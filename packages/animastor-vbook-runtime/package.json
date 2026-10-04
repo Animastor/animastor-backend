@@ -42,11 +42,11 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Animastor/animastor.git",
+        "url": "git+https://github.com/Animastor/animastor-backend.git",
         "directory": "packages/animastor-vbook-runtime"
     },
     "bugs": {
-        "url": "https://github.com/Animastor/animastor/issues"
+        "url": "https://github.com/Animastor/animastor-backend/issues"
     },
     "dependencies": {
         "@animastor/parser": "^0.1.0",

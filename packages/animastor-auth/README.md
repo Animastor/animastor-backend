@@ -10,7 +10,7 @@ primitives.
 **Status: EXTRACTED (0.1.0).** The domain physically lives in this package
 (`src/`); the host backend consumes it only through the package entrypoint
 (`backend/src/auth/index.cjs` — composition root over host ports). See
-[`docs/architecture/auth-extraction-readiness-audit.md`](https://github.com/Animastor/animastor/blob/main/docs/architecture/auth-extraction-readiness-audit.md)
+[`docs/architecture/auth-extraction-readiness-audit.md`](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/auth-extraction-readiness-audit.md)
 (physical extraction COMPLETE).
 
 ## Public API

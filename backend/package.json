@@ -2,6 +2,7 @@
   "name": "animastor-backend",
   "version": "0.1.0",
   "description": "Animastor backend",
+  "license": "MIT",
   "main": "src/backend.cjs",
   "type": "commonjs",
   "scripts": {

@@ -29,11 +29,11 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Animastor/animastor.git",
+        "url": "git+https://github.com/Animastor/animastor-backend.git",
         "directory": "packages/animastor-parser"
     },
     "bugs": {
-        "url": "https://github.com/Animastor/animastor/issues"
+        "url": "https://github.com/Animastor/animastor-backend/issues"
     },
     "dependencies": {
         "iconv-lite": "^0.6.3",

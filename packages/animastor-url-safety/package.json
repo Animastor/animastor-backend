@@ -31,12 +31,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Animastor/animastor.git",
+    "url": "git+https://github.com/Animastor/animastor-backend.git",
     "directory": "packages/animastor-url-safety"
   },
-  "homepage": "https://github.com/Animastor/animastor/tree/main/packages/animastor-url-safety#readme",
+  "homepage": "https://github.com/Animastor/animastor-backend/tree/main/packages/animastor-url-safety#readme",
   "bugs": {
-    "url": "https://github.com/Animastor/animastor/issues"
+    "url": "https://github.com/Animastor/animastor-backend/issues"
   },
   "devDependencies": {
     "chai": "^6.2.2",

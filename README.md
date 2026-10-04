@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontends/app/public/logo.png" alt="Animastor" width="128" />
+  <img src="https://raw.githubusercontent.com/Animastor/animastor-web/main/frontends/app/public/logo.png" alt="Animastor" width="128" />
 </p>
 
 <h1 align="center">Animastor</h1>
@@ -69,15 +69,15 @@ Text Input
 
 ## Architecture at a Glance
 
-| Layer | Component | Description |
-|-------|-----------|-------------|
-| **Frontend** | `frontends/app` | Responsive web app — MobileShell / DesktopShell (Preact + Vite) |
-| **Frontend** | `frontends/android` | Native Android app (Kotlin) with media player |
-| **Backend** | `backend` | API server + orchestration engine (Node.js / Express) |
-| **Compute** | `gpu-hub` | GPU task dispatcher with workspace-scoped queues |
-| **Workers** | `worker` | GPU workers — image (SD), audio (TTS), video (LTX) via ComfyUI |
-| **Storage** | PostgreSQL + Redis | 30+ tables canonical state; Redis for runtime, queues, heartbeats |
-| **Proxy** | `proxy` | Nginx reverse proxy with TLS and multi-domain routing |
+| Layer | Component | Repository | Description |
+|-------|-----------|------------|-------------|
+| **Backend** | `backend/` | [animastor-backend](https://github.com/Animastor/animastor-backend) (this repo) | API server + orchestration engine (Node.js / Express) |
+| **Proxy** | `proxy/` | [animastor-backend](https://github.com/Animastor/animastor-backend) (this repo) | Nginx reverse proxy with TLS and multi-domain routing |
+| **Web** | `frontends/app` | [animastor-web](https://github.com/Animastor/animastor-web) | Responsive web app (Preact + Vite) |
+| **Android** | `frontends/android` | [animastor-android](https://github.com/Animastor/animastor-android) | Native Android app (Kotlin) |
+| **Compute** | `packages/animastor-gpu-hub` | [animastor-gpu-hub](https://github.com/Animastor/animastor-gpu-hub) | GPU task dispatcher with workspace-scoped queues |
+| **Workers** | `packages/animastor-worker` | [animastor-worker](https://github.com/Animastor/animastor-worker) | GPU workers — image (SD), audio (TTS), video (LTX) via ComfyUI |
+| **Storage** | PostgreSQL + Redis | — | 30+ tables canonical state; Redis for runtime, queues, heartbeats |
 
 For the full architecture deep-dive, see [docs/01-overview/ARCHITECTURE.md](docs/01-overview/ARCHITECTURE.md).
 
@@ -92,8 +92,8 @@ For the full architecture deep-dive, see [docs/01-overview/ARCHITECTURE.md](docs
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/Animastor/animastor.git
-cd animastor
+git clone https://github.com/Animastor/animastor-backend.git
+cd animastor-backend
 cp .env.example .env
 # Edit .env — set POSTGRES_PASSWORD, WORKSPACE_SECRET_KEY, and AI_API_BASE_URL
 ```
@@ -112,11 +112,7 @@ Navigate to `http://localhost` (or your configured domain). Register an account,
 
 ### Building the Android App
 
-```bash
-./build-apk.sh
-```
-
-Requires Android SDK. See [build-apk.sh](build-apk.sh) for details.
+The Android app lives in the separate [animastor-android](https://github.com/Animastor/animastor-android) repository. See its [build-apk.sh](https://github.com/Animastor/animastor-android/blob/main/build-apk.sh) for details.
 
 ## Documentation
 
@@ -142,20 +138,22 @@ Additional documentation:
 ## Project Structure
 
 ```
-animastor/
+animastor-backend/
 ├── backend/           # API server + orchestration engine (Node.js)
-├── frontends/
-│   ├── app/           # Responsive web app (Preact + Vite)
-│   ├── android/       # Native Android app (Kotlin)
-│   └── website/       # Public website (animastor.in)
-├── gpu-hub/           # GPU compute dispatcher
-├── worker/            # GPU workers (ComfyUI)
+├── packages/          # 15 npm packages (@animastor/*)
 ├── proxy/             # Nginx reverse proxy
+├── docker/            # Container definitions
+├── docker-compose.yml # Service orchestration
 ├── docs/              # Documentation
 ├── scripts/           # Utility scripts
-├── docker-compose.yml # Service orchestration
 └── .env.example       # Environment configuration template
 ```
+
+The web app, Android client, GPU hub, and GPU workers live in separate repositories:
+[animastor-web](https://github.com/Animastor/animastor-web) ·
+[animastor-android](https://github.com/Animastor/animastor-android) ·
+[animastor-gpu-hub](https://github.com/Animastor/animastor-gpu-hub) ·
+[animastor-worker](https://github.com/Animastor/animastor-worker).
 
 ## Development
 

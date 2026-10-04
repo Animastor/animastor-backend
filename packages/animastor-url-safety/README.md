@@ -8,7 +8,7 @@ redirect following).
 **Status: EXTRACTED (0.1.0).** Physically extracted from the Animastor host
 (`backend/src/services/url-safety.js`) with strict behavior parity — the
 security contract is frozen, nothing weakened. See
-[`docs/architecture/backend-decomposition-reconnaissance.md`](https://github.com/Animastor/animastor/blob/main/docs/architecture/backend-decomposition-reconnaissance.md)
+[`docs/architecture/backend-decomposition-reconnaissance.md`](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/backend-decomposition-reconnaissance.md)
 §4.4 (physical extraction).
 
 ## Public API

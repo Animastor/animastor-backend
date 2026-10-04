@@ -5,7 +5,7 @@
 ### Initial publishable release
 
 - Initial extraction from the Animastor backend host
-  ([auth-extraction-readiness-audit](https://github.com/Animastor/animastor/blob/main/docs/architecture/auth-extraction-readiness-audit.md) §16):
+  ([auth-extraction-readiness-audit](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/auth-extraction-readiness-audit.md) §16):
   `createAuthService` lifecycle (register with guest→account in-place
   conversion, login/logout, session + guest identity, legacy-name
   self-heal), the canonical book-access decision layer, the frozen cookie

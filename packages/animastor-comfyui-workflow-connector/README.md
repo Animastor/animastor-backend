@@ -285,8 +285,8 @@ The package ships only: `src/` (4 JS files), `README.md`, `LICENSE`, `package.js
 Tests are included in the repository but **not** in the published npm package:
 
 ```bash
-git clone https://github.com/Animastor/animastor.git
-cd animastor/packages/animastor-comfyui-workflow-connector
+git clone https://github.com/Animastor/animastor-backend.git
+cd animastor-backend/packages/animastor-comfyui-workflow-connector
 npm install
 npm test
 ```

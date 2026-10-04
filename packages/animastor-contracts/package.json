@@ -23,10 +23,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Animastor/animastor.git",
+    "url": "git+https://github.com/Animastor/animastor-backend.git",
     "directory": "packages/animastor-contracts"
   },
   "bugs": {
-    "url": "https://github.com/Animastor/animastor/issues"
+    "url": "https://github.com/Animastor/animastor-backend/issues"
   }
 }

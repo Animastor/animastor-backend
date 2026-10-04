@@ -32,12 +32,12 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Animastor/animastor.git",
+        "url": "git+https://github.com/Animastor/animastor-backend.git",
         "directory": "packages/animastor-orchestration"
     },
-    "homepage": "https://github.com/Animastor/animastor/tree/main/packages/animastor-orchestration#readme",
+    "homepage": "https://github.com/Animastor/animastor-backend/tree/main/packages/animastor-orchestration#readme",
     "bugs": {
-        "url": "https://github.com/Animastor/animastor/issues"
+        "url": "https://github.com/Animastor/animastor-backend/issues"
     },
     "dependencies": {
         "@animastor/contracts": "^0.1.0",

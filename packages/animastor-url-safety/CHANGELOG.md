@@ -6,7 +6,7 @@
 
 - Physical extraction from the Animastor backend host
   (`backend/src/services/url-safety.js`,
-  [backend-decomposition-reconnaissance](https://github.com/Animastor/animastor/blob/main/docs/architecture/backend-decomposition-reconnaissance.md)
+  [backend-decomposition-reconnaissance](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/backend-decomposition-reconnaissance.md)
   §4.4) with strict behavior parity: `assertPublicEndpoint` (http/https
   only, literal IPv4/IPv6 private/loopback/link-local/metadata
   classification incl. decimal/octal/hex alternative forms and

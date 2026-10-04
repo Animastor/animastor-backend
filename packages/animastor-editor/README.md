@@ -13,7 +13,7 @@ snake_case over the pure cyr-latin map).
 **Status: EXTRACTED (0.1.0).** The editing contour physically lives in this
 package (`src/`); the host backend consumes it only through the package
 entrypoint. See
-[`docs/architecture/editor-module-extraction-audit.md`](https://github.com/Animastor/animastor/blob/main/docs/architecture/editor-module-extraction-audit.md)
+[`docs/architecture/editor-module-extraction-audit.md`](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/editor-module-extraction-audit.md)
 (Phase 4 — physical move COMPLETE).
 
 ## Requirements
@@ -102,10 +102,10 @@ POST   /api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units
 DELETE /api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units/:unitId
 ```
 
-Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github.com/Animastor/animastor/blob/main/backend/tests/architecture/editor-route-split.test.js)
-(E1–E3), [`backend/tests/architecture/editor-extraction-readiness.test.js`](https://github.com/Animastor/animastor/blob/main/backend/tests/architecture/editor-extraction-readiness.test.js)
-(E4–E8 + B1), [`backend/tests/architecture/phase6-editor-player.test.js`](https://github.com/Animastor/animastor/blob/main/backend/tests/architecture/phase6-editor-player.test.js)
-(T2–T7), [`backend/tests/architecture/editor-package-boundary.test.js`](https://github.com/Animastor/animastor/blob/main/backend/tests/architecture/editor-package-boundary.test.js)
+Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github.com/Animastor/animastor-backend/blob/main/backend/tests/architecture/editor-route-split.test.js)
+(E1–E3), [`backend/tests/architecture/editor-extraction-readiness.test.js`](https://github.com/Animastor/animastor-backend/blob/main/backend/tests/architecture/editor-extraction-readiness.test.js)
+(E4–E8 + B1), [`backend/tests/architecture/phase6-editor-player.test.js`](https://github.com/Animastor/animastor-backend/blob/main/backend/tests/architecture/phase6-editor-player.test.js)
+(T2–T7), [`backend/tests/architecture/editor-package-boundary.test.js`](https://github.com/Animastor/animastor-backend/blob/main/backend/tests/architecture/editor-package-boundary.test.js)
 (PB1–PB5 — deep-import guard, manifest freeze, package closure, cyr-latin-map twin parity).
 
 ## Package boundary (NPM readiness — Phase 4.1)
@@ -130,7 +130,7 @@ Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github
   `README.md`, `LICENSE`; `publishConfig.access = public`). Publication is a manual,
   explicit step — it is never automated in CI or agent runs.
 - Release history is tracked in
-  [`docs/architecture/editor-module-extraction-audit.md`](https://github.com/Animastor/animastor/blob/main/docs/architecture/editor-module-extraction-audit.md)
+  [`docs/architecture/editor-module-extraction-audit.md`](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/editor-module-extraction-audit.md)
   (§Phase 4 physical move, §Phase 4.1 NPM readiness).
 
 ## License
