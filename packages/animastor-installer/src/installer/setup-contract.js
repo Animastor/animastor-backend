@@ -692,7 +692,7 @@ function dockerContainerSteps({ profileIds, mode, hubUrl }) {
         id: 'docker-build',
         title: 'Build the worker image',
         body: 'Clone the Animastor repository and build the worker image from its canonical Dockerfile (the image runs the universal installer in docker deployment).',
-        code: 'git clone https://github.com/Animastor/animastor.git\ncd animastor\ndocker build -t animastor-worker -f docker/worker/Dockerfile docker/worker',
+        code: 'git clone https://github.com/Animastor/animastor-worker.git\ncd animastor-worker\ndocker build -t animastor-worker -f docker/worker/Dockerfile docker/worker',
     });
     steps.push({
         id: 'docker-install',

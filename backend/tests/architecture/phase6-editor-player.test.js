@@ -35,6 +35,9 @@ const PLAYER_FACADE = path.join(PLAYER_DIR, 'player-model.cjs');
 const EDITOR_FACADE = path.join(EDITOR_DIR, 'editor-model.cjs');
 const BACKEND_ROOT = path.join(BACKEND_SRC, 'backend.cjs');
 const FRONTEND_APP_DIR = path.join(REPO_ROOT, 'frontends', 'app', 'src');
+// frontends/app lives in the separate animastor-web repository after the
+// physical split — standalone-safe guard (B7 convention).
+const FRONTEND_APP_PRESENT = fs.existsSync(FRONTEND_APP_DIR);
 
 // Layers below the Player/Editor boundary — the ONLY backend code the
 // Editor facade may reach is the Canonical Book Model layer
@@ -363,6 +366,7 @@ describe('T7: frontend Player/Editor consumers build API URLs through the client
     });
 
     it('api/client.ts owns the API base and exposes the media URL seam', () => {
+        if (!FRONTEND_APP_PRESENT) return; // MOVE to animastor-web after the split
         const client = readSource(path.join(FRONTEND_APP_DIR, 'api', 'client.ts'));
         expect(client).to.match(/export const API_BASE = '\/api\/v1';/);
         expect(client).to.match(/export function mediaUrl/);

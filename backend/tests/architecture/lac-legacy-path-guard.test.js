@@ -37,6 +37,18 @@ const PRODUCTION_ROOTS = [
     .map((p) => path.join(REPO_ROOT, ...p.split('/')))
     .filter((p) => fs.existsSync(p));
 
+// Standalone-safe (post-split, same convention as B7 / HUB_CHECKOUT_PRESENT):
+// the monorepo-only roots (gpu-hub, worker, frontends/*) live in separate
+// repositories after the physical split, so PRODUCTION_ROOTS shrinks there.
+// The non-vacuousness floor is therefore the roots OWNED BY THIS repo — they
+// must exist and be scanned in both layouts.
+const IN_REPO_ROOTS = [
+    'backend/src',
+    'packages/animastor-ai-connector',
+    'scripts',
+]
+    .map((p) => path.join(REPO_ROOT, ...p.split('/')));
+
 const SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.kt', '.sh', '.py']);
 
 // Standalone-token match: the legacy name not glued to another word or
@@ -67,7 +79,7 @@ const NEGATIVE_CONTROL_FILE = path.join(REPO_ROOT, 'backend', 'src', '__guard_ne
 
 describe('architecture: LAC legacy path guard (Phase 8D)', () => {
     it('production/runtime code contains no reference to the legacy local-ai-connector path', () => {
-        expect(PRODUCTION_ROOTS, 'expected production roots to exist (backend/src, gpu-hub, the worker package, ai-connector, frontends)').to.have.lengthOf.at.least(4);
+        expect(PRODUCTION_ROOTS, 'expected in-repo production roots to exist (backend/src, packages/animastor-ai-connector, scripts)').to.include.members(IN_REPO_ROOTS);
         const offenders = PRODUCTION_ROOTS.flatMap(scanForLegacyPath);
         expect(offenders, 'legacy "local-ai-connector" path reference found in production code. The connector lives at ai-connector/ since Phase 8C — update the reference (compat markers like local-ai-connector-binding / doc names stay allowed).').to.deep.equal([]);
     });
