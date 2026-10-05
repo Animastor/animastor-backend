@@ -14,6 +14,25 @@
 # the base compose in Phase 10T (bake-in). Production uses the
 # GHCR image with baked-in artifacts instead, so this file is
 # local development only.
+#
+# WHY THE WORKER BUNDLE IS MOUNTED TWICE
+#
+# The hub resolves artifacts with resolveArtifactDir (gpu-hub.js):
+#   config override > BAKED-IN /app/artifacts/<name> > mount fallback
+# baked-in is checked BEFORE the mount fallback, so on an image that ships
+# artifacts/ a mount at the fallback path is silently ignored: the hub keeps
+# serving the bundled copy while the developer believes local sources are live.
+# Measured: with worker 2.1.1 mounted on a baked-in image the hub still
+# reported 2.1.0.
+#
+# server.js does not forward WORKER_BUNDLE_DIR into config, so the env
+# override branch is unreachable in the shipped image (verified: setting
+# WORKER_BUNDLE_DIR changes nothing). The only way to win is to mount over
+# the baked-in path itself.
+#
+# Mounting the baked-in path is safe on images that have no artifacts/ at all:
+# Docker creates the directory and the resolver falls back to the mount exactly
+# as before. Verified against both published digests.
 
 services:
   gpu-hub:
@@ -23,13 +42,25 @@ services:
       # vendored here, so the source is a path into a checkout of that repo.
       # Default assumes a sibling checkout next to this one; override with
       # WORKER_BUNDLE_SRC=/path/to/animastor-worker/packages/animastor-worker/worker
-      # Mount TARGET stays /app/worker-bundle — the hub resolves artifacts there.
       - ${WORKER_BUNDLE_SRC:-../animastor-worker/packages/animastor-worker/worker}:/app/worker-bundle:ro
+      - ${WORKER_BUNDLE_SRC:-../animastor-worker/packages/animastor-worker/worker}:/app/artifacts/worker-bundle:ro
+
+      # Baseline workflows.
       - ./backend/ai/workflows:/app/workflows:ro
+
       # Installer extraction: source + manifests live in the installer package
       # (mount TARGETS are frozen — the hub resolves artifacts there).
       - ./packages/animastor-installer/src/installer:/app/installer-src:ro
       # Canonical installer version source — the hub reads installer-src/package.json
       # (the Dockerfile bakes it into the same flat location).
       - ./packages/animastor-installer/package.json:/app/installer-src/package.json:ro
+
       - ./packages/animastor-installer/ai/install-manifests:/app/install-manifests:ro
+
+      # KNOWN LIMITATION, out of scope here: workflows and installer have the
+      # same baked-in precedence problem (a baked-in image serves installer
+      # 1.3.0 instead of the local 0.1.0). They are not dual-mounted here
+      # because the container cannot start at all while installer
+      # package.json is bind-mounted inside the read-only installer-src
+      # directory mount — runc rejects the nested mountpoint. Fixing that
+      # needs its own change.
