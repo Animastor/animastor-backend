@@ -12,13 +12,19 @@
 #
 # This overlay adds the artifact mounts that were removed from
 # the base compose in Phase 10T (bake-in). Production uses the
-# GHCR image with baked-in artifacts instead.
+# GHCR image with baked-in artifacts instead, so this file is
+# local development only.
 
 services:
   gpu-hub:
     volumes:
-      # Worker bundle source: packages/animastor-worker/worker/
-      - ./packages/animastor-worker/worker:/app/worker-bundle:ro
+      # Worker bundle source. Since the split the worker lives in its own
+      # repository (github.com/Animastor/animastor-worker) and is no longer
+      # vendored here, so the source is a path into a checkout of that repo.
+      # Default assumes a sibling checkout next to this one; override with
+      # WORKER_BUNDLE_SRC=/path/to/animastor-worker/packages/animastor-worker/worker
+      # Mount TARGET stays /app/worker-bundle — the hub resolves artifacts there.
+      - ${WORKER_BUNDLE_SRC:-../animastor-worker/packages/animastor-worker/worker}:/app/worker-bundle:ro
       - ./backend/ai/workflows:/app/workflows:ro
       # Installer extraction: source + manifests live in the installer package
       # (mount TARGETS are frozen — the hub resolves artifacts there).
