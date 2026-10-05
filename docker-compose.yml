@@ -102,17 +102,17 @@ services:
         condition: service_healthy
 
   gpu-hub:
-    # Phase 10T.1: multi-stage bake-in — artifacts are staged from the repo
-    # root into /app/artifacts inside the image. Build context is the repo root
-    # so the Dockerfile can COPY packages/animastor-worker/worker/ (canonical
-    # worker bundle source), backend/ai/, etc.
-    # Cutover: set GPU_HUB_IMAGE to the pinned standalone image and use
-    # docker/compose/overlay-gpu-hub-standalone.yml (removes build:).
+    # GPU Hub lives in its own repository (github.com/Animastor/animastor-gpu-hub)
+    # and its Dockerfile is self-contained, so this repo cannot build it from
+    # source. The hub is consumed as a published image; @animastor/gpu-hub in
+    # backend/package.json is a devDependency used by the architecture tests.
+    #
     # NEVER use a moving tag — pin by digest (see the Phase 10J audit).
-    build:
-      context: .
-      dockerfile: packages/animastor-gpu-hub/Dockerfile
-    image: ${GPU_HUB_IMAGE:-animastor-gpu-hub:local}
+    # Set GPU_HUB_IMAGE in .env, e.g.:
+    #   GPU_HUB_IMAGE=ghcr.io/animastor/animastor-gpu-hub@sha256:<digest>
+    # docker/compose/overlay-gpu-hub-standalone.yml remains available for
+    # deployments that compose it explicitly.
+    image: ${GPU_HUB_IMAGE:?set GPU_HUB_IMAGE=<pinned digest ref> in .env}
     container_name: gpu-hub
     restart: unless-stopped
     networks:
@@ -128,10 +128,7 @@ services:
       # and the share_policy heartbeat markers. Must match the backend
       # section value.
       - SHARE_FEATURES_ENABLED=${SHARE_FEATURES_ENABLED:-0}
-    # Phase 10T: Artifacts are baked into the GHCR image.
-    # For local development without GPU_HUB_IMAGE, use:
-    #   docker compose -f docker-compose.yml -f docker/compose/overlay-gpu-hub-local.yml up
-    # which adds bind mounts from the monorepo.
+    # Phase 10T: artifacts are baked into the published image.
 
   nginx:
     image: nginx:alpine

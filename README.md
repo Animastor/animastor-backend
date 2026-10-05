@@ -75,8 +75,8 @@ Text Input
 | **Proxy** | `proxy/` | [animastor-backend](https://github.com/Animastor/animastor-backend) (this repo) | Nginx reverse proxy with TLS and multi-domain routing |
 | **Web** | `frontends/app` | [animastor-web](https://github.com/Animastor/animastor-web) | Responsive web app (Preact + Vite) |
 | **Android** | `frontends/android` | [animastor-android](https://github.com/Animastor/animastor-android) | Native Android app (Kotlin) |
-| **Compute** | `packages/animastor-gpu-hub` | [animastor-gpu-hub](https://github.com/Animastor/animastor-gpu-hub) | GPU task dispatcher with workspace-scoped queues |
-| **Workers** | `packages/animastor-worker` | [animastor-worker](https://github.com/Animastor/animastor-worker) | GPU workers — image (SD), audio (TTS), video (LTX) via ComfyUI |
+| **Compute** | external image | [animastor-gpu-hub](https://github.com/Animastor/animastor-gpu-hub) | GPU task dispatcher with workspace-scoped queues |
+| **Workers** | external image | [animastor-worker](https://github.com/Animastor/animastor-worker) | GPU workers — image (SD), audio (TTS), video (LTX) via ComfyUI |
 | **Storage** | PostgreSQL + Redis | — | 30+ tables canonical state; Redis for runtime, queues, heartbeats |
 
 For the full architecture deep-dive, see [docs/01-overview/ARCHITECTURE.md](docs/01-overview/ARCHITECTURE.md).
