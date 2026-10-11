@@ -439,6 +439,42 @@ const entityCleanup = require('./services/entity-cleanup.cjs')(redis, config, {
 // audio-recovery.cjs logic merged into reconcileCycle Phase A.
 
 // ======================================================
+// COMPOSITION ROOT — Assistant contour ports
+// ======================================================
+// Built in MODULE SCOPE, before routeDeps: the deletion-cascade adapter
+// (bookDeletion.purgeAssistantForBook below) closes over this binding, so
+// the binding must exist before the adapter is created — otherwise the
+// closure resolves an undeclared identifier at call time and the
+// Assistant-data purge silently degrades to a warning.
+// Assistant contour ports (the playerPorts analog — extraction COMPLETE):
+// the AI Assistant HTTP contour (@animastor/assistant package) gets its
+// host legs ONLY through this narrow seam. No storage barrel, no SQL,
+// no whole Book/VBook services cross into the Assistant object graph:
+//   loadBook       — canonical||draft read (Book Model facade, lazy mode)
+//   persistBook    — ONE book-save semantics (full bundle save + the
+//                    zero-chapter targeted fallback behind a single port)
+//   validateBundle / validateBundleFile — bundle-contract validation
+//   resolveChatAI  — chat provider resolution (Provider Gateway seam)
+//   sessionRepo    — chat-session repository port (list/get/create/
+//                    append/rename/delete/purge) — PG impl host-side
+//   purgeForBook   — Assistant-data purge for book deletion/cache teardown
+//   chatTransport  — safeFetch (@animastor/url-safety) + shared-pool inference +
+//                    describeSharedError + chat source token (gateway)
+//   log            — host logger
+// Guarded by tests/architecture/assistant-contour.test.js (A1–A7) and
+// assistant-package-boundary.test.js (PB1–PB4).
+const assistantPorts = createAssistantPorts({
+    bookModel, book, lazyBook,
+    bundleValidator: require('./book/bundle-validator.cjs'),
+    providerGateway: require('./services/provider-gateway'),
+    chatEngine,
+    sessionRepo: chatSessionRepo,
+    urlSafety: require('@animastor/url-safety'),
+    sharedPool: require('./services/ai-connector/shared-pool'),
+    log: utils.log,
+});
+
+// ======================================================
 // ROUTES (each registers endpoints on app)
 // ======================================================
 const routeDeps = {
@@ -466,33 +502,11 @@ const routeDeps = {
         // ai_chat_sessions table — it purges Assistant data through the port.
         purgeAssistantForBook: (bookId) => assistantPorts.purgeForBook(bookId),
     }),
-    // Assistant contour ports (the playerPorts analog — extraction COMPLETE):
-    // the AI Assistant HTTP contour (@animastor/assistant package) gets its
-    // host legs ONLY through this narrow seam. No storage barrel, no SQL,
-    // no whole Book/VBook services cross into the Assistant object graph:
-    //   loadBook       — canonical||draft read (Book Model facade, lazy mode)
-    //   persistBook    — ONE book-save semantics (full bundle save + the
-    //                    zero-chapter targeted fallback behind a single port)
-    //   validateBundle / validateBundleFile — bundle-contract validation
-    //   resolveChatAI  — chat provider resolution (Provider Gateway seam)
-    //   sessionRepo    — chat-session repository port (list/get/create/
-    //                    append/rename/delete/purge) — PG impl host-side
-    //   purgeForBook   — Assistant-data purge for book deletion/cache teardown
-    //   chatTransport  — safeFetch (@animastor/url-safety) + shared-pool inference +
-    //                    describeSharedError + chat source token (gateway)
-    //   log            — host logger
-    // Guarded by tests/architecture/assistant-contour.test.js (A1–A7) and
-    // assistant-package-boundary.test.js (PB1–PB4).
-    assistantPorts: createAssistantPorts({
-        bookModel, book, lazyBook,
-        bundleValidator: require('./book/bundle-validator.cjs'),
-        providerGateway: require('./services/provider-gateway'),
-        chatEngine,
-        sessionRepo: chatSessionRepo,
-        urlSafety: require('@animastor/url-safety'),
-        sharedPool: require('./services/ai-connector/shared-pool'),
-        log: utils.log,
-    }),
+    // Assistant contour ports — built at module scope above (the seam
+    // documentation lives with the construction site). Re-exported on
+    // routeDeps for the Assistant route registration + book-routes/cache-
+    // routes purge wiring.
+    assistantPorts,
     // Phase 6: Player/Editor boundaries — book access via the Canonical
     // Book Model.
     // playerModel comes from the extracted @animastor/player package; the
