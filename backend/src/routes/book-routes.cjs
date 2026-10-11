@@ -35,10 +35,16 @@ module.exports = function(app, redis, deps) {
     // the contour lives in @animastor/editor (packages/animastor-editor);
     // the legacy ./editor/ directory is a one-line re-export shim of the
     // package (relocation checklist §2.4).
-    // Since Phase 4.1 the package exposes ONLY its root entrypoint — the
-    // editor routes are registered through the public API re-export shim
-    // (backend/src/routes/editor/index.cjs → require('@animastor/editor')).
-    require('./editor/index.cjs')(app, redis, deps);
+    // Phase 4.1 contract fix: the package root exports FACTORY functions
+    // (createEditorRoutes / createEntityCrudRoutes) — not a registrar —
+    // so the shim must be destructured and both registrars invoked. The
+    // previous single call invoked the shim object as a function (boot
+    // TypeError) and silently dropped the entity/structure CRUD leg.
+    // editorModel/editorPorts are wired at the composition root
+    // (backend.cjs routeDeps) and ride in via deps.
+    const { createEditorRoutes, createEntityCrudRoutes } = require('./editor/index.cjs');
+    createEditorRoutes(app, redis, deps);
+    createEntityCrudRoutes(app, redis, deps);
 
     // Import and bootstrap routes
     require('./book/import-routes.cjs')(app, redis, deps);
