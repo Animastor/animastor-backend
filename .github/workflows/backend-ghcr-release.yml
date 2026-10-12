@@ -154,8 +154,12 @@ jobs:
       - name: Push immutable tags
         run: |
           set -euo pipefail
-          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}"
-          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.commit }}"
+          out=$(docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}" 2>&1) \
+            || { echo "$out"; echo "::error::push ${{ steps.src.outputs.tag }} failed: $out"; exit 1; }
+          echo "$out"
+          out=$(docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.commit }}" 2>&1) \
+            || { echo "$out"; echo "::error::push full-sha tag failed: $out"; exit 1; }
+          echo "$out"
 
       - name: Record digest
         run: |
