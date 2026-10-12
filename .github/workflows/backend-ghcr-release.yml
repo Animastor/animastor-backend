@@ -1,0 +1,167 @@
+# Backend GHCR release (Stage 41) — build + isolated smoke + publish.
+#
+# Restores the missing backend half of the image pipeline: the gpu-hub repo has
+# gpu-hub-ghcr-release.yml, but this repository had NO workflow, so backend
+# images were only ever built by hand (deploy-<sha> tags). This workflow is the
+# minimal fix: same rules as gpu-hub-ghcr-release (immutable tag, never :latest,
+# digest recorded in the run summary, fail-closed on provenance).
+#
+# RULES
+#   - The image is built ONLY from an immutable commit of THIS repository
+#     (default: the approved commit of stage 41). The run FAILS if the
+#     checked-out HEAD does not equal the requested/approved SHA.
+#   - Never publish :latest. Tags are deploy-<short-sha> and the full SHA.
+#   - Smoke runs against an isolated docker network with an ephemeral redis —
+#     no production PostgreSQL/Redis is reachable from the smoke containers.
+#   - The image content is compared byte-for-byte (sha256) against the
+#     checked-out source before anything is pushed.
+#
+# NOTE: build context is ./backend (backend/Dockerfile). This repository has no
+# backend/.dockerignore (the monorepo has one) — the context therefore carries
+# the tracked tests/ tree; production bind-mounts shadow /app/tests at runtime.
+
+name: backend-ghcr-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Immutable source commit to build"
+        required: true
+        default: a7a8c4639ed40fbc4ba7a1f91cae0e4bdaf5a6ad
+        type: string
+      image_tag:
+        description: "Immutable image tag (e.g. deploy-a7a8c463)"
+        required: true
+        default: deploy-a7a8c463
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/backend-ghcr-release.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: animastor/animastor-backend
+  APPROVED_COMMIT: a7a8c4639ed40fbc4ba7a1f91cae0e4bdaf5a6ad
+  APPROVED_TAG: deploy-a7a8c463
+
+jobs:
+  build-smoke-push:
+    name: build + isolated smoke + push to GHCR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || env.APPROVED_COMMIT }}
+          fetch-depth: 1
+
+      - name: Verify source commit (fail-closed)
+        id: src
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          WANT="${{ inputs.commit || env.APPROVED_COMMIT }}"
+          TAG="${{ inputs.image_tag || env.APPROVED_TAG }}"
+          echo "checked-out HEAD: $HEAD_SHA"
+          echo "approved commit : $WANT"
+          if [ "$HEAD_SHA" != "$WANT" ]; then
+            echo "PROVENANCE FAIL: checkout is not the approved commit" >&2
+            exit 1
+          fi
+          echo "commit=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build image (context ./backend, no build args, no secrets)
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.revision=${{ steps.src.outputs.commit }}" \
+            --label "org.opencontainers.image.source=https://github.com/Animastor/animastor-backend" \
+            --label "org.opencontainers.image.version=${{ steps.src.outputs.tag }}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.commit }}" \
+            ./backend
+
+      - name: Isolated smoke (ephemeral redis, no production PG/Redis)
+        run: |
+          set -euo pipefail
+          IMG="${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}"
+
+          # 1) image content must equal the checked-out source (byte-for-byte)
+          for f in src/backend.cjs package.json package-lock.json Dockerfile; do
+            img_sha=$(docker run --rm --entrypoint sha256sum "$IMG" "/app/$f" | cut -d' ' -f1)
+            src_sha=$(sha256sum "backend/$f" | cut -d' ' -f1)
+            echo "$f  image=$img_sha  source=$src_sha"
+            [ "$img_sha" = "$src_sha" ] || { echo "PROVENANCE FAIL: $f" >&2; exit 1; }
+          done
+
+          # 2) OCI label must carry the approved revision
+          rev=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMG")
+          [ "$rev" = "${{ steps.src.outputs.commit }}" ] || { echo "PROVENANCE FAIL: label $rev" >&2; exit 1; }
+
+          # 3) boot in an isolated network (backend hardcodes redis host 'redis')
+          docker network create be-smoke >/dev/null
+          docker run -d --name redis --network be-smoke redis:7 >/dev/null
+          sleep 5
+          docker run -d --name backend --network be-smoke \
+            -e PG_HOST=127.0.0.1 -e PG_PORT=5432 \
+            -e OUTPUT_DIR=/tmp/out -e BOOKS_DIR=/tmp/books \
+            "$IMG" >/dev/null
+
+          CODE=0
+          BODY=""
+          for i in $(seq 1 30); do
+            BODY=$(docker exec backend node -e "require('http').get('http://127.0.0.1:3000/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{console.log(r.statusCode+' '+d);process.exit(0)})}).on('error',e=>{console.log('000 '+e.message);process.exit(0)})" || true)
+            CODE=${BODY%% *}
+            [ "$CODE" = "200" ] && break
+            sleep 2
+          done
+          echo "health: $BODY"
+          [ "$CODE" = "200" ] || { echo "SMOKE FAIL: /health=$CODE" >&2; docker logs backend | tail -50; exit 1; }
+          echo "$BODY" | grep -q '"status":"ok"' || { echo "SMOKE FAIL: status" >&2; exit 1; }
+          echo "$BODY" | grep -q '"redis":"PONG"' || { echo "SMOKE FAIL: redis" >&2; exit 1; }
+
+          docker logs backend 2>&1 | grep -ciE 'fatal|uncaught' | grep -q '^0$' \
+            || { echo "SMOKE FAIL: fatal errors in logs" >&2; exit 1; }
+          echo "SMOKE OK"
+
+      - name: Teardown smoke
+        if: always()
+        run: |
+          docker rm -f backend redis >/dev/null 2>&1 || true
+          docker network rm be-smoke >/dev/null 2>&1 || true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Push immutable tags
+        run: |
+          set -euo pipefail
+          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}"
+          docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.commit }}"
+
+      - name: Record digest
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}" 2>/dev/null || echo "N/A")
+          {
+            echo "## Backend GHCR Release Digest"
+            echo '```'
+            echo "Image:   ${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}"
+            echo "Image:   ${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.commit }}"
+            echo "Digest:  $DIGEST"
+            echo "Commit:  ${{ steps.src.outputs.commit }}"
+            echo '```'
+            echo "**REMEMBER:** record this digest in the cutover audit before consuming."
+          } >> "$GITHUB_STEP_SUMMARY"
