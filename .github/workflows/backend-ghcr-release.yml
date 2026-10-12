@@ -127,8 +127,15 @@ jobs:
           echo "$BODY" | grep -q '"status":"ok"' || { echo "SMOKE FAIL: status" >&2; exit 1; }
           echo "$BODY" | grep -q '"redis":"PONG"' || { echo "SMOKE FAIL: redis" >&2; exit 1; }
 
-          docker logs backend 2>&1 | grep -ciE 'fatal|uncaught' | grep -q '^0$' \
-            || { echo "SMOKE FAIL: fatal errors in logs" >&2; exit 1; }
+          # 4) no crash signatures. NOTE: with no PostgreSQL in the smoke
+          #    network the app intentionally logs "(non-fatal)" PG lines —
+          #    those are expected here; FATAL/uncaught are not.
+          bad=$(docker logs backend 2>&1 | grep -cE 'FATAL|[Uu]ncaught' || true)
+          echo "crash-signature lines: $bad"
+          [ "$bad" -eq 0 ] || { echo "SMOKE FAIL: crash signatures in logs" >&2; exit 1; }
+
+          # 5) container must still be running after the probes
+          [ -n "$(docker ps -q --filter name=^backend$)" ] || { echo "SMOKE FAIL: container exited" >&2; exit 1; }
           echo "SMOKE OK"
 
       - name: Teardown smoke
