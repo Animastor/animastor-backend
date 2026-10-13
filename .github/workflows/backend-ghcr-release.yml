@@ -1,16 +1,28 @@
-# Backend GHCR release (Stage 41) — build + isolated smoke + publish.
+# Backend GHCR release (Stage 41; publish fix Stage 43) — build + isolated
+# smoke + publish.
 #
 # Restores the missing backend half of the image pipeline: the gpu-hub repo has
-# gpu-hub-ghcr-release.yml, but this repository had NO workflow, so backend
-# images were only ever built by hand (deploy-<sha> tags). This workflow is the
-# minimal fix: same rules as gpu-hub-ghcr-release (immutable tag, never :latest,
-# digest recorded in the run summary, fail-closed on provenance).
+# ghcr-release.yml, but this repository had NO workflow until stage 41, so
+# backend images were only ever built by hand (deploy-<sha> tags). Stage 41
+# proved GITHUB_TOKEN cannot write to the pre-existing org package
+# animastor/animastor-backend (denied: permission_denied: write_package — the
+# package was created by manual pushes, not by Actions). Stage 43 fix, matching
+# the working gpu-hub pattern: publish via the repo secret GHCR_IMAGE_PAT
+# (classic PAT, scopes repo + write:packages), falling back to GITHUB_TOKEN if
+# the secret is absent (e.g. after the owner later grants the package
+# Actions-read/write to this repository and removes the secret).
 #
 # RULES
-#   - The image is built ONLY from an immutable commit of THIS repository
-#     (default: the approved commit of stage 41). The run FAILS if the
-#     checked-out HEAD does not equal the requested/approved SHA.
-#   - Never publish :latest. Tags are deploy-<short-sha> and the full SHA.
+#   - workflow_dispatch ONLY (no push trigger): a publish run must always be an
+#     explicit, operator-chosen immutable commit + tag pair — pushing the
+#     workflow file itself never builds or publishes anything.
+#   - The backend/ source tree of the built commit must be byte-identical to
+#     APPROVED_COMMIT (the approved backend source pin). The run FAILS if the
+#     checked-out HEAD does not equal the requested commit or if backend/
+#     differs from the approved tree.
+#   - Never publish :latest and NEVER overwrite an existing tag: the push step
+#     refuses to run if either target tag already exists in the registry.
+#     Tags are deploy-<short-sha> and the full SHA.
 #   - Smoke runs against an isolated docker network with an ephemeral redis —
 #     no production PostgreSQL/Redis is reachable from the smoke containers.
 #   - The image content is compared byte-for-byte (sha256) against the
@@ -26,19 +38,13 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: "Immutable source commit to build"
+        description: "Immutable source commit to build (must carry the approved backend/ tree)"
         required: true
-        default: a7a8c4639ed40fbc4ba7a1f91cae0e4bdaf5a6ad
         type: string
       image_tag:
-        description: "Immutable image tag (e.g. deploy-a7a8c463)"
+        description: "Immutable image tag, e.g. deploy-<short-sha> (must NOT already exist)"
         required: true
-        default: deploy-a7a8c463
         type: string
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/backend-ghcr-release.yml"
 
 permissions:
   contents: read
@@ -48,7 +54,6 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: animastor/animastor-backend
   APPROVED_COMMIT: a7a8c4639ed40fbc4ba7a1f91cae0e4bdaf5a6ad
-  APPROVED_TAG: deploy-a7a8c463
 
 jobs:
   build-smoke-push:
@@ -59,7 +64,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit || env.APPROVED_COMMIT }}
-          fetch-depth: 1
+          # depth must reach APPROVED_COMMIT from the requested commit for the
+          # backend/-tree equality gate below (stage 43)
+          fetch-depth: 10
 
       - name: Verify source commit (fail-closed)
         id: src
@@ -67,13 +74,21 @@ jobs:
           set -euo pipefail
           HEAD_SHA="$(git rev-parse HEAD)"
           WANT="${{ inputs.commit || env.APPROVED_COMMIT }}"
-          TAG="${{ inputs.image_tag || env.APPROVED_TAG }}"
+          TAG="${{ inputs.image_tag }}"
           echo "checked-out HEAD: $HEAD_SHA"
-          echo "approved commit : $WANT"
+          echo "requested commit: $WANT"
           if [ "$HEAD_SHA" != "$WANT" ]; then
-            echo "PROVENANCE FAIL: checkout is not the approved commit" >&2
+            echo "PROVENANCE FAIL: checkout is not the requested commit" >&2
             exit 1
           fi
+          # the built backend/ tree must equal the approved backend source
+          git cat-file -e "${APPROVED_COMMIT}^{commit}" \
+            || { echo "PROVENANCE FAIL: approved commit ${APPROVED_COMMIT} not in fetched history" >&2; exit 1; }
+          if ! git diff --quiet "${APPROVED_COMMIT}" HEAD -- backend/; then
+            echo "PROVENANCE FAIL: backend/ tree differs from approved commit ${APPROVED_COMMIT}" >&2
+            exit 1
+          fi
+          echo "backend/ tree == approved ${APPROVED_COMMIT}"
           echo "commit=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -149,12 +164,25 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          # Stage 43: GITHUB_TOKEN is denied write on the pre-existing package
+          # (permission_denied: write_package), so publish with the same
+          # PAT pattern the gpu-hub workflow uses. Falls back to GITHUB_TOKEN
+          # if the secret is absent — least privilege when package permissions
+          # are granted to Actions directly.
+          password: ${{ secrets.GHCR_IMAGE_PAT || github.token }}
 
-      - name: Push immutable tags
+      - name: Push immutable tags (refuse to overwrite existing tags)
         run: |
           set -euo pipefail
           flat() { printf '%s' "$1" | tr '\n' ' ' | cut -c1-3000; }
+          # fail-closed: tags are immutable — never re-point an existing tag
+          for T in "${{ steps.src.outputs.tag }}" "${{ steps.src.outputs.commit }}"; do
+            if docker manifest inspect "${REGISTRY}/${IMAGE_NAME}:${T}" >/dev/null 2>&1; then
+              echo "::error::tag ${T} already exists in ${REGISTRY}/${IMAGE_NAME} — refusing to overwrite"
+              exit 1
+            fi
+            echo "tag ${T}: not present, ok to push"
+          done
           out=$(docker push "${REGISTRY}/${IMAGE_NAME}:${{ steps.src.outputs.tag }}" 2>&1) \
             || { echo "$out"; echo "::error::push ${{ steps.src.outputs.tag }} failed: $(flat "$out")"; exit 1; }
           echo "$out"
