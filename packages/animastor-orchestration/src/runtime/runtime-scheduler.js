@@ -571,6 +571,8 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
 
     let dispatched = 0;
     let throttled = 0;
+    let anyCompleted = false;
+    const failures = [];
 
     // Dispatch ALL eligible stages in this tick.
     // Concurrency limits per stage type are handled by dispatch engine.
@@ -589,10 +591,29 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
             dispatched++;
         } else if (result.reason === 'backpressure' || result.reason === 'throttled') {
             throttled++;
+        } else if (result.completed) {
+            // Stage finished inside the executor (already_done / cache_hit /
+            // no_segments) — not a failure, nothing to dispatch.
+            anyCompleted = true;
+        } else {
+            // Stage 50: раньше per-stage отказ (circuit_open, retry budget,
+            // lease, generating_transition_failed, …) молча проглатывался и
+            // tick писал «undefined for <scene>» — ошибки исчезали из
+            // observability. Теперь причина всплывает в tick-сводку.
+            failures.push(`${stage}:${result.reason || 'unknown'}`);
         }
     }
 
-    return { dispatched, throttled, stages: stages.length };
+    if (dispatched > 0) {
+        return { dispatched, throttled, stages: stages.length };
+    }
+    if (failures.length > 0) {
+        return { dispatched: 0, throttled, stages: stages.length, success: false, reason: failures.join(', ') };
+    }
+    if (anyCompleted) {
+        return { dispatched: 0, throttled, completed: true, reason: 'stage_completed' };
+    }
+    return { dispatched: 0, throttled, stages: stages.length, success: true, reason: 'no_dispatch' };
 }
 
 // ======================================================
@@ -615,6 +636,7 @@ module.exports = {
     // Scheduling
     shouldScheduleAssets,
     detectVersionStale,
+    attemptDispatch,
     markVersionStaleDirty,
     getLayerConfig,
     checkChunksHaveImages,

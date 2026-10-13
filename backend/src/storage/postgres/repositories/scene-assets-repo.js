@@ -103,6 +103,50 @@ async function markStale(bookId, chapterId, sceneId, assetType, buildId = null) 
     return result.rowCount || 0;
 }
 
+// ── Stage 50: dispatch-time scene-version stamping ────
+// Делает scene_assets.scene_content_version / scene_audio_config_version
+// семантикой «версия контента, под которую СТАРТОВАЛА эта генерация»:
+//   • version gate в completeStage сравнивает версию строки с текущей
+//     версией сцены — до фикса строка вообще не штамповалась при
+//     генерации (только book-sync при stale-marking), поэтому после
+//     перегенерации постиравшийся gate навсегда возвращал DIRTY
+//     (риск бесконечного re-dispatch после convergence-fix stage 50);
+//   • повторная регенерация после genuine stale штампует актуальную
+//     версию → gate пропускает READY ровно один раз (сходимость).
+// UPDATE-first по ВСЕМ строкам ассета (включая legacy-дубли с NULL
+// build_id — ON CONFLICT с NULL в Postgres не матчится, INSERT плодил
+// бы дубли; в production уже 450/503 строк с NULL build_id). Если строк
+// нет вообще (первая генерация versioned-книги) — синтетическая pending-
+// строка со штампом, по образцу book-sync.markSceneAssetsStale (R15+);
+// для книг без строки в scenes (legacy) SELECT даёт 0 строк → no-op.
+async function stampSceneVersionsForDispatch(bookId, chapterId, sceneId, assetType) {
+    const updateResult = await query(`
+        UPDATE scene_assets sa
+        SET scene_content_version = sv.content_version,
+            scene_audio_config_version = sv.audio_config_version,
+            updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+        FROM scenes sv
+        WHERE sa.book_id = $1 AND sa.chapter_id = $2 AND sa.scene_id = $3
+          AND sa.asset_type = $4
+          AND sv.book_id = $1 AND sv.chapter_id = $2 AND sv.scene_id = $3
+    `, [bookId, chapterId, sceneId, assetType]);
+    if ((updateResult.rowCount || 0) > 0) {
+        return { stamped: updateResult.rowCount, inserted: 0 };
+    }
+
+    const insertResult = await query(`
+        INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, status,
+                                  scene_content_version, scene_audio_config_version, updated_at)
+        SELECT $1, $2, $3, $4, 'pending',
+               sv.content_version, sv.audio_config_version,
+               EXTRACT(EPOCH FROM NOW())::bigint
+        FROM scenes sv
+        WHERE sv.book_id = $1 AND sv.chapter_id = $2 AND sv.scene_id = $3
+        ON CONFLICT DO NOTHING
+    `, [bookId, chapterId, sceneId, assetType]);
+    return { stamped: 0, inserted: insertResult.rowCount || 0 };
+}
+
 async function markFailed(bookId, chapterId, sceneId, assetType, error, buildId = null) {
     return upsertAsset({
         book_id: bookId, chapter_id: chapterId, scene_id: sceneId, asset_type: assetType,
@@ -510,6 +554,7 @@ module.exports = {
     markReady,
     markStale,
     markFailed,
+    stampSceneVersionsForDispatch,
     getAsset,
     getSceneAssets,
     getAssetsByType,

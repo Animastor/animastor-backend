@@ -59,6 +59,11 @@ async function markReady(bookId, chapterId, sceneId, assetType, path, extras) {
     return sceneAssetsRepo().markReady(bookId, chapterId, sceneId, assetType, path, extras);
 }
 
+// Stage 50: dispatch-time scene-version stamping (see scene-assets-repo).
+async function stampSceneVersionsForDispatch(bookId, chapterId, sceneId, assetType) {
+    return sceneAssetsRepo().stampSceneVersionsForDispatch(bookId, chapterId, sceneId, assetType);
+}
+
 async function getDirtyUnitIds(bookId, chapterId, sceneId) {
     return sceneAssetsRepo().getDirtyUnitIds(bookId, chapterId, sceneId);
 }
@@ -200,6 +205,7 @@ module.exports = {
     sceneAssets: {
         getAsset,
         markReady,
+        stampSceneVersionsForDispatch,
         getDirtyUnitIds,
         setDirtyUnitIds,
         clearDirtyUnitIds,

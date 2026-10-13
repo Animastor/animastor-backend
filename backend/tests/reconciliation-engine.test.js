@@ -1363,6 +1363,61 @@ describe('orch invariants — FAILED + DIRTY (stage 47)', () => {
         });
     });
 
+    // Stage 49: production holds exactly two DONE × dirty scenes
+    // (import_1786345731767_1786345734345 / ch-1bb5123c / sc-5f18dd0f and
+    // ch-37eadabb / sc-5f0068ca). The combination is reachable BY DESIGN of
+    // the writers: audio-orch DONE is terminal (VALID_TRANSITIONS[DONE] = [])
+    // and markDirtyScene / markVersionStaleDirty / book-diff only write the
+    // per-asset FSM, never the phase record (ORCHESTRATOR_CONVERGENCE_TODO
+    // Фаза 4 — "markDirtyScene чистит audio-orch" — was planned HIGH and never
+    // implemented). So the check must KEEP reporting it, and reconciliation
+    // must KEEP hands-off: the violation's `recommendation: run_completeStage`
+    // is dead metadata (never routed into getFixRecommendations) and would be
+    // the wrong repair anyway — completing the stage writes READY and erases
+    // exactly the dirty marker that schedules the pending regeneration.
+    describe('DONE + dirty (stage 49) stays reported and log-only', () => {
+        it('audio DONE + pending / generating / failed → audio_orch_invariant_done', async () => {
+            for (const state of ['pending', 'generating', 'failed']) {
+                const violations = await audioCheck(createMockRedis(), 'DONE', state);
+                expect(violations, `DONE orchestrator + asset=${state}`).to.be.an('array').with.length(1);
+                expect(violations[0].type).to.equal('audio_orch_invariant_done');
+                expect(violations[0].audioState).to.equal(state);
+                expect(violations[0].expected).to.equal('READY or PLACEHOLDER');
+            }
+        });
+
+        it('audio DONE + placeholder → null (allowed terminal outcome)', async () => {
+            expect(await audioCheck(createMockRedis(), 'DONE', 'placeholder')).to.be.null;
+        });
+
+        it('video DONE + dirty → video_orch_invariant_done (audio mirror)', async () => {
+            const violations = await videoCheck(createMockRedis(), 'DONE', 'dirty');
+            expect(violations).to.be.an('array').with.length(1);
+            expect(violations[0].type).to.equal('video_orch_invariant_done');
+            expect(violations[0].videoState).to.equal('dirty');
+        });
+
+        it('audio/video *_invariant_done → REVIEW_MANUALLY, safeToExecute=false', () => {
+            const engine = mockDeps(createMockRedis());
+            for (const issue of ['audio_orch_invariant_done', 'video_orch_invariant_done']) {
+                const [fix] = engine.getFixRecommendations([{ scene: sceneRef(), issue }]);
+                expect(fix.action, issue).to.equal('REVIEW_MANUALLY');
+                expect(fix.safeToExecute, issue).to.equal(false);
+            }
+        });
+
+        it('no auto-fix path may run for DONE × dirty — the dirty marker must survive reconcile', () => {
+            const engine = mockDeps(createMockRedis());
+            const fixes = engine.getFixRecommendations([
+                { scene: sceneRef(), issue: 'audio_orch_invariant_done' },
+                { scene: sceneRef(), issue: 'video_orch_invariant_done' },
+            ]);
+            expect(fixes.filter(f => f.safeToExecute),
+                'auto-applying run_completeStage/mark_dirty here would silently drop the required regeneration')
+                .to.have.length(0);
+        });
+    });
+
     describe('C1 recovery end state satisfies the invariant and is idempotent', () => {
         it('recovery → FAILED + dirty, invariant clean, second run changes nothing', async () => {
             const redisRef = createMockRedis();

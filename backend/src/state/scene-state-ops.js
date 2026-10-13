@@ -50,11 +50,43 @@ function warn(msg) {
 // T5: PG side-effect — синхронно пишет scene_assets.status='stale' для каждого ассета.
 // Это зеркалит то, как completeStage пишет status='ready'. Если PG недоступен —
 // только warning в лог, Redis write не откатывается.
+//
+// Stage 50 (Фаза 4 ORCHESTRATOR_CONVERGENCE_TODO): терминальная аудио/видео-FSM
+// запись (phase=DONE, VALID_TRANSITIONS[DONE]=[]) не должна переживать DIRTY —
+// иначе dispatch навсегда упирается в DONE guard / invariant DONE×DIRTY
+// (2 зависшие сцены в production, отчёт stage 49). Чистится ТОЛЬКО DONE:
+// WAITING_CHUNKS/MERGING/FAILED ведут штатные recovery-леги и сохраняются.
+// FSM доступ идёт через O-7/O-8 хост-адаптеры (sanctioned bridge — прямой
+// require сервисов запрещён guards O7-G10/O8-G10), лениво — require.cache-
+// стабы тестов остаются видимыми.
+async function clearTerminalFsmForAssets(redis, bookId, chapterId, sceneId, assets) {
+    const fsmByAsset = {
+        audio: () => require('../storage/audio-fsm-adapter'),
+        video: () => require('../storage/video-fsm-adapter'),
+    };
+    for (const asset of assets) {
+        const fsmGetter = fsmByAsset[asset];
+        if (!fsmGetter) continue;
+        try {
+            const fsm = fsmGetter();
+            const orchState = await fsm.getState(redis, bookId, chapterId, sceneId);
+            if (!orchState || orchState.phase !== fsm.PHASES.DONE) continue;
+            await fsm.deleteState(redis, bookId, chapterId, sceneId);
+            log(`[DIRTY-SCENE] ${bookId}/${chapterId}/${sceneId}: regeneration requested over terminal DONE ${asset}-orch record — cleared for re-dispatch`);
+        } catch (fsmErr) {
+            warn(`markDirtyScene: ${asset}-orch DONE cleanup failed for ${bookId}/${chapterId}/${sceneId}: ${fsmErr.message}`);
+        }
+    }
+}
+
 async function markDirtyScene(redis, bookId, chapterId, sceneId, assets = mediaRegistry.listMediaTypes(), buildId = null) {
     const state = require('./asset-state-store');
     for (const asset of assets) {
         await state.unsafeRestoreAssetState(redis, bookId, chapterId, sceneId, asset, state.AssetState.DIRTY);
     }
+
+    // Stage 50 (Фаза 4): терминальная FSM-запись не блокирует re-dispatch
+    await clearTerminalFsmForAssets(redis, bookId, chapterId, sceneId, assets);
 
     // T8: syncLinearState удалён — per-asset state единственный source of truth
 
@@ -73,6 +105,11 @@ async function markDirtyScene(redis, bookId, chapterId, sceneId, assets = mediaR
 // Set an asset to PENDING. R1: validateAssetTransition + journal event.
 // Used by scene-window when starting a scene.
 // T8: syncLinearState удалён — per-asset state единственный source of truth.
+//
+// Stage 50 (Фаза 5 ORCHESTRATOR_CONVERGENCE_TODO): PENDING для audio сбрасывает
+// audio-orch ТОЛЬКО в фазе DONE (терминальная запись не должна переживать
+// явный PENDING-запрос на генерацию). Другие фазы сохраняются — re-dispatch
+// через FAILED → GENERATING и stale-recovery леги остаются штатными.
 async function setScenePending(redis, bookId, chapterId, sceneId, asset, buildId = null) {
     const state = require('./asset-state-store');
 
@@ -92,6 +129,11 @@ async function setScenePending(redis, bookId, chapterId, sceneId, asset, buildId
     await journal.appendSceneEvent(redis, bookId, chapterId, sceneId,
         journal.EventType.SCENE_PENDING, state.AssetState.PENDING,
         { asset, buildId }).catch(() => {});
+
+    if (asset === 'audio') {
+        await clearTerminalFsmForAssets(redis, bookId, chapterId, sceneId, ['audio']);
+    }
+
     return { changed: true };
 }
 

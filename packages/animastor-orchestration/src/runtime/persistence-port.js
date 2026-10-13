@@ -59,6 +59,7 @@ const OPS = [
 
     'sceneAssets.getAsset',
     'sceneAssets.markReady',
+    'sceneAssets.stampSceneVersionsForDispatch',
     'sceneAssets.getDirtyUnitIds',
     'sceneAssets.setDirtyUnitIds',
     'sceneAssets.clearDirtyUnitIds',

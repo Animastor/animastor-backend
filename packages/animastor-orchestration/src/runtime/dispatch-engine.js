@@ -24,6 +24,9 @@ const runtimeMetrics = require('./runtime-metrics');
 // domain state over the injected redis parameter).
 const circuitBreaker = require('./circuit-breaker');
 const retryBudget = require('./retry-budget-manager');
+// O-2 (Stage 50): the dispatch-time scene-version stamp is a PG-side effect
+// consumed through the PersistencePort (host adapter owns the SQL).
+const persist = require('./persistence-port').persist;
 const crypto = require('crypto');
 // Phase 5: Runtime Result Contract — dispatch finalizations are reported to
 // orchestration through the contracts seam (runtime → contract → injected
@@ -864,7 +867,22 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
         dispatchId,
         leaseKey: lease.leaseKey,
         started_at: metadata.started_at
-    });        // Step 6: Get orchestrator to perform dispatch
+    });
+
+    // Step 5.5 (Stage 50): stamp the scene's CURRENT content/audio-config
+    // versions onto the asset row — «версия, под которую стартовала генерация».
+    // completeStage's version gate then compares exactly that, so a regen
+    // started for the current content reaches READY (convergence of the
+    // DONE×DIRTY / version-stale flows), while a version bump DURING the
+    // generation still fails the gate (T1.11 semantics preserved). Best-effort:
+    // dispatch is a Redis-domain operation; a PG outage must not block it —
+    // the gate stays fail-closed and the next dispatch re-stamps.
+    try {
+        await persist('sceneAssets.stampSceneVersionsForDispatch')(bookId, chapterId, sceneId, stage);
+    } catch (stampErr) {
+        warn(`DISPATCH_VERSION_STAMP_FAILED: ${bookId}/${chapterId}/${sceneId}:${stage}: ${stampErr.message}`);
+    }
+        // Step 6: Get orchestrator to perform dispatch
         try {
             // S-5: the stage executor entry (scene-orchestrator.dispatchStage) is
             // injected by the composition root — runtime must not import

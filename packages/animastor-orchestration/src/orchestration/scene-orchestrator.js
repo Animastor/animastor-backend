@@ -93,23 +93,62 @@ async function startScene(redis, scene, loadedBook, buildId) {
 // открывал circuit breaker.
 //
 // Контракт: перед отправкой любого GPU job ассет обязан пройти
-//   NEW → PENDING (здесь) → GENERATING (сразу ниже),
+//   NEW|DIRTY → PENDING (здесь) → GENERATING (сразу ниже),
 // либо уже находиться в состоянии, из которого GENERATING достижим.
 // Если переход невозможен — dispatch ПРЕРЫВАЕТСЯ ДО отправки job.
+//
+// Stage 50: DIRTY включён в нормализацию. DIRTY → GENERATING запрещён FSM
+// (scene-state.js: DIRTY → [PENDING, PLACEHOLDER]), поэтому до этого фикса
+// dirty-ассет (version-stale pre-pass, C1/C1b recovery, RELEASE_STALE_LEASE,
+// markDirtyScene) не мог перегенерироваться через планировщик вообще: guard
+// отклонял setSceneGenerating(dirty), rejection проглатывался в
+// attemptDispatch — ровно тот `INVALID state=dirty attempted=generating`
+// из journal (Case A, stage 49). Комментарий теста stage-dispatch-lifecycle
+// («scheduler's version-stale pre-pass owns DIRTY→PENDING») описывал
+// нормализацию, которой не существовало. PENDING-хоп здесь — это и есть
+// недостающая половина контракта.
 async function ensureStageDispatchable(redis, bookId, chapterId, sceneId, stage) {
     const states = await state.getAssetStates(redis, bookId, chapterId, sceneId);
-    if (states?.[stage] === state.AssetState.NEW) {
+    if (states?.[stage] === state.AssetState.NEW || states?.[stage] === state.AssetState.DIRTY) {
         const init = await setScenePending(redis, bookId, chapterId, sceneId, stage);
         if (!init.changed) {
             return { ok: false, reason: `pending_init_failed:${init.reason}` };
         }
-        log(`STAGE_INIT: ${bookId}/${chapterId}/${sceneId} ${stage}: NEW → PENDING`);
+        log(`STAGE_INIT: ${bookId}/${chapterId}/${sceneId} ${stage}: ${states[stage]} → PENDING`);
     }
     const gen = await setSceneGenerating(redis, bookId, chapterId, sceneId, stage);
     if (!gen.changed) {
         return { ok: false, reason: `generating_transition_failed:${gen.reason}` };
     }
     return { ok: true };
+}
+
+// ── Stage 50: terminal audio-orch record vs requested regeneration ──
+// DONE — терминальная фаза (VALID_TRANSITIONS[DONE] = []), но per-asset DIRTY
+// поверх неё — явный запрос на перегенерацию (version-stale pre-pass, C1/C1b
+// recovery, RELEASE_STALE_LEASE, completeStage version-gate stale). Без сброса
+// записи dispatch навсегда упирается в DONE guard (already_done) — состояние
+// DONE+DIRTY зависает навсегда (2 сцены в production, stage 49). Хил:
+// терминальная запись удаляется, дальше ensureStageDispatchable проводит
+// DIRTY → PENDING → GENERATING, а no_state-лега переинициализирует FSM.
+// Не-DONE записи (WAITING_CHUNKS/MERGING/FAILED) НЕ трогаются — их ведут
+// штатные recovery-леги (Фаза 4: чистится только DONE).
+async function clearTerminalAudioOrchForDirty(redis, bookId, chapterId, sceneId) {
+    let orchState;
+    try {
+        orchState = await audioFsmOp('getState')(redis, bookId, chapterId, sceneId);
+    } catch (err) {
+        warn(`AUDIO_DONE_DIRTY_HEAL: getState failed for ${bookId}/${chapterId}/${sceneId}: ${err.message}`);
+        return false;
+    }
+    if (!orchState || orchState.phase !== audioFsmPhases().DONE) return false;
+
+    const states = await state.getAssetStates(redis, bookId, chapterId, sceneId);
+    if (states?.audio !== state.AssetState.DIRTY) return false;
+
+    log(`AUDIO_DONE_DIRTY_HEAL: ${bookId}/${chapterId}/${sceneId} — regeneration requested over terminal DONE record — clearing audio-orch state for re-dispatch`);
+    await audioFsmOp('deleteState')(redis, bookId, chapterId, sceneId);
+    return true;
 }
 
 // T3: Каждый executor возвращает { dispatched: true/false, jobs, reason }
@@ -124,6 +163,10 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
     await logEvent(redis, scene, 'AUDIO_DISPATCHED', 'audio_generating', {
         buildId, dispatchType: 'orchestrator'
     });
+
+    // Stage 50: heal the DONE×DIRTY deadlock BEFORE the lifecycle guard —
+    // a DIRTY request over a terminal DONE record must regenerate, not skip.
+    await clearTerminalAudioOrchForDirty(redis, bookId, chapterId, sceneId);
 
     // T7: через фасад — единый владелец GENERATING (audio)
     // Lifecycle guard: abort BEFORE any GPU job if the transition chain fails.
@@ -591,6 +634,7 @@ async function dispatchStage(redis, scene, loadedBook, buildId, overrideStage, d
 
 module.exports = {
     ensureStageDispatchable,
+    clearTerminalAudioOrchForDirty,
     dispatchStage,
     restoreSceneChunkStatus,
     handleAudioCompleted,

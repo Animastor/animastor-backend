@@ -96,17 +96,26 @@ describe('stage dispatch lifecycle guard (video re-dispatch incident fix)', () =
             expect(await getState(redis, 'video')).to.equal(state.AssetState.READY);
         });
 
-        it('DIRTY asset aborts (must pass through reset→PENDING first)', async () => {
-            // DIRTY allows only PENDING/PLACEHOLDER — never GENERATING.
-            // The scheduler's version-stale pre-pass owns DIRTY→PENDING;
-            // the executor must not send a job from DIRTY directly.
+        it('DIRTY asset walks DIRTY → PENDING → GENERATING (stage 50 normalization)', async () => {
+            // Stage 50: DIRTY → GENERATING остаётся запрещённым FSM, но guard
+            // обязан провести ассет через FSM-легальный PENDING-хоп — раньше
+            // «scheduler's version-stale pre-pass owns DIRTY→PENDING» был
+            // незакрытым контрактом, и dirty-ассеты не могли перегенерироваться
+            // через планировщик вообще (INVALID state=dirty attempted=generating,
+            // Case A stage 49). Комментарий теста сохранён как контракт, теперь
+            // реализованный здесь.
             await setState(redis, 'video', state.AssetState.DIRTY);
             const result = await sceneOrchestrator.ensureStageDispatchable(
                 redis, B, C, S, 'video'
             );
-            expect(result.ok).to.equal(false);
-            expect(result.reason).to.match(/^generating_transition_failed:/);
-            expect(await getState(redis, 'video')).to.equal(state.AssetState.DIRTY);
+            expect(result.ok).to.equal(true);
+            // The dispatch happens only AFTER the FSM-legal PENDING hop —
+            // evidenced by the journal event written by setScenePending.
+            expect(await getState(redis, 'video')).to.equal(state.AssetState.GENERATING);
+            const events = (await redis.lrange(`animastor:event-journal:${B}:${C}:${S}`, 0, -1))
+                .map(JSON.parse);
+            const pending = events.find(e => e.type === 'SCENE_PENDING' && e.details?.asset === 'video');
+            expect(pending, 'DIRTY must pass through PENDING before GENERATING').to.exist;
         });
 
         it('already-GENERATING asset stays dispatchable (idempotent)', async () => {
@@ -117,9 +126,11 @@ describe('stage dispatch lifecycle guard (video re-dispatch incident fix)', () =
             expect(result.ok).to.equal(true);
         });
 
-        it('executor aborts a DIRTY video dispatch with zero GPU jobs sent', async () => {
-            // Scenario 16-18 (audit c8b79f6 old-fix regression): dirty→generating is
-            // an invalid transition, so the executor must abort BEFORE any GPU job.
+        it('executor dispatches a DIRTY video through the PENDING hop — abort reasons are state failures, not FSM deadlocks (stage 50)', async () => {
+            // Stage 50: dirty→generating больше не тупик — guard проводит
+            // DIRTY → PENDING → GENERATING до любой отправки job'а. Здесь
+            // loadedBook=null → dispatch падает на загрузке данных книги с
+            // НУЛЁМ отправленных job'ов и ассетом в GENERATING (не в DIRTY).
             await setState(redis, 'video', state.AssetState.DIRTY);
 
             const result = await sceneOrchestrator.dispatchStage(
@@ -128,12 +139,14 @@ describe('stage dispatch lifecycle guard (video re-dispatch incident fix)', () =
                 null,           // loadedBook unused — abort happens before book load
                 'build-1',
                 'video',
-                'dispatch-dirty-abort'
+                'dispatch-dirty-normalized'
             );
 
             expect(result.dispatched).to.equal(false);
             expect(result.jobs).to.equal(0);
-            expect(result.reason).to.match(/^generating_transition_failed:/);
+            // FSM deadlock reason is gone — DIRTY reaches GENERATING now.
+            expect(result.reason).to.not.match(/^generating_transition_failed:/);
+            expect(await getState(redis, 'video')).to.equal(state.AssetState.GENERATING);
         });
     });
 

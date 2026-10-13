@@ -345,15 +345,23 @@ async function checkOrphanGeneratingState(redis, bookId, chapterId, sceneId) {
 /**
  * Check for partially built scenes.
  * T8: использует per-asset state вместо линейного.
+ *
+ * Stage 50: генерация в полёте — не «partial build». Раньше registry мог
+ * ещё не содержать image (registerSceneImage пишется по завершении), а
+ * ассет уже PENDING/GENERATING с живым lease — отчёт partial_audio_only
+ * вёл к PROGRESS_TO_IMAGE → setScenePending(generating→pending rejected)
+ * каждый цикл (issue №3 stage 49: ch-1bb5123c/sc-45c789c6).
  */
 async function checkPartialBuilds(redis, bookId, chapterId, sceneId) {
     const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);
     const assets = await persist('registry.getSceneAssetsRedis')(redis, bookId, chapterId, sceneId);
 
+    const isInFlight = s => s === state.AssetState.PENDING || s === state.AssetState.GENERATING;
+
     // Audio READY/PLACEHOLDER but no image asset
     const audioReady = assetStates && assetStates.audio &&
         (assetStates.audio === state.AssetState.READY || assetStates.audio === state.AssetState.PLACEHOLDER);
-    if (audioReady && !assets?.image) {
+    if (audioReady && !assets?.image && !isInFlight(assetStates.image)) {
         return {
             type: 'partial_audio_only',
             scene: { bookId, chapterId, sceneId },
@@ -366,7 +374,7 @@ async function checkPartialBuilds(redis, bookId, chapterId, sceneId) {
     // Image READY but no video asset
     const imageReady = assetStates && assetStates.image &&
         (assetStates.image === state.AssetState.READY || assetStates.image === state.AssetState.PLACEHOLDER);
-    if (imageReady && !assets?.video) {
+    if (imageReady && !assets?.video && !isInFlight(assetStates.video)) {
         return {
             type: 'partial_image_video_missing',
             scene: { bookId, chapterId, sceneId },
@@ -646,7 +654,11 @@ async function checkAudioOrchInvariants(redis, bookId, chapterId, sceneId) {
                 phase,
                 audioState,
                 expected: 'READY or PLACEHOLDER',
-                recommendation: 'run_completeStage'
+                // Stage 50: former value 'run_completeStage' was dead AND
+                // destructive metadata — completing the stage would write READY
+                // and erase exactly the dirty marker that schedules the pending
+                // regeneration. Re-dispatch (stage 50 guard-heal) owns the repair.
+                recommendation: 'review_manually'
             });
         }
     } else if (phase === PHASES.FAILED) {
@@ -714,7 +726,9 @@ async function checkVideoOrchInvariants(redis, bookId, chapterId, sceneId) {
                 phase,
                 videoState,
                 expected: 'READY or PLACEHOLDER',
-                recommendation: 'run_completeStage'
+                // Stage 50: mirror of the audio fix — 'run_completeStage' was
+                // dead + destructive; manual review only, re-dispatch owns it.
+                recommendation: 'review_manually'
             });
         }
     } else if (phase === PHASES.FAILED) {
@@ -1102,6 +1116,23 @@ function getFixRecommendations(inconsistentScenes) {
                     action: 'RELEASE_STALE_LEASE',
                     reason: `Stale dispatch lease detected`,
                     safeToExecute: true
+                };
+            // Stage 50: explicit (no longer default-fallback) — a terminal
+            // audio/video-orch phase conflicting with the asset state is
+            // NEVER auto-repaired here. In particular run_completeStage would
+            // write READY and erase the dirty marker that schedules the
+            // pending regeneration (stage 49: 2 stuck production scenes).
+            // The DONE×DIRTY deadlock is healed by re-dispatch (stage 50
+            // guard-heal in scene-orchestrator); everything else is manual.
+            case 'audio_orch_invariant_done':
+            case 'video_orch_invariant_done':
+            case 'audio_orch_invariant_failed':
+            case 'video_orch_invariant_failed':
+                return {
+                    scene,
+                    action: 'REVIEW_MANUALLY',
+                    reason: `${issue}: terminal orch phase conflicts with asset state — re-dispatch heals DONE×DIRTY, other combinations need manual review`,
+                    safeToExecute: false
                 };
             default:
                 return {
@@ -2107,6 +2138,19 @@ async function recoverVideoOrchStates(redis, deps) {
 // the sceneVersions.getVersionStalenessRows() port op (SQL lives in the host
 // adapter verbatim). Pre-O-2 a missing deps.postgres skipped the phase; the
 // unwired-port throw hits the same catch → warn + return 0.
+//
+// Stage 50: per-asset и READY-only. Раньше сцена помечалась целиком
+// (markDirtyScene со ВСЕМИ ассетами по умолчанию) при каждом старте:
+//   • unsafeRestoreAssetState пишет DIRTY поверх GENERATING/PENDING — убивал
+//     бы живую генерацию при рестарте;
+//   • READY→DIRTY на не-stale ассетах — лишняя регенерация;
+//   • повторная маркировка уже-DIRTY ассетов — неидемпотентный счётчик.
+// Теперь stale-типы считаются построчно (audio: content ИЛИ audio_config;
+// image/video: content), пишется только READY→DIRTY (FSM-легальный переход),
+// прежний READY-артефакт не удаляется — он остаётся отдаваемым до успешной
+// замены (файл и registry не трогаются; completeStage version-gate пропустит
+// READY только после успешной перегенерации). Повторный прогон: ассет уже
+// DIRTY → 0 маркировок (идемпотентность), счётчик считает только факты записи.
 async function checkVersionStaleness(redis, deps) {
     const { orchestrator } = deps;
     if (!orchestrator) return 0;
@@ -2118,22 +2162,43 @@ async function checkVersionStaleness(redis, deps) {
         for (const row of result.rows) {
             const key = `${row.book_id}|${row.chapter_id}|${row.scene_id}`;
             if (!sceneMap.has(key)) {
-                sceneMap.set(key, { bookId: row.book_id, chapterId: row.chapter_id, sceneId: row.scene_id, stale: false });
+                sceneMap.set(key, { bookId: row.book_id, chapterId: row.chapter_id, sceneId: row.scene_id, staleAssets: new Set() });
             }
             const entry = sceneMap.get(key);
-            if ((row.scene_content_version != null && row.content_version != null && row.scene_content_version < row.content_version) ||
-                (row.scene_audio_config_version != null && row.audio_config_version != null && row.scene_audio_config_version < row.audio_config_version)) {
-                entry.stale = true;
+            const contentStale = row.scene_content_version != null && row.content_version != null &&
+                row.scene_content_version < row.content_version;
+            const audioConfigStale = row.scene_audio_config_version != null && row.audio_config_version != null &&
+                row.scene_audio_config_version < row.audio_config_version;
+            if (row.asset_type === 'audio') {
+                if (contentStale || audioConfigStale) entry.staleAssets.add('audio');
+            } else if (row.asset_type === 'image' || row.asset_type === 'video') {
+                if (contentStale) entry.staleAssets.add(row.asset_type);
             }
         }
 
         let outdated = 0;
         for (const entry of sceneMap.values()) {
-            if (entry.stale) {
-                log(`[VERSION-STALE] ${entry.bookId}/${entry.chapterId}/${entry.sceneId}`);
-                await orchestrator.markDirtyScene(redis, entry.bookId, entry.chapterId, entry.sceneId);
-                outdated++;
+            if (entry.staleAssets.size === 0) continue;
+
+            let assetStates;
+            try {
+                assetStates = await state.getAssetStates(redis, entry.bookId, entry.chapterId, entry.sceneId);
+            } catch (stateErr) {
+                warn(`Version staleness: asset-state read failed for ${entry.bookId}/${entry.chapterId}/${entry.sceneId}: ${stateErr.message}`);
+                continue;
             }
+
+            const readyStale = [...entry.staleAssets]
+                .filter(t => assetStates?.[t] === state.AssetState.READY);
+            if (readyStale.length === 0) {
+                // Уже DIRTY/GENERATING/FAILED — регенерация инициирована или идёт;
+                // повторная маркировка была бы неидемпотентной и опасной.
+                continue;
+            }
+
+            log(`[VERSION-STALE] ${entry.bookId}/${entry.chapterId}/${entry.sceneId} → ${readyStale.join(', ')} (READY → DIRTY, previous artifact preserved until replacement)`);
+            await orchestrator.markDirtyScene(redis, entry.bookId, entry.chapterId, entry.sceneId, readyStale);
+            outdated++;
         }
         return outdated;
     } catch (err) {
