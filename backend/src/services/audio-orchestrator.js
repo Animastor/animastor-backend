@@ -21,8 +21,13 @@
 // | NEW → PLACEHOLDER_READY | startScene() | После создания placeholder + chunk metadata |
 // | PLACEHOLDER_READY → GENERATING | executeAudioDispatch() | Перед отправкой TTS |
 // | GENERATING → WAITING_CHUNKS | executeAudioDispatch() | После отправки TTS |
+// | GENERATING → FAILED | recovery (startup C1) / failStage sync | Запись зависла
+//   после рестарта (TTS не дошёл) или сцена упала на audio-диспатче — зеркало
+//   video-FSM, где этот переход разрешён с момента создания |
 // | WAITING_CHUNKS → MERGING | completeChunk() | Когда все чанки на диске |
 // | MERGING → DONE | completeChunk() → completeMerge() | После успешного merge |
+// | MERGING → FAILED | completeChunk() (merge error) / recovery (startup C1) | Merge
+//   упал или прерван рестартом — зеркало video-FSM |
 // | WAITING_CHUNKS → FAILED | failWaitingScene() (watchdog/recovery) | Застой чанков или сбой |
 // | FAILED → WAITING_CHUNKS | completeChunk() (late chunk) | Когда все чанки пришли после FAILED |
 // | FAILED → GENERATING | scheduler re-dispatch | На следующем scheduler tick |
@@ -50,13 +55,19 @@ const PHASES = {
     FAILED: 'FAILED',
 };
 
-// Valid transitions map
+// Valid transitions map.
+// Stage 46: GENERATING → FAILED and MERGING → FAILED join the map — the
+// recovery legs (startup C1) and the merge-error/failStage paths drive them,
+// and the video twin FSM has allowed both since its creation. Without them
+// setFailed() from those phases silently no-ops (invalid_transition) and the
+// record stays stuck (the July-2026 orphan GENERATING keys). PLACEHOLDER_READY
+// → FAILED stays forbidden: a scene must reach GENERATING before it can fail.
 const VALID_TRANSITIONS = {
     [PHASES.NEW]: [PHASES.PLACEHOLDER_READY],
     [PHASES.PLACEHOLDER_READY]: [PHASES.GENERATING],
-    [PHASES.GENERATING]: [PHASES.WAITING_CHUNKS],
+    [PHASES.GENERATING]: [PHASES.WAITING_CHUNKS, PHASES.FAILED],
     [PHASES.WAITING_CHUNKS]: [PHASES.MERGING, PHASES.FAILED],
-    [PHASES.MERGING]: [PHASES.DONE],
+    [PHASES.MERGING]: [PHASES.DONE, PHASES.FAILED],
     [PHASES.FAILED]: [PHASES.GENERATING, PHASES.WAITING_CHUNKS],
     [PHASES.DONE]: [], // terminal
 };

@@ -41,6 +41,10 @@ const STATE_PATH = path.join(CWD, 'src/state/index.js');
 const STORAGE_PATH = path.join(CWD, 'src/storage/index.js');
 const IMAGE_PATH = path.join(CWD, 'src/image/index.js');
 const AUDIO_ORCH_PATH = path.join(CWD, 'src/services/audio-orchestrator.js');
+// Captured at file load (before any mockDeps() replaces the module in
+// require.cache) so the stage-46 recovery tests can drive C1 through the REAL
+// audio FSM (VALID_TRANSITIONS map) instead of a setFailed stub.
+const realAudioOrch = require('../src/services/audio-orchestrator');
 const ORCH_PATH = path.join(CWD, 'node_modules/@animastor/orchestration/src/orchestration/orchestrator.js');
 const JOURNAL_PATH = path.join(CWD, 'src/state/event-journal.js');
 
@@ -1090,5 +1094,137 @@ describe('recoverAudioOrchStates (startup C1)', () => {
         } finally {
             media.audio.chunks.findExistingSceneChunks = origFind;
         }
+    });
+});
+
+// ======================================================
+// TESTS: recoverAudioOrchStates — REAL audio FSM (stage 46)
+// ======================================================
+// Stage 45 fixed the host binding, but C1's setFailed() writes still no-oped
+// on the July-2026 orphan GENERATING keys: the host FSM map forbade
+// GENERATING → FAILED, so transitionState() returned invalid_transition and
+// the record stayed GENERATING forever (production warn:
+// `[AUDIO-ORCH] ⚠️ Invalid transition: GENERATING → FAILED`). These tests
+// drive C1 through the REAL audio-orchestrator FSM (captured at file load),
+// so the VALID_TRANSITIONS map itself is under test — not a setFailed stub.
+
+describe('recoverAudioOrchStates — real audio FSM (stage 46)', () => {
+    const AUDIO_KEY = `animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
+    let redis;
+
+    afterEach(() => { delete require.cache[RECONCILE_PATH]; });
+
+    function seed(redisRef, state) {
+        return redisRef.set(AUDIO_KEY, JSON.stringify({ build_id: null, ...state }));
+    }
+
+    async function readState(redisRef) {
+        const raw = await redisRef.get(AUDIO_KEY);
+        return raw ? JSON.parse(raw) : null;
+    }
+
+    it('stuck GENERATING record → FAILED through the real FSM (restart_recovery)', async () => {
+        redis = createMockRedis();
+        await seed(redis, {
+            phase: 'GENERATING', expected_count: 0, chunks_received: 0,
+            started_at: Date.now() - 86400000,
+        });
+        const calls = { dirty: 0 };
+        const engine = mockDeps(redis, {
+            setFailed: (...args) => realAudioOrch.setFailed(...args),
+            state: { unsafeRestoreAssetState: async () => {} },
+        });
+
+        const recovered = await engine.recoverAudioOrchStates(redis, {
+            orchestrator: { markDirtyScene: async () => { calls.dirty++; } },
+        });
+
+        expect(recovered).to.equal(1);
+        const state = await readState(redis);
+        expect(state.phase, 'C1 must persist FAILED through the FSM map').to.equal('FAILED');
+        expect(state.fail_reason).to.equal('restart_recovery');
+        expect(state.failed_at).to.be.a('number');
+        expect(calls.dirty, 'scene must be marked dirty for re-dispatch').to.equal(1);
+    });
+
+    it('terminal record is not modified by recovery', async () => {
+        redis = createMockRedis();
+        const terminal = {
+            phase: 'DONE', expected_count: 3, chunks_received: 3,
+            build_id: 'build-terminal', started_at: 1780000000000,
+            last_chunk_at: 1780000001000,
+        };
+        await seed(redis, terminal);
+        const engine = mockDeps(redis, {
+            setFailed: (...args) => realAudioOrch.setFailed(...args),
+            state: { unsafeRestoreAssetState: async () => {} },
+        });
+
+        const recovered = await engine.recoverAudioOrchStates(redis, { orchestrator: {} });
+
+        expect(recovered).to.equal(0);
+        expect(await readState(redis)).to.deep.equal(terminal);
+    });
+
+    it('active generation is not failed just because the record is old — merge recovery wins', async () => {
+        redis = createMockRedis();
+        await seed(redis, {
+            phase: 'GENERATING', expected_count: 2, chunks_received: 2,
+            build_id: 'build-active', started_at: Date.now() - 86400000,
+        });
+        const calls = { completeChunk: 0, failed: 0 };
+        const engine = mockDeps(redis, {
+            completeChunk: async () => { calls.completeChunk++; return { phase: 'MERGING' }; },
+            setFailed: (...args) => { calls.failed++; return realAudioOrch.setFailed(...args); },
+            state: { unsafeRestoreAssetState: async () => {} },
+        });
+
+        const media = require('@animastor/orchestration').hostBinding('media');
+        const origFind = media.audio.chunks.findExistingSceneChunks;
+        media.audio.chunks.findExistingSceneChunks = () => [1, 2];
+        try {
+            const recovered = await engine.recoverAudioOrchStates(redis, { orchestrator: {} });
+            expect(recovered).to.equal(1);
+            expect(calls.completeChunk, 'merge recovery must run').to.equal(1);
+            expect(calls.failed, 'age alone must never drive FAILED').to.equal(0);
+            expect((await readState(redis)).phase).to.not.equal('FAILED');
+        } finally {
+            media.audio.chunks.findExistingSceneChunks = origFind;
+        }
+    });
+
+    it('repeated recovery is idempotent — second run leaves FAILED untouched', async () => {
+        redis = createMockRedis();
+        await seed(redis, {
+            phase: 'GENERATING', expected_count: 0, chunks_received: 0,
+            started_at: Date.now() - 86400000,
+        });
+        const engine = mockDeps(redis, {
+            setFailed: (...args) => realAudioOrch.setFailed(...args),
+            state: { unsafeRestoreAssetState: async () => {} },
+        });
+        const orch = { markDirtyScene: async () => {} };
+
+        expect(await engine.recoverAudioOrchStates(redis, { orchestrator: orch })).to.equal(1);
+        const afterFirst = await readState(redis);
+        expect(afterFirst.phase).to.equal('FAILED');
+
+        expect(await engine.recoverAudioOrchStates(redis, { orchestrator: orch })).to.equal(0);
+        expect(await readState(redis)).to.deep.equal(afterFirst);
+    });
+
+    it('forbidden transitions stay forbidden through the real FSM (PLACEHOLDER_READY → FAILED)', async () => {
+        redis = createMockRedis();
+        await seed(redis, {
+            phase: 'PLACEHOLDER_READY', expected_count: 4, chunks_received: 0,
+            started_at: Date.now() - 86400000, build_id: 'build-early',
+        });
+        // PLACEHOLDER_READY is non-terminal for the FSM but C1's switch sends
+        // it to the default branch (deleteState) — assert the FSM itself still
+        // refuses the premature FAILED write even if a caller tries it.
+        const result = await realAudioOrch.setFailed(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'premature');
+        expect(result.success).to.be.false;
+        expect(result.reason).to.equal('invalid_transition');
+        expect((await readState(redis)).phase).to.equal('PLACEHOLDER_READY');
     });
 });

@@ -121,6 +121,33 @@ describe('Audio Orchestrator — Phase Machine', () => {
             expect(state.failed_at).to.be.a('number');
         });
 
+        it('GENERATING → FAILED (startup recovery / failStage sync, stage 46)', async () => {
+            await audioOrch.initPlaceholderReady(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, BUILD_ID, EXPECTED_COUNT);
+            await audioOrch.setGenerating(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+
+            const result = await audioOrch.setFailed(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'restart_recovery');
+            expect(result.success).to.be.true;
+
+            const state = await audioOrch.getState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            expect(state.phase).to.equal(audioOrch.PHASES.FAILED);
+            expect(state.fail_reason).to.equal('restart_recovery');
+            expect(state.failed_at).to.be.a('number');
+        });
+
+        it('MERGING → FAILED (merge error / interrupted-merge recovery, stage 46)', async () => {
+            await audioOrch.initPlaceholderReady(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, BUILD_ID, EXPECTED_COUNT);
+            await audioOrch.setGenerating(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            await audioOrch.setWaitingChunks(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            await audioOrch.setMerging(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+
+            const result = await audioOrch.setFailed(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'merge_failed_no_output');
+            expect(result.success).to.be.true;
+
+            const state = await audioOrch.getState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            expect(state.phase).to.equal(audioOrch.PHASES.FAILED);
+            expect(state.fail_reason).to.equal('merge_failed_no_output');
+        });
+
         it('FAILED → GENERATING (scheduler re-dispatch)', async () => {
             await audioOrch.setGenerating(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
             await audioOrch.setWaitingChunks(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
@@ -188,6 +215,38 @@ describe('Audio Orchestrator — Phase Machine', () => {
             const result = await audioOrch.setFailed(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'late_error');
             expect(result.success).to.be.false;
             expect(result.reason).to.equal('invalid_transition');
+
+            // terminal record must stay untouched (stage 46)
+            const state = await audioOrch.getState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            expect(state.phase).to.equal(audioOrch.PHASES.DONE);
+            expect(state.fail_reason).to.be.undefined;
+        });
+
+        it('rejects FAILED → DONE (re-dispatch re-enters through GENERATING/WAITING_CHUNKS)', async () => {
+            await audioOrch.initPlaceholderReady(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, BUILD_ID, EXPECTED_COUNT);
+            await audioOrch.setGenerating(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            await audioOrch.setWaitingChunks(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            await audioOrch.setFailed(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'timeout');
+
+            const result = await audioOrch.setDone(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            expect(result.success).to.be.false;
+            expect(result.reason).to.equal('invalid_transition');
+
+            const state = await audioOrch.getState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            expect(state.phase).to.equal(audioOrch.PHASES.FAILED);
+        });
+
+        it('rejects NEW → FAILED (must reach GENERATING first)', async () => {
+            await audioOrch.setState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, { phase: audioOrch.PHASES.NEW });
+
+            const result = await audioOrch.setFailed(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'too_early');
+            expect(result.success).to.be.false;
+            expect(result.reason).to.equal('invalid_transition');
+            expect(result.from).to.equal(audioOrch.PHASES.NEW);
+
+            const state = await audioOrch.getState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+            expect(state.phase).to.equal(audioOrch.PHASES.NEW);
+            expect(state.fail_reason).to.be.undefined;
         });
 
         it('rejects transition when no state exists', async () => {
