@@ -232,6 +232,13 @@ describe('§32.30 post-move boundary guards — packages/animastor-orchestration
         }
         // seams still registered from the composition root
         expect(rootSrc).to.include('registerOrchestrationSeams({');
+        // §32.30 media sub-paths (stage 44): the package resolves
+        // media.audio.chunks / media.audio.segments through the binding — the
+        // composition root must compose both audio sub-modules in, otherwise
+        // startup phase C1 dies with a TypeError on the first non-terminal
+        // audio-orch state (`[STARTUP] Reconcile errors: audio_orch: …`).
+        expect(rootSrc, 'backend.cjs must expose media.audio.chunks').to.include("chunks: require('./audio/chunks')");
+        expect(rootSrc, 'backend.cjs must expose media.audio.segments').to.include("segments: require('./audio/segments')");
         // result consumer still injected, never required by runtime modules
         expect(rootSrc).to.include('createRuntimeResultConsumer(');
         expect(rootSrc).to.include('setConsumer(');

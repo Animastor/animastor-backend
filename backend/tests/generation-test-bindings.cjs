@@ -120,7 +120,15 @@ const HOST_MODULE_BINDINGS = {
     stateOps: () => require('../src/state/scene-state-ops'),
     journal: () => require('../src/state/event-journal'),
     media: () => ({
-        audio: require('../src/audio'),
+        // Mirror of the composition root (backend.cjs, stage 44): the audio
+        // barrel is flat — compose in the two sub-modules the package resolves
+        // as media.audio.chunks / media.audio.segments (startup phase C1
+        // recoverAudioOrchStates + scene-orchestrator stale/no-state legs).
+        audio: {
+            ...require('../src/audio'),
+            chunks: require('../src/audio/chunks'),
+            segments: require('../src/audio/segments'),
+        },
         image: require('../src/image'),
         video: require('../src/video'),
     }),

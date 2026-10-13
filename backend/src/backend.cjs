@@ -152,7 +152,19 @@ orchestrationPkg.bindHostModules({
     stateOps: () => require('./state/scene-state-ops'),
     journal: () => require('./state/event-journal'),
     media: () => ({
-        audio: require('./audio'),
+        // §32.30 MEDIA SUB-PATHS (stage 44): the extracted orchestration
+        // package resolves media.audio.chunks / media.audio.segments through
+        // this binding exactly as the pre-move files required
+        // '../audio/chunks' and '../audio/segments' (startup phase C1
+        // recoverAudioOrchStates + the scene-orchestrator stale/no-state
+        // recovery legs). The audio barrel is flat, so the two sub-modules are
+        // composed in here — no host module is mutated, every other media.audio
+        // consumer keeps the flat barrel surface.
+        audio: {
+            ...require('./audio'),
+            chunks: require('./audio/chunks'),
+            segments: require('./audio/segments'),
+        },
         image: require('./image'),
         video: require('./video'),
     }),

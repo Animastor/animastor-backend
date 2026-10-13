@@ -1014,3 +1014,81 @@ describe('reconcileScene', () => {
         expect(report.toSummary().totalStaleLocks).to.equal(1);
     });
 });
+
+// ======================================================
+// TESTS: recoverAudioOrchStates — startup phase C1
+// ======================================================
+// Regression for the production startup warn (stages 42/44):
+//   [STARTUP] Reconcile errors: audio_orch: Cannot read properties of
+//   undefined (reading 'findExistingSceneChunks')
+// The C1 leg resolves `media.audio.chunks` through the host-binding seam.
+// The composition root must register the two audio sub-modules the extracted
+// package expects (chunks/segments) — the same modules the pre-move files
+// required as '../audio/chunks' and '../audio/segments'. The audio barrel is
+// flat, so without that registration every non-terminal audio-orch state
+// aborts the whole C1 phase with a TypeError.
+
+describe('recoverAudioOrchStates (startup C1)', () => {
+    let redis;
+    afterEach(() => { delete require.cache[RECONCILE_PATH]; });
+
+    it('host media binding exposes the audio.chunks / audio.segments sub-modules', () => {
+        const media = require('@animastor/orchestration').hostBinding('media');
+        expect(media.audio.chunks, 'media.audio.chunks must be registered').to.be.an('object');
+        expect(media.audio.chunks.findExistingSceneChunks).to.be.a('function');
+        expect(media.audio.segments, 'media.audio.segments must be registered').to.be.an('object');
+        expect(media.audio.segments.buildSegments).to.be.a('function');
+        // flat barrel surface stays intact for every other media.audio consumer
+        expect(media.audio.findExistingSceneChunks).to.be.a('function');
+        expect(media.audio.buildSegments).to.be.a('function');
+    });
+
+    it('GENERATING state with no chunks on disk → FAILED, no audio_orch error', async () => {
+        redis = createMockRedis();
+        await redis.set(`animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`, JSON.stringify({
+            phase: 'GENERATING', expected_count: 0, chunks_received: 0,
+            build_id: null, started_at: Date.now() - 86400000,
+        }));
+        const calls = { failed: 0, assetResync: 0, dirty: 0 };
+        const engine = mockDeps(redis, {
+            state: { unsafeRestoreAssetState: async () => { calls.assetResync++; } },
+            setFailed: async () => { calls.failed++; return { phase: 'FAILED' }; },
+        });
+
+        const recovered = await engine.recoverAudioOrchStates(redis, {
+            orchestrator: { markDirtyScene: async () => { calls.dirty++; } },
+        });
+
+        expect(recovered).to.equal(1);
+        expect(calls.failed, 'audio-orch state must be driven to FAILED').to.equal(1);
+        expect(calls.assetResync, 'asset.audio must be resynced to FAILED').to.equal(1);
+        expect(calls.dirty, 'scene must be marked dirty for re-dispatch').to.equal(1);
+    });
+
+    it('GENERATING state with all chunks on disk → merge recovery, no audio_orch error', async () => {
+        redis = createMockRedis();
+        await redis.set(`animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`, JSON.stringify({
+            phase: 'GENERATING', expected_count: 2, chunks_received: 2,
+            build_id: 'build-test', started_at: Date.now() - 86400000,
+        }));
+        const calls = { completeChunk: 0, failed: 0 };
+        const engine = mockDeps(redis, {
+            state: { unsafeRestoreAssetState: async () => {} },
+            completeChunk: async () => { calls.completeChunk++; return { phase: 'MERGING' }; },
+            setFailed: async () => { calls.failed++; return { phase: 'FAILED' }; },
+        });
+
+        // stub the chunk enumeration on the registered media binding: 2/2 present
+        const media = require('@animastor/orchestration').hostBinding('media');
+        const origFind = media.audio.chunks.findExistingSceneChunks;
+        media.audio.chunks.findExistingSceneChunks = () => [1, 2];
+        try {
+            const recovered = await engine.recoverAudioOrchStates(redis, { orchestrator: {} });
+            expect(recovered).to.equal(1);
+            expect(calls.completeChunk, 'completeChunk merge recovery must run').to.equal(1);
+            expect(calls.failed).to.equal(0);
+        } finally {
+            media.audio.chunks.findExistingSceneChunks = origFind;
+        }
+    });
+});
