@@ -13,8 +13,11 @@
 //
 // Инварианты (проверяются в reconcileCycle, T6):
 //   phase=DONE     ⇔ asset.audio = READY
-//   phase=FAILED   ⇒ asset.audio = FAILED
-//   промежуточные  ⇒ asset.audio = GENERATING
+//   phase=FAILED   ⇒ asset.audio ∈ {FAILED, PENDING, DIRTY}
+//                    (FAILED — failStage без re-dispatch; PENDING —
+//                     failStage(redispatch); DIRTY — startup C1 recovery,
+//                     stage 47)
+//   промежуточные  ⇒ asset.audio ∈ {PENDING, GENERATING, DIRTY}
 //
 // | Phase | Владелец перехода | Когда |
 // |-------|-------------------|-------|

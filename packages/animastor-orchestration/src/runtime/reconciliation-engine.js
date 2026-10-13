@@ -607,8 +607,21 @@ async function checkStalledVideoScenes(redis, deps) {
 // ======================================================
 // Проверяет соответствие между audio-orch phase и asset state:
 //   phase=DONE     ⇔ asset.audio = READY
-//   phase=FAILED   ⇒ asset.audio = FAILED (или PENDING — после re-dispatch)
+//   phase=FAILED   ⇒ asset.audio ∈ {FAILED, PENDING, DIRTY}
 //   промежуточные  ⇒ asset.audio ∈ {PENDING, GENERATING, DIRTY}
+//
+// Stage 47 (FAILED + DIRTY): DIRTY — штатный итог для phase=FAILED.
+// Два писателя приводят к FAILED на стороне оркестратора:
+//   • failStage(redispatch=true) → asset = PENDING (FAILED пишется первым и
+//     тут же перезаписывается), redispatch=false → asset = FAILED;
+//   • startup C1/C1b recovery → setFailed, затем markDirtyScene → asset =
+//     DIRTY (+ PG scene_assets.status='stale'). Это сделано нарочно:
+//     shouldScheduleAssets() перескакивает READY/FAILED и передиспатчитивает
+//     только PENDING/DIRTY, т.е. asset=FAILED застрял бы навсегда, а
+//     recommendation 'mark_dirty' (см. ветку ниже) есть ничто иное, как
+//     путь к допустимому состоянию. Проверка до stage 47 отвергала именно
+//     тот итог, к которому сама же рекомендовала прийти, — ложный
+//     audio_orch_invariant_failed на каждой успешной recovery.
 
 async function checkAudioOrchInvariants(redis, bookId, chapterId, sceneId) {
     // O-7: through the AudioFsmPort (host adapter: storage/audio-fsm-adapter)
@@ -637,13 +650,19 @@ async function checkAudioOrchInvariants(redis, bookId, chapterId, sceneId) {
             });
         }
     } else if (phase === PHASES.FAILED) {
-        if (audioState !== state.AssetState.FAILED && audioState !== state.AssetState.PENDING) {
+        // Stage 47: DIRTY is a legitimate FAILED-phase asset state (see the
+        // header of this section). Everything else — READY above all — stays
+        // a real contradiction: the orchestrator failed while the asset claims
+        // its result is accepted.
+        if (audioState !== state.AssetState.FAILED &&
+            audioState !== state.AssetState.PENDING &&
+            audioState !== state.AssetState.DIRTY) {
             violations.push({
                 type: 'audio_orch_invariant_failed',
                 scene: { bookId, chapterId, sceneId },
                 phase,
                 audioState,
-                expected: 'FAILED or PENDING',
+                expected: 'FAILED, PENDING or DIRTY',
                 recommendation: 'mark_dirty'
             });
         }
@@ -668,7 +687,8 @@ async function checkAudioOrchInvariants(redis, bookId, chapterId, sceneId) {
 // VIDEO-ORCH INVARIANT CHECKS (зеркало checkAudioOrchInvariants)
 // ======================================================
 //   phase=DONE     ⇒ asset.video = READY (или PLACEHOLDER)
-//   phase=FAILED   ⇒ asset.video = FAILED (или PENDING — после re-dispatch)
+//   phase=FAILED   ⇒ asset.video ∈ {FAILED, PENDING, DIRTY}  (stage 47 —
+//                    зеркало аудио: C1b recovery заканчивается markDirtyScene)
 //   промежуточные  ⇒ asset.video = PENDING|GENERATING|DIRTY
 
 async function checkVideoOrchInvariants(redis, bookId, chapterId, sceneId) {
@@ -698,13 +718,17 @@ async function checkVideoOrchInvariants(redis, bookId, chapterId, sceneId) {
             });
         }
     } else if (phase === PHASES.FAILED) {
-        if (videoState !== state.AssetState.FAILED && videoState !== state.AssetState.PENDING) {
+        // Stage 47: mirror of the audio branch — DIRTY is the deliberate C1b
+        // recovery outcome (markDirtyScene → asset DIRTY for re-dispatch).
+        if (videoState !== state.AssetState.FAILED &&
+            videoState !== state.AssetState.PENDING &&
+            videoState !== state.AssetState.DIRTY) {
             violations.push({
                 type: 'video_orch_invariant_failed',
                 scene: { bookId, chapterId, sceneId },
                 phase,
                 videoState,
-                expected: 'FAILED or PENDING',
+                expected: 'FAILED, PENDING or DIRTY',
                 recommendation: 'mark_dirty'
             });
         }

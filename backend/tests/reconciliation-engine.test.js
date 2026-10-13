@@ -1228,3 +1228,222 @@ describe('recoverAudioOrchStates — real audio FSM (stage 46)', () => {
         expect((await readState(redis)).phase).to.equal('PLACEHOLDER_READY');
     });
 });
+
+// ======================================================
+// TESTS: orch invariants — FAILED + DIRTY (stage 47)
+// ======================================================
+// Stage 46 recovery left three July-2026 scenes at
+//   audio-orch phase=FAILED (fail_reason=restart_recovery) + asset.audio=dirty,
+// and every reconcile cycle logged `audio_orch_invariant_failed`. That state is
+// the deliberate output of the C1 leg (setFailed → unsafeRestoreAssetState
+// FAILED → markDirtyScene DIRTY + PG status='stale'): shouldScheduleAssets()
+// re-dispatches only PENDING/DIRTY (a FAILED asset is terminal for the
+// scheduler), and the violation's own recommendation is 'mark_dirty' — the
+// pre-stage-47 check rejected exactly the state it told operators to produce.
+// These tests pin the contract:
+//   • allowed combinations (FAILED × {failed,pending,dirty}, DONE × ready,
+//     intermediate × {pending,generating,dirty}) produce NO invariant error;
+//   • real contradictions (FAILED × ready, DONE × dirty, intermediate × ready)
+//     are still reported;
+//   • a second recovery run is a no-op and never clears the dirty marker;
+//   • the recommendation for a real FAILED-phase contradiction stays log-only.
+
+describe('orch invariants — FAILED + DIRTY (stage 47)', () => {
+    const AUDIO_KEY = `animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
+    const VIDEO_KEY = `animastor:video-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
+
+    afterEach(() => { delete require.cache[RECONCILE_PATH]; });
+
+    // Audio: the phase record is read through the AudioFsmPort → host
+    // audio-orchestrator, which this harness mocks at AUDIO_ORCH_PATH — so
+    // getState is overridden to read the seeded key instead of returning null
+    // (a null orchState would make the check vacuously pass).
+    async function audioCheck(redis, phase, audioState) {
+        await redis.set(AUDIO_KEY, JSON.stringify({
+            phase, expected_count: 1, chunks_received: 0,
+            build_id: 'build-inv', started_at: Date.now(),
+        }));
+        await setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'audio', audioState);
+        const engine = mockDeps(redis, {
+            getAudioOrchState: async (r, b, c, s) => {
+                const raw = await r.get(`animastor:audio-orch:${b}:${c}:${s}`);
+                return raw ? JSON.parse(raw) : null;
+            },
+        });
+        return engine.checkAudioOrchInvariants(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+    }
+
+    // Video: no video-orchestrator mock in this harness — the REAL FSM reader
+    // resolves through the wired VideoFsmPort (see .mocharc test bindings).
+    async function videoCheck(redis, phase, videoState) {
+        await redis.set(VIDEO_KEY, JSON.stringify({
+            phase, started_at: Date.now(), build_id: 'build-inv',
+        }));
+        await setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'video', videoState);
+        const engine = mockDeps(redis);
+        return engine.checkVideoOrchInvariants(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+    }
+
+    describe('allowed combinations produce no false positives', () => {
+        it('audio FAILED + dirty (C1 recovery outcome) → null', async () => {
+            expect(await audioCheck(createMockRedis(), 'FAILED', 'dirty')).to.be.null;
+        });
+
+        it('audio FAILED + failed (failStage without redispatch) → null', async () => {
+            expect(await audioCheck(createMockRedis(), 'FAILED', 'failed')).to.be.null;
+        });
+
+        it('audio FAILED + pending (failStage with redispatch) → null', async () => {
+            expect(await audioCheck(createMockRedis(), 'FAILED', 'pending')).to.be.null;
+        });
+
+        it('audio DONE + ready (terminal success) → null', async () => {
+            expect(await audioCheck(createMockRedis(), 'DONE', 'ready')).to.be.null;
+        });
+
+        it('audio intermediate phase + dirty/pending → null', async () => {
+            expect(await audioCheck(createMockRedis(), 'WAITING_CHUNKS', 'dirty')).to.be.null;
+            expect(await audioCheck(createMockRedis(), 'WAITING_CHUNKS', 'pending')).to.be.null;
+            expect(await audioCheck(createMockRedis(), 'GENERATING', 'generating')).to.be.null;
+        });
+
+        it('video FAILED + dirty (C1b recovery outcome) → null', async () => {
+            expect(await videoCheck(createMockRedis(), 'FAILED', 'dirty')).to.be.null;
+        });
+
+        it('video FAILED + failed / pending → null', async () => {
+            expect(await videoCheck(createMockRedis(), 'FAILED', 'failed')).to.be.null;
+            expect(await videoCheck(createMockRedis(), 'FAILED', 'pending')).to.be.null;
+        });
+    });
+
+    describe('real contradictions are still reported', () => {
+        it('audio FAILED + ready → audio_orch_invariant_failed', async () => {
+            const violations = await audioCheck(createMockRedis(), 'FAILED', 'ready');
+            expect(violations, 'FAILED orchestrator + accepted asset is a contradiction').to.be.an('array').with.length(1);
+            expect(violations[0].type).to.equal('audio_orch_invariant_failed');
+            expect(violations[0].audioState).to.equal('ready');
+            expect(violations[0].expected).to.equal('FAILED, PENDING or DIRTY');
+        });
+
+        it('audio FAILED + generating → still reported (in-flight state is not a FAILED end state)', async () => {
+            const violations = await audioCheck(createMockRedis(), 'FAILED', 'generating');
+            expect(violations).to.be.an('array').with.length(1);
+            expect(violations[0].type).to.equal('audio_orch_invariant_failed');
+        });
+
+        it('audio DONE + dirty → audio_orch_invariant_done (terminal invariant not weakened)', async () => {
+            const violations = await audioCheck(createMockRedis(), 'DONE', 'dirty');
+            expect(violations).to.be.an('array').with.length(1);
+            expect(violations[0].type).to.equal('audio_orch_invariant_done');
+        });
+
+        it('audio intermediate + ready → audio_orch_invariant_intermediate', async () => {
+            const violations = await audioCheck(createMockRedis(), 'WAITING_CHUNKS', 'ready');
+            expect(violations).to.be.an('array').with.length(1);
+            expect(violations[0].type).to.equal('audio_orch_invariant_intermediate');
+        });
+
+        it('video FAILED + ready → video_orch_invariant_failed', async () => {
+            const violations = await videoCheck(createMockRedis(), 'FAILED', 'ready');
+            expect(violations).to.be.an('array').with.length(1);
+            expect(violations[0].type).to.equal('video_orch_invariant_failed');
+            expect(violations[0].expected).to.equal('FAILED, PENDING or DIRTY');
+        });
+    });
+
+    describe('recommendation for a FAILED-phase violation stays log-only', () => {
+        it('audio_orch_invariant_failed → REVIEW_MANUALLY, safeToExecute=false', () => {
+            const engine = mockDeps(createMockRedis());
+            const [fix] = engine.getFixRecommendations([
+                { scene: sceneRef(), issue: 'audio_orch_invariant_failed' },
+            ]);
+            expect(fix.action).to.equal('REVIEW_MANUALLY');
+            expect(fix.safeToExecute).to.equal(false);
+        });
+    });
+
+    describe('C1 recovery end state satisfies the invariant and is idempotent', () => {
+        it('recovery → FAILED + dirty, invariant clean, second run changes nothing', async () => {
+            const redisRef = createMockRedis();
+            const assetKey = `animastor:asset-state:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
+            await redisRef.set(AUDIO_KEY, JSON.stringify({
+                phase: 'GENERATING', expected_count: 0, chunks_received: 0,
+                build_id: null, started_at: Date.now() - 86400000,
+            }));
+            await redisRef.hset(assetKey, 'audio', 'pending');
+
+            const engine = mockDeps(redisRef, {
+                setFailed: (...args) => realAudioOrch.setFailed(...args),
+                // F1 + T6 writers, actually applied: FAILED is written first,
+                // then markDirtyScene overwrites it with DIRTY (production C1).
+                state: {
+                    unsafeRestoreAssetState: async (r, b, c, s, asset, status) => {
+                        await r.hset(assetKey, asset, status);
+                    },
+                },
+                getAudioOrchState: async (r, b, c, s) => {
+                    const raw = await r.get(`animastor:audio-orch:${b}:${c}:${s}`);
+                    return raw ? JSON.parse(raw) : null;
+                },
+            });
+            const orch = {
+                markDirtyScene: async (r, b, c, s, assets) => {
+                    for (const a of assets) await r.hset(assetKey, a, 'dirty');
+                },
+            };
+
+            expect(await engine.recoverAudioOrchStates(redisRef, { orchestrator: orch })).to.equal(1);
+
+            const afterFirst = JSON.parse(await redisRef.get(AUDIO_KEY));
+            expect(afterFirst.phase).to.equal('FAILED');
+            expect(afterFirst.fail_reason).to.equal('restart_recovery');
+            expect(await redisRef.hget(assetKey, 'audio'),
+                'dirty is what makes the scene re-dispatchable — never cleared by recovery')
+                .to.equal('dirty');
+            expect(await engine.checkAudioOrchInvariants(redisRef, BOOK_ID, CHAPTER_ID, SCENE_ID),
+                'FAILED + dirty must not be reported as a violation').to.be.null;
+
+            // Second run: terminal record skipped, no new writes, no effects.
+            expect(await engine.recoverAudioOrchStates(redisRef, { orchestrator: orch })).to.equal(0);
+            expect(JSON.parse(await redisRef.get(AUDIO_KEY))).to.deep.equal(afterFirst);
+            expect(await redisRef.hget(assetKey, 'audio')).to.equal('dirty');
+            expect(await engine.checkAudioOrchInvariants(redisRef, BOOK_ID, CHAPTER_ID, SCENE_ID)).to.be.null;
+        });
+
+        it('recovered DONE record keeps asset=ready and stays violation-free', async () => {
+            const redisRef = createMockRedis();
+            const terminal = {
+                phase: 'DONE', expected_count: 3, chunks_received: 3,
+                build_id: 'build-terminal', started_at: 1780000000000,
+                last_chunk_at: 1780000001000,
+            };
+            await redisRef.set(AUDIO_KEY, JSON.stringify(terminal));
+            await setAssetState(redisRef, BOOK_ID, CHAPTER_ID, SCENE_ID, 'audio', 'ready');
+            const engine = mockDeps(redisRef, {
+                setFailed: (...args) => realAudioOrch.setFailed(...args),
+                state: { unsafeRestoreAssetState: async () => { throw new Error('must not write'); } },
+                getAudioOrchState: async (r, b, c, s) => {
+                    const raw = await r.get(`animastor:audio-orch:${b}:${c}:${s}`);
+                    return raw ? JSON.parse(raw) : null;
+                },
+            });
+
+            expect(await engine.recoverAudioOrchStates(redisRef, { orchestrator: {} })).to.equal(0);
+            expect(JSON.parse(await redisRef.get(AUDIO_KEY))).to.deep.equal(terminal);
+            expect(await engine.checkAudioOrchInvariants(redisRef, BOOK_ID, CHAPTER_ID, SCENE_ID)).to.be.null;
+        });
+    });
+
+    describe('the copy under test is the canonical package source', () => {
+        it('node_modules/@animastor/orchestration reconciliation-engine matches packages/', function () {
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const canonical = path.resolve(__dirname, '../../packages/animastor-orchestration/src/runtime/reconciliation-engine.js');
+            if (!fs.existsSync(canonical)) this.skip(); // post-split checkout: only the npm copy exists
+            const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+            expect(sha(RECONCILE_PATH + '.js'), 'tests must exercise the canonical package bytes — sync backend/node_modules')
+                .to.equal(sha(canonical));
+        });
+    });
+});

@@ -29,8 +29,11 @@
 //
 // Инварианты:
 //   phase=DONE   ⇒ asset.video = READY
-//   phase=FAILED ⇒ asset.video = FAILED (→ PENDING после re-dispatch)
-//   промежуточные ⇒ asset.video = GENERATING
+//   phase=FAILED ⇒ asset.video ∈ {FAILED, PENDING, DIRTY}
+//                  (FAILED — failStage без re-dispatch; PENDING —
+//                   failStage(redispatch); DIRTY — startup C1b recovery,
+//                   stage 47)
+//   промежуточные ⇒ asset.video ∈ {PENDING, GENERATING, DIRTY}
 //
 // Отличие от аудио: видео-группы НЕ склеиваются в обязательный единый
 // файл для хранения — чанки остаются отдельными файлами `_gN.mp4`
