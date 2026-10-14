@@ -641,4 +641,460 @@ describe('Generation routes independent commands', () => {
         expect(response.statusCode).to.equal(200);
         expect(clearCalls).to.deep.equal(['tombstone-clear-book']);
     });
+
+    it('regenerate materializes scenes rows (ensureSceneRow) for every dirty scene — stage 52', async () => {
+        const redis = createMockRedis();
+        const ensured = [];
+        const resetCalls = [];
+
+        stub('../src/storage/postgres/repositories/scene-assets-repo', {
+            setDirtyUnitIds: async () => {},
+            ensureSceneRow: async (bookId, chapterId, sceneId) => {
+                ensured.push(`${bookId}:${chapterId}/${sceneId}`);
+            },
+        });
+        stub('../src/storage/postgres/repositories/task-repo', {
+            createTask: async () => {},
+            updateTaskStatus: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+            addSceneToActiveIndex: async () => {},
+            clearBookFromActiveIndex: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+            clearCancelFlag: async () => {},
+        });
+
+        const handlers = new Map();
+        const app = {
+            post(path, handler) { handlers.set(path, handler); },
+            get() {},
+            put() {},
+        };
+        const loadedBook = { manifest: { build_id: 'build-1' }, chapters: [] };
+        const allScenes = [
+            { chapter_id: 'ch-1', scene_id: 'scene-a', payload: { units: [] } },
+            { chapter_id: 'ch-2', scene_id: 'scene-b', payload: { units: [] } },
+        ];
+        const deps = {
+            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/orphan-materialize-output' },
+            book: {
+                loadBook: () => loadedBook,
+                collectScenes: () => allScenes,
+            },
+            layerConfig: {
+                get: async () => ({ audio_enabled: true, image_enabled: true, video_enabled: true }),
+                set: async () => ({}),
+            },
+            bookDiff: {
+                filterDirtyScenesByScope: (dirty) => dirty,
+            },
+            storage: {},
+            orchestrator: {
+                resetScenes: async (_redis, _bookId, _buildId, scenes) => {
+                    resetCalls.push(scenes.length);
+                    return { marked: scenes.length, reset_scenes: scenes.length };
+                },
+            },
+            runtime: {
+                sceneWindow: { clearCancelFlag: async () => {}, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
+                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
+            },
+            utils: { log: () => {} },
+        };
+        require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
+        const handler = handlers.get('/api/v1/book/:bookId/regenerate');
+
+        const response = createResponse();
+        await handler({
+            params: { bookId: 'orphan-materialize-book' },
+            body: {
+                scope: 'whole_book',
+                worker_types: ['audio'],
+                rebuild_all: true,
+            },
+        }, response);
+
+        expect(response.statusCode).to.equal(200);
+        // every scene of the run is materialized BEFORE reset (order matters:
+        // resetScenes/setDirtyUnitIds both UPDATE scenes and are no-ops
+        // without an existing row)
+        expect(ensured).to.deep.equal([
+            'orphan-materialize-book:ch-1/scene-a',
+            'orphan-materialize-book:ch-2/scene-b',
+        ]);
+        expect(resetCalls).to.deep.equal([2]);
+    });
+
+    it('regenerate stays fail-open when ensureSceneRow rejects — generation is not blocked', async () => {
+        const redis = createMockRedis();
+        let ensureCalls = 0;
+
+        stub('../src/storage/postgres/repositories/scene-assets-repo', {
+            setDirtyUnitIds: async () => {},
+            ensureSceneRow: async () => {
+                ensureCalls++;
+                throw new Error('pg unavailable');
+            },
+        });
+        stub('../src/storage/postgres/repositories/task-repo', {
+            createTask: async () => {},
+            updateTaskStatus: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+            addSceneToActiveIndex: async () => {},
+            clearBookFromActiveIndex: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+            clearCancelFlag: async () => {},
+        });
+
+        const handlers = new Map();
+        const app = {
+            post(path, handler) { handlers.set(path, handler); },
+            get() {},
+            put() {},
+        };
+        const loadedBook = { manifest: { build_id: 'build-1' }, chapters: [] };
+        const allScenes = [
+            { chapter_id: 'ch-1', scene_id: 'scene-a', payload: { units: [] } },
+        ];
+        const deps = {
+            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/orphan-failopen-output' },
+            book: {
+                loadBook: () => loadedBook,
+                collectScenes: () => allScenes,
+            },
+            layerConfig: {
+                get: async () => ({ audio_enabled: true, image_enabled: true, video_enabled: true }),
+                set: async () => ({}),
+            },
+            bookDiff: {
+                filterDirtyScenesByScope: (dirty) => dirty,
+            },
+            storage: {},
+            orchestrator: {
+                resetScenes: async () => ({ marked: 1, reset_scenes: 1 }),
+            },
+            runtime: {
+                sceneWindow: { clearCancelFlag: async () => {}, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
+                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
+            },
+            utils: { log: () => {} },
+        };
+        require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
+        const handler = handlers.get('/api/v1/book/:bookId/regenerate');
+
+        const response = createResponse();
+        await handler({
+            params: { bookId: 'orphan-failopen-book' },
+            body: {
+                scope: 'whole_book',
+                worker_types: ['audio'],
+                rebuild_all: true,
+            },
+        }, response);
+
+        expect(ensureCalls).to.equal(1);
+        expect(response.statusCode).to.equal(200);
+        const tasks = await generationProgress.listTasks(redis, 'orphan-failopen-book');
+        expect(tasks).to.have.length(1);
+    });
+
+    it('regenerate is repeatable: ensureSceneRow re-invoked per run, no state corruption — stage 53', async () => {
+        const redis = createMockRedis();
+        const ensured = [];
+
+        stub('../src/storage/postgres/repositories/scene-assets-repo', {
+            setDirtyUnitIds: async () => {},
+            // mirrors the production repo: INSERT … ON CONFLICT DO NOTHING
+            ensureSceneRow: async (bookId, chapterId, sceneId) => {
+                ensured.push(`${bookId}:${chapterId}/${sceneId}`);
+            },
+        });
+        stub('../src/storage/postgres/repositories/task-repo', {
+            createTask: async () => {},
+            updateTaskStatus: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+            addSceneToActiveIndex: async () => {},
+            clearBookFromActiveIndex: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+            clearCancelFlag: async () => {},
+        });
+
+        const handlers = new Map();
+        const app = {
+            post(path, handler) { handlers.set(path, handler); },
+            get() {},
+            put() {},
+        };
+        const loadedBook = { manifest: { build_id: 'build-1' }, chapters: [] };
+        const allScenes = [
+            { chapter_id: 'ch-1', scene_id: 'scene-a', payload: { units: [] } },
+        ];
+        const deps = {
+            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/orphan-repeat-output' },
+            book: {
+                loadBook: () => loadedBook,
+                collectScenes: () => allScenes,
+            },
+            layerConfig: {
+                get: async () => ({ audio_enabled: true, image_enabled: true, video_enabled: true }),
+                set: async () => ({}),
+            },
+            bookDiff: {
+                filterDirtyScenesByScope: (dirty) => dirty,
+            },
+            storage: {},
+            orchestrator: {
+                resetScenes: async () => ({ marked: 1, reset_scenes: 1 }),
+            },
+            runtime: {
+                sceneWindow: { clearCancelFlag: async () => {}, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
+                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
+            },
+            utils: { log: () => {} },
+        };
+        require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
+        const handler = handlers.get('/api/v1/book/:bookId/regenerate');
+
+        const first = createResponse();
+        await handler({
+            params: { bookId: 'orphan-repeat-book' },
+            body: { scope: 'whole_book', worker_types: ['audio'], rebuild_all: true },
+        }, first);
+        const second = createResponse();
+        await handler({
+            params: { bookId: 'orphan-repeat-book' },
+            body: { scope: 'whole_book', worker_types: ['audio'], rebuild_all: true },
+        }, second);
+
+        // lock is released in `finally` — a sequential repeat is accepted (not 429)
+        expect(first.statusCode).to.equal(200);
+        expect(second.statusCode).to.equal(200);
+        // route-level re-invocation is expected; dedupe is the repo's job
+        // (ON CONFLICT DO NOTHING, asserted at DB level in orphan-books-diagnosis)
+        expect(ensured).to.deep.equal([
+            'orphan-repeat-book:ch-1/scene-a',
+            'orphan-repeat-book:ch-1/scene-a',
+        ]);
+    });
+
+    it('regenerate reports partial materialization failure (summary warn) and still fails open — stage 53', async () => {
+        const redis = createMockRedis();
+        const ensured = [];
+        const warns = [];
+        const originalWarn = console.warn;
+        console.warn = (...args) => { warns.push(args.join(' ')); };
+
+        stub('../src/storage/postgres/repositories/scene-assets-repo', {
+            setDirtyUnitIds: async () => {},
+            ensureSceneRow: async (bookId, chapterId, sceneId) => {
+                ensured.push(`${chapterId}/${sceneId}`);
+                if (sceneId === 'scene-b') throw new Error('pg unavailable');
+            },
+        });
+        stub('../src/storage/postgres/repositories/task-repo', {
+            createTask: async () => {},
+            updateTaskStatus: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+            addSceneToActiveIndex: async () => {},
+            clearBookFromActiveIndex: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+            clearCancelFlag: async () => {},
+        });
+
+        const handlers = new Map();
+        const app = {
+            post(path, handler) { handlers.set(path, handler); },
+            get() {},
+            put() {},
+        };
+        const loadedBook = { manifest: { build_id: 'build-1' }, chapters: [] };
+        const allScenes = [
+            { chapter_id: 'ch-1', scene_id: 'scene-a', payload: { units: [] } },
+            { chapter_id: 'ch-2', scene_id: 'scene-b', payload: { units: [] } },
+        ];
+        const resetCalls = [];
+        const deps = {
+            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/orphan-partial-output' },
+            book: {
+                loadBook: () => loadedBook,
+                collectScenes: () => allScenes,
+            },
+            layerConfig: {
+                get: async () => ({ audio_enabled: true, image_enabled: true, video_enabled: true }),
+                set: async () => ({}),
+            },
+            bookDiff: {
+                filterDirtyScenesByScope: (dirty) => dirty,
+            },
+            storage: {},
+            orchestrator: {
+                resetScenes: async (_redis, _bookId, _buildId, scenes) => {
+                    resetCalls.push(scenes.length);
+                    return { marked: scenes.length, reset_scenes: scenes.length };
+                },
+            },
+            runtime: {
+                sceneWindow: { clearCancelFlag: async () => {}, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
+                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
+            },
+            utils: { log: () => {} },
+        };
+        require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
+        const handler = handlers.get('/api/v1/book/:bookId/regenerate');
+
+        const response = createResponse();
+        try {
+            await handler({
+                params: { bookId: 'orphan-partial-book' },
+                body: { scope: 'whole_book', worker_types: ['audio'], rebuild_all: true },
+            }, response);
+        } finally {
+            console.warn = originalWarn;
+        }
+
+        // BOTH scenes attempted before reset (materialize-then-reset ordering)
+        expect(ensured).to.deep.equal(['ch-1/scene-a', 'ch-2/scene-b']);
+        expect(resetCalls).to.deep.equal([2]);
+        expect(response.statusCode).to.equal(200);
+        // failure is NOT hidden: per-scene warn + summary with the failed scene
+        expect(warns.some(w => w.includes('Failed to ensure scenes row for ch-2/scene-b'))).to.equal(true);
+        expect(warns.some(w =>
+            w.includes('materialization FAILED for 1/2 scene(s)') &&
+            w.includes('ch-2/scene-b'))).to.equal(true);
+    });
+
+    it('regenerate with a book that has no scenes materializes nothing and resets nothing — stage 53', async () => {
+        const redis = createMockRedis();
+        let ensureCalls = 0;
+        const resetCalls = [];
+
+        stub('../src/storage/postgres/repositories/scene-assets-repo', {
+            setDirtyUnitIds: async () => {},
+            ensureSceneRow: async () => { ensureCalls++; },
+        });
+        stub('../src/storage/postgres/repositories/task-repo', {
+            createTask: async () => {},
+            updateTaskStatus: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+            addSceneToActiveIndex: async () => {},
+            clearBookFromActiveIndex: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+            clearCancelFlag: async () => {},
+        });
+
+        const handlers = new Map();
+        const app = {
+            post(path, handler) { handlers.set(path, handler); },
+            get() {},
+            put() {},
+        };
+        const loadedBook = { manifest: { build_id: 'build-1' }, chapters: [] };
+        const deps = {
+            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/orphan-empty-output' },
+            book: {
+                loadBook: () => loadedBook,
+                collectScenes: () => [],
+            },
+            layerConfig: {
+                get: async () => ({ audio_enabled: true, image_enabled: true, video_enabled: true }),
+                set: async () => ({}),
+            },
+            bookDiff: {
+                filterDirtyScenesByScope: (dirty) => dirty,
+            },
+            storage: {},
+            orchestrator: {
+                resetScenes: async (_redis, _bookId, _buildId, scenes) => {
+                    resetCalls.push(scenes.length);
+                    return { marked: 0, reset_scenes: 0 };
+                },
+            },
+            runtime: {
+                sceneWindow: { clearCancelFlag: async () => {}, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
+                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
+            },
+            utils: { log: () => {} },
+        };
+        require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
+        const handler = handlers.get('/api/v1/book/:bookId/regenerate');
+
+        const response = createResponse();
+        await handler({
+            params: { bookId: 'orphan-empty-book' },
+            body: { scope: 'whole_book', worker_types: ['audio'], rebuild_all: true },
+        }, response);
+
+        expect(response.statusCode).to.equal(200);
+        expect(ensureCalls, 'no scenes → no materialization').to.equal(0);
+        expect(resetCalls, 'empty dirty set → reset sees zero scenes').to.deep.equal([0]);
+        expect(response.body.dirty_scenes).to.deep.equal([]);
+        expect(response.body.marked).to.equal(0);
+    });
+
+    it('regenerate returns 404 for a missing book before touching anything — stage 53', async () => {
+        const redis = createMockRedis();
+        let ensureCalls = 0;
+
+        stub('../src/storage/postgres/repositories/scene-assets-repo', {
+            setDirtyUnitIds: async () => {},
+            ensureSceneRow: async () => { ensureCalls++; },
+        });
+        stub('../src/storage/postgres/repositories/task-repo', {
+            createTask: async () => {},
+            updateTaskStatus: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+            addSceneToActiveIndex: async () => {},
+            clearBookFromActiveIndex: async () => {},
+        });
+        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+            clearCancelFlag: async () => {},
+        });
+
+        const handlers = new Map();
+        const app = {
+            post(path, handler) { handlers.set(path, handler); },
+            get() {},
+            put() {},
+        };
+        const deps = {
+            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/orphan-missing-output' },
+            book: {
+                loadBook: () => null, // corrupted / absent bundle
+                collectScenes: () => [],
+            },
+            layerConfig: {
+                get: async () => ({ audio_enabled: true, image_enabled: true, video_enabled: true }),
+                set: async () => ({}),
+            },
+            bookDiff: { filterDirtyScenesByScope: (dirty) => dirty },
+            storage: {},
+            orchestrator: { resetScenes: async () => ({ marked: 0 }) },
+            runtime: {
+                sceneWindow: { clearCancelFlag: async () => {}, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
+                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
+            },
+            utils: { log: () => {} },
+        };
+        require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
+        const handler = handlers.get('/api/v1/book/:bookId/regenerate');
+
+        const response = createResponse();
+        await handler({
+            params: { bookId: 'orphan-missing-book' },
+            body: { scope: 'whole_book', worker_types: ['audio'], rebuild_all: true },
+        }, response);
+
+        expect(response.statusCode).to.equal(404);
+        expect(ensureCalls, 'missing book → no materialization attempt').to.equal(0);
+    });
 });

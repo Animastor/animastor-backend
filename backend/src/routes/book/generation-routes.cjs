@@ -534,6 +534,44 @@ module.exports = function(app, redis, deps) {
                 }
             }
 
+            // ── Materialize `scenes` rows for every scene this run touches ──
+            // `scenes` is lazily populated (editor-save reconcile /
+            // ensureSceneRow on unit-dirty). Import and /regenerate never create
+            // it, and a derived-state cleanup can delete it while the canonical
+            // bundle + scene_assets survive — the book then disappears from
+            // listBooks (`SELECT DISTINCT book_id FROM scenes`) and C8/recovery
+            // can never pick it up again (production case
+            // import_1786345731767_1786345734345, 2026-08-10…08-13).
+            // INSERT … ON CONFLICT DO NOTHING: idempotent, no version bump.
+            // ALL materialization attempts complete BEFORE resetScenes — state
+            // is never reset for a scene whose row attempt has not finished.
+            // Fail-open per scene: an unavailable repo must not block
+            // generation, but every failure is logged (per-scene + summary).
+            const scenesRowsFailed = [];
+            for (const ds of filteredDirty) {
+                try {
+                    if (typeof sceneAssetsRepo.ensureSceneRow === 'function') {
+                        await sceneAssetsRepo.ensureSceneRow(bookId, ds.chapter_id, ds.scene_id);
+                    }
+                } catch (pgErr) {
+                    scenesRowsFailed.push(`${ds.chapter_id}/${ds.scene_id}`);
+                    console.warn(
+                        `[REGENERATE] Failed to ensure scenes row for ` +
+                        `${ds.chapter_id}/${ds.scene_id}: ${pgErr.message}`
+                    );
+                }
+            }
+            if (scenesRowsFailed.length > 0) {
+                console.warn(
+                    `[REGENERATE] ${bookId}: scenes-row materialization FAILED for ` +
+                    `${scenesRowsFailed.length}/${filteredDirty.length} scene(s): ` +
+                    `${scenesRowsFailed.join(', ')} — those scenes stay invisible to ` +
+                    `listBooks until a later successful materialization`
+                );
+            } else if (filteredDirty.length > 0) {
+                log(`[REGENERATE] ${bookId}: materialized scenes rows for ${filteredDirty.length} scene(s)`);
+            }
+
             // ── State management через единую команду фасада ──
             // T4 консолидации: resetScenes заменяет ручной ритуал очистки
             // force-dispatch, gen-scope, active index, lease, GPU queues,
