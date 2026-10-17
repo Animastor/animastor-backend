@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.2 (2026-10-17)
+
+BOOK-RECOVER registry gate (stage 59, released via stage 61): a deleted book
+whose disk `book.json` remained was resurrected on every client poll —
+`GET /book/:id` unconditionally ran both read-time recovery legs (placeholder
+audio + Redis chunks) keyed only on disk presence, re-creating registry state
+the cleanup intentionally removed.
+
+### Fixed
+
+- `GET /book/:id` — placeholder-audio recovery and the `recoverMissingRedisChunks`
+  call now run only when the book is still registered (owns a `books` row).
+  The book read itself still succeeds; only the recovery WRITES are suppressed,
+  logged as `[BOOK-RECOVER] … skipped — book not registered`.
+- `read-recovery.cjs` — `recoverMissingRedisChunks` re-checks the gate
+  internally (defense in depth).
+
+### API
+
+- No breaking changes. The gate rides on the existing optional
+  `editorPorts.recoveryCtx.isBookRegistered(bookId) → Promise<boolean>`
+  port; when the host does not inject it, behavior is identical to 0.1.1
+  (fail-open, legacy recovery). Hosts that inject it (backend composition
+  root, stage 59) get the gate; a lookup error is treated as unregistered
+  fail-closed host-side.
+
 ## 0.1.1 (2026-09-26)
 
 Documentation-only release: the repository `CHANGELOG.md` mistakenly held a

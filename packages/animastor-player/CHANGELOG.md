@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.1 (2026-10-17)
+
+BOOK-RECOVER registry gate (stage 59, released via stage 61): the scene
+storyboard read path self-healed PG for any disk book — when no PG durations
+existed it computed them and upserted `image_units` keyed only on disk
+presence, re-creating rows for deleted books on every client poll.
+
+### Fixed
+
+- `GET /scene/:b/:ch/:sc/storyboard` — the `image_units` PG upsert
+  (duration self-heal) now runs only when the book is still registered
+  (owns a `books` row). Durations are still computed and returned in the
+  response; only the PG WRITE is suppressed for unregistered books.
+
+### API
+
+- No breaking changes. The gate rides on the existing injection seam:
+  `playerRoutes(app, redis, deps)` accepts an optional
+  `deps.isBookRegistered(bookId) → Promise<boolean>` and threads it into the
+  shared contour context (`playerShared.isBookRegistered`). When the host
+  does not inject it, behavior is identical to 0.1.0 (fail-open, legacy
+  recovery). Root exports unchanged.
+
 ## 0.1.0 — 2026-09-08
 
 ### Release preparation (npm publication)
