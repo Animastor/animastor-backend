@@ -157,18 +157,28 @@ module.exports = function(app, ctx, deps) {
                     iu._end_ms = endMs;
                     cursorMs = endMs;
                 }
-                for (const [idx, iu] of ius.entries()) {
-                    try {
-                        await ctx.iuRepo.upsertImageUnit(buildId, bookId, chapterId, sceneId, iu.unit_id, {
-                            scene_order: idx, text: iu.text, text_length: (iu.text || '').length,
-                            text_proportion: iu.text_proportion || 0, scene_duration_sec: sceneDuration || 0,
-                            estimated_duration_sec: iu.estimated_duration_sec || 0,
-                            scene_audio_file: naming.sceneAudioName(bookId, chapterId, sceneId),
-                            start_ms: iu._start_ms != null ? iu._start_ms : null,
-                            end_ms: iu._end_ms != null ? iu._end_ms : null,
-                        });
-                    } catch (pgErr) {
-                        console.warn('[SCENE STORYBOARD] Failed to persist IU to PG:', pgErr.message);
+                // Registration gate: only persist the duration self-heal for a
+                // book that is still in the registry. A deleted book whose disk
+                // book.json remains would otherwise get its image_units rows
+                // re-created here every time a client polls the scene storyboard.
+                // The in-memory durations are still computed and returned; only
+                // the PG write is suppressed.
+                const registered = typeof ctx.isBookRegistered !== 'function'
+                    ? true : await ctx.isBookRegistered(bookId);
+                if (registered) {
+                    for (const [idx, iu] of ius.entries()) {
+                        try {
+                            await ctx.iuRepo.upsertImageUnit(buildId, bookId, chapterId, sceneId, iu.unit_id, {
+                                scene_order: idx, text: iu.text, text_length: (iu.text || '').length,
+                                text_proportion: iu.text_proportion || 0, scene_duration_sec: sceneDuration || 0,
+                                estimated_duration_sec: iu.estimated_duration_sec || 0,
+                                scene_audio_file: naming.sceneAudioName(bookId, chapterId, sceneId),
+                                start_ms: iu._start_ms != null ? iu._start_ms : null,
+                                end_ms: iu._end_ms != null ? iu._end_ms : null,
+                            });
+                        } catch (pgErr) {
+                            console.warn('[SCENE STORYBOARD] Failed to persist IU to PG:', pgErr.message);
+                        }
                     }
                 }
             }

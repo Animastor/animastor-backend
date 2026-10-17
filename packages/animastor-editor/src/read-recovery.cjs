@@ -9,10 +9,21 @@
 // coupling is visible and testable. The ctx object is built host-side by the
 // editorPorts seam (recoveryCtx) — the package itself holds no host requires.
 //
-// ctx fields used: { redis, book, state, activeScenes, config, getAllChunks, saveChunk, log }
+// ctx fields used: { redis, book, state, activeScenes, config, getAllChunks, saveChunk, log, isBookRegistered }
 
 async function recoverMissingRedisChunks(ctx, buildId, bookId) {
-    const { redis, book, state, activeScenes, config, getAllChunks, saveChunk, log } = ctx;
+    const { redis, book, state, activeScenes, config, getAllChunks, saveChunk, log, isBookRegistered } = ctx;
+
+    // Registration gate: only self-heal a book that is still in the registry
+    // (owns a `books` row). A deleted book whose disk book.json remains would
+    // otherwise be resurrected here every time a client polls GET /book/:id,
+    // re-creating Redis chunks (and downstream PG image_units via the scene
+    // storyboard) that the cleanup intentionally removed. Reads of the book
+    // still succeed; only the recovery WRITE is suppressed.
+    if (typeof isBookRegistered === 'function' && !(await isBookRegistered(bookId))) {
+        log(`[BOOK-RECOVER] ${bookId}: skipped — book not registered (no books row)`);
+        return;
+    }
 
     const loadedBook = book.loadBook(bookId);
     if (!loadedBook) return;

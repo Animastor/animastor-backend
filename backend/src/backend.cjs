@@ -428,6 +428,28 @@ const windowGenerator = require('./services/window-generator.cjs')({
 
 const iuRepo = require('./storage/postgres/repositories/iu-repo');
 const sceneAssetsRepo = require('./storage/postgres/repositories/scene-assets-repo');
+const bookRepo = require('./storage/postgres/repositories/book-repo');
+
+// ── Book-registry gate (read-time self-heal) ────────────────────────────
+// A book is "registered" iff it owns a `books` row (workspace association).
+// The composition root is the only place that decides this; the editor/
+// player contours receive it as an injected port so they keep zero host
+// PG requires. Read-time self-heal (BOOK-RECOVER Redis chunks + the scene
+// storyboard's image_units upsert) must ONLY run for registered books:
+// a disk-only book whose registry rows were removed (deleted book) must
+// not be resurrected just because a client still polls its book.json.
+// Fails closed (skip self-heal) if the registry lookup errors, so a PG
+// blip can never resurrect a deleted book.
+const isBookRegistered = async (bookId) => {
+    try {
+        const workspaceId = await bookRepo.getWorkspaceId(bookId);
+        return !!workspaceId;
+    } catch (err) {
+        console.log(new Date().toISOString(),
+            `[BOOK-REGISTRY] lookup failed for ${bookId} (${err.message}) — treating as unregistered (fail-closed)`);
+        return false;
+    }
+};
 
 const taskHandlerDeps = {
     audio, image, video, state, book, orchestrator, activeScenes, placeholderAudio,
@@ -499,6 +521,9 @@ const routeDeps = {
     cleanupService, taskHandler, bookDiff, windowGenerator, chatEngine,
     iuRepo, computeWaveform, journal,
     wfManager, sceneAssetsRepo,
+    // Book-registry gate for read-time self-heal (scene storyboard must not
+    // upsert image_units for a deleted/unregistered book).
+    isBookRegistered,
     // Phase 4: Canonical Book Model facade + deletion/purge boundary
     bookModel,
     bookDeletion: createBookDeletion({
@@ -588,6 +613,7 @@ const routeDeps = {
             },
             recoveryCtx: {
                 redis, book, state, activeScenes, config, getAllChunks, saveChunk,
+                isBookRegistered,
                 log: (utils && utils.log) || ((...a) => console.log(new Date().toISOString(), ...a)),
             },
         },

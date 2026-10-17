@@ -120,13 +120,25 @@ module.exports = function(app, redis, deps) {
             bookData.scene_list = book.collectSceneList ? book.collectSceneList(bookData) : [];
 
             const buildId = bookData?.manifest?.build_id || 'default';
-            try {
-                const phResult = await placeholderAudio.recoverMissingPlaceholders(buildId, bookId);
-                if (phResult.created > 0 || phResult.errors.length > 0) {
-                    log(`[BOOK-RECOVER] ${bookId}: ${phResult.created} placeholders created, ${phResult.errors.length} errors`);
+            // Registration gate: both read-time recovery legs (placeholder
+            // audio + Redis chunks) must only run for a book still in the
+            // registry. A deleted book whose disk book.json remains would
+            // otherwise be resurrected here on every client poll. The book
+            // read itself still succeeds; only the recovery writes are
+            // suppressed. (recoverMissingRedisChunks re-checks internally.)
+            const isReg = editorPorts.recoveryCtx && editorPorts.recoveryCtx.isBookRegistered;
+            const bookRegistered = typeof isReg !== 'function' ? true : await isReg(bookId);
+            if (bookRegistered) {
+                try {
+                    const phResult = await placeholderAudio.recoverMissingPlaceholders(buildId, bookId);
+                    if (phResult.created > 0 || phResult.errors.length > 0) {
+                        log(`[BOOK-RECOVER] ${bookId}: ${phResult.created} placeholders created, ${phResult.errors.length} errors`);
+                    }
+                } catch (recErr) {
+                    console.warn(`[BOOK-RECOVER] ${bookId}: placeholder recovery failed: ${recErr.message}`);
                 }
-            } catch (recErr) {
-                console.warn(`[BOOK-RECOVER] ${bookId}: placeholder recovery failed: ${recErr.message}`);
+            } else {
+                log(`[BOOK-RECOVER] ${bookId}: skipped recovery — book not registered`);
             }
 
             try {

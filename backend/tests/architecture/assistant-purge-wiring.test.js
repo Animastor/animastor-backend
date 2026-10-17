@@ -136,6 +136,9 @@ function buildComposition({ sessionRepo, order }) {
         recoverChunksFromDisk: async () => {},
         recoverAllBooksFromDisk: async () => {},
         cleanBookRedisKeys: async () => { order.push('cleanBookRedisKeys'); },
+        // Module-scope book-registry gate (stage 59) — defined above the
+        // extracted slice window, stubbed here like the other module legs.
+        isBookRegistered: async () => true,
         cleanupService: {}, taskHandler: {}, bookDiff: {}, windowGenerator: {},
         chatEngine: { AI_API_BASE_URL: 'http://stub.local' },
         iuRepo: {},

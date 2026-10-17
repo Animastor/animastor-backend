@@ -51,6 +51,9 @@ module.exports = function(app, redis, deps) {
         getChunk, getAllChunks, getBookWindowStatus,
         activeScenes, placeholderAudio, layerConfig, iuRepo,
         sceneAssetsRepo, playerModel,
+        // Book-registry gate (read-time self-heal must not persist for a
+        // deleted/unregistered book):
+        isBookRegistered,
         // Player-route seams (composition root provides them):
         outputRoot,            // = config.OUTPUT_DIR (injected)
         playerPorts,           // { assertBookAccess, computeVideoStartMs, computeWaveform }
@@ -73,6 +76,7 @@ module.exports = function(app, redis, deps) {
         redis,
         getChunk,
         iuRepo,
+        isBookRegistered,
         log,
     });
 

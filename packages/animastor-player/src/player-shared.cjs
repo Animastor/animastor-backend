@@ -37,7 +37,7 @@ const naming = require('./artifact-naming.cjs');
  *   - playerPorts: { assertBookAccess, computeVideoStartMs, computeWaveform }
  */
 function createPlayerShared(deps) {
-    const { playerModel, playerPorts, redis, getChunk, iuRepo, log } = deps;
+    const { playerModel, playerPorts, redis, getChunk, iuRepo, isBookRegistered, log } = deps;
     const outputRoot = deps.outputRoot;
     const ports = playerPorts || {};
 
@@ -222,6 +222,7 @@ function createPlayerShared(deps) {
         get redis() { return redis; },
         get getChunk() { return getChunk; },
         get iuRepo() { return iuRepo; },
+        get isBookRegistered() { return isBookRegistered; },
         get outputRoot() { return outputRoot; },
         get log() { return log; },
     };
