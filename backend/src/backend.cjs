@@ -396,13 +396,37 @@ const OUTPUT_DIR = config.OUTPUT_DIR;
 // ======================================================
 const { log, warn } = utils;
 
+// ── Book-registry gate (read-time self-heal + startup recovery) ──────────
+// A book is "registered" iff it owns a `books` row (workspace association).
+// The composition root is the only place that decides this; the editor/
+// player contours receive it as an injected port so they keep zero host
+// PG requires. Read-time self-heal (BOOK-RECOVER Redis chunks + the scene
+// storyboard's image_units upsert) AND startup disk recovery
+// (recoverAllBooksFromDisk, stage 63) must ONLY run for registered books:
+// a disk-only book whose registry rows were removed (deleted book) must
+// not be resurrected just because a client still polls its book.json or
+// because output files survive on disk. Fails closed (skip recovery) if
+// the registry lookup errors, so a PG blip can never resurrect a deleted
+// book.
+const bookRepo = require('./storage/postgres/repositories/book-repo');
+const isBookRegistered = async (bookId) => {
+    try {
+        const workspaceId = await bookRepo.getWorkspaceId(bookId);
+        return !!workspaceId;
+    } catch (err) {
+        console.log(new Date().toISOString(),
+            `[BOOK-REGISTRY] lookup failed for ${bookId} (${err.message}) — treating as unregistered (fail-closed)`);
+        return false;
+    }
+};
+
 // Redis helpers (factory, initialized with redis instance)
 const {
     saveChunk, getChunk, getAllChunks, getBookWindowStatus,
     detectAvailableMode, saveIURegistry,
     recoverChunksFromDisk, recoverAllBooksFromDisk,
     cleanBookRedisKeys,
-} = require('./helpers/redis-helpers.cjs')(redis);
+} = require('./helpers/redis-helpers.cjs')(redis, { isBookRegistered });
 
 // ======================================================
 // SERVICES (factory pattern)
@@ -428,28 +452,6 @@ const windowGenerator = require('./services/window-generator.cjs')({
 
 const iuRepo = require('./storage/postgres/repositories/iu-repo');
 const sceneAssetsRepo = require('./storage/postgres/repositories/scene-assets-repo');
-const bookRepo = require('./storage/postgres/repositories/book-repo');
-
-// ── Book-registry gate (read-time self-heal) ────────────────────────────
-// A book is "registered" iff it owns a `books` row (workspace association).
-// The composition root is the only place that decides this; the editor/
-// player contours receive it as an injected port so they keep zero host
-// PG requires. Read-time self-heal (BOOK-RECOVER Redis chunks + the scene
-// storyboard's image_units upsert) must ONLY run for registered books:
-// a disk-only book whose registry rows were removed (deleted book) must
-// not be resurrected just because a client still polls its book.json.
-// Fails closed (skip self-heal) if the registry lookup errors, so a PG
-// blip can never resurrect a deleted book.
-const isBookRegistered = async (bookId) => {
-    try {
-        const workspaceId = await bookRepo.getWorkspaceId(bookId);
-        return !!workspaceId;
-    } catch (err) {
-        console.log(new Date().toISOString(),
-            `[BOOK-REGISTRY] lookup failed for ${bookId} (${err.message}) — treating as unregistered (fail-closed)`);
-        return false;
-    }
-};
 
 const taskHandlerDeps = {
     audio, image, video, state, book, orchestrator, activeScenes, placeholderAudio,

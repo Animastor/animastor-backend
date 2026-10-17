@@ -10,7 +10,14 @@ const state = require('../state');
 const artifactNaming = require('@animastor/generation').artifactNaming;
 const config = require('../config/runtime-config');
 
-module.exports = function(redis) {
+module.exports = function(redis, deps = {}) {
+    // Stage 63: startup disk recovery is gated on the book registry. The
+    // composition root injects the same host-side isBookRegistered port the
+    // editor/player contours use (books-row ownership). Fail-closed: without
+    // the injected checker we cannot confirm registration, so recovery stays
+    // disabled rather than resurrecting deleted books from disk leftovers.
+    const { isBookRegistered } = deps;
+
     const pad = (n) => String(n).padStart(4, '0');
     const log = (...args) => console.log(new Date().toISOString(), ...args);
 
@@ -272,6 +279,28 @@ module.exports = function(redis) {
             }
 
             for (const [bookId, sceneSet] of Object.entries(bookScenes)) {
+                // Stage 63: registry gate — before ANY Redis read/write for this
+                // book. A deleted book whose book.json/output files survive on
+                // disk must not be resurrected by the startup scan. Fail-closed:
+                // unregistered book, a thrown lookup, or a missing checker all
+                // skip the book entirely (no chunks, no asset-state, no
+                // book-scenes window counters).
+                let registered = false;
+                try {
+                    if (typeof isBookRegistered !== 'function') {
+                        log('[RECOVERY] no isBookRegistered gate injected — skipping recovery (fail-closed) for', bookId);
+                        continue;
+                    }
+                    registered = !!(await isBookRegistered(bookId));
+                } catch (err) {
+                    log('[RECOVERY] registry check failed for', bookId, '(' + err.message + ') — skipping (fail-closed)');
+                    continue;
+                }
+                if (!registered) {
+                    log('[RECOVERY] Skipping recovery for', bookId, '— book not registered');
+                    continue;
+                }
+
                 const existingIds = await getAllChunks(bookId);
                 if (existingIds.length > 0) {
                     log('[RECOVERY] Chunks already exist in Redis for', bookId + ', skipping');
