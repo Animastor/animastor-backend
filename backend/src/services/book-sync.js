@@ -25,7 +25,7 @@ const { query } = require('../storage/postgres/database');
 const { listMediaTypes: _mediaTypes, isValidWorkerType: _isMediaType } = require('@animastor/generation').mediaRegistry;
 // scene-hash: adopted into @animastor/generation (dirty-grammar) — host copy deleted
 const { computeSceneHash } = require('@animastor/generation').dirtyGrammar;
-const { getOutdatedByVersions } = require('../storage/postgres/repositories/scene-assets-repo');
+const { getOutdatedByVersions, ensureSyntheticStaleAsset } = require('../storage/postgres/repositories/scene-assets-repo');
 
 const logPrefix = '[BOOK-SYNC]';
 function log(msg) { console.log(`${logPrefix} ${msg}`); }
@@ -241,21 +241,8 @@ async function markSceneAssetsStale(bookId, chapterSceneKeys) {
         //    anlegen, damit der Versionsvergleich in sceneHasValidContent()
         //    die Staleness erkennen kann (asset.scene_content_version < scene.content_version).
         if (updateResult.rowCount === 0) {
-            await query(`
-                INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, status, scene_content_version, scene_audio_config_version, updated_at)
-                SELECT $1, $2, $3, 'audio', 'stale',
-                       sv.content_version, sv.audio_config_version,
-                       EXTRACT(EPOCH FROM NOW())::bigint
-                FROM scenes sv
-                WHERE sv.book_id = $1 AND sv.chapter_id = $2 AND sv.scene_id = $3
-                ON CONFLICT(book_id, chapter_id, scene_id, asset_type, build_id)
-                DO UPDATE SET
-                    status = 'stale',
-                    scene_content_version = EXCLUDED.scene_content_version,
-                    scene_audio_config_version = EXCLUDED.scene_audio_config_version,
-                    updated_at = EXTRACT(EPOCH FROM NOW())::bigint
-            `, [bookId, chapterId, sceneId]);
-            total++;
+            const ensured = await ensureSyntheticStaleAsset(bookId, chapterId, sceneId);
+            total += ensured || 0;
         } else {
             total += updateResult.rowCount || 0;
         }

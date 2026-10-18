@@ -11,9 +11,11 @@
 //   2. recovery  — ensureSceneRow materializes the row, book becomes visible
 //   3. Class II  — scenes rows whose books row is gone (mirror drift)
 //   4. Class III — disk bundle registered nowhere in PG (temp booksDir)
-//   5. Class IV  — scene_assets NULL build_id cannot be deduped (current
-//                  behavior: every markReady/upsert with build_id IS NULL
-//                  inserts a NEW row under the unique constraint)
+//   5. Class IV  — historical scene_assets rows with build_id IS NULL
+//                  (the unique key cannot deduplicate them — PostgreSQL
+//                  treats NULLs as distinct). New duplicates are no longer
+//                  minted by markReady/upsert (stage 66), but rows written
+//                  before the fix must stay visible to the audit.
 //   6. fail-open — /regenerate materializes scenes rows and survives a
 //                  failing repo (route-level, generation-routes.test.js)
 
@@ -162,7 +164,7 @@ describe('Orphan-books audit (stage 52)', () => {
         }
     });
 
-    it('Class IV: scene_assets rows with build_id IS NULL are never deduped by the unique key', async () => {
+    it('Class IV: historical NULL build_id duplicates are still detected and reported', async () => {
         const repo = require('../src/storage/postgres/repositories/scene-assets-repo');
         const asset = (buildId) => ({
             book_id: TEST_DUP_ID, chapter_id: 'ch-audit', scene_id: 'sc-audit',
@@ -171,6 +173,10 @@ describe('Orphan-books audit (stage 52)', () => {
 
         await repo.upsertAsset(asset(null));
         await repo.upsertAsset(asset(null));
+        await query()(`
+            INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, path, build_id, status, updated_at)
+            VALUES ($1, 'ch-audit', 'sc-audit', 'audio', '/tmp/dup.mp3', NULL, 'ready', 1700000000)
+        `, [TEST_DUP_ID]);
         await repo.upsertAsset(asset('build-real'));
 
         const rows = await query()(

@@ -1,4 +1,6 @@
-const { query } = require('../database');
+const nodePath = require('path');
+const { query, withTransaction } = require('../database');
+const runtimeConfig = require('../../../config/runtime-config');
 
 const logPrefix = '[SCENE-ASSETS-REPO]';
 
@@ -30,7 +32,35 @@ function rowToAsset(row) {
     };
 }
 
-async function upsertAsset(asset) {
+function nullBuildLockKey(bookId, chapterId, sceneId, assetType) {
+    return `scene_assets|null|${bookId}|${chapterId}|${sceneId}|${assetType}`;
+}
+
+async function lockNullBuildKey(client, bookId, chapterId, sceneId, assetType) {
+    await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [nullBuildLockKey(bookId, chapterId, sceneId, assetType)]
+    );
+}
+
+function buildIdFromArtifactPath(artifactPath) {
+    if (typeof artifactPath !== 'string' || artifactPath.length === 0) return null;
+    const root = nodePath.resolve(runtimeConfig.OUTPUT_DIR || '/data/output');
+    let resolved;
+    try {
+        resolved = nodePath.resolve(artifactPath);
+    } catch (_) {
+        return null;
+    }
+    if (!resolved.startsWith(root + nodePath.sep)) return null;
+    const relative = resolved.slice(root.length + 1);
+    const separatorIndex = relative.indexOf(nodePath.sep);
+    if (separatorIndex <= 0 || separatorIndex === relative.length - 1) return null;
+    const buildDir = relative.slice(0, separatorIndex);
+    return buildDir.length > 0 ? buildDir : null;
+}
+
+function upsertAssetParams(asset) {
     const {
         book_id, chapter_id, scene_id, asset_type,
         path = null, duration_sec = null, width = null, height = null,
@@ -39,6 +69,99 @@ async function upsertAsset(asset) {
         scene_content_version = null, scene_audio_config_version = null,
         status = 'pending', error = null, metadata = null,
     } = asset;
+    return {
+        book_id, chapter_id, scene_id, asset_type,
+        path, duration_sec, width, height,
+        format, sample_rate, channel_count,
+        chunks, build_id, scene_hash,
+        scene_content_version, scene_audio_config_version,
+        status, error, metadata,
+    };
+}
+
+async function upsertAssetWithNullBuildId(asset) {
+    const {
+        book_id, chapter_id, scene_id, asset_type,
+        path, duration_sec, width, height,
+        format, sample_rate, channel_count,
+        chunks, scene_hash,
+        scene_content_version, scene_audio_config_version,
+        status, error, metadata,
+    } = upsertAssetParams(asset);
+
+    const values = [
+        book_id, chapter_id, scene_id, asset_type,
+        path, duration_sec, width, height,
+        format, sample_rate, channel_count,
+        chunks ? JSON.stringify(chunks) : null, scene_hash,
+        scene_content_version, scene_audio_config_version,
+        status, error,
+        metadata ? JSON.stringify(metadata) : null,
+    ];
+
+    return withTransaction(async (client) => {
+        await lockNullBuildKey(client, book_id, chapter_id, scene_id, asset_type);
+
+        const updated = await client.query(`
+            UPDATE scene_assets SET
+                path = COALESCE($5, path),
+                duration_sec = COALESCE($6, duration_sec),
+                width = COALESCE($7, width),
+                height = COALESCE($8, height),
+                format = COALESCE($9, format),
+                sample_rate = COALESCE($10, sample_rate),
+                channel_count = COALESCE($11, channel_count),
+                chunks = COALESCE($12::jsonb, chunks),
+                scene_hash = COALESCE($13, scene_hash),
+                scene_content_version = COALESCE($14, scene_content_version),
+                scene_audio_config_version = COALESCE($15, scene_audio_config_version),
+                status = $16,
+                error = $17,
+                metadata = COALESCE($18::jsonb, metadata),
+                updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+            WHERE id = (
+                SELECT id FROM scene_assets
+                WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND asset_type = $4
+                  AND build_id IS NULL
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+            )
+            RETURNING *
+        `, values);
+        if (updated.rows[0]) return rowToAsset(updated.rows[0]);
+
+        const inserted = await client.query(`
+            INSERT INTO scene_assets (
+                book_id, chapter_id, scene_id, asset_type,
+                path, duration_sec, width, height,
+                format, sample_rate, channel_count,
+                chunks, scene_hash,
+                scene_content_version, scene_audio_config_version,
+                status, error, metadata,
+                updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18::jsonb,
+                    EXTRACT(EPOCH FROM NOW())::bigint)
+            RETURNING *
+        `, values);
+        return rowToAsset(inserted.rows[0]);
+    });
+}
+
+async function upsertAsset(asset) {
+    const params = upsertAssetParams(asset);
+    const {
+        book_id, chapter_id, scene_id, asset_type,
+        path, duration_sec, width, height,
+        format, sample_rate, channel_count,
+        chunks, build_id, scene_hash,
+        scene_content_version, scene_audio_config_version,
+        status, error, metadata,
+    } = params;
+
+    if (build_id == null) {
+        return upsertAssetWithNullBuildId(params);
+    }
 
     const result = await query(`
         INSERT INTO scene_assets (
@@ -82,10 +205,13 @@ async function upsertAsset(asset) {
     return rowToAsset(result.rows[0]);
 }
 
-async function markReady(bookId, chapterId, sceneId, assetType, path, extras = {}) {
+async function markReady(bookId, chapterId, sceneId, assetType, artifactPath, extras = {}) {
+    const extrasWithBuildId = (extras && extras.build_id != null)
+        ? extras
+        : { ...extras, build_id: buildIdFromArtifactPath(artifactPath) };
     return upsertAsset({
         book_id: bookId, chapter_id: chapterId, scene_id: sceneId, asset_type: assetType,
-        path, status: 'ready', ...extras,
+        path: artifactPath, status: 'ready', ...extrasWithBuildId,
     });
 }
 
@@ -134,17 +260,73 @@ async function stampSceneVersionsForDispatch(bookId, chapterId, sceneId, assetTy
         return { stamped: updateResult.rowCount, inserted: 0 };
     }
 
-    const insertResult = await query(`
-        INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, status,
-                                  scene_content_version, scene_audio_config_version, updated_at)
-        SELECT $1, $2, $3, $4, 'pending',
-               sv.content_version, sv.audio_config_version,
-               EXTRACT(EPOCH FROM NOW())::bigint
-        FROM scenes sv
-        WHERE sv.book_id = $1 AND sv.chapter_id = $2 AND sv.scene_id = $3
-        ON CONFLICT DO NOTHING
-    `, [bookId, chapterId, sceneId, assetType]);
-    return { stamped: 0, inserted: insertResult.rowCount || 0 };
+    return withTransaction(async (client) => {
+        await lockNullBuildKey(client, bookId, chapterId, sceneId, assetType);
+
+        const recheck = await client.query(`
+            UPDATE scene_assets sa
+            SET scene_content_version = sv.content_version,
+                scene_audio_config_version = sv.audio_config_version,
+                updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+            FROM scenes sv
+            WHERE sa.book_id = $1 AND sa.chapter_id = $2 AND sa.scene_id = $3
+              AND sa.asset_type = $4
+              AND sv.book_id = $1 AND sv.chapter_id = $2 AND sv.scene_id = $3
+        `, [bookId, chapterId, sceneId, assetType]);
+        if ((recheck.rowCount || 0) > 0) {
+            return { stamped: recheck.rowCount, inserted: 0 };
+        }
+
+        const insertResult = await client.query(`
+            INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, status,
+                                      scene_content_version, scene_audio_config_version, updated_at)
+            SELECT $1, $2, $3, $4, 'pending',
+                   sv.content_version, sv.audio_config_version,
+                   EXTRACT(EPOCH FROM NOW())::bigint
+            FROM scenes sv
+            WHERE sv.book_id = $1 AND sv.chapter_id = $2 AND sv.scene_id = $3
+              AND NOT EXISTS (
+                  SELECT 1 FROM scene_assets sa
+                  WHERE sa.book_id = $1 AND sa.chapter_id = $2 AND sa.scene_id = $3
+                    AND sa.asset_type = $4 AND sa.build_id IS NULL
+              )
+            ON CONFLICT DO NOTHING
+        `, [bookId, chapterId, sceneId, assetType]);
+        return { stamped: 0, inserted: insertResult.rowCount || 0 };
+    });
+}
+
+async function ensureSyntheticStaleAsset(bookId, chapterId, sceneId, assetType = 'audio') {
+    return withTransaction(async (client) => {
+        await lockNullBuildKey(client, bookId, chapterId, sceneId, assetType);
+
+        const scene = await client.query(`
+            SELECT content_version, audio_config_version FROM scenes
+            WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3
+        `, [bookId, chapterId, sceneId]);
+        if (scene.rows.length === 0) return 0;
+        const { content_version, audio_config_version } = scene.rows[0];
+
+        const updated = await client.query(`
+            UPDATE scene_assets SET
+                status = 'stale',
+                scene_content_version = $4,
+                scene_audio_config_version = $5,
+                updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+            WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3
+              AND asset_type = $6 AND build_id IS NULL
+            RETURNING id
+        `, [bookId, chapterId, sceneId, content_version, audio_config_version, assetType]);
+        if ((updated.rowCount || 0) > 0) return updated.rowCount;
+
+        const inserted = await client.query(`
+            INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, status,
+                                      scene_content_version, scene_audio_config_version, updated_at)
+            VALUES ($1, $2, $3, $6, 'stale', $4, $5, EXTRACT(EPOCH FROM NOW())::bigint)
+            RETURNING id
+        `, [bookId, chapterId, sceneId, content_version, audio_config_version, assetType]);
+        return inserted.rowCount || 0;
+    });
 }
 
 async function markFailed(bookId, chapterId, sceneId, assetType, error, buildId = null) {
@@ -555,6 +737,7 @@ module.exports = {
     markStale,
     markFailed,
     stampSceneVersionsForDispatch,
+    ensureSyntheticStaleAsset,
     getAsset,
     getSceneAssets,
     getAssetsByType,

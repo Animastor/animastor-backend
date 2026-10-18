@@ -2,7 +2,17 @@ const { query } = require('../database');
 
 const logPrefix = '[IU-REPO]';
 
+function assertBuildId(buildId, fnName) {
+    if (typeof buildId !== 'string' || buildId.trim() === '') {
+        throw new Error(
+            `${fnName}: build_id is required — image_units rows are identified by ` +
+            'build_id and the unique key cannot deduplicate a missing one'
+        );
+    }
+}
+
 async function upsertImageUnit(buildId, bookId, chapterId, sceneId, unitId, data) {
+    assertBuildId(buildId, 'iu.upsertImageUnit');
     await query(`
         INSERT INTO image_units (build_id, book_id, chapter_id, scene_id, unit_id, scene_order,
             text, text_length, text_proportion, scene_duration_sec, estimated_duration_sec, scene_audio_file, start_ms, end_ms)
@@ -41,6 +51,7 @@ async function upsertImageUnit(buildId, bookId, chapterId, sceneId, unitId, data
 }
 
 async function upsertIuTiming(buildId, bookId, chapterId, sceneId, unitId, startMs, endMs) {
+    assertBuildId(buildId, 'iu.upsertIuTiming');
     await query(`
         INSERT INTO image_units (build_id, book_id, chapter_id, scene_id, unit_id, start_ms, end_ms)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
