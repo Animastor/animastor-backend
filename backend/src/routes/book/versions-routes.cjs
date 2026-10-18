@@ -35,7 +35,7 @@ module.exports = function registerVersionRoutes(app, ctx) {
                     assets: [],
                 };
             }
-            for (const row of assetResult.rows) {
+            for (const row of assetRows) {
                 const key = `${row.chapter_id}/${row.scene_id}`;
                 if (sceneVersions[key]) {
                     sceneVersions[key].assets.push({
