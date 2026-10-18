@@ -29,8 +29,10 @@ const { runMigrations } = require('../src/storage/postgres/schema');
 const { authContext } = require('../src/middleware/auth-context');
 const config = require('../src/config/runtime-config');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { captureGuestWorkspaceBaseline, teardownGuestWorkspaces } = require('./helpers/pg-teardown');
 // B7/R-2 (pre-split decoupling, 2026-10): hub via npm devDependency.
 const { buildHubApp } = require('@animastor/gpu-hub/gpu-hub.js');
+let guestWsBaseline = null;
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
@@ -84,6 +86,7 @@ describe('Private worker setup contract API (Phase 3)', function () {
         this.timeout(60000);
         await runMigrations();
         await cleanup();
+        guestWsBaseline = await captureGuestWorkspaceBaseline();
         redis = createMockRedis();
 
         // Post-split fallback (§8.4): synthetic servable bundle when the
@@ -171,6 +174,7 @@ describe('Private worker setup contract API (Phase 3)', function () {
         if (synthWorkerDir) fs.rmSync(synthWorkerDir, { recursive: true, force: true });
         synthWorkerDir = null;
         await cleanup();
+        await teardownGuestWorkspaces(guestWsBaseline);
     });
 
     const SETUP_ENDPOINTS = [

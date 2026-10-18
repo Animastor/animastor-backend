@@ -33,6 +33,7 @@ const workspaceAi = require('../src/services/workspace-ai-provider');
 const aiService = require('../src/services/ai-service');
 const aiCaller = require('../src/services/agent/ai-caller');
 const config = require('../src/config/runtime-config');
+const { captureGuestWorkspaceBaseline, teardownGuestWorkspaces } = require('./helpers/pg-teardown');
 
 // In the full suite runtime-config may already be cached from an earlier
 // module evaluated BEFORE this file set the env var — sync the snapshot so
@@ -41,6 +42,7 @@ if (!config.OPENROUTER_API_KEY) config.OPENROUTER_API_KEY = process.env.OPENROUT
 
 const stamp = `wspai${Date.now()}`;
 let bookWorkspaceId = null;
+let guestWsBaseline = null;
 
 async function createWorkspaceRow(name, type) {
     const { rows } = await query(
@@ -53,6 +55,7 @@ async function createWorkspaceRow(name, type) {
 async function cleanup() {
     await query(`DELETE FROM workspace_ai_providers WHERE workspace_id IN (
         SELECT id FROM workspaces WHERE name LIKE '%${stamp}%')`);
+    await query(`DELETE FROM ai_chat_sessions WHERE book_id LIKE 'wspai-${stamp}%'`);
     await query(`DELETE FROM books WHERE book_id LIKE 'wspai-${stamp}%'`);
     await query(`DELETE FROM workspaces WHERE name LIKE '%${stamp}%'`);
 }
@@ -95,6 +98,7 @@ describe('Workspace AI Provider', () => {
     before(async () => {
         await runMigrations();
         bookWorkspaceId = await createWorkspaceRow('wspai-book', 'personal');
+        guestWsBaseline = await captureGuestWorkspaceBaseline();
         // The SSRF guard (url-safety) resolves the endpoint hostname before
         // every fetch. This suite uses reserved *.example hostnames (RFC 2606,
         // intentionally unresolvable), so DNS is stubbed to a public address —
@@ -111,6 +115,7 @@ describe('Workspace AI Provider', () => {
     after(async () => {
         dns.promises.lookup = originalDnsLookup;
         await cleanup();
+        await teardownGuestWorkspaces(guestWsBaseline);
     });
 
     // 1 ── schema contract ───────────────────────────────────────────────

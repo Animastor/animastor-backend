@@ -50,8 +50,10 @@ const { requireWorkerAuth } = require('../src/middleware/worker-auth-middleware'
 const workerAuth = require('../src/services/worker-auth');
 const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { captureGuestWorkspaceBaseline, teardownGuestWorkspaces } = require('./helpers/pg-teardown');
 
 const stamp = `pwphase1${Date.now()}`;
+let guestWsBaseline = null;
 
 function cookieOf(res) {
     const set = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
@@ -136,6 +138,7 @@ describe('Private worker identity & authentication (Phase 1)', () => {
         this.timeout(60000);
         await runMigrations();
         await cleanup();
+        guestWsBaseline = await captureGuestWorkspaceBaseline();
         redis = createMockRedis();
 
         const app = buildApp(redis);
@@ -162,6 +165,7 @@ describe('Private worker identity & authentication (Phase 1)', () => {
         this.timeout(30000);
         if (server) server.close();
         await cleanup();
+        await teardownGuestWorkspaces(guestWsBaseline);
     });
 
     // ══════════════════════════════════════════════════════════════════

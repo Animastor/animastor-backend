@@ -86,7 +86,7 @@ async function createBook(bookId, workspaceId) {
 }
 
 async function cleanup() {
-    await query(`DELETE FROM ai_chat_sessions WHERE book_id LIKE 'shai3-${stamp}%'`);
+    await query(`DELETE FROM ai_chat_sessions WHERE book_id LIKE 'shai3-${stamp}%' OR book_id = 'shai3-nope'`);
     await query(`DELETE FROM books WHERE book_id LIKE 'shai3-${stamp}%'`);
     await query(`DELETE FROM ai_endpoint_share_policies WHERE workspace_id IN (
         SELECT id FROM workspaces WHERE name LIKE '%${stamp}%')`);

@@ -158,9 +158,9 @@ async function cleanup() {
     for (const gid of cleanupGuestIds) {
         const guest = (await query(`SELECT workspace_id FROM guests WHERE guest_id = $1`, [gid])).rows[0];
         if (guest) {
-            await query(`DELETE FROM workspaces WHERE workspace_id = $1`, [guest.workspace_id]).catch(() => {});
+            await query(`DELETE FROM workspaces WHERE id = $1`, [guest.workspace_id]);
         }
-        await query(`DELETE FROM guests WHERE guest_id = $1`, [gid]).catch(() => {});
+        await query(`DELETE FROM guests WHERE guest_id = $1`, [gid]);
     }
     cleanupBookIds.clear();
     cleanupUsernames.length = 0;
