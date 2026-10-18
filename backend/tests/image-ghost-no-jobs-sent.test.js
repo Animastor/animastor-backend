@@ -44,9 +44,21 @@ const iuProcessor = require('../src/image/iu-processor');
 const imageModule = require('../src/image');
 const callbacks = require('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { query } = require('../src/storage/postgres/database');
 
-const B = 'ghost_book', C = 'ch-1', S = 'sc-1', BUILD = 'build-ghost';
+const RUN_TOKEN = `${Date.now().toString(36)}-${process.pid}`;
+const B = `ghost_book_${RUN_TOKEN}`, C = 'ch-1', S = 'sc-1', BUILD = `build-ghost-${RUN_TOKEN}`;
 const IU_COUNT = 9;
+
+async function teardownGhostBookPg() {
+    const deleted = await query('DELETE FROM image_units WHERE book_id = $1', [B]);
+    const remaining = await query('SELECT count(*)::int AS n FROM image_units WHERE book_id = $1', [B]);
+    const n = remaining.rows[0].n;
+    if (n !== 0) {
+        throw new Error(`ghost-book PG teardown left ${n} image_units row(s) for ${B}`);
+    }
+    return deleted.rowCount || 0;
+}
 
 function makeBook(unitCount = IU_COUNT) {
     const units = Array.from({ length: unitCount }, (_, i) => ({
@@ -121,6 +133,11 @@ describe('image ghost GENERATING — no_jobs_sent lifecycle fix (audit 6929ba5)'
         provider.generate = originalGenerate;
         // Lease renewal timers are module-level — always stop them so mocha exits
         dispatchEngine.stopDispatchRenewal(B, C, S, 'image');
+    });
+
+    after(async () => {
+        const removed = await teardownGhostBookPg();
+        console.log(`[GHOST-PG] teardown removed ${removed} image_units row(s) for ${B}`);
     });
 
     // ────────────────────────────────────────────────────────────
@@ -644,6 +661,11 @@ describe('iu-in-flight marker lifecycle after successful gpu.send (follow-up 226
     afterEach(() => {
         provider.generate = originalGenerate;
         dispatchEngine.stopDispatchRenewal(B, C, S, 'image');
+    });
+
+    after(async () => {
+        const removed = await teardownGhostBookPg();
+        console.log(`[GHOST-PG] teardown removed ${removed} image_units row(s) for ${B}`);
     });
 
     // Test helper: create a full active dispatch (quota+lease+metadata)
