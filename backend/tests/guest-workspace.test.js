@@ -393,7 +393,9 @@ describe('Guest Workspace MVP', () => {
             expect(found).to.not.equal(null);
             expect(found.guest_id).to.equal(created.guestId);
             // A wrong raw token must not match (sha256 hash comparison).
-            const wrong = await guestRepo.findByToken(created.token.replace(/.$/, 'x'));
+            const parts = created.token.split('.');
+            const wrongSecret = (parts[2][0] === 'A' ? 'B' : 'A') + parts[2].slice(1);
+            const wrong = await guestRepo.findByToken(`${parts[0]}.${parts[1]}.${wrongSecret}`);
             expect(wrong).to.equal(null);
             await query('DELETE FROM guests WHERE guest_id = $1', [created.guestId]);
             await query('DELETE FROM workspaces WHERE id = $1', [created.workspace.id]);

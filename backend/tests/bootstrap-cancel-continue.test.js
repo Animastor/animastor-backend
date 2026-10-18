@@ -25,6 +25,7 @@ describe('bootstrapNextWindow — explicit Continue clears cancellation tombston
     const modulePaths = [
         '../src/services/agent/bootstrap',
         '../src/book/lazy-book',
+        '../src/services/workspace-ai-provider',
     ];
     const savedCache = new Map();
     let draftToReturn;
@@ -53,6 +54,17 @@ describe('bootstrapNextWindow — explicit Continue clears cancellation tombston
             getChapterDir: () => '/tmp/nonexistent-bootstrap-dir/chapters',
             SourceType: { TXT: 'txt' },
             BookState: { BOOTSTRAPPED: 'bootstrapped', ACTIVE: 'active' },
+        });
+        stub('../src/services/workspace-ai-provider', {
+            resolveAIForBook: async () => ({
+                source: 'system',
+                provider: 'global',
+                endpoint: null,
+                apiKey: 'sk-stage69-deterministic',
+                model: null,
+                workspaceId: null,
+                transport: 'http',
+            }),
         });
     });
 
