@@ -87,14 +87,27 @@ async function getDirtyScenesByVersion(bookId) {
 // Pre-O-2 (reconciliation rebuildWorkList): two raw barrel queries issued
 // back-to-back per book. The SQL moved here verbatim — same statements, same
 // params, same row shapes; only the fetch is batched into one op.
+//
+// Stage 73 (self-heal fix): a legacy `build_id IS NULL` row that has a
+// PROVEN versioned equivalent (same key + byte-identical artifact path —
+// the 21338/48353 twin family of Stage 72) is no longer a dirty marker for
+// its key. Before this rule every startup rebuilt `sc-5f18dd0f/audio` as
+// dirty from stale NULL duplicates → markDirtyScene → markStale demoted the
+// canonical READY row and burned a dispatch cycle (report 72 §B.4). The
+// versioned row keeps carrying the key's status: if IT is stale/failed/
+// pending the key is still marked dirty, so no genuine work is lost.
+// Rows without a proven twin (true legacy keys, `path IS NULL` synthetic
+// pending rows — Stage 70 К-5) keep the previous behaviour unchanged.
 async function getDirtyMarkers(bookId) {
     const unitMarker = await database().query(`
         SELECT DISTINCT chapter_id, scene_id FROM scenes
         WHERE book_id = $1 AND dirty_unit_ids IS NOT NULL AND array_length(dirty_unit_ids, 1) > 0
     `, [bookId]);
+    const notDup = sceneAssetsRepo().notProvenNullDuplicateCondition('sa');
     const assetMarker = await database().query(`
-        SELECT DISTINCT chapter_id, scene_id, asset_type FROM scene_assets
+        SELECT DISTINCT chapter_id, scene_id, asset_type FROM scene_assets sa
         WHERE book_id = $1 AND status IN ('stale', 'failed', 'pending')
+          AND ${notDup}
     `, [bookId]);
     return { unitScenes: unitMarker.rows, assetStages: assetMarker.rows };
 }
@@ -136,7 +149,11 @@ async function getSceneVersions(bookId, chapterId, sceneId) {
 // `SELECT s.content_version, s.audio_config_version, a.scene_content_version,
 //  a.scene_audio_config_version, a.status as asset_status FROM scenes s LEFT
 //  JOIN scene_assets a …` — runtime-scheduler.detectVersionStale.
+// Stage 73: доказанные NULL-дубли исключены из строки-сигнала (иначе их
+// `ready` + устаревшие штампы запускали бы version-stale reset и markDirtyScene
+// поверх канонической versioned-строки).
 async function getAudioConfigVersions(bookId, chapterId, sceneId) {
+    const notDup = sceneAssetsRepo().notProvenNullDuplicateCondition('a');
     const result = await database().query(`
         SELECT s.content_version, s.audio_config_version,
                a.scene_content_version, a.scene_audio_config_version, a.status as asset_status
@@ -145,6 +162,7 @@ async function getAudioConfigVersions(bookId, chapterId, sceneId) {
             AND a.chapter_id = s.chapter_id
             AND a.scene_id = s.scene_id
         WHERE s.book_id = $1 AND s.chapter_id = $2 AND s.scene_id = $3
+          AND ${notDup}
     `, [bookId, chapterId, sceneId]);
     return result.rows;
 }
@@ -154,7 +172,11 @@ async function getAudioConfigVersions(bookId, chapterId, sceneId) {
 //  a.scene_audio_config_version FROM scenes s LEFT JOIN scene_assets a …
 //  WHERE s.content_version > 1 OR s.audio_config_version > 1` —
 //  reconciliation-engine.checkVersionStaleness (C2 book-wide scan).
+// Stage 73: доказанные NULL-дубли не участвуют в version-сигнале ключа —
+// иначе их устаревшие штампы (без фильтра status в этой фазе) помечали бы
+// stale всю сцену и demote'или READY канонической versioned-строки.
 async function getVersionStalenessRows() {
+    const notDup = sceneAssetsRepo().notProvenNullDuplicateCondition('a');
     const result = await database().query(`
         SELECT s.book_id, s.chapter_id, s.scene_id, s.content_version, s.audio_config_version,
                a.asset_type, a.scene_content_version, a.scene_audio_config_version
@@ -162,7 +184,8 @@ async function getVersionStalenessRows() {
         LEFT JOIN scene_assets a ON a.book_id = s.book_id
             AND a.chapter_id = s.chapter_id
             AND a.scene_id = s.scene_id
-        WHERE s.content_version > 1 OR s.audio_config_version > 1
+        WHERE (s.content_version > 1 OR s.audio_config_version > 1)
+          AND ${notDup}
     `);
     return result.rows;
 }

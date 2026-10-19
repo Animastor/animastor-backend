@@ -43,6 +43,49 @@ async function lockNullBuildKey(client, bookId, chapterId, sceneId, assetType) {
     );
 }
 
+// ── Stage 73: доказанный versioned-эквивалент legacy NULL-строки ──────
+// Legacy-строка `build_id IS NULL` считается ДОКАЗАННЫМ ДУБЛЕКОМ, когда у
+// того же ключа (book, chapter, scene, asset_type) есть versioned-строка с
+// тем же немусорным путём artifact'а (byte-identical path). Именно такую
+// пару доказала Stage 72 для 21338/48353: один и тот же путь, один файл на
+// диске, build_id versioned-строки == manifest.build_id.
+//
+// Такие строки исключаются из ВСЕХ выборок, превращающих состояние строк
+// ключа в dirty/stale-сигнал (getDirtyMarkers / getDirtyScenesByVersion /
+// getAudioConfigVersions / getVersionStalenessRows): сигналом для ключа
+// владеет сама versioned-строка, а не её legacy-дубль — иначе каждый старте
+// self-heal (rebuildWorkList → markDirtyScene → markStale) сбрасывал READY
+// канонического артефакта и порождал лишний dispatch-цикл (Stage 72 §B.4).
+//
+// Что НЕ покрывается правилом (сознательно — прежнее поведение сохраняется):
+//   • legacy-ключи без versioned-строк вообще (437 исторических строк
+//     принадлежат двум сохраняемым книгам — не все они лишние);
+//   • строки с `path IS NULL` (9 ba_-строк + 2 синтетические pending,
+//     категория К-5 Stage 70): у них нет доказанной artifact-идентичности;
+//   • строки с другим/отсутствующим у versioned-брата путём.
+function provenNullDuplicateCondition(alias) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(alias))) {
+        throw new Error(`provenNullDuplicateCondition: unsafe alias ${JSON.stringify(alias)}`);
+    }
+    return `EXISTS (
+            SELECT 1 FROM scene_assets twin
+            WHERE twin.book_id = ${alias}.book_id
+              AND twin.chapter_id = ${alias}.chapter_id
+              AND twin.scene_id = ${alias}.scene_id
+              AND twin.asset_type = ${alias}.asset_type
+              AND twin.build_id IS NOT NULL
+              AND twin.path IS NOT NULL
+              AND twin.path = ${alias}.path
+        )`;
+}
+
+// Строка УЧАСТВУЕТ в выборке сигнала (не является доказанным NULL-дублем).
+// Для LEFT JOIN без строки ассета (alias.* IS NULL) условие истинно:
+// `build_id IS NULL` → TRUE, EXISTS по NULL-ключу → FALSE → NOT(FALSE) → TRUE.
+function notProvenNullDuplicateCondition(alias) {
+    return `NOT (${alias}.build_id IS NULL AND ${provenNullDuplicateCondition(alias)})`;
+}
+
 function buildIdFromArtifactPath(artifactPath) {
     if (typeof artifactPath !== 'string' || artifactPath.length === 0) return null;
     const root = nodePath.resolve(runtimeConfig.OUTPUT_DIR || '/data/output');
@@ -641,6 +684,12 @@ async function clearDirtyFlag(bookId, chapterId, sceneId) {
  * @returns {Promise<Array<{chapter_id: string, scene_id: string, reason: string}>>}
  */
 async function getDirtyScenesByVersion(bookId) {
+    // Stage 73: version-mismatch — сигнал только от строк, не являющихся
+    // доказанными NULL-дублями (см. provenNullDuplicateCondition). Дубль с
+    // устаревшими штампами не должен помечать ключ stale, если у него есть
+    // versioned-эквивалент: его собственные штампы/статус участвуют в
+    // выборке независимо. `s.is_dirty` — scene-level сигнал, остаётся как был.
+    const notDup = notProvenNullDuplicateCondition('a');
     const result = await query(`
         SELECT DISTINCT s.book_id, s.chapter_id, s.scene_id, s.content_version, s.audio_config_version,
                s.is_dirty,
@@ -659,6 +708,7 @@ async function getDirtyScenesByVersion(bookId) {
                       OR
                       (a.scene_audio_config_version IS NOT NULL AND a.scene_audio_config_version < s.audio_config_version)
                   )
+                  AND ${notDup}
               )
           )
         ORDER BY s.chapter_id, s.scene_id
@@ -736,6 +786,9 @@ module.exports = {
     markReady,
     markStale,
     markFailed,
+    // Stage 73: shared SQL predicates for the "proven NULL duplicate" rule
+    provenNullDuplicateCondition,
+    notProvenNullDuplicateCondition,
     stampSceneVersionsForDispatch,
     ensureSyntheticStaleAsset,
     getAsset,
