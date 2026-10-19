@@ -10,9 +10,9 @@ on-disk path layout.
 `backend/src/utils/{character-identity,snake-guard,scene-title-utils}.js`).
 The composition root (`backend/src/backend.cjs`) binds both ports through the
 package entry points. See
-[`docs/architecture/VBOOK_RUNTIME_RELOCATION_CHECKLIST.md`](../../docs/architecture/VBOOK_RUNTIME_RELOCATION_CHECKLIST.md)
+[`docs/architecture/VBOOK_RUNTIME_RELOCATION_CHECKLIST.md`](https://github.com/Animastor/animastor-docs/blob/main/architecture/VBOOK_RUNTIME_RELOCATION_CHECKLIST.md)
 (COMPLETE) and
-[`docs/03-audit/VBOOK_EXTRACTION_READINESS_AUDIT.md`](../../docs/03-audit/VBOOK_EXTRACTION_READINESS_AUDIT.md).
+[`docs/03-audit/VBOOK_EXTRACTION_READINESS_AUDIT.md`](https://github.com/Animastor/animastor-docs/blob/main/03-audit/VBOOK_EXTRACTION_READINESS_AUDIT.md).
 
 ## Standalone use
 

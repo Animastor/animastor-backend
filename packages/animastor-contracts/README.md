@@ -9,7 +9,7 @@ Currently published contracts:
 - **Job Protocol v2** (`src/job-protocol-v2.js`) — the frozen wire contract
   between backend (orchestrator/dispatcher), GPU Hub (queues/claim) and
   Worker (ComfyUI execution). The normative specification is
-  [`docs/architecture/JOB_PROTOCOL_V2.md`](../docs/architecture/JOB_PROTOCOL_V2.md)
+  [`docs/architecture/JOB_PROTOCOL_V2.md`](https://github.com/Animastor/animastor-docs/blob/main/architecture/JOB_PROTOCOL_V2.md)
   (Phase 9A, FROZEN) — this package implements it verbatim, no more.
 - **Runtime Result** (`src/runtime-result.js`, exported as `runtimeResult`) —
   the Phase 5 stable shape of a runtime job/dispatch execution result

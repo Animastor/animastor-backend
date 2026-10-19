@@ -79,7 +79,7 @@ Text Input
 | **Workers** | external image | [animastor-worker](https://github.com/Animastor/animastor-worker) | GPU workers — image (SD), audio (TTS), video (LTX) via ComfyUI |
 | **Storage** | PostgreSQL + Redis | — | 30+ tables canonical state; Redis for runtime, queues, heartbeats |
 
-For the full architecture deep-dive, see [docs/01-overview/ARCHITECTURE.md](docs/01-overview/ARCHITECTURE.md).
+For the full architecture deep-dive, see [docs/01-overview/ARCHITECTURE.md](https://github.com/Animastor/animastor-docs/blob/main/01-overview/ARCHITECTURE.md).
 
 ## Quick Start
 
@@ -116,24 +116,24 @@ The Android app lives in the separate [animastor-android](https://github.com/Ani
 
 ## Documentation
 
-Comprehensive documentation lives in the [`docs/`](docs/) directory:
+Comprehensive documentation lives in the [`animastor-docs`](https://github.com/Animastor/animastor-docs) repository:
 
 | Document | Description |
 |----------|-------------|
-| [System Overview](docs/01-overview/SYSTEM_OVERVIEW.md) | Subsystems, use cases, and data flow |
-| [Architecture](docs/01-overview/ARCHITECTURE.md) | Backend layers, components, and dependencies |
-| [System Map](docs/01-overview/SYSTEM_MAP.md) | Detailed "as-is" map of all subsystems |
-| [Data Flow](docs/01-overview/DATA_FLOW.md) | 10 scenarios: import → bootstrap → generation → playback |
-| [Project Structure](docs/01-overview/PROJECT_STRUCTURE.md) | File tree with module descriptions |
-| [Changelog](docs/CHANGELOG.md) | Full change history |
+| [System Overview](https://github.com/Animastor/animastor-docs/blob/main/01-overview/SYSTEM_OVERVIEW.md) | Subsystems, use cases, and data flow |
+| [Architecture](https://github.com/Animastor/animastor-docs/blob/main/01-overview/ARCHITECTURE.md) | Backend layers, components, and dependencies |
+| [System Map](https://github.com/Animastor/animastor-docs/blob/main/01-overview/SYSTEM_MAP.md) | Detailed "as-is" map of all subsystems |
+| [Data Flow](https://github.com/Animastor/animastor-docs/blob/main/01-overview/DATA_FLOW.md) | 10 scenarios: import → bootstrap → generation → playback |
+| [Project Structure](https://github.com/Animastor/animastor-docs/blob/main/01-overview/PROJECT_STRUCTURE.md) | File tree with module descriptions |
+| [Changelog](https://github.com/Animastor/animastor-docs/blob/main/CHANGELOG.md) | Full change history |
 
 Additional documentation:
 
-- [Orchestration](docs/02-orchestration/ORCHESTRATION.md) — Orchestrator lifecycle and state management
-- [Workflows & Connectors](docs/06-workflows/WORKFLOWS.md) — Declarative ComfyUI pipeline system
-- [AI Agents](docs/07-agents-and-generators/AGENTS.md) — 6-step AI analysis pipeline
-- [Architectural Audit](docs/03-audit/ARCHITECTURAL_AUDIT.md) — Comprehensive codebase audit
-- [6-Month Roadmap](docs/04-planning/ROADMAP_6M.md) — Project roadmap
+- [Orchestration](https://github.com/Animastor/animastor-docs/blob/main/02-orchestration/ORCHESTRATION.md) — Orchestrator lifecycle and state management
+- [Workflows & Connectors](https://github.com/Animastor/animastor-docs/blob/main/06-workflows/WORKFLOWS.md) — Declarative ComfyUI pipeline system
+- [AI Agents](https://github.com/Animastor/animastor-docs/blob/main/07-agents-and-generators/AGENTS.md) — 6-step AI analysis pipeline
+- [Architectural Audit](https://github.com/Animastor/animastor-docs/blob/main/03-audit/ARCHITECTURAL_AUDIT.md) — Comprehensive codebase audit
+- [6-Month Roadmap](https://github.com/Animastor/animastor-docs/blob/main/04-planning/ROADMAP_6M.md) — Project roadmap
 
 ## Project Structure
 
@@ -144,7 +144,6 @@ animastor-backend/
 ├── proxy/             # Nginx reverse proxy
 ├── docker/            # Container definitions
 ├── docker-compose.yml # Service orchestration
-├── docs/              # Documentation
 ├── scripts/           # Utility scripts
 └── .env.example       # Environment configuration template
 ```

@@ -11,9 +11,9 @@ Model and the read-side artifact-naming grammar.
 **Status: EXTRACTED (0.1.0).** The playback contour physically lives in this
 package (`src/`); the host backend consumes it only through the package
 entrypoint. See
-[`docs/architecture/PLAYER_ROUTE_SPLIT_CHECKLIST.md`](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/PLAYER_ROUTE_SPLIT_CHECKLIST.md)
+[`docs/architecture/PLAYER_ROUTE_SPLIT_CHECKLIST.md`](https://github.com/Animastor/animastor-docs/blob/main/architecture/PLAYER_ROUTE_SPLIT_CHECKLIST.md)
 (physical move COMPLETE) and
-[`docs/architecture/PLAYER_PACKAGE_EXTRACTION_READINESS_AUDIT.md`](https://github.com/Animastor/animastor-backend/blob/main/docs/architecture/PLAYER_PACKAGE_EXTRACTION_READINESS_AUDIT.md).
+[`docs/architecture/PLAYER_PACKAGE_EXTRACTION_READINESS_AUDIT.md`](https://github.com/Animastor/animastor-docs/blob/main/architecture/PLAYER_PACKAGE_EXTRACTION_READINESS_AUDIT.md).
 
 ## Requirements
 

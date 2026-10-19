@@ -56,7 +56,7 @@ Open an issue on GitHub with:
 
 ## Architecture Documentation
 
-Before making significant changes, review the architecture documentation in [`docs/01-overview/ARCHITECTURE.md`](docs/01-overview/ARCHITECTURE.md) to understand the system's layers and conventions.
+Before making significant changes, review the architecture documentation in [`docs/01-overview/ARCHITECTURE.md`](https://github.com/Animastor/animastor-docs/blob/main/01-overview/ARCHITECTURE.md) to understand the system's layers and conventions.
 
 ## Code of Conduct
 
