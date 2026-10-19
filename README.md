@@ -168,7 +168,12 @@ cd frontends/app && npm install && npm run dev
 
 ### Running tests
 
+The architecture guardrails read `architecture/PHASE_2_CONTRACTS.md` from the
+[`animastor-docs`](https://github.com/Animastor/animastor-docs) checkout. Clone it
+next to this repository (or point `ANIMASTOR_DOCS_ROOT` at an existing clone):
+
 ```bash
+git clone https://github.com/Animastor/animastor-docs ../animastor-docs
 cd backend && npm test
 ```
 

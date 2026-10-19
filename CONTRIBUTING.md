@@ -18,8 +18,12 @@ Thank you for your interest in contributing to Animastor! This document provides
    git checkout -b feature/your-feature-name
    ```
 2. Make your changes in small, focused commits.
-3. Run tests before submitting:
+3. Run tests before submitting. The architecture guardrails read
+   `architecture/PHASE_2_CONTRACTS.md` from the
+   [`animastor-docs`](https://github.com/Animastor/animastor-docs) checkout —
+   clone it next to this repository or set `ANIMASTOR_DOCS_ROOT`:
    ```bash
+   git clone https://github.com/Animastor/animastor-docs ../animastor-docs
    cd backend && npm test
    ```
 4. Push your branch and open a Pull Request.

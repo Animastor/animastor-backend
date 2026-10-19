@@ -29,7 +29,28 @@ function read(file) {
     return readSource(file);
 }
 
-const PHASE_2_DOCS = path.join(REPO_ROOT, 'docs', 'architecture', 'PHASE_2_CONTRACTS.md');
+// Phase 76: the documentation tree is canonical in Animastor/animastor-docs.
+// Resolve the Phase 2 contract from an explicit docs checkout:
+//   1. ANIMASTOR_DOCS_ROOT (CI / alternate layouts);
+//   2. a sibling animastor-docs clone next to this repository;
+//   3. the legacy in-repo docs/ path (pre-extraction checkouts).
+// Fails closed with a clear message when none of them contains the contract.
+const PHASE_2_DOCS_ENTRY = path.join('architecture', 'PHASE_2_CONTRACTS.md');
+const PHASE_2_DOCS = [
+    process.env.ANIMASTOR_DOCS_ROOT
+        ? path.join(process.env.ANIMASTOR_DOCS_ROOT, PHASE_2_DOCS_ENTRY)
+        : null,
+    path.join(REPO_ROOT, '..', 'animastor-docs', PHASE_2_DOCS_ENTRY),
+    path.join(REPO_ROOT, 'docs', PHASE_2_DOCS_ENTRY),
+].filter(Boolean).find((candidate) => fs.existsSync(candidate));
+
+if (!PHASE_2_DOCS) {
+    throw new Error(
+        'Phase 2 contract doc not found: set ANIMASTOR_DOCS_ROOT to the '
+        + 'animastor-docs checkout (or clone it next to this repository). '
+        + `Expected ${PHASE_2_DOCS_ENTRY} under one of the docs roots.`
+    );
+}
 
 describe('architecture: Redis ownership contract (Phase 2 documentation)', () => {
     it('Phase 2 ownership docs mention the four dangerous places', () => {
