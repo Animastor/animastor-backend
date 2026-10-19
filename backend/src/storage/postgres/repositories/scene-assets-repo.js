@@ -339,6 +339,20 @@ async function stampSceneVersionsForDispatch(bookId, chapterId, sceneId, assetTy
     });
 }
 
+// Stage 76 (К-5 предотвращение ре-создания): синтетическая NULL-строка больше
+// не вставляется, когда у ключа уже есть versioned-строки (build_id IS NOT NULL).
+// unique-ключ (book, chapter, scene, asset_type, build_id) не матчит NULL, поэтому
+// прежний INSERT плодил новую NULL-строку при каждом genuine edit versioned-сцены —
+// ровно та ре-семейство, которую мигрирует Stage 75. Теперь ветка действий:
+//   1. нет строки в scenes → no-op (legacy, без изменений);
+//   2. есть NULL-строки ключа → обновить ИХ (как раньше; поведение для текущего
+//      production-форма ba_ с NULL+versioned не меняется);
+//   3. есть versioned-строки → обновить ВСЕ их (status→stale + штампы сцен),
+//      INSERT запрещён: ни одна строка не удаляется, ни один build не выбирается
+//      молча (fail-closed при нескольких builds — все консервативно stale,
+//      канонический build определяет только следующий dispatch через markReady);
+//   4. строк нет вообще (legacy-сцена без build-контекста) → прежний
+//      синтетический NULL-INSERT (R15+ семантика маркера версии сохранена).
 async function ensureSyntheticStaleAsset(bookId, chapterId, sceneId, assetType = 'audio') {
     return withTransaction(async (client) => {
         await lockNullBuildKey(client, bookId, chapterId, sceneId, assetType);
@@ -361,6 +375,18 @@ async function ensureSyntheticStaleAsset(bookId, chapterId, sceneId, assetType =
             RETURNING id
         `, [bookId, chapterId, sceneId, content_version, audio_config_version, assetType]);
         if ((updated.rowCount || 0) > 0) return updated.rowCount;
+
+        const versioned = await client.query(`
+            UPDATE scene_assets SET
+                status = 'stale',
+                scene_content_version = $4,
+                scene_audio_config_version = $5,
+                updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+            WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3
+              AND asset_type = $6 AND build_id IS NOT NULL
+            RETURNING id
+        `, [bookId, chapterId, sceneId, content_version, audio_config_version, assetType]);
+        if ((versioned.rowCount || 0) > 0) return versioned.rowCount;
 
         const inserted = await client.query(`
             INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, status,
