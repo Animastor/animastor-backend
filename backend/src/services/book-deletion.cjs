@@ -101,7 +101,7 @@ function createBookDeletion(deps) {
 
         // ── 2. Canonical: remove the disk bundle + snapshot file ──
         await book.resetBook(bookId);
-        const snapshotPath = path.join(config.BOOKS_DIR || '/data/books', `${bookId}.snapshot.json`);
+        const snapshotPath = path.join(config.BOOKS_DIR, `${bookId}.snapshot.json`);
         if (fs.existsSync(snapshotPath)) {
             try { fs.unlinkSync(snapshotPath); } catch (_) {}
         }

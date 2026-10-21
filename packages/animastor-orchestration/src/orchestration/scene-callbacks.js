@@ -278,7 +278,7 @@ async function handleImageCompleted(redis, bookId, chapterId, sceneId, buildId) 
     log(`IMAGE_CALLBACK: ${bookId}/${chapterId}/${sceneId}`);
 
     const sceneImage = image.resolveCanonicalSceneImage(
-        '/data/output', buildId, bookId, chapterId, sceneId
+        artifactRoot(), buildId, bookId, chapterId, sceneId
     );
 
     // Per-asset check
@@ -390,7 +390,7 @@ async function handleVideoCompleted(redis, bookId, chapterId, sceneId, buildId) 
     // T1: возвращает { ok, retryable, reason, artifact }
     log(`VIDEO_CALLBACK: ${bookId}/${chapterId}/${sceneId}`);
 
-    const videoPath = `/data/output/${buildId}/${bookId}_${chapterId}_${sceneId}.mp4`;
+    const videoPath = `${artifactRoot()}/${buildId}/${bookId}_${chapterId}_${sceneId}.mp4`;
     const { valid, duration, metadata } = video.validateVideoFile(videoPath);
 
     const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);

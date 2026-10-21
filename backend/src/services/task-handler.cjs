@@ -241,7 +241,7 @@ module.exports = function(redis, config, deps) {
                 log(`⚠️ saveBookSnapshot: book ${bookId} not found`);
                 return null;
             }
-            const snapshotPath = path.join(config.BOOKS_DIR || '/data/books', `${bookId}.snapshot.json`);
+            const snapshotPath = path.join(config.BOOKS_DIR, `${bookId}.snapshot.json`);
             fs.writeFileSync(snapshotPath, JSON.stringify(bookData, null, 2));
             log(`💾 Book snapshot saved: ${bookId}`);
             return snapshotPath;
@@ -253,7 +253,7 @@ module.exports = function(redis, config, deps) {
 
     async function loadBookSnapshot(bookId) {
         try {
-            const snapshotPath = path.join(config.BOOKS_DIR || '/data/books', `${bookId}.snapshot.json`);
+            const snapshotPath = path.join(config.BOOKS_DIR, `${bookId}.snapshot.json`);
             if (!fs.existsSync(snapshotPath)) {
                 log(`⚠️ loadBookSnapshot: no snapshot found for ${bookId}`);
                 return null;

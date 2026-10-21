@@ -15,9 +15,12 @@ const fs = require('fs').promises;
 const syncFs = require('fs');
 const syncPath = require('path');
 
-const { lazyHostBinding } = require('../host/host-bindings');
+const { lazyHostBinding, hostBinding } = require('../host/host-bindings');
 // §32.30: former host requires resolve lazily through the host-bindings seam.
 const state = lazyHostBinding('state');
+// §32.30: the artifact root resolves through the composition-root seam at
+// call time (Stage 96: former hardcoded artifact root closed here).
+const artifactRoot = () => hostBinding('artifactRoot');
 // S-4: filename grammar composed from the canonical owner (bytes unchanged)
 const artifactNaming = require('@animastor/generation').artifactNaming;
 // S-2: registered stage list resolved from media registry
@@ -121,7 +124,7 @@ async function checkOrphanVideoState(redis, bookId, chapterId, sceneId) {
     }
 
     const buildId = resolveBookBuildId(bookId);
-    const videoPath = `/data/output/${buildId}/${bookId}_${chapterId}_${sceneId}.mp4`;
+    const videoPath = `${artifactRoot()}/${buildId}/${bookId}_${chapterId}_${sceneId}.mp4`;
 
     try {
         await fs.access(videoPath);
@@ -155,7 +158,7 @@ async function checkOrphanImageState(redis, bookId, chapterId, sceneId) {
     const buildId = resolveBookBuildId(bookId);
     const imageModule = lazyHostBinding('media.image');
     const imageInfo = imageModule.resolveCanonicalSceneImage(
-        '/data/output',
+        artifactRoot(),
         buildId,
         bookId,
         chapterId,

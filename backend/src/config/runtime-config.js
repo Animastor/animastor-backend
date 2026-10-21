@@ -57,8 +57,28 @@
 // ======================================================
 // PATHS
 // ======================================================
-const OUTPUT_DIR = process.env.OUTPUT_DIR || '/data/output';
-const BOOKS_DIR = process.env.BOOKS_DIR || '/data/books';
+// Единая точка настройки корня данных (Stage 96, план Stage 95 §2.2):
+//   DATA_ROOT — общий корень логических подкаталогов `books` и `output`
+//   (абсолютный путь или пусто). Приоритет: явный BOOKS_DIR / OUTPUT_DIR >
+//   вычисление из DATA_ROOT > прежний дефолт. Без переменных действуют
+//   /data/books и /data/output — байт-в-байт, как до Stage 96: контейнерные
+//   пути, на которые ссылаются сохранённые данные PG/Redis, не меняются.
+// Нормализация DATA_ROOT не меняет семантику существующих путей: трим,
+// только абсолютные значения, хвостовые слэши отбрасываются; всё прочное
+// (в т.ч. относительные пути и корень "/") считается пустым → прежние дефолты.
+/**
+ * @param {string | null | undefined} value
+ * @returns {string}
+ */
+function normalizeDataRoot(value) {
+    const raw = String(value == null ? '' : value).trim();
+    if (!raw.startsWith('/')) return '';
+    const stripped = raw.replace(/\/+$/, '');
+    return stripped === '' ? '' : stripped;
+}
+const DATA_ROOT = normalizeDataRoot(process.env.DATA_ROOT);
+const OUTPUT_DIR = process.env.OUTPUT_DIR || (DATA_ROOT ? `${DATA_ROOT}/output` : '/data/output');
+const BOOKS_DIR = process.env.BOOKS_DIR || (DATA_ROOT ? `${DATA_ROOT}/books` : '/data/books');
 const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
 
 // ======================================================
@@ -279,6 +299,7 @@ const GUEST_SESSION_TTL_DAYS = Number(process.env.GUEST_SESSION_TTL_DAYS ?? 30);
 // EXPORTS
 // ======================================================
 module.exports = {
+    DATA_ROOT,
     OUTPUT_DIR,
     BOOKS_DIR,
     HUB_URL,

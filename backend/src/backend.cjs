@@ -171,8 +171,9 @@ orchestrationPkg.bindHostModules({
     genScope: () => require('./services/gen-scope'),
     seams: () => require('./runtime/orchestration-seams'),
     // §32.29 step 4a — OUTPUT_DIR injection: the package no longer reads
-    // process.env; the host passes the artifact root (same value/fallback).
-    artifactRoot: () => config.OUTPUT_DIR || '/data/output',
+    // process.env; the host passes the artifact root. The default lives in
+    // ONE place — config/runtime-config (Stage 96: no local fallback).
+    artifactRoot: () => config.OUTPUT_DIR,
     // §32.29 step 4b — PW-2 workspace routing: scene-window's former lazy
     // gpu-dispatcher call, injected as an optional-load resolver — the host
     // wrapper preserves the exact optional-load/system-pool-fallback semantics.
