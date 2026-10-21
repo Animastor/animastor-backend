@@ -19,6 +19,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const config = require('../config/runtime-config');
 
 // NOTE: no direct postgres/database import here — SQL boundary (services must
 // go through repositories or an injected read-only query fn; the CLI wrapper
@@ -36,7 +37,7 @@ const ORPHAN_CLASS = {
  * READ-ONLY: issues SELECT statements only, via the injected query fn.
  * @param {object} opts
  * @param {Function} opts.query read-only query fn (SELECT …) → { rows }
- * @param {string} [opts.booksDir] canonical bundle dir (default /data/books)
+ * @param {string} [opts.booksDir] canonical bundle dir (default: config.BOOKS_DIR)
  * @returns {Promise<{
  *   booksWithoutScenes: Array<{book_id:string, assets:number, tasks:number, image_units:number, in_books:boolean, on_disk:boolean}>,
  *   scenesWithoutBooks: Array<{book_id:string, scenes:number, on_disk:boolean}>,
@@ -50,7 +51,7 @@ async function collectOrphanReport(opts) {
         throw new TypeError('collectOrphanReport: opts.query (read-only SELECT fn) is required');
     }
     const query = opts.query;
-    const booksDir = opts.booksDir || process.env.BOOKS_DIR || '/data/books';
+    const booksDir = opts.booksDir || config.BOOKS_DIR;
 
     // ── 1. identity sets ────────────────────────────────────────────────
     const booksRows = await query('SELECT book_id FROM books');

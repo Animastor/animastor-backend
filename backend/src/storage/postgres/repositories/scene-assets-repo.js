@@ -88,7 +88,7 @@ function notProvenNullDuplicateCondition(alias) {
 
 function buildIdFromArtifactPath(artifactPath) {
     if (typeof artifactPath !== 'string' || artifactPath.length === 0) return null;
-    const root = nodePath.resolve(runtimeConfig.OUTPUT_DIR || '/data/output');
+    const root = nodePath.resolve(runtimeConfig.OUTPUT_DIR);
     let resolved;
     try {
         resolved = nodePath.resolve(artifactPath);
