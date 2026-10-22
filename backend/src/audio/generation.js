@@ -310,6 +310,9 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
 
     // ── Generate audio ──
     let sentCount = 0;
+    // Stage 116 (D3): collect WHY the chunks were not sent so the caller can
+    // report a precise, retryable reason (bounded capacity deferral).
+    const deferState = { notSentReasons: new Map(), deferReason: null };
 
     if (isPureDialogue) {
         // ════════════════════════════════════════
@@ -319,7 +322,7 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
         if (!mergedWf) {
             helpers.warn(`Pure dialogue: buildMergedDialogueWorkflow returned null for ${bookId}/${chapterId}/${sceneId} — falling back to per-segment`);
             // Fallback to per-segment approach
-            sentCount = await sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildId, bookId, dispatchId, chapterId, sceneId);
+            sentCount = await sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildId, bookId, dispatchId, chapterId, sceneId, deferState);
         } else {
             // Create single chunk and send one workflow
             const { id } = await ensureMergedChunk(
@@ -338,6 +341,8 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
                 sentCount = 1;
                 helpers.log(`🎭 Merged dialogue dispatched: ${bookId}/${chapterId}/${sceneId} (${segList.length} segments in 1 workflow)`);
             } else {
+                // Stage 116 (D3): keep the reason for the capacity deferral.
+                deferState.notSentReasons.set(sendResult.reason || 'send_failed', 1);
                 helpers.warn(`Audio enqueue failed for merged dialogue ${id}: ${sendResult.error || 'unknown'}`);
                 // Cleanup the pending chunk
                 const chunkKey = `animastor:chunk:${id}`;
@@ -349,7 +354,7 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
         // ════════════════════════════════════════
         // MIXED SCENE: по-сегментно (narration + dialogue)
         // ════════════════════════════════════════
-        sentCount = await sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildId, bookId, dispatchId, chapterId, sceneId);
+        sentCount = await sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildId, bookId, dispatchId, chapterId, sceneId, deferState);
     }
 
     await redis.del(sceneLockKey);
@@ -359,7 +364,10 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
         generated: sentCount > 0,
         chunks: sentCount,
         expectedChunkCount: isPureDialogue ? 1 : segList.length,
-        reason: sentCount > 0 ? null : 'no_jobs_accepted'
+        reason: sentCount > 0 ? null : 'no_jobs_accepted',
+        // Stage 116 (D3): the precise reason (no live worker / everything
+        // already queued) for the orchestration layer's capacity deferral.
+        deferReason: sentCount > 0 ? null : (deferState.deferReason || null)
     };
 }
 
@@ -367,8 +375,12 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
  * Send audio per-segment (for mixed scenes or fallback).
  * Each segment gets its own workflow with speaker-based voice.
  */
-async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildId, bookId, dispatchId, chapterId, sceneId) {
+async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildId, bookId, dispatchId, chapterId, sceneId, deferState) {
     let sentCount = 0;
+    // Stage 116 (D3): why the chunks were not sent (shared with the caller
+    // through deferState so the reason survives the merged/per-segment split).
+    const notSentReasons = (deferState && deferState.notSentReasons) || new Map();
+    let lastDeferReason = (deferState && deferState.deferReason) || null;
 
     // ═══ BATCH DISPATCH ═══
     // Отправляем все narration чанки скопом, затем все dialogue.
@@ -514,8 +526,23 @@ async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildI
             sentCount++;
             helpers.log(`📤 Dispatched chunk ${chunkIndex}/${segList.length}: ${id} (${segment.segment_type}, padded=${!!segment.padded})`);
         } else {
-            helpers.warn(`Audio enqueue failed for ${id}: ${sendResult.error || 'unknown'}`);
+            // Stage 116 (D3): keep WHY the chunk was not sent - the
+            // orchestration layer turns it into a bounded capacity deferral
+            // instead of a fatal 'no_jobs_generated' cancel.
+            notSentReasons.set(sendResult.reason || 'send_failed', (notSentReasons.get(sendResult.reason || 'send_failed') || 0) + 1);
+            helpers.warn(`Audio enqueue failed for ${id}: ${sendResult.error || sendResult.reason || 'unknown'}`);
         }
+    }
+
+    if (sentCount === 0 && notSentReasons.size === 1) {
+        const only = [...notSentReasons.keys()][0];
+        const qidem = require('../helpers/queue-idempotency.cjs');
+        if (qidem.isCapacityReason(only)) lastDeferReason = only;
+    }
+
+    if (deferState) {
+        deferState.notSentReasons = notSentReasons;
+        deferState.deferReason = lastDeferReason;
     }
 
     return sentCount;

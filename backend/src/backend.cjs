@@ -519,8 +519,18 @@ const assistantPorts = createAssistantPorts({
 // ======================================================
 // ROUTES (each registers endpoints on app)
 // ======================================================
+// Stage 116 (D4): the queue-idempotency port (GPU-lane claim ownership).
+// Bound inside the composition slice — the architecture guard stubs every
+// require the slice contains (the stub map is the registry of the
+// composition root's module graph).
+const queueIdempotency = require('./helpers/queue-idempotency.cjs');
+
 const routeDeps = {
     config, state, audio, image, video, book, orchestrator, storage,
+    // Stage 116 (D4): queue-idempotency port — injected into the routes that
+    // release the claims of a cleared GPU lane (cancel / regenerate / cache
+    // teardown). The route layers must not require backend/src/helpers.
+    queueIdempotency,
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
@@ -537,6 +547,9 @@ const routeDeps = {
     bookDeletion: createBookDeletion({
         book, redis, config, storage,
         getAllChunks, getChunk, cleanBookRedisKeys,
+        // Stage 116 (D4): queue-idempotency port (injected — the Book Model
+        // layer must not depend on backend/src/helpers).
+        queueIdempotency,
         log: utils.log,
         setCancelFlag: (redisClient, id) => require('@animastor/orchestration').runtime.sceneWindow.setCancelFlag(redisClient, id),
         // Agent-session cancel port: the cascade delivers the cancellation
@@ -640,7 +653,7 @@ require('./routes/generation-routes.cjs')(app, redis, {
     ...routeDeps, taskHandler,
     // Stage 114 — queue idempotency port (injected, not required by the
     // route layer: the contour-route require sets are frozen).
-    queueIdempotency: require('./helpers/queue-idempotency.cjs'),
+    queueIdempotency,
 });
 // AI Assistant routes — registered through the @animastor/assistant
 // package API (the Assistant HTTP contour lives in

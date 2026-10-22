@@ -209,7 +209,7 @@ function params(overrides = {}) {
 }
 
 /** A dispatcher wired to a fake Redis + a stubbed PG routing layer. */
-function makeDispatcher({ redis, workspaceId = WS, hasPrivateWorker = true, liveWorkers = [] }) {
+function makeDispatcher({ redis, workspaceId = WS, hasPrivateWorker = true, liveWorkers = [], fetchImpl = null }) {
     const calls = [];
     const bookRepo = { getWorkspaceId: async () => workspaceId };
     const workerRepo = { hasActivePrivateWorkerOfType: async () => hasPrivateWorker };
@@ -223,10 +223,10 @@ function makeDispatcher({ redis, workspaceId = WS, hasPrivateWorker = true, live
     gpuDispatcher.clearRoutingCaches();
 
     const originalFetch = global.fetch;
-    global.fetch = async (url, opts) => {
+    global.fetch = fetchImpl || (async (url, opts) => {
         calls.push({ url, body: JSON.parse(opts.body) });
         return { ok: true, status: 200, json: async () => ({ ok: true }) };
-    };
+    });
 
     return {
         gpuDispatcher,
@@ -300,15 +300,21 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             expect(await qidem.getStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image')).to.equal(1);
         });
 
-        it('all jobs of one dispatch observe the SAME frozen epoch', async () => {
+        it('Stage 116 (D1): the epoch is read at the moment of EACH send (no per-dispatch freeze)', async () => {
             redis = new FakeRedis();
             await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image'); // epoch → 1
             const first = await qidem.resolveDispatchEpoch(redis, 'dispatch-A', BOOK, CHAPTER, SCENE, 'image');
-            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image'); // epoch → 2 (concurrent bump)
+            expect(first).to.equal(1);
+            // a bump between two sends of the SAME dispatch applies to the
+            // later send — that is exactly what makes a dirty-unit
+            // regeneration work on the FIRST attempt (Stage 115 D1).
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image'); // epoch → 2
             const second = await qidem.resolveDispatchEpoch(redis, 'dispatch-A', BOOK, CHAPTER, SCENE, 'image');
-            expect(first).to.equal(second);
-            const other = await qidem.resolveDispatchEpoch(redis, 'dispatch-B', BOOK, CHAPTER, SCENE, 'image');
-            expect(other).to.not.equal(first);
+            expect(second).to.equal(2);
+            expect(second).to.not.equal(first);
+            // the same send of the same job is stable while the epoch is stable
+            const again = await qidem.resolveDispatchEpoch(redis, 'dispatch-A', BOOK, CHAPTER, SCENE, 'image');
+            expect(again).to.equal(second);
         });
     });
 
@@ -491,25 +497,44 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             expect(ctx.calls).to.have.length(0);
         });
 
-        it('a failed POST releases the claim (crash between claim and enqueue)', async function () {
-            this.timeout(15000);   // the dispatcher retries 3× with a 1 s backoff
+        it('Stage 116 (D2): an AMBIGUOUS POST failure keeps the claim; a DEFINITIVE rejection releases it', async function () {
+            this.timeout(20000);   // the dispatcher retries 3× with a 1 s backoff
             redis = new FakeRedis();
             await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
-            ctx = makeDispatcher({ redis, workspaceId: null });
 
-            const originalFetch = global.fetch;
-            global.fetch = async () => { throw new Error('hub unreachable'); };
+            // (a) ambiguous: the hub MAY have taken the task → the claim stays
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => { throw new Error('hub unreachable (ambiguous)'); },
+            });
             const spec = {
                 job_id: jobId('iu-aaa'), params: params(), job_type: 'image',
                 build_id: BUILD, dispatch_id: 'dispatch-1',
             };
             const failed = await ctx.gpuDispatcher.sendUnified(spec);
             expect(failed.sent).to.equal(false);
-            global.fetch = originalFetch;
+            expect(failed.ambiguous).to.equal(true);
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key))).to.be.a('string');
+            ctx.restore();
 
-            // the claim must not block a later attempt
-            const retry = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'dispatch-2' });
-            expect(retry.sent).to.equal(true);
+            // (b) definitive: the hub answered with an HTTP error → nothing was
+            // enqueued → the claim is released and a later attempt may run
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: 'bad request' }) }),
+            });
+            const rejected = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'dispatch-1' });
+            expect(rejected.sent).to.equal(false);
+            expect(rejected.ambiguous).to.equal(false);
+            const key2 = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key2))).to.equal(null);
         });
 
         it('a completed task is not re-queued without an allowed retry', async () => {
@@ -525,11 +550,11 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             expect(first.sent).to.equal(true);
 
             // the worker result arrives → the backend settles the identity
-            const idemKey = await qidem.readTaskRef(redis, spec.job_id);
+            const idemKey = await qidem.readTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
             expect(idemKey).to.be.a('string');
             await qidem.markTaskDone(redis, idemKey);
             await qidem.releaseTask(redis, idemKey);
-            await qidem.forgetTaskRef(redis, spec.job_id);
+            await qidem.forgetTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
 
             const again = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'dispatch-2' });
             expect(again.sent).to.equal(false);
@@ -567,6 +592,168 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
         });
     });
 
+    // ── Stage 116 regressions (D1 / D2 / D4) ──────────────────────────────
+    describe('Stage 116: lifecycle regressions', () => {
+        it('D1: a dirty-unit regeneration is allowed on the FIRST attempt', async () => {
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+
+            const spec = { job_id: jobId('iu-dirty'), params: params(), job_type: 'image', build_id: BUILD };
+            // attempt 1 — the unit is generated and its result accepted
+            const first = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(first.sent).to.equal(true);
+            const idemKey = await qidem.readTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
+            await qidem.markTaskDone(redis, idemKey);
+            await qidem.releaseTask(redis, idemKey);
+            await qidem.forgetTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
+
+            // the user edits the unit → the stage epoch is bumped by the
+            // dirty branch (inside the dispatch)
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image');
+            // the epoch is read AT THE MOMENT of the send (no per-dispatch
+            // freeze) ⇒ the dirty unit gets a fresh identity right away
+            const retry = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D2' });
+            expect(retry.sent).to.equal(true);
+            expect(retry.reason).to.equal(undefined);
+            expect(ctx.calls).to.have.length(2);
+        });
+
+        it('D1: a unit sent earlier in the same dispatch does not freeze the epoch of a later one', async () => {
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+
+            const other = await ctx.gpuDispatcher.sendUnified({
+                job_id: jobId('iu-other'), params: params(), job_type: 'image',
+                build_id: BUILD, dispatch_id: 'D1',
+            });
+            expect(other.sent).to.equal(true);
+            // the dirty branch bumps the epoch between the two sends
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image');
+            const dirty = await ctx.gpuDispatcher.sendUnified({
+                job_id: jobId('iu-dirty'), params: params(), job_type: 'image',
+                build_id: BUILD, dispatch_id: 'D1',
+            });
+            expect(dirty.sent).to.equal(true);
+        });
+
+        it('D2: an AMBIGUOUS network failure keeps the claim (no duplicate)', async function () {
+            this.timeout(15000);
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => { throw new Error('socket hang up (ambiguous)'); },
+            });
+
+            const spec = { job_id: jobId('iu-amb'), params: params(), job_type: 'image', build_id: BUILD };
+            const failed = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(failed.sent).to.equal(false);
+            expect(failed.ambiguous).to.equal(true);
+
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key))).to.be.a('string');   // claim kept
+            const ttl = await redis.ttl(qidem.idemClaimKey(key));
+            expect(ttl).to.be.lessThan(qidem.IDEM_CLAIM_TTL_S);                  // shortened
+            expect(ttl).to.be.lessThanOrEqual(qidem.IDEM_AMBIGUOUS_CLAIM_TTL_S);
+        });
+
+        it('D2: a DEFINITIVE hub rejection releases the claim', async function () {
+            this.timeout(15000);
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: 'bad request' }) }),
+            });
+
+            const spec = { job_id: jobId('iu-bad'), params: params(), job_type: 'image', build_id: BUILD };
+            const failed = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(failed.sent).to.equal(false);
+            expect(failed.ambiguous).to.equal(false);
+
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key))).to.equal(null);   // released
+        });
+
+        it('D4: a cleared lane releases the claims of THAT scene only', async () => {
+            redis = new FakeRedis();
+            const sceneA = `${BOOK}_${CHAPTER}_${SCENE}_iu-a:iu_image`;
+            const sceneB = `${BOOK}_${CHAPTER}_sc-other_iu-b:iu_image`;
+            const otherBook = `other-book_${CHAPTER}_${SCENE}_iu-c:iu_image`;
+
+            const owned = [
+                { jobId: sceneA, book: BOOK, chapter: CHAPTER, scene: SCENE },
+                { jobId: sceneB, book: BOOK, chapter: CHAPTER, scene: 'sc-other' },
+                { jobId: otherBook, book: 'other-book', chapter: CHAPTER, scene: SCENE },
+            ];
+            for (const o of owned) {
+                const key = qidem.computeIdemKey({
+                    workspaceId: null, jobId: o.jobId, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+                });
+                await qidem.claimTask(redis, key);
+                await qidem.rememberTaskRef(redis, o.book, o.chapter, o.scene, o.jobId, key);
+                await qidem.markTaskDone(redis, key);
+            }
+
+            const released = await qidem.releaseClaimsForScene(redis, BOOK, CHAPTER, SCENE);
+            expect(released.released).to.equal(1);
+
+            const keyA = qidem.computeIdemKey({
+                workspaceId: null, jobId: sceneA, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            const keyB = qidem.computeIdemKey({
+                workspaceId: null, jobId: sceneB, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(keyA))).to.equal(null);   // released
+            expect(await redis.get(qidem.idemDoneKey(keyA))).to.equal(null);      // done marker released too
+            expect(await redis.get(qidem.idemClaimKey(keyB))).to.be.a('string'); // untouched
+        });
+
+        it('D4: a book-scoped release does not touch another book', async () => {
+            redis = new FakeRedis();
+            const mine = `${BOOK}_${CHAPTER}_${SCENE}_iu-a:iu_image`;
+            const theirs = `other-book_${CHAPTER}_${SCENE}_iu-b:iu_image`;
+            for (const o of [
+                { jobId: mine, book: BOOK },
+                { jobId: theirs, book: 'other-book' },
+            ]) {
+                const key = qidem.computeIdemKey({
+                    workspaceId: null, jobId: o.jobId, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+                });
+                await qidem.claimTask(redis, key);
+                await qidem.rememberTaskRef(redis, o.book, CHAPTER, SCENE, o.jobId, key);
+            }
+            const released = await qidem.releaseClaimsForBook(redis, BOOK);
+            expect(released.released).to.equal(1);
+            const keyTheirs = qidem.computeIdemKey({
+                workspaceId: null, jobId: theirs, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(keyTheirs))).to.be.a('string');
+        });
+
+        it('a pending claim is refreshed while the task stays queued (TTL cannot expire under a live task)', async () => {
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+            const spec = { job_id: jobId('iu-pending'), params: params(), job_type: 'image', build_id: BUILD };
+            await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            const before = await redis.ttl(qidem.idemClaimKey(key));
+            // the claim is refreshed on every suppressed re-dispatch
+            await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D2' });
+            const after = await redis.ttl(qidem.idemClaimKey(key));
+            expect(after).to.be.greaterThanOrEqual(before - 1);
+        });
+    });
+
     // ── result idempotency ───────────────────────────────────────────────
     describe('worker result idempotency', () => {
         it('a redelivered result is deduplicated independently of the dispatch_id', async () => {
@@ -584,10 +771,10 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             const key = qidem.computeIdemKey({
                 workspaceId: WS, jobId: jobId('iu-aaa'), jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
             });
-            await qidem.rememberTaskRef(redis, jobId('iu-aaa'), key);
-            expect(await qidem.readTaskRef(redis, jobId('iu-aaa'))).to.equal(key);
-            await qidem.forgetTaskRef(redis, jobId('iu-aaa'));
-            expect(await qidem.readTaskRef(redis, jobId('iu-aaa'))).to.equal(null);
+            await qidem.rememberTaskRef(redis, BOOK, CHAPTER, SCENE, jobId('iu-aaa'), key);
+            expect(await qidem.readTaskRef(redis, BOOK, CHAPTER, SCENE, jobId('iu-aaa'))).to.equal(key);
+            await qidem.forgetTaskRef(redis, BOOK, CHAPTER, SCENE, jobId('iu-aaa'));
+            expect(await qidem.readTaskRef(redis, BOOK, CHAPTER, SCENE, jobId('iu-aaa'))).to.equal(null);
         });
     });
 });

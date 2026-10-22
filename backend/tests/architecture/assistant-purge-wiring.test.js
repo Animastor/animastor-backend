@@ -92,6 +92,12 @@ function buildComposition({ sessionRepo, order }) {
                 return { IMAGE_PROMPT_MAX_CHARS: 4000 };
             case './middleware/workspace-ownership':
                 return { resolveWorkspaceForBook: async () => null };
+            // Stage 116 (D4): the queue-idempotency port (GPU-lane claims).
+            case './helpers/queue-idempotency.cjs':
+                return {
+                    releaseClaimsForBook: async () => ({ released: 0, done: 0, scanned: 0 }),
+                    releaseClaimsForScene: async () => ({ released: 0, done: 0, scanned: 0 }),
+                };
             default:
                 throw new Error(`composition slice required an unexpected module: ${spec}`);
         }

@@ -239,10 +239,12 @@ async function sendUnified(taskSpec) {
             };
         }
 
-        // (2) SINGLE PENDING ENTRY — the epoch is frozen per dispatch, so all
-        //     jobs of one dispatch share one identity; a re-dispatch with a
-        //     NEW dispatch_id computes the SAME idem_key and is therefore
-        //     suppressed instead of appending a duplicate lane entry.
+        // (2) SINGLE PENDING ENTRY — the epoch is read at the moment of the
+        //     actual send (Stage 116 / D1: a dirty-unit regeneration bumps the
+        //     epoch inside the dispatch and must take effect immediately).
+        //     A re-dispatch with a NEW dispatch_id computes the SAME idem_key
+        //     and is therefore suppressed instead of appending a duplicate
+        //     lane entry.
         const epoch = await qidem.resolveDispatchEpoch(
             redis, taskSpec.dispatch_id, parsed.bookId, parsed.chapterId, parsed.sceneId, stage
         );
@@ -257,6 +259,12 @@ async function sendUnified(taskSpec) {
         const guard = await qidem.guardEnqueue(redis, idemKey);
         if (!guard.allowed) {
             stats.jobs_suppressed_duplicate = (stats.jobs_suppressed_duplicate || 0) + 1;
+            // Stage 116: an entry that is already pending must STAY pending —
+            // refresh the claim so it cannot expire while the task is still
+            // queued in the lane (an expired claim would allow a second copy).
+            if (guard.reason === 'duplicate_pending' && idemKey) {
+                await qidem.claimTask(redis, idemKey);
+            }
             log(`Enqueue suppressed (${guard.reason}): ${payload.job_id} dispatch=${taskSpec.dispatch_id} idem=${idemKey.slice(0, 12)}`);
             return {
                 sent: false,
@@ -268,8 +276,9 @@ async function sendUnified(taskSpec) {
                 dispatchId: taskSpec.dispatch_id,
             };
         }
-        // Remember the identity so the result callback can find it.
-        await qidem.rememberTaskRef(redis, payload.job_id, idemKey);
+        // Remember the identity so the result callback can find it (the ref
+        // key carries the book/chapter/scene ownership structurally).
+        await qidem.rememberTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id, idemKey);
     }
 
     // T9: Include GPU_HUB_API_KEY header for authenticated requests
@@ -279,6 +288,15 @@ async function sendUnified(taskSpec) {
     }
 
     let lastError;
+    // Stage 116 (D2): a definitive rejection (the hub answered with an HTTP
+    // error) and an AMBIGUOUS outcome (timeout / connection reset / lost
+    // response) must be treated differently:
+    //   - definitive -> the hub did NOT take the task => release the claim;
+    //   - ambiguous  -> the hub MAY have taken the task => KEEP the claim
+    //     (releasing it would re-open the duplicate hole) but shorten its TTL
+    //     so a lost request cannot block the task for the full backstop.
+    let definitiveRejection = false;
+    let lastStatus = null;
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
             const controller = new AbortController();
@@ -292,7 +310,13 @@ async function sendUnified(taskSpec) {
             });
             clearTimeout(timeoutId);
 
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) {
+                lastStatus = res.status;
+                // 4xx = the hub rejected the task outright (nothing enqueued);
+                // 5xx = the hub failed while handling it (ambiguous).
+                if (res.status >= 400 && res.status < 500) definitiveRejection = true;
+                throw new Error(`HTTP ${res.status}`);
+            }
 
             log(`Task sent: ${payload.job_id} (${payload.job_type}), build: ${payload.build_id}, dispatch: ${payload.dispatch_id}, ws: ${workspaceId || (policyLane ? `policy:${policyLane.policy_id}` : '(system pool)')}`);
             // S-2: per-type counters keyed dynamically — no hardcoded media list
@@ -305,13 +329,29 @@ async function sendUnified(taskSpec) {
         }
     }
     stats.failed_jobs++;
-    // The hub never took the job → the pending claim must be released, so a
-    // later justified attempt is not blocked by a claim nobody holds.
     if (redis && idemKey) {
-        await qidem.releaseTask(redis, idemKey);
-        await qidem.forgetTaskRef(redis, payload.job_id);
+        if (definitiveRejection) {
+            // The hub answered with an HTTP error => nothing was enqueued => the
+            // pending claim must be released, so a later justified attempt is
+            // not blocked by a claim nobody holds.
+            await qidem.releaseTask(redis, idemKey);
+            await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id);
+        } else {
+            // Ambiguous: the hub may have taken the task. Keep the claim (a
+            // release would allow a duplicate) and shorten its TTL - the
+            // hub's result/error callback settles it sooner if the task was
+            // really taken.
+            await qidem.shortenClaimTtl(redis, idemKey);
+            stats.jobs_ambiguous_post = (stats.jobs_ambiguous_post || 0) + 1;
+        }
     }
-    return { sent: false, error: lastError ? lastError.message : 'max_retries', jobId: payload.job_id };
+    return {
+        sent: false,
+        error: lastError ? lastError.message : 'max_retries',
+        ambiguous: !definitiveRejection,
+        status: lastStatus,
+        jobId: payload.job_id,
+    };
 }
 
 async function send(job_id, workflow, type, build_id, dispatch_id) {

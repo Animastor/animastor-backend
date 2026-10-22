@@ -117,6 +117,9 @@ module.exports = function(app, redis, deps) {
         purgeAssistantForBook: deps.assistantPorts
             ? (bookId) => deps.assistantPorts.purgeForBook(bookId)
             : undefined,
+        // Stage 116 (D4): queue-idempotency port (injected, not required —
+        // the Book Model layer must not depend on backend/src/helpers).
+        queueIdempotency: deps.queueIdempotency,
         log,
     });
 };

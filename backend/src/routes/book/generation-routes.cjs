@@ -19,6 +19,9 @@ const { createAgentSessionControl } = require('../../services/agent-session-cont
 const mediaRegistry = require('@animastor/generation').mediaRegistry;
 
 module.exports = function(app, redis, deps) {
+    // Stage 116 (D4): queue-idempotency port (injected by the composition root
+    // — the contour-route require sets are frozen).
+    const { queueIdempotency } = deps;
     const {
         config, state, audio, image, video, book, orchestrator, storage,
         runtime,
@@ -314,6 +317,20 @@ module.exports = function(app, redis, deps) {
 
             // Also clear GPU hub stale jobs via HTTP endpoint (T4: владелец ключей — gpu-hub)
             try {
+                // Stage 116 (D4): the hub clears the LANE entries, but the
+                // backend-side pending claims of the same jobs would survive
+                // and suppress the next legitimate run of this book for the
+                // whole claim TTL. Release the claims of THIS book only
+                // (ownership-checked by the job_id prefix).
+                try {
+                    const qidem = queueIdempotency;
+                    if (qidem) {
+                        const released = await qidem.releaseClaimsForBook(redis, bookId);
+                        log(`[CANCEL-GENERATION] ${bookId}: released ${released.released} idempotency claim(s)`);
+                    }
+                } catch (claimErr) {
+                    console.warn(`[CANCEL-GENERATION] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
+                }
                 const hubUrl = `${config.HUB_URL}/queue/clear?book_id=${bookId}`;
                 const hubOptions = { method: 'DELETE', headers: {} };
                 if (config.GPU_HUB_API_KEY) {
@@ -594,6 +611,28 @@ module.exports = function(app, redis, deps) {
                 cleanPngUnitIds: Object.keys(cleanPngUnitIds).length > 0 ? cleanPngUnitIds : null,
                 readdToActiveIndex: false,
             });
+
+            // Stage 116 (D4): resetScenes cleared the hub lane entries of the
+            // cancelled dispatches; the backend-side pending claims of the
+            // SAME jobs must be released too, otherwise the regeneration
+            // would be suppressed as a duplicate (the claim outlives the lane
+            // entry it protected). Ownership-scoped per dirty scene.
+            try {
+                const qidem = queueIdempotency;
+                let releasedClaims = 0;
+                if (!qidem) throw new Error('queue idempotency port not wired');
+                for (const ds of filteredDirty) {
+                    const released = await qidem.releaseClaimsForScene(
+                        redis, bookId, ds.chapter_id, ds.scene_id
+                    );
+                    releasedClaims += released.released;
+                }
+                if (releasedClaims > 0) {
+                    log(`[REGENERATE] ${bookId}: released ${releasedClaims} idempotency claim(s) for the regenerated scenes`);
+                }
+            } catch (claimErr) {
+                console.warn(`[REGENERATE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
+            }
 
             // /regenerate is an execution command, not a content change. The
             // runtime reset above already marks the requested layers pending.

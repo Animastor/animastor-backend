@@ -49,18 +49,22 @@ const IDEM_CLAIM_PREFIX = 'animastor:idempotency:claim:';
 const IDEM_DONE_PREFIX = 'animastor:idempotency:done:';
 const IDEM_REF_PREFIX = 'animastor:idempotency:ref:';
 const STAGE_EPOCH_PREFIX = 'animastor:idempotency:stage-epoch:';
-const DISPATCH_EPOCH_PREFIX = 'animastor:idempotency:dispatch-epoch:';
 
 /** Backstop TTL for a pending claim (the claim is released on terminal state). */
 const IDEM_CLAIM_TTL_S = 24 * 3600;
+/**
+ * TTL for a claim whose POST outcome was AMBIGUOUS (the hub may have taken
+ * the task). The claim is kept — releasing it would re-open the duplicate
+ * hole — but it must not block the task for the full 24 h if the request was
+ * in fact lost. 3× the longest job timeout (30 min) is the bound.
+ */
+const IDEM_AMBIGUOUS_CLAIM_TTL_S = 90 * 60;
 /** TTL of the "task completed" marker (mirrors the artifact lifetime). */
 const IDEM_DONE_TTL_S = 7 * 24 * 3600;
 /** TTL of the ref that maps job_id → idem_key (result callback lookup). */
 const IDEM_REF_TTL_S = 24 * 3600;
 /** TTL of the per-stage generation epoch counter. */
 const STAGE_EPOCH_TTL_S = 30 * 24 * 3600;
-/** TTL of the per-dispatch frozen epoch (all jobs of one dispatch share it). */
-const DISPATCH_EPOCH_TTL_S = 3600;
 
 // ── canonical hashing ──────────────────────────────────────────────────────
 
@@ -145,28 +149,22 @@ async function bumpStageEpoch(redis, bookId, chapterId, sceneId, stage) {
 }
 
 /**
- * Epoch frozen for one dispatch. All jobs of a dispatch must observe the SAME
- * epoch, otherwise a concurrent bump would split the dispatch across two
- * identities. The first sender of a dispatch publishes the epoch; the rest
- * read it back (SETNX + GET converges concurrent senders).
+ * Read the CURRENT generation epoch of a stage at the moment of the actual
+ * send (Stage 116 / D1).
+ *
+ * Stage 114 froze the epoch per dispatch (`animastor:idempotency:dispatch-epoch:*`).
+ * That freeze hid a legitimate regeneration: the dirty-unit branch bumps the
+ * stage epoch INSIDE the dispatch, but a unit that had already been sent in
+ * the same dispatch froze the epoch at the OLD value, so the dirty unit
+ * computed the identity of its PREVIOUS (completed) attempt and was
+ * suppressed as `already_completed` — the regeneration needed a second
+ * attempt. Reading the epoch per send makes the bump effective immediately.
+ *
+ * Per-job identity is unaffected: every job resolves its epoch exactly once,
+ * so one job never sees two identities.
  */
 async function resolveDispatchEpoch(redis, dispatchId, bookId, chapterId, sceneId, stage) {
-    if (!redis || !dispatchId) return 0;
-    const key = `${DISPATCH_EPOCH_PREFIX}${dispatchId}`;
-    try {
-        const existing = await redis.get(key);
-        if (existing != null) {
-            const n = parseInt(existing, 10);
-            if (Number.isFinite(n)) return n;
-        }
-        const epoch = await getStageEpoch(redis, bookId, chapterId, sceneId, stage);
-        await redis.set(key, String(epoch), 'NX', 'EX', DISPATCH_EPOCH_TTL_S);
-        const settled = await redis.get(key);
-        const n = parseInt(settled, 10);
-        return Number.isFinite(n) ? n : epoch;
-    } catch (_) {
-        return 0;
-    }
+    return getStageEpoch(redis, bookId, chapterId, sceneId, stage);
 }
 
 // ── hub-side claim (single pending entry per logical task) ─────────────────
@@ -179,8 +177,15 @@ function idemDoneKey(idemKey) {
     return `${IDEM_DONE_PREFIX}${idemKey}`;
 }
 
-function idemRefKey(jobId) {
-    return `${IDEM_REF_PREFIX}${jobId}`;
+/**
+ * The ref key carries the OWNERSHIP structurally:
+ *   animastor:idempotency:ref:{bookId}:{chapterId}:{sceneId}:{jobId}
+ * A scene/book-scoped release is therefore a prefix scan over a key shape that
+ * can only belong to that book/scene — no job-id grammar has to be re-derived
+ * (and the ':' separator keeps a book_id that contains '_' unambiguous).
+ */
+function idemRefKey(bookId, chapterId, sceneId, jobId) {
+    return `${IDEM_REF_PREFIX}${bookId}:${chapterId}:${sceneId}:${jobId}`;
 }
 
 /**
@@ -204,21 +209,23 @@ async function releaseTask(redis, idemKey) {
 }
 
 /** Remember which idem_key belongs to a job_id (result callback lookup). */
-async function rememberTaskRef(redis, jobId, idemKey, ttlSeconds = IDEM_REF_TTL_S) {
-    if (!redis || !jobId || !idemKey) return;
-    try { await redis.set(idemRefKey(jobId), idemKey, 'EX', ttlSeconds); } catch (_) { /* best effort */ }
+async function rememberTaskRef(redis, bookId, chapterId, sceneId, jobId, idemKey, ttlSeconds = IDEM_REF_TTL_S) {
+    if (!redis || !jobId || !idemKey || !bookId || !chapterId || !sceneId) return;
+    try {
+        await redis.set(idemRefKey(bookId, chapterId, sceneId, jobId), idemKey, 'EX', ttlSeconds);
+    } catch (_) { /* best effort */ }
 }
 
 /** Read back the idem_key of a job_id (null when unknown/expired). */
-async function readTaskRef(redis, jobId) {
-    if (!redis || !jobId) return null;
-    try { return await redis.get(idemRefKey(jobId)); } catch (_) { return null; }
+async function readTaskRef(redis, bookId, chapterId, sceneId, jobId) {
+    if (!redis || !jobId || !bookId || !chapterId || !sceneId) return null;
+    try { return await redis.get(idemRefKey(bookId, chapterId, sceneId, jobId)); } catch (_) { return null; }
 }
 
 /** Forget the job_id → idem_key mapping (terminal state). */
-async function forgetTaskRef(redis, jobId) {
-    if (!redis || !jobId) return;
-    try { await redis.del(idemRefKey(jobId)); } catch (_) { /* best effort */ }
+async function forgetTaskRef(redis, bookId, chapterId, sceneId, jobId) {
+    if (!redis || !jobId || !bookId || !chapterId || !sceneId) return;
+    try { await redis.del(idemRefKey(bookId, chapterId, sceneId, jobId)); } catch (_) { /* best effort */ }
 }
 
 /**
@@ -258,6 +265,23 @@ async function guardEnqueue(redis, idemKey, ttlSeconds = IDEM_CLAIM_TTL_S) {
         return { allowed: false, reason: 'duplicate_pending' };
     }
     return { allowed: true, reason: 'enqueued' };
+}
+
+/**
+ * Reasons that mean "the GPU capacity is not there right now" — as opposed to
+ * "this particular job failed". Only these turn a dispatch into a bounded
+ * capacity deferral (Stage 116 / D3); every other reason keeps the historic
+ * 'no_jobs_sent' semantics (an immediate retry on the next tick).
+ */
+const CAPACITY_REASONS = new Set([
+    'no_worker_available',   // no live, type-compatible worker
+    'duplicate_pending',     // the job is already pending in the lane
+    'already_completed',     // the job is already done (artifact missing)
+]);
+
+/** Is a not-sent reason a capacity reason? */
+function isCapacityReason(reason) {
+    return CAPACITY_REASONS.has(String(reason || ''));
 }
 
 // ── worker liveness (execution capacity) ───────────────────────────────────
@@ -333,18 +357,89 @@ function resultDedupKey(jobId, buildId) {
     return `animastor:result-processed:${jobId}:${buildId}`;
 }
 
+/**
+ * Shorten the TTL of a claim whose POST outcome was ambiguous (the hub may
+ * have taken the task). The claim is KEPT (releasing it would re-open the
+ * duplicate hole) but it must not block the task for the full backstop TTL.
+ */
+async function shortenClaimTtl(redis, idemKey, ttlSeconds = IDEM_AMBIGUOUS_CLAIM_TTL_S) {
+    if (!redis || !idemKey) return false;
+    try {
+        await redis.expire(idemClaimKey(idemKey), ttlSeconds);
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+/**
+ * Release the claims (and completion markers) of the jobs that belong to a
+ * SCENE — used when the hub lane is cleared (cancel / regenerate) so a
+ * legitimate re-run is not suppressed as a duplicate (Stage 116 / D4).
+ *
+ * Ownership: the ref key embeds the job_id, and a job_id is
+ * `{bookId}_{chapterId}_{sceneId}_{unit}:{kind}` ⇒ a SCAN restricted to
+ * `animastor:idempotency:ref:{bookId}_{chapterId}_{sceneId}_*` can only match
+ * keys of THIS scene. Every matched ref is verified again against the same
+ * prefix before it is touched, and only the claim/done keys derived from that
+ * ref are removed — never a broad SCAN+DEL over the family.
+ */
+async function releaseClaimsForScene(redis, bookId, chapterId, sceneId) {
+    if (!redis || !bookId || !chapterId || !sceneId) return { released: 0, done: 0 };
+    return releaseClaimsByPrefix(redis, `${IDEM_REF_PREFIX}${bookId}:${chapterId}:${sceneId}:`);
+}
+
+/**
+ * Same as releaseClaimsForScene, but for a whole book (cancel / deletion).
+ * Ownership: `animastor:idempotency:ref:{bookId}_*` — a book_id may contain
+ * '_', so the matched ref is verified to start with `{bookId}_` before it is
+ * touched.
+ */
+async function releaseClaimsForBook(redis, bookId) {
+    if (!redis || !bookId) return { released: 0, done: 0 };
+    return releaseClaimsByPrefix(redis, `${IDEM_REF_PREFIX}${bookId}:`);
+}
+
+async function releaseClaimsByPrefix(redis, prefix) {
+    const summary = { released: 0, done: 0, scanned: 0 };
+    if (!redis || !prefix) return summary;
+    let cursor = '0';
+    try {
+        do {
+            const [next, keys] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 200);
+            cursor = next;
+            for (const key of keys || []) {
+                summary.scanned++;
+                // Ownership check (structural): the key must belong to the
+                // requested book/scene. A ref of another book/scene is never
+                // touched — there is no broad SCAN+DEL over the family.
+                if (!key.startsWith(prefix)) continue;
+                const idemKey = await redis.get(key);
+                if (!idemKey) continue;
+                await redis.del(idemClaimKey(idemKey));
+                await redis.del(idemDoneKey(idemKey));
+                await redis.del(key);
+                summary.released++;
+                summary.done++;
+            }
+        } while (cursor !== '0');
+    } catch (_) {
+        /* best effort — a missed release only delays a re-run */
+    }
+    return summary;
+}
+
 module.exports = {
     // constants
     IDEM_CLAIM_PREFIX,
     IDEM_DONE_PREFIX,
     IDEM_REF_PREFIX,
     STAGE_EPOCH_PREFIX,
-    DISPATCH_EPOCH_PREFIX,
     IDEM_CLAIM_TTL_S,
+    IDEM_AMBIGUOUS_CLAIM_TTL_S,
     IDEM_DONE_TTL_S,
     IDEM_REF_TTL_S,
     STAGE_EPOCH_TTL_S,
-    DISPATCH_EPOCH_TTL_S,
     // hashing / identity
     canonicalJson,
     sha256,
@@ -361,12 +456,19 @@ module.exports = {
     idemRefKey,
     claimTask,
     releaseTask,
+    shortenClaimTtl,
     rememberTaskRef,
     readTaskRef,
     forgetTaskRef,
     markTaskDone,
     isTaskDone,
     guardEnqueue,
+    // ownership-scoped release (cancel / regenerate / deletion)
+    releaseClaimsForScene,
+    releaseClaimsForBook,
+    // capacity classification
+    CAPACITY_REASONS,
+    isCapacityReason,
     // worker liveness
     listAliveWorkers,
     hasLiveExecutorForLane,

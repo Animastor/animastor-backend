@@ -518,11 +518,13 @@ module.exports = function(app, redis, deps) {
                 // result is.
                 try {
                     const qidem = queueIdempotency;
-                    const idemKey = qidem ? await qidem.readTaskRef(redis, job_id) : null;
+                    const idemKey = qidem
+                        ? await qidem.readTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id)
+                        : null;
                     if (idemKey) {
                         await qidem.markTaskDone(redis, idemKey);
                         await qidem.releaseTask(redis, idemKey);
-                        await qidem.forgetTaskRef(redis, job_id);
+                        await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id);
                         log(`[GPU RESULT] Idempotency settled for ${job_id} (idem=${idemKey.slice(0, 12)})`);
                     }
                 } catch (idemErr) {
@@ -607,10 +609,12 @@ module.exports = function(app, redis, deps) {
             // bump the retry would be suppressed as a duplicate.
             try {
                 const qidem = queueIdempotency;
-                const idemKey = qidem ? await qidem.readTaskRef(redis, job_id) : null;
+                const idemKey = qidem
+                    ? await qidem.readTaskRef(redis, bookId, chapterId, sceneId, job_id)
+                    : null;
                 if (idemKey) {
                     await qidem.releaseTask(redis, idemKey);
-                    await qidem.forgetTaskRef(redis, job_id);
+                    await qidem.forgetTaskRef(redis, bookId, chapterId, sceneId, job_id);
                 }
                 if (qidem) {
                     await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, stage);

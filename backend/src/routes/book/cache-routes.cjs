@@ -113,6 +113,20 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 console.warn(`[CACHE] Assistant data cleanup failed: ${assistantErr.message}`);
             }
 
+            // Stage 116 (D4): the hub lane entries of this book are cleared
+            // below; the backend-side pending claims must go with them,
+            // otherwise the next run of the same book would be suppressed as a
+            // duplicate until the claim TTL expires.
+            try {
+                const qidem = ctx.queueIdempotency;
+                if (qidem) {
+                    const released = await qidem.releaseClaimsForBook(redis, bookId);
+                    log('[CACHE] Released', released.released, 'idempotency claim(s) for', bookId);
+                }
+            } catch (claimErr) {
+                console.warn(`[CACHE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
+            }
+
             // Clear gpu-hub queue
             try {
                 const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';

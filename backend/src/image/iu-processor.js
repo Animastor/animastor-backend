@@ -354,6 +354,10 @@ async function generateSceneIUImages(redis, sceneData, loadedBook, buildId, book
     let sentCount = 0;
     let cachedCount = 0;
     let skippedCount = 0;
+    // Stage 116 (D3): WHY nothing was sent matters — the orchestration layer
+    // turns it into a bounded capacity deferral instead of a fatal
+    // 'no_jobs_sent' cancel (which used to spin on every 5 s scheduler tick).
+    const notSentReasons = new Map();
     for (let uIdx = 0; uIdx < units.length; uIdx++) {
         const result = await processSingleIU(
             redis,
@@ -373,8 +377,20 @@ async function generateSceneIUImages(redis, sceneData, loadedBook, buildId, book
         if (result.sent) sentCount++;
         if (result.cached) cachedCount++;
         if (result.skipped) skippedCount++;
+        if (!result.sent && !result.cached && !result.skipped && result.reason) {
+            notSentReasons.set(result.reason, (notSentReasons.get(result.reason) || 0) + 1);
+        }
     }
-    return { sentCount, cachedCount, skippedCount, total: units.length };
+    // A single dominant CAPACITY reason across all not-sent units is the
+    // useful signal. Every other reason keeps the historic semantics
+    // ('no_jobs_sent' ⇒ immediate retry on the next tick).
+    let deferReason = null;
+    if (sentCount === 0 && notSentReasons.size === 1) {
+        const only = [...notSentReasons.keys()][0];
+        const qidem = require('../helpers/queue-idempotency.cjs');
+        if (qidem.isCapacityReason(only)) deferReason = only;
+    }
+    return { sentCount, cachedCount, skippedCount, total: units.length, deferReason };
 }
 
 module.exports = {

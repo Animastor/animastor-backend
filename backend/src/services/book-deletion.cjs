@@ -200,6 +200,19 @@ function createBookDeletion(deps) {
             console.warn(`[DELETE-BOOK] Assistant data cleanup failed: ${assistantErr.message}`);
         }
 
+        // Stage 116 (D4): the hub lane entries of this book are removed
+        // below; the backend-side pending claims must go with them, otherwise
+        // a later run of the same book would be suppressed as a duplicate.
+        try {
+            const qidem = deps.queueIdempotency;
+            if (qidem) {
+                const released = await qidem.releaseClaimsForBook(redis, bookId);
+                console.log(`[DELETE-BOOK] ${bookId}: released ${released.released} idempotency claim(s)`);
+            }
+        } catch (claimErr) {
+            console.warn(`[DELETE-BOOK] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
+        }
+
         // ── 6. GPU-hub queue clear (best-effort, external runtime) ──
         try {
             const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
