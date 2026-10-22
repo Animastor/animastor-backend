@@ -388,6 +388,7 @@ async function tick(redis, loadedBooks = {}) {
             throttled: 0,
             skipped: 0,
             completed: 0,
+            deferred: 0,
             errors: []
         };
 
@@ -466,6 +467,10 @@ async function tick(redis, loadedBooks = {}) {
                     summary.skipped++;
                 } else if (result.throttled > 0) {
                     summary.throttled += result.throttled;
+                } else if (result.deferred > 0) {
+                    // Stage 118 (M9): a bounded deferral is a normal, quiet
+                    // state — it must not pollute the tick error list.
+                    summary.deferred += result.deferred;
                 } else if (result.reason === 'backpressure' || result.reason === 'throttled') {
                     summary.throttled++;
                 } else if (result.success) {
@@ -480,7 +485,7 @@ async function tick(redis, loadedBooks = {}) {
         }
 
         log(`=== TICK COMPLETE ===`);
-        log(`Active: ${summary.totalActive}, Dispatched: ${summary.dispatched}, Skipped: ${summary.skipped}, Throttled: ${summary.throttled}, Completed: ${summary.completed}`);
+        log(`Active: ${summary.totalActive}, Dispatched: ${summary.dispatched}, Skipped: ${summary.skipped}, Throttled: ${summary.throttled}, Completed: ${summary.completed}, Deferred: ${summary.deferred}`);
 
         if (summary.errors.length > 0) {
             log(`Errors: ${summary.errors.length}`);
@@ -572,6 +577,9 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
     let dispatched = 0;
     let throttled = 0;
     let anyCompleted = false;
+    // Stage 118 (M9): bounded deferrals are counted separately — they are
+    // neither a dispatch nor an error.
+    let deferred = 0;
     const failures = [];
 
     // Dispatch ALL eligible stages in this tick.
@@ -595,6 +603,12 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
             // Stage finished inside the executor (already_done / cache_hit /
             // no_segments) — not a failure, nothing to dispatch.
             anyCompleted = true;
+        } else if (result.deferred) {
+            // Stage 118 (M9): a bounded deferral is NOT an error — nothing
+            // happened, the stage is waiting for capacity (or is already
+            // idempotently complete). Reporting it as a failure filled the
+            // tick summary with "errors" 12 times per minute per scene.
+            deferred++;
         } else {
             // Stage 50: раньше per-stage отказ (circuit_open, retry budget,
             // lease, generating_transition_failed, …) молча проглатывался и
@@ -606,6 +620,9 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
 
     if (dispatched > 0) {
         return { dispatched, throttled, stages: stages.length };
+    }
+    if (deferred > 0 && failures.length === 0) {
+        return { dispatched: 0, throttled, deferred, stages: stages.length, success: true, reason: 'deferred' };
     }
     if (failures.length > 0) {
         return { dispatched: 0, throttled, stages: stages.length, success: false, reason: failures.join(', ') };

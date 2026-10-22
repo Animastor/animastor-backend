@@ -13,6 +13,10 @@ const chunks = lazyHostBinding('media.audio.chunks');
 // orchestrator never requires gpu-dispatcher or the workflow connector.
 const provider = require('@animastor/generation').comfyuiProvider;
 const runtimeScheduler = require('../runtime/runtime-scheduler');
+// Stage 118 (M3): the shared outcome taxonomy — the dispatch engine (runtime
+// tier) and the stage executors (orchestration tier) must classify a
+// "nothing was enqueued" outcome IDENTICALLY.
+const { classifyNotSentReasons } = require('../runtime/dispatch-outcomes');
 // O-2: persistence arrives ONLY through the PersistencePort (host adapter:
 // storage/runtime-persistence-adapter) — the scene-assets repository left
 // this file. SQL lives host-side.
@@ -300,9 +304,17 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
         const completion = await completeStage(redis, bookId, chapterId, sceneId, 'audio', buildId, dispatchId);
         return { dispatched: false, jobs: 0, completed: completion.completed, reason: 'no_segments' };
     } else {
-        // Stage 116 (D3): nothing was enqueued — carry the precise reason
-        // (no live worker / everything already queued) so the dispatch engine
-        // can apply a bounded capacity deferral instead of a fatal cancel.
+        // Stage 116 (D3) / Stage 118 (B3, M3): nothing was enqueued — carry
+        // the precise reason (no live worker / everything already queued /
+        // ambiguous POST) so the dispatch engine can apply a BOUNDED deferral
+        // instead of a fatal cancel.
+        //
+        // Stage 118 (B3): the merged (pure-dialogue) path and the per-segment
+        // path must produce the SAME classification — the merged branch used
+        // to leave the reason empty, so a pure-dialogue scene kept the
+        // 5-second retry loop. `deferReason` is computed by the host (audio
+        // generation) for EVERY path; the fallback below keeps the historic
+        // 'no_jobs_generated' semantics when the host could not classify it.
         const deferReason = (result && result.reason === 'no_jobs_accepted' && result.deferReason)
             ? result.deferReason
             : 'no_jobs_generated';
@@ -386,11 +398,11 @@ async function executeImageDispatch(redis, scene, loadedBook, buildId, dispatchI
         return { dispatched: true, jobs: jobsSent, reason: null };
     }
 
-    // Stage 116 (D3): the executor sent NOTHING. That is not a lost task and
-    // not a fatal cancellation — it is a capacity deferral with a bounded
-    // retry/backoff (the dispatch engine owns the deferral window). The
-    // precise reason (no live worker / everything already queued) is carried
-    // through so the deferral can be classified.
+    // Stage 116 (D3) / Stage 118 (M3): the executor sent NOTHING. That is
+    // not a lost task and not a fatal cancellation — it is a bounded
+    // deferral. The precise reason (no live worker / everything already
+    // queued / ambiguous POST) is carried through so the deferral can be
+    // classified by the shared taxonomy (runtime/dispatch-outcomes).
     if (genResult && genResult.deferReason) {
         warn(`IMAGE_DISPATCH: ${bookId}/${chapterId}/${sceneId} — nothing enqueued (${genResult.deferReason}); deferring`);
         return { dispatched: false, jobs: 0, reason: genResult.deferReason, retryable: true };
@@ -570,9 +582,9 @@ async function executeVideoDispatch(redis, scene, loadedBook, buildId, dispatchI
     await videoOrch.setWaitingChunks(redis, bookId, chapterId, sceneId);
 
     let sentCount = 0;
-    // Stage 116 (D3): collect WHY a job was not sent — the dominant reason
-    // becomes the deferral reason (bounded capacity backoff) instead of the
-    // generic 'send_failed'.
+    // Stage 116 (D3) / Stage 118 (M3): collect WHY a job was not sent — the
+    // dominant reason becomes the deferral reason (bounded backoff) instead
+    // of the generic 'send_failed'.
     const notSentReasons = new Map();
     for (const jobSpec of jobsToSend) {
         try {
@@ -595,15 +607,11 @@ async function executeVideoDispatch(redis, scene, loadedBook, buildId, dispatchI
         return { dispatched: true, jobs: sentCount, reason: null };
     }
 
-    // Only a single CAPACITY reason becomes a specific deferral reason; every
-    // other case keeps the historic 'send_failed' semantics.
-    let deferReason = 'send_failed';
-    if (notSentReasons.size === 1) {
-        const only = [...notSentReasons.keys()][0];
-        if (only === 'no_worker_available' || only === 'duplicate_pending' || only === 'already_completed') {
-            deferReason = only;
-        }
-    }
+    // Stage 116 (D3) / Stage 118 (M3): the shared taxonomy decides whether
+    // the outcome is a bounded deferral. EVERY reason must be deferrable —
+    // a single real failure (send_failed) keeps the historic 'send_failed'
+    // semantics (an immediate retry on the next tick).
+    const deferReason = classifyNotSentReasons(notSentReasons) || 'send_failed';
     warn(`VIDEO_DISPATCH: ${bookId}/${chapterId}/${sceneId}: nothing enqueued (${deferReason})`);
     return { dispatched: false, jobs: 0, reason: deferReason, retryable: true };
 }

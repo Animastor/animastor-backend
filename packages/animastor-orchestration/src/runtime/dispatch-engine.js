@@ -731,7 +731,8 @@ async function shouldSkipDispatch(redis, bookId, chapterId, sceneId, stage) {
  * - { dispatched: false, reason, skip: true/false }
  */
 // ======================================================
-// STAGE 116 (D3) — CAPACITY DEFERRAL (bounded retry/backoff)
+// STAGE 116 (D3) — BOUNDED DEFERRAL (capacity backoff)
+// STAGE 118 (audit 117 · M2/M4) — taxonomy + force handling
 // ======================================================
 // The scheduler ticks every SCHEDULER_TICK_MS (5 s). A stage whose jobs could
 // not be enqueued (no live compatible worker, or every job already pending in
@@ -745,29 +746,63 @@ async function shouldSkipDispatch(redis, bookId, chapterId, sceneId, stage) {
 //     no journal event) ⇒ a deferred stage costs one Redis GET per tick;
 //   • the stage stays PENDING and stays in the active index ⇒ recoverable;
 //   • an explicit cancel clears it (the user asked for the work to run).
+//
+// Stage 118 — three corrections of the Stage 116 implementation:
+//
+// 1. The reason taxonomy now distinguishes CAPACITY from IDEMPOTENT
+//    suppression ('already_completed' is NOT a capacity gap — audit 117 · M4).
+//    The idempotent bucket gets its own, much longer window: the stage is not
+//    "waiting for capacity", it is "already done" — retrying it every minute
+//    for a week is not a fix.
+// 2. `force=true` NO LONGER BYPASSES the deferral (audit 117 · M2). The
+//    force-dispatch flag lives for FORCE_DISPATCH_TTL_S (120 s) and is set for
+//    the WHOLE book by /regenerate, so bypassing the backoff there restored
+//    the very dispatch/cancel churn D3 was built to remove (≈24 full attempts
+//    per scene per regeneration). The explicit intent (a regeneration, a
+//    cancel) clears the deferral at ITS call site — the backoff then applies
+//    again after the next capacity failure.
+// 3. The deferral key encodes its components (audit 117 · M1): a book_id may
+//    contain ':' (the bundle book_id is client-controlled), so a raw
+//    ':'-joined key is ambiguous — `a:b` + chapter `c` collides with book
+//    `a` + chapter `b`.
 const DEFERRED_STAGE_KEY_PREFIX = 'animastor:runtime:deferred:';
-const DEFERRED_STAGE_TTL_S = 60;   // bounded retry/backoff window
+const DEFERRED_STAGE_TTL_S = 60;        // capacity backoff window (bounded retry)
+const DEFERRED_IDEMPOTENT_TTL_S = 900;  // idempotent-suppression window (15 min)
 
 /**
  * Executor outcomes that mean "nothing could be enqueued — retry later".
  *
- * ONLY the capacity outcomes are deferrable. The generic 'no_jobs_sent' /
- * 'no_jobs_generated' / 'send_failed' outcomes keep their historic contract
- * (retry on the next tick — the audit-6929ba5 regression tests rely on it):
- * deferring them would change the meaning of an executor result that does not
- * necessarily mean "no capacity".
+ * The taxonomy lives in ./dispatch-outcomes (shared with the stage
+ * executors). The generic 'no_jobs_sent' / 'no_jobs_generated' /
+ * 'send_failed' outcomes keep their historic contract (retry on the next
+ * tick — the audit-6929ba5 regression tests rely on it): deferring them
+ * would change the meaning of an executor result that does not necessarily
+ * mean "no capacity".
  */
-const DEFERRABLE_OUTCOMES = new Set([
-    'no_worker_available',   // no live, type-compatible worker
-    'duplicate_pending',     // every job is already pending in the lane
-    'already_completed',     // every job is already done (artifact missing)
-]);
+const {
+    CAPACITY_OUTCOMES,
+    IDEMPOTENT_OUTCOMES,
+    isCapacityOutcome,
+    isIdempotentOutcome,
+    isDeferrableOutcome,
+} = require('./dispatch-outcomes');
 
-function deferredStageKey(bookId, chapterId, sceneId, stage) {
-    return `${DEFERRED_STAGE_KEY_PREFIX}${bookId}:${chapterId}:${sceneId}:${stage}`;
+/**
+ * Encode one key component so that ':' (and the glob metacharacters) can
+ * never be mistaken for the separator. encodeURIComponent escapes ':' as
+ * '%3A' and leaves '_' readable.
+ */
+function encodeKeyComponent(value) {
+    return encodeURIComponent(String(value == null ? '' : value));
 }
 
-/** Is this stage currently deferred (capacity backoff active)? */
+function deferredStageKey(bookId, chapterId, sceneId, stage) {
+    return `${DEFERRED_STAGE_KEY_PREFIX}`
+        + `${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}`
+        + `:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(stage)}`;
+}
+
+/** Is this stage currently deferred (backoff active)? */
 async function isStageDeferred(redis, bookId, chapterId, sceneId, stage) {
     try {
         const value = await redis.get(deferredStageKey(bookId, chapterId, sceneId, stage));
@@ -777,10 +812,14 @@ async function isStageDeferred(redis, bookId, chapterId, sceneId, stage) {
     }
 }
 
-/** Defer a stage for the bounded backoff window. */
-async function deferStage(redis, bookId, chapterId, sceneId, stage) {
+/**
+ * Defer a stage for the bounded backoff window.
+ * @param {number} [ttlSeconds] — the capacity window by default; the
+ *        idempotent window for an 'already_completed' suppression.
+ */
+async function deferStage(redis, bookId, chapterId, sceneId, stage, ttlSeconds = DEFERRED_STAGE_TTL_S) {
     try {
-        await redis.set(deferredStageKey(bookId, chapterId, sceneId, stage), '1', 'EX', DEFERRED_STAGE_TTL_S);
+        await redis.set(deferredStageKey(bookId, chapterId, sceneId, stage), '1', 'EX', ttlSeconds);
     } catch (_) { /* best effort — a missed deferral only costs one extra attempt */ }
 }
 
@@ -791,9 +830,56 @@ async function clearStageDeferral(redis, bookId, chapterId, sceneId, stage) {
     } catch (_) { /* best effort */ }
 }
 
-/** Is an executor outcome a capacity deferral (retryable, not fatal)? */
-function isDeferrableOutcome(reason) {
-    return DEFERRABLE_OUTCOMES.has(String(reason || ''));
+/**
+ * Clear the capacity backoff of EVERY stage of a book.
+ *
+ * Stage 118 (audit 117 · M2/B4): the explicit intents — a cancel, a cache
+ * teardown, a deletion — ask for the work to run again, so the backoff must
+ * not survive them. The deferral key is owned by this package, so the
+ * package clears it (the host only injects the port).
+ *
+ * @returns {Promise<number>} the number of cleared deferrals.
+ */
+async function clearDeferralsForBook(redis, bookId) {
+    if (!redis || !bookId) return 0;
+    return clearDeferralsByPrefix(redis, `${DEFERRED_STAGE_KEY_PREFIX}${encodeKeyComponent(bookId)}:`);
+}
+
+/**
+ * Clear the capacity backoff of every stage of one scene (an explicit
+ * regeneration of that scene).
+ */
+async function clearDeferralsForScene(redis, bookId, chapterId, sceneId) {
+    if (!redis || !bookId || !chapterId || !sceneId) return 0;
+    return clearDeferralsByPrefix(redis, `${DEFERRED_STAGE_KEY_PREFIX}`
+        + `${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:`);
+}
+
+async function clearDeferralsByPrefix(redis, prefix) {
+    let cleared = 0;
+    if (!redis || !prefix) return cleared;
+    let cursor = '0';
+    try {
+        do {
+            const [next, keys] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 200);
+            cursor = next;
+            for (const key of keys || []) {
+                if (!key.startsWith(prefix)) continue;
+                await redis.del(key);
+                cleared++;
+            }
+        } while (cursor !== '0');
+    } catch (_) { /* best effort */ }
+    return cleared;
+}
+
+/**
+ * The backoff window that fits the outcome: a capacity gap retries in
+ * minutes, an idempotent suppression (already complete) in quarters of an
+ * hour — it is not waiting for capacity, it is simply done.
+ */
+function deferralWindowFor(reason) {
+    return isIdempotentOutcome(reason) ? DEFERRED_IDEMPOTENT_TTL_S : DEFERRED_STAGE_TTL_S;
 }
 
 async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBook, buildId, options = {}) {
@@ -801,7 +887,7 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
     const dispatchId = generateDispatchToken();
 
     // ─────────────────────────────────────────────────────────────────────
-    // Stage 116 (D3) — CAPACITY DEFERRAL (bounded retry/backoff)
+    // Stage 116 (D3) / Stage 118 (M2) — BOUNDED DEFERRAL (retry/backoff)
     // ─────────────────────────────────────────────────────────────────────
     // A stage that could not enqueue anything (no live compatible worker, or
     // every job already pending in the lane) must NOT be retried on every
@@ -814,8 +900,14 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
     // Redis GET per tick. The stage stays PENDING and stays in the active
     // index ⇒ it is recoverable: as soon as the deferral window expires (or a
     // worker appears) the next tick dispatches it again.
-    if (!force && await isStageDeferred(redis, bookId, chapterId, sceneId, stage)) {
-        return { dispatched: false, reason: 'deferred_capacity', retryable: true, dispatchId };
+    //
+    // Stage 118 (M2): the check applies in FORCE mode as well. The
+    // force-dispatch flag is per BOOK and lives for 120 s, so bypassing the
+    // backoff there reproduced the very churn D3 removes (≈24 full attempts
+    // per scene per /regenerate). An EXPLICIT intent (a regeneration, a
+    // cancel) clears the deferral at its own call site.
+    if (await isStageDeferred(redis, bookId, chapterId, sceneId, stage)) {
+        return { dispatched: false, reason: 'deferred_capacity', retryable: true, deferred: true, dispatchId };
     }
 
     log(`DISPATCH_REQUEST: ${bookId}/${chapterId}/${sceneId}:${stage}${force ? ' (force=true)' : ''}`);
@@ -993,11 +1085,16 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
                 log(`DISPATCH_SKIPPED: ${bookId}/${chapterId}/${sceneId}:${stage} - ${result.reason || 'already_done'}`);
                 if (!result.completed) {
                     // Stage 116 (D3): a stage that enqueued NOTHING is not a
-                    // lost task and not a fatal cancellation — it is a
-                    // capacity deferral. Remember it for a bounded window so
-                    // the scheduler's 5 s tick does not spin.
+                    // lost task and not a fatal cancellation — it is a bounded
+                    // deferral. Remember it for a bounded window so the
+                    // scheduler's 5 s tick does not spin.
+                    //
+                    // Stage 118 (M4): the window depends on the bucket — a
+                    // capacity gap retries within a minute, an idempotent
+                    // suppression ('already_completed') is NOT waiting for
+                    // capacity and gets the long window.
                     if (isDeferrableOutcome(result.reason)) {
-                        await deferStage(redis, bookId, chapterId, sceneId, stage);
+                        await deferStage(redis, bookId, chapterId, sceneId, stage, deferralWindowFor(result.reason));
                     }
                     await finalizeDispatch(redis, bookId, chapterId, sceneId, stage, {
                         outcome: 'cancelled',
@@ -1017,7 +1114,16 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
                 // Cancelled finalize does not touch the circuit breaker — release
                 // the test permit here so a half-open circuit can keep recovering.
                 await releaseTestPermit();
-                return { dispatched: false, dispatchId, reason: result.reason || 'already_done', retryable: isDeferrableOutcome(result.reason), result };
+                return {
+                    dispatched: false,
+                    dispatchId,
+                    reason: result.reason || 'already_done',
+                    retryable: isDeferrableOutcome(result.reason),
+                    // Stage 118 (M9): the caller (scheduler) must be able to
+                    // tell "nothing happened, try later" from a real error.
+                    deferred: isDeferrableOutcome(result.reason),
+                    result,
+                };
             }
 
             // The stage really dispatched — capacity deferral is over.
@@ -1882,15 +1988,26 @@ module.exports = {
     LEASE_TTLS,
     QUOTAS,
 
-    // Stage 116 (D3): capacity deferral (bounded retry/backoff) — the stage
-    // is not retried on every 5 s scheduler tick while it cannot enqueue.
+    // Stage 116 (D3) / Stage 118 (M2/M4): bounded deferral (retry/backoff) —
+    // the stage is not retried on every 5 s scheduler tick while it cannot
+    // enqueue. Stage 118: the capacity and the idempotent bucket have their
+    // own windows, and the taxonomy is shared with the stage executors.
     DEFERRED_STAGE_KEY_PREFIX,
     DEFERRED_STAGE_TTL_S,
+    DEFERRED_IDEMPOTENT_TTL_S,
     deferredStageKey,
     isStageDeferred,
     deferStage,
     clearStageDeferral,
+    clearDeferralsForBook,
+    clearDeferralsForScene,
+    deferralWindowFor,
+    encodeKeyComponent,
     isDeferrableOutcome,
+    isCapacityOutcome,
+    isIdempotentOutcome,
+    CAPACITY_OUTCOMES,
+    IDEMPOTENT_OUTCOMES,
 
     // PW-2: dispatch identity generation (crypto-hardened)
     generateDispatchToken
