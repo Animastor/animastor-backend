@@ -360,14 +360,28 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
     await redis.del(sceneLockKey);
     helpers.log(`Audio orchestration lock released: ${bookId}/${chapterId}/${sceneId}`);
 
+    // Stage 118 (B3): the deferral reason is computed HERE — in ONE place —
+    // for EVERY path (merged pure-dialogue AND per-segment). The Stage 116
+    // implementation computed it only inside sendPerSegmentAudio, so the
+    // merged (pure-dialogue) branch left it empty: a pure-dialogue scene
+    // reported the generic 'no_jobs_generated' and kept the 5-second
+    // dispatch/cancel/rollback loop that the capacity deferral was built to
+    // remove.
+    let deferReason = null;
+    if (sentCount === 0) {
+        const qidem = require('../helpers/queue-idempotency.cjs');
+        deferReason = qidem.classifyNotSentReasons(deferState.notSentReasons);
+    }
+
     return {
         generated: sentCount > 0,
         chunks: sentCount,
         expectedChunkCount: isPureDialogue ? 1 : segList.length,
         reason: sentCount > 0 ? null : 'no_jobs_accepted',
         // Stage 116 (D3): the precise reason (no live worker / everything
-        // already queued) for the orchestration layer's capacity deferral.
-        deferReason: sentCount > 0 ? null : (deferState.deferReason || null)
+        // already queued / ambiguous POST) for the orchestration layer's
+        // bounded deferral. Stage 118 (B3): computed on EVERY path.
+        deferReason: sentCount > 0 ? null : deferReason
     };
 }
 
@@ -380,7 +394,6 @@ async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildI
     // Stage 116 (D3): why the chunks were not sent (shared with the caller
     // through deferState so the reason survives the merged/per-segment split).
     const notSentReasons = (deferState && deferState.notSentReasons) || new Map();
-    let lastDeferReason = (deferState && deferState.deferReason) || null;
 
     // ═══ BATCH DISPATCH ═══
     // Отправляем все narration чанки скопом, затем все dialogue.
@@ -534,15 +547,12 @@ async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildI
         }
     }
 
-    if (sentCount === 0 && notSentReasons.size === 1) {
-        const only = [...notSentReasons.keys()][0];
-        const qidem = require('../helpers/queue-idempotency.cjs');
-        if (qidem.isCapacityReason(only)) lastDeferReason = only;
-    }
-
+    // Stage 118 (B3/M3): the deferral reason is computed by the CALLER
+    // (generateSceneAudio) for every path — merged and per-segment alike —
+    // so there is a single classification point. Here we only publish the
+    // collected reasons.
     if (deferState) {
         deferState.notSentReasons = notSentReasons;
-        deferState.deferReason = lastDeferReason;
     }
 
     return sentCount;

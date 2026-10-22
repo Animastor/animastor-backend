@@ -239,14 +239,17 @@ async function sendUnified(taskSpec) {
             };
         }
 
-        // (2) SINGLE PENDING ENTRY — the epoch is read at the moment of the
-        //     actual send (Stage 116 / D1: a dirty-unit regeneration bumps the
-        //     epoch inside the dispatch and must take effect immediately).
-        //     A re-dispatch with a NEW dispatch_id computes the SAME idem_key
-        //     and is therefore suppressed instead of appending a duplicate
-        //     lane entry.
-        const epoch = await qidem.resolveDispatchEpoch(
-            redis, taskSpec.dispatch_id, parsed.bookId, parsed.chapterId, parsed.sceneId, stage
+        // (2) SINGLE PENDING ENTRY — the intent epoch of the task is resolved
+        //     AT THE MOMENT OF THE SEND (Stage 116 / D1) and PINNED per task
+        //     (Stage 118 / M6): the first sender of a logical task fixes the
+        //     epoch for that task, so a later send or re-dispatch observes the
+        //     SAME identity even when a sibling unit of the same stage moved
+        //     the stage epoch. The pin is dropped only when the task's own
+        //     intent changes (an explicit regeneration / a consumed failure).
+        //     A re-dispatch with a NEW dispatch_id therefore computes the SAME
+        //     idem_key and is suppressed instead of appending a duplicate.
+        const epoch = await qidem.resolveJobEpoch(
+            redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id, stage
         );
         idemKey = qidem.computeIdemKey({
             workspaceId: payload.workspace_id,
@@ -259,11 +262,17 @@ async function sendUnified(taskSpec) {
         const guard = await qidem.guardEnqueue(redis, idemKey);
         if (!guard.allowed) {
             stats.jobs_suppressed_duplicate = (stats.jobs_suppressed_duplicate || 0) + 1;
-            // Stage 116: an entry that is already pending must STAY pending —
-            // refresh the claim so it cannot expire while the task is still
-            // queued in the lane (an expired claim would allow a second copy).
+            // Stage 118 (B5): an entry that is already pending must STAY
+            // pending — the claim's TTL must actually be extended, otherwise it
+            // expires while the task is still queued in the lane and a second
+            // copy can be enqueued. `claimTask` (SET NX) does NOT touch the TTL
+            // of an existing key — the refresh uses `SET XX EX`.
             if (guard.reason === 'duplicate_pending' && idemKey) {
-                await qidem.claimTask(redis, idemKey);
+                await qidem.refreshClaimTtl(redis, idemKey);
+                // The pinned intent epoch must outlive the claim.
+                await qidem.refreshJobEpochTtl(
+                    redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id
+                );
             }
             log(`Enqueue suppressed (${guard.reason}): ${payload.job_id} dispatch=${taskSpec.dispatch_id} idem=${idemKey.slice(0, 12)}`);
             return {
@@ -288,52 +297,70 @@ async function sendUnified(taskSpec) {
     }
 
     let lastError;
-    // Stage 116 (D2): a definitive rejection (the hub answered with an HTTP
-    // error) and an AMBIGUOUS outcome (timeout / connection reset / lost
-    // response) must be treated differently:
-    //   - definitive -> the hub did NOT take the task => release the claim;
-    //   - ambiguous  -> the hub MAY have taken the task => KEEP the claim
-    //     (releasing it would re-open the duplicate hole) but shorten its TTL
-    //     so a lost request cannot block the task for the full backstop.
-    let definitiveRejection = false;
     let lastStatus = null;
+    // Stage 118 (B2): every POST attempt is classified ON ITS OWN and the
+    // whole request is reduced to ONE verdict:
+    //   - HTTP 4xx: a DEFINITIVE rejection (the hub answered and did NOT
+    //     enqueue). It decides the verdict ONLY when no attempt was
+    //     ambiguous: an earlier timeout / reset / 5xx may already have been
+    //     taken by the hub, so the claim MUST stay.
+    //   - HTTP 5xx / timeout / connection reset / lost response: AMBIGUOUS
+    //     (the hub may have taken the task) => the claim stays.
+    //
+    // Stage 116 kept ONE sticky flag: an early 4xx released the claim even
+    // when a LATER attempt ended ambiguously => the duplicate hole D2 was
+    // built to close re-opened (audit 117 - B2, reproduced on the real
+    // module: "the claim was released although the last attempt was
+    // ambiguous").
+    let definitiveRejection = false;
+    let ambiguousOutcome = false;
     for (let attempt = 0; attempt < 3; attempt++) {
+        let res;
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-            const res = await fetch(`${config.HUB_URL}/task`, {
+            res = await fetch(`${config.HUB_URL}/task`, {
                 method: "POST",
                 headers,
                 body: JSON.stringify(payload),
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
+        } catch (err) {
+            // The request may have reached the hub before it broke => ambiguous.
+            lastError = err;
+            ambiguousOutcome = true;
+            if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+            continue;
+        }
 
-            if (!res.ok) {
-                lastStatus = res.status;
-                // 4xx = the hub rejected the task outright (nothing enqueued);
-                // 5xx = the hub failed while handling it (ambiguous).
-                if (res.status >= 400 && res.status < 500) definitiveRejection = true;
-                throw new Error(`HTTP ${res.status}`);
-            }
-
+        if (res.ok) {
             log(`Task sent: ${payload.job_id} (${payload.job_type}), build: ${payload.build_id}, dispatch: ${payload.dispatch_id}, ws: ${workspaceId || (policyLane ? `policy:${policyLane.policy_id}` : '(system pool)')}`);
             // S-2: per-type counters keyed dynamically — no hardcoded media list
             const typeKey = `${payload.job_type}_jobs_started`;
             stats[typeKey] = (stats[typeKey] || 0) + 1;
-            return { sent: true, jobId: payload.job_id, dispatchId: payload.dispatch_id, idem_key: idemKey };
-        } catch (err) {
-            lastError = err;
-            if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+            return { sent: true, jobId: payload.job_id, dispatchId: taskSpec.dispatch_id, idem_key: idemKey };
         }
+
+        lastStatus = res.status;
+        lastError = new Error(`HTTP ${res.status}`);
+        if (res.status >= 400 && res.status < 500) {
+            definitiveRejection = true;   // this attempt was definitive
+        } else {
+            ambiguousOutcome = true;      // 5xx — the hub may have taken it
+        }
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
     }
+
+    // The verdict of the WHOLE request: an ambiguous attempt always wins.
+    const ambiguous = ambiguousOutcome || !definitiveRejection;
     stats.failed_jobs++;
     if (redis && idemKey) {
-        if (definitiveRejection) {
-            // The hub answered with an HTTP error => nothing was enqueued => the
-            // pending claim must be released, so a later justified attempt is
-            // not blocked by a claim nobody holds.
+        if (!ambiguous) {
+            // The hub answered with an HTTP error on EVERY attempt => nothing
+            // was enqueued => the pending claim must be released, so a later
+            // justified attempt is not blocked by a claim nobody holds.
             await qidem.releaseTask(redis, idemKey);
             await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id);
         } else {
@@ -348,7 +375,11 @@ async function sendUnified(taskSpec) {
     return {
         sent: false,
         error: lastError ? lastError.message : 'max_retries',
-        ambiguous: !definitiveRejection,
+        ambiguous,
+        // Stage 118 (M5): the outcome now CARRIES a reason, so the
+        // orchestration layer can classify it ('ambiguous_post' -> a bounded
+        // deferral; a definitive rejection -> the historic immediate retry).
+        reason: ambiguous ? 'ambiguous_post' : 'hub_rejected',
         status: lastStatus,
         jobId: payload.job_id,
     };

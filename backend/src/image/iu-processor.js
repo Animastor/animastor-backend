@@ -227,7 +227,15 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
         try {
             const qidem = require('../helpers/queue-idempotency.cjs');
             const epoch = await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, 'image');
-            helpers.log(`[DEDUP-CLEAR] Bumped image generation epoch for ${bookId}/${chapterId}/${sceneId} → ${epoch} (explicit regeneration of ${imageIUId})`);
+            // Stage 118 (M6): the bump moves the STAGE epoch, but the identity
+            // of a logical task is pinned per task. The dirty unit's OWN pin
+            // must be dropped — this unit is the one the user asked to
+            // regenerate, so it needs a FRESH identity on the FIRST attempt.
+            // The sibling units of the same scene keep their pins (their
+            // identities stay stable → no duplicate lane entries).
+            const jobId = provider.buildJobId(imageIUId, 'iu_image');
+            await qidem.resetJobEpoch(redis, bookId, chapterId, sceneId, jobId);
+            helpers.log(`[DEDUP-CLEAR] Bumped image generation epoch for ${bookId}/${chapterId}/${sceneId} → ${epoch} (explicit regeneration of ${imageIUId}); task identity re-pinned`);
         } catch (e) {
             helpers.warn(`[DEDUP-CLEAR] Failed to bump generation epoch: ${e.message}`);
         }
@@ -381,14 +389,14 @@ async function generateSceneIUImages(redis, sceneData, loadedBook, buildId, book
             notSentReasons.set(result.reason, (notSentReasons.get(result.reason) || 0) + 1);
         }
     }
-    // A single dominant CAPACITY reason across all not-sent units is the
-    // useful signal. Every other reason keeps the historic semantics
-    // ('no_jobs_sent' ⇒ immediate retry on the next tick).
+    // Stage 118 (M3): EVERY not-sent reason must be deferrable; the most
+    // frequent one is reported. The Stage 116 rule (`size === 1`) left a
+    // scene with two different capacity reasons un-deferred — it kept the
+    // 5-second dispatch/cancel churn.
     let deferReason = null;
-    if (sentCount === 0 && notSentReasons.size === 1) {
-        const only = [...notSentReasons.keys()][0];
+    if (sentCount === 0) {
         const qidem = require('../helpers/queue-idempotency.cjs');
-        if (qidem.isCapacityReason(only)) deferReason = only;
+        deferReason = qidem.classifyNotSentReasons(notSentReasons);
     }
     return { sentCount, cachedCount, skippedCount, total: units.length, deferReason };
 }

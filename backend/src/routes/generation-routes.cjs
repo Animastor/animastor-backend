@@ -516,6 +516,15 @@ module.exports = function(app, redis, deps) {
                 // pending-entry claim and record the completion marker. A
                 // queue entry was never proof of completion; a real, accepted
                 // result is.
+                //
+                // Stage 118 (B1): the ownership ref is NOT forgotten here — it
+                // is the index that makes the completion marker RELEASABLE
+                // (a scene/book-scoped release reaches the done marker only
+                // through a ref). The Stage 116 implementation deleted it
+                // together with the claim, so the done marker became
+                // unreachable: an authorized regeneration could never free it
+                // and the task stayed suppressed as `already_completed` for
+                // the whole 7-day marker TTL.
                 try {
                     const qidem = queueIdempotency;
                     const idemKey = qidem
@@ -524,7 +533,7 @@ module.exports = function(app, redis, deps) {
                     if (idemKey) {
                         await qidem.markTaskDone(redis, idemKey);
                         await qidem.releaseTask(redis, idemKey);
-                        await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id);
+                        await qidem.extendTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id);
                         log(`[GPU RESULT] Idempotency settled for ${job_id} (idem=${idemKey.slice(0, 12)})`);
                     }
                 } catch (idemErr) {
@@ -602,11 +611,17 @@ module.exports = function(app, redis, deps) {
 
             log(`[GPU ERROR] ${bookId}/${chapterId}/${sceneId} ${stage} failed: ${reason || 'unknown'} (job=${job_id})`);
 
-            // Stage 114 — a failed job is a JUSTIFIED retry: release the
-            // pending-entry claim (the task is no longer pending) and bump
-            // the stage generation epoch, so the next dispatch of this stage
+            // Stage 114 - a failed job is a JUSTIFIED retry: release the
+            // pending-entry claim (the task is no longer pending) and bump the
+            // stage generation epoch, so the next dispatch of this stage
             // gets a fresh identity and may enqueue again. Without the epoch
             // bump the retry would be suppressed as a duplicate.
+            //
+            // Stage 118 (M6): the identity is pinned PER TASK, so the bump
+            // alone is not enough - the pin of THIS job must be dropped too
+            // (the task's own intent changed: the failure was consumed).
+            // The sibling jobs of the stage keep their pins (stable identity,
+            // no duplicate lane entries).
             try {
                 const qidem = queueIdempotency;
                 const idemKey = qidem
@@ -618,6 +633,7 @@ module.exports = function(app, redis, deps) {
                 }
                 if (qidem) {
                     await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, stage);
+                    await qidem.resetJobEpoch(redis, bookId, chapterId, sceneId, job_id);
                 }
             } catch (idemErr) {
                 console.warn(`[GPU ERROR] idempotency settle failed for ${job_id}: ${idemErr.message}`);

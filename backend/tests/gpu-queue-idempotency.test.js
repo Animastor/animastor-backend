@@ -306,8 +306,8 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             const first = await qidem.resolveDispatchEpoch(redis, 'dispatch-A', BOOK, CHAPTER, SCENE, 'image');
             expect(first).to.equal(1);
             // a bump between two sends of the SAME dispatch applies to the
-            // later send — that is exactly what makes a dirty-unit
-            // regeneration work on the FIRST attempt (Stage 115 D1).
+            // later send — that is what makes a dirty-unit regeneration work
+            // on the FIRST attempt (Stage 115 D1).
             await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image'); // epoch → 2
             const second = await qidem.resolveDispatchEpoch(redis, 'dispatch-A', BOOK, CHAPTER, SCENE, 'image');
             expect(second).to.equal(2);
@@ -315,6 +315,25 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             // the same send of the same job is stable while the epoch is stable
             const again = await qidem.resolveDispatchEpoch(redis, 'dispatch-A', BOOK, CHAPTER, SCENE, 'image');
             expect(again).to.equal(second);
+        });
+
+        it('Stage 118 (M6): the intent epoch is PINNED per task (stable across sends and re-dispatches)', async () => {
+            redis = new FakeRedis();
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image'); // epoch → 1
+            const job = jobId('iu-pinned');
+            // the first sender of the task pins the intent epoch
+            expect(await qidem.resolveJobEpoch(redis, BOOK, CHAPTER, SCENE, job, 'image')).to.equal(1);
+            // the stage epoch moves (a sibling unit was regenerated) — the
+            // PINNED epoch of THIS task does not change
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image'); // epoch → 2
+            expect(await qidem.resolveJobEpoch(redis, BOOK, CHAPTER, SCENE, job, 'image')).to.equal(1);
+            // a task that was never sent resolves the CURRENT stage epoch
+            const other = jobId('iu-fresh');
+            expect(await qidem.resolveJobEpoch(redis, BOOK, CHAPTER, SCENE, other, 'image')).to.equal(2);
+            // the task's OWN intent change drops the pin ⇒ the next send gets
+            // a fresh identity
+            expect(await qidem.resetJobEpoch(redis, BOOK, CHAPTER, SCENE, job)).to.equal(true);
+            expect(await qidem.resolveJobEpoch(redis, BOOK, CHAPTER, SCENE, job, 'image')).to.equal(2);
         });
     });
 
@@ -417,8 +436,13 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
                 build_id: BUILD, dispatch_id: 'dispatch-1',
             };
             expect((await ctx.gpuDispatcher.sendUnified(spec)).sent).to.equal(true);
-            // failure → the epoch is bumped by the error callback path
+            // failure → the epoch is bumped AND the task's pinned intent epoch
+            // is dropped by the GPU error callback (backend/src/routes/
+            // generation-routes.cjs — the production sequence of a consumed
+            // failure), so the next dispatch of this stage gets a fresh
+            // identity and may enqueue again.
             await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image');
+            await qidem.resetJobEpoch(redis, BOOK, CHAPTER, SCENE, spec.job_id);
             const retry = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'dispatch-2' });
             expect(retry.sent).to.equal(true);
             expect(ctx.calls).to.have.length(2);
@@ -606,13 +630,18 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             const idemKey = await qidem.readTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
             await qidem.markTaskDone(redis, idemKey);
             await qidem.releaseTask(redis, idemKey);
-            await qidem.forgetTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
+            // Stage 118 (B1): the ownership ref is NOT forgotten at settlement
+            // — it is the index that makes the completion marker releasable.
+            await qidem.extendTaskRef(redis, BOOK, CHAPTER, SCENE, spec.job_id);
 
-            // the user edits the unit → the stage epoch is bumped by the
-            // dirty branch (inside the dispatch)
+            // the user edits the unit → the dirty branch (backend/src/image/
+            // iu-processor.js) bumps the stage epoch AND drops the pinned
+            // intent epoch of THAT unit — the production sequence of an
+            // explicit regeneration.
             await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image');
-            // the epoch is read AT THE MOMENT of the send (no per-dispatch
-            // freeze) ⇒ the dirty unit gets a fresh identity right away
+            await qidem.resetJobEpoch(redis, BOOK, CHAPTER, SCENE, spec.job_id);
+            // the epoch is resolved AT THE MOMENT OF THE SEND ⇒ the dirty
+            // unit gets a fresh identity right away
             const retry = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D2' });
             expect(retry.sent).to.equal(true);
             expect(retry.reason).to.equal(undefined);
@@ -696,13 +725,20 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
                 const key = qidem.computeIdemKey({
                     workspaceId: null, jobId: o.jobId, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
                 });
+                // The PRODUCTION settlement sequence (result callback):
+                // claim → ref → done → claim released → the ref is EXTENDED
+                // (Stage 118 · B1) instead of forgotten — the ref is the
+                // ownership index that makes the completion marker releasable.
                 await qidem.claimTask(redis, key);
                 await qidem.rememberTaskRef(redis, o.book, o.chapter, o.scene, o.jobId, key);
                 await qidem.markTaskDone(redis, key);
+                await qidem.releaseTask(redis, key);
+                await qidem.extendTaskRef(redis, o.book, o.chapter, o.scene, o.jobId);
             }
 
             const released = await qidem.releaseClaimsForScene(redis, BOOK, CHAPTER, SCENE);
-            expect(released.released).to.equal(1);
+            expect(released.released).to.equal(0);   // the claim was already released at settlement
+            expect(released.done).to.equal(1);       // the COMPLETION MARKER was freed
 
             const keyA = qidem.computeIdemKey({
                 workspaceId: null, jobId: sceneA, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
@@ -710,9 +746,9 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
             const keyB = qidem.computeIdemKey({
                 workspaceId: null, jobId: sceneB, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
             });
-            expect(await redis.get(qidem.idemClaimKey(keyA))).to.equal(null);   // released
             expect(await redis.get(qidem.idemDoneKey(keyA))).to.equal(null);      // done marker released too
-            expect(await redis.get(qidem.idemClaimKey(keyB))).to.be.a('string'); // untouched
+            expect(await redis.get(qidem.idemRefKey(BOOK, CHAPTER, SCENE, sceneA))).to.equal(null);
+            expect(await redis.get(qidem.idemDoneKey(keyB))).to.be.a('string');   // sibling scene untouched
         });
 
         it('D4: a book-scoped release does not touch another book', async () => {
@@ -747,10 +783,270 @@ describe('Stage 114: GPU queue idempotency + executor gate', () => {
                 workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
             });
             const before = await redis.ttl(qidem.idemClaimKey(key));
+            // Stage 118 (B5): the Stage 116 assertion (`after >= before - 1`)
+            // was VACUOUS — it passed even when the TTL was never touched
+            // (SET NX does not refresh an existing key). The test now burns
+            // part of the TTL and requires it to be pushed BACK to the full
+            // window.
+            redis.now += 120 * 1000;                       // 2 minutes passed
+            const aged = await redis.ttl(qidem.idemClaimKey(key));
+            expect(aged).to.be.lessThan(before);
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
             // the claim is refreshed on every suppressed re-dispatch
             await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D2' });
             const after = await redis.ttl(qidem.idemClaimKey(key));
-            expect(after).to.be.greaterThanOrEqual(before - 1);
+            expect(after).to.equal(before);                // the TTL was REALLY extended
+            expect(after).to.be.greaterThan(aged);
+        });
+    });
+
+    // ── Stage 118 — audit 117 regressions ─────────────────────────────────
+    describe('Stage 118: audit 117 lifecycle regressions', () => {
+        /**
+         * The PRODUCTION settlement sequence of the result callback
+         * (backend/src/routes/generation-routes.cjs): claim → ref → done →
+         * claim released → the ref is EXTENDED (the ownership index survives,
+         * Stage 118 · B1).
+         */
+        async function settle(redis, { book, chapter, scene, jobId, key }) {
+            await qidem.claimTask(redis, key);
+            await qidem.rememberTaskRef(redis, book, chapter, scene, jobId, key);
+            await qidem.markTaskDone(redis, key);
+            await qidem.releaseTask(redis, key);
+            await qidem.extendTaskRef(redis, book, chapter, scene, jobId);
+        }
+
+        it('B1: a completed task CAN be released by the scene scope (the done marker is reachable)', async () => {
+            redis = new FakeRedis();
+            const job = jobId('iu-b1');
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: job, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            await settle(redis, { book: BOOK, chapter: CHAPTER, scene: SCENE, jobId: job, key });
+            // the completion marker is there and the ref is the index that
+            // makes it reachable
+            expect(await redis.get(qidem.idemDoneKey(key))).to.equal('1');
+            expect(await redis.get(qidem.idemRefKey(BOOK, CHAPTER, SCENE, job))).to.equal(key);
+
+            const released = await qidem.releaseClaimsForScene(redis, BOOK, CHAPTER, SCENE);
+            expect(released.done).to.equal(1);
+            expect(await redis.get(qidem.idemDoneKey(key))).to.equal(null);
+            // ⇒ the task may run again (an authorized regeneration)
+            const guard = await qidem.guardEnqueue(redis, key);
+            expect(guard.allowed).to.equal(true);
+        });
+
+        it('B1: a completed task CAN be released by the book scope', async () => {
+            redis = new FakeRedis();
+            const job = jobId('iu-b1b');
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: job, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            await settle(redis, { book: BOOK, chapter: CHAPTER, scene: SCENE, jobId: job, key });
+            const released = await qidem.releaseClaimsForBook(redis, BOOK);
+            expect(released.done).to.equal(1);
+            expect((await qidem.guardEnqueue(redis, key)).allowed).to.equal(true);
+        });
+
+        it('B2: an early 4xx followed by an AMBIGUOUS attempt keeps the claim', async function () {
+            this.timeout(20000);
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            let attempt = 0;
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => {
+                    attempt++;
+                    if (attempt === 1) return { ok: false, status: 400, json: async () => ({ error: 'bad request' }) };
+                    throw new Error('socket hang up after the hub took the task');
+                },
+            });
+            const spec = { job_id: jobId('iu-b2'), params: params(), job_type: 'image', build_id: BUILD };
+            const failed = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(failed.sent).to.equal(false);
+            // the LAST attempt was ambiguous ⇒ the whole request is ambiguous
+            expect(failed.ambiguous).to.equal(true);
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key))).to.be.a('string');   // claim KEPT
+        });
+
+        it('B2: an AMBIGUOUS attempt followed by a 4xx also keeps the claim', async function () {
+            this.timeout(20000);
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            let attempt = 0;
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => {
+                    attempt++;
+                    if (attempt === 1) throw new Error('timeout');
+                    return { ok: false, status: 400, json: async () => ({ error: 'bad request' }) };
+                },
+            });
+            const spec = { job_id: jobId('iu-b2b'), params: params(), job_type: 'image', build_id: BUILD };
+            const failed = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(failed.ambiguous).to.equal(true);
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key))).to.be.a('string');   // claim KEPT
+        });
+
+        it('B2/B5: an ambiguous outcome carries the reason and shortens the claim TTL', async function () {
+            this.timeout(20000);
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => { throw new Error('timeout'); },
+            });
+            const spec = { job_id: jobId('iu-b2c'), params: params(), job_type: 'image', build_id: BUILD };
+            const failed = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(failed.ambiguous).to.equal(true);
+            expect(failed.reason).to.equal('ambiguous_post');   // M5 — the reason travels
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            const ttl = await redis.ttl(qidem.idemClaimKey(key));
+            expect(ttl).to.be.lessThan(qidem.IDEM_CLAIM_TTL_S);
+            expect(ttl).to.be.lessThanOrEqual(qidem.IDEM_AMBIGUOUS_CLAIM_TTL_S);
+        });
+
+        it('M1: a book_id containing ":" cannot reach into another book key space', async () => {
+            redis = new FakeRedis();
+            // book 'a' with chapter 'b' and book 'a:b' — the ':' separator made
+            // these two key spaces collide in the Stage 116 implementation.
+            const victim = { book: 'a', chapter: 'b', scene: 'c' };
+            const attacker = { book: 'a:b', chapter: 'c', scene: 'd' };
+            const victimJob = 'a_b_c_iu-v:iu_image';
+            const attackerJob = 'a:b_c_d_iu-x:iu_image';
+            const victimKey = qidem.computeIdemKey({
+                workspaceId: null, jobId: victimJob, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            const attackerKey = qidem.computeIdemKey({
+                workspaceId: null, jobId: attackerJob, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            await qidem.claimTask(redis, victimKey);
+            await qidem.rememberTaskRef(redis, victim.book, victim.chapter, victim.scene, victimJob, victimKey);
+            await qidem.claimTask(redis, attackerKey);
+            await qidem.rememberTaskRef(redis, attacker.book, attacker.chapter, attacker.scene, attackerJob, attackerKey);
+
+            const released = await qidem.releaseClaimsForBook(redis, 'a:b');
+            expect(released.released).to.equal(1);
+            // the victim book is untouched
+            expect(await redis.get(qidem.idemClaimKey(victimKey))).to.be.a('string');
+        });
+
+        it('M6: the same task sent twice inside ONE dispatch keeps ONE identity', async () => {
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+            const spec = { job_id: jobId('iu-m6'), params: params(), job_type: 'image', build_id: BUILD };
+            expect((await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' })).sent).to.equal(true);
+            // the stage epoch moves (a sibling unit was regenerated) — the
+            // identity of THIS task must NOT change
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image');
+            const again = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(again.sent).to.equal(false);
+            expect(again.reason).to.equal('duplicate_pending');
+            expect(ctx.calls).to.have.length(1);   // exactly ONE lane entry
+        });
+
+        it('M6: the pinned intent epoch survives a re-dispatch with a NEW dispatch_id', async () => {
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+            const spec = { job_id: jobId('iu-m6b'), params: params(), job_type: 'image', build_id: BUILD };
+            expect((await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' })).sent).to.equal(true);
+            // a sibling unit of the same stage is regenerated → the stage
+            // epoch moves, but this task keeps its identity
+            await qidem.bumpStageEpoch(redis, BOOK, CHAPTER, SCENE, 'image');
+            const reDispatch = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D2' });
+            expect(reDispatch.sent).to.equal(false);
+            expect(reDispatch.reason).to.equal('duplicate_pending');
+            expect(ctx.calls).to.have.length(1);
+        });
+
+        it('M7: after the 90-minute ambiguous TTL the task may be sent again', async function () {
+            this.timeout(20000);
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({
+                redis, workspaceId: null,
+                fetchImpl: async () => { throw new Error('timeout'); },
+            });
+            const spec = { job_id: jobId('iu-m7'), params: params(), job_type: 'image', build_id: BUILD };
+            const failed = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D1' });
+            expect(failed.ambiguous).to.equal(true);
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: spec.job_id, jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            expect(await redis.get(qidem.idemClaimKey(key))).to.be.a('string');
+            // the ambiguous claim expires after 90 minutes ⇒ the task is not
+            // blocked forever
+            redis.now += (qidem.IDEM_AMBIGUOUS_CLAIM_TTL_S + 60) * 1000;
+            expect(await redis.get(qidem.idemClaimKey(key))).to.equal(null);
+            ctx.restore();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+            const retry = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'D2' });
+            expect(retry.sent).to.equal(true);
+        });
+
+        it('restart: the claim survives a backend restart and suppresses the re-dispatch', async () => {
+            redis = new FakeRedis();
+            await writeHeartbeat(redis, { type: 'image', workerId: 'w-sys-1', mode: 'system' });
+            ctx = makeDispatcher({ redis, workspaceId: null });
+            const first = ctx;
+            const spec = { job_id: jobId('iu-restart'), params: params(), job_type: 'image', build_id: BUILD };
+            expect((await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'before-restart' })).sent).to.equal(true);
+            expect(first.calls).to.have.length(1);
+            ctx.restore();
+            // the backend restarts: a NEW dispatcher instance, the same Redis
+            ctx = makeDispatcher({ redis, workspaceId: null });
+            const after = ctx;
+            const reDispatch = await ctx.gpuDispatcher.sendUnified({ ...spec, dispatch_id: 'after-restart' });
+            expect(reDispatch.sent).to.equal(false);
+            expect(reDispatch.reason).to.equal('duplicate_pending');
+            expect(after.calls).to.have.length(0);   // nothing was enqueued again
+            expect(first.calls).to.have.length(1);   // still exactly ONE lane entry
+        });
+
+        it('M4: already_completed is NOT a capacity reason but it IS deferrable', () => {
+            expect(qidem.isCapacityReason('already_completed')).to.equal(false);
+            expect(qidem.isDeferrableReason('already_completed')).to.equal(true);
+            expect(qidem.isCapacityReason('ambiguous_post')).to.equal(true);
+            expect(qidem.isCapacityReason('no_worker_available')).to.equal(true);
+            expect(qidem.isCapacityReason('duplicate_pending')).to.equal(true);
+            expect(qidem.isCapacityReason('send_failed')).to.equal(false);
+        });
+
+        it('M3: several deferrable reasons are classified (the dominant one is reported)', () => {
+            const reasons = new Map([['no_worker_available', 3], ['duplicate_pending', 1]]);
+            expect(qidem.classifyNotSentReasons(reasons)).to.equal('no_worker_available');
+            // a real failure keeps the historic semantics
+            expect(qidem.classifyNotSentReasons(new Map([['no_worker_available', 3], ['send_failed', 1]]))).to.equal(null);
+            expect(qidem.classifyNotSentReasons(new Map())).to.equal(null);
+        });
+
+        it('B5: refreshClaimTtl extends an existing claim and never resurrects a released one', async () => {
+            redis = new FakeRedis();
+            const key = qidem.computeIdemKey({
+                workspaceId: null, jobId: jobId('iu-b5'), jobType: 'image', buildId: BUILD, params: params(), generationEpoch: 0,
+            });
+            // a released claim must NOT be resurrected by a refresh
+            expect(await qidem.refreshClaimTtl(redis, key)).to.equal(false);
+            expect(await redis.get(qidem.idemClaimKey(key))).to.equal(null);
+
+            await qidem.claimTask(redis, key);
+            redis.now += 600 * 1000;
+            const aged = await redis.ttl(qidem.idemClaimKey(key));
+            expect(await qidem.refreshClaimTtl(redis, key)).to.equal(true);
+            const refreshed = await redis.ttl(qidem.idemClaimKey(key));
+            expect(refreshed).to.be.greaterThan(aged);
+            expect(refreshed).to.equal(qidem.IDEM_CLAIM_TTL_S);
         });
     });
 
