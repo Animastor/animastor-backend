@@ -531,9 +531,25 @@ module.exports = function(app, redis, deps) {
                         ? await qidem.readTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id)
                         : null;
                     if (idemKey) {
-                        await qidem.markTaskDone(redis, idemKey);
-                        await qidem.releaseTask(redis, idemKey);
-                        await qidem.extendTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id);
+                        // Stage 120 (M-f): the marker may only exist while its
+                        // OWNERSHIP REF is alive (a marker over a dead ref is
+                        // unreachable for its whole 7-day TTL). The helper
+                        // extends the ref, repairs it from job_id when it is
+                        // already gone, verifies it points at THIS identity
+                        // and only then writes the marker — never blindly.
+                        const settled = await qidem.settleCompletedTask(redis, {
+                            bookId: parsed.bookId,
+                            chapterId: parsed.chapterId,
+                            sceneId: parsed.sceneId,
+                            jobId: job_id,
+                            idemKey,
+                        });
+                        if (settled.refRepaired) {
+                            log(`[GPU RESULT] Ownership ref for ${job_id} was gone at settlement — repaired from job_id`);
+                        }
+                        if (!settled.markerWritten) {
+                            console.warn(`[GPU RESULT] Completion marker NOT written for ${job_id}: ownership ref unreachable (artifact check stays authoritative)`);
+                        }
                         log(`[GPU RESULT] Idempotency settled for ${job_id} (idem=${idemKey.slice(0, 12)})`);
                     }
                 } catch (idemErr) {

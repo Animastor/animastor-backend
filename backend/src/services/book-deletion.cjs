@@ -239,6 +239,20 @@ function createBookDeletion(deps) {
             } catch (claimErr) {
                 console.warn(`[DELETE-BOOK] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
             }
+            // Stage 120 (M-b): sweep the lane AGAIN after the release — a
+            // dispatch landing between the clear above and the release would
+            // leave an ORPHAN lane entry whose claim was just deleted (the
+            // next run would enqueue a second copy). The sweep removes it.
+            try {
+                const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
+                const hubHeaders = { method: 'DELETE' };
+                const apiKey = process.env.GPU_HUB_API_KEY;
+                if (apiKey) hubHeaders.headers = { 'x-api-key': apiKey };
+                const sweep = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
+                if (!(sweep && sweep.ok)) {
+                    console.warn(`[DELETE-BOOK] Post-release lane sweep failed for ${bookId} — an orphan entry may survive (bounded by claim TTL)`);
+                }
+            } catch (_) {}
         } else {
             console.warn(`[DELETE-BOOK] GPU hub queue clear failed for ${bookId} — the idempotency claims are KEPT (no duplicate window)`);
         }

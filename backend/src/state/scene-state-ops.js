@@ -104,7 +104,16 @@ async function markDirtyScene(redis, bookId, chapterId, sceneId, assets = mediaR
         for (const asset of assets) {
             if (!STAGE_EPOCH_STAGES.includes(asset)) continue;
             const epoch = await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, asset);
-            log(`[DIRTY-SCENE] ${bookId}/${chapterId}/${sceneId}: generation epoch bumped for ${asset} → ${epoch}`);
+            // Stage 120 (F1): a stage regeneration is an intent change for
+            // EVERY task of that stage — the per-task pins (M6) that would
+            // otherwise freeze the OLD identity must be dropped too, or the
+            // re-dispatch is suppressed as `already_completed` and the
+            // regeneration never runs. Only THIS stage's pins are dropped; a
+            // sibling stage keeps its pins.
+            const dropped = qidem.resetJobEpochForStage
+                ? await qidem.resetJobEpochForStage(redis, bookId, chapterId, sceneId, asset)
+                : 0;
+            log(`[DIRTY-SCENE] ${bookId}/${chapterId}/${sceneId}: generation epoch bumped for ${asset} → ${epoch} (${dropped} task pin(s) reset)`);
         }
     } catch (epochErr) {
         warn(`markDirtyScene: generation epoch bump failed for ${bookId}/${chapterId}/${sceneId}: ${epochErr.message}`);

@@ -155,12 +155,43 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 } catch (claimErr) {
                     console.warn(`[CACHE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
                 }
+                // Stage 120 (M-b): a dispatch that lands BETWEEN the lane
+                // clear above and the release just above re-creates a claim
+                // and appends a lane entry; the release then deleted that
+                // claim, leaving an ORPHAN lane entry with no claim — the next
+                // dispatch would enqueue a SECOND copy (the mirror of the
+                // Stage 116 lost-task race). A SECOND lane-clear pass removes
+                // any such orphan entry so the state stays consistent.
+                try {
+                    const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
+                    const hubHeaders = { method: 'DELETE' };
+                    const apiKey = config.GPU_HUB_API_KEY || process.env.GPU_HUB_API_KEY;
+                    if (apiKey) hubHeaders.headers = { 'x-api-key': apiKey };
+                    const sweep = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
+                    if (!(sweep && sweep.ok)) {
+                        console.warn(`[CACHE] Post-release lane sweep failed for ${bookId} — an orphan entry may survive (bounded by claim TTL)`);
+                    }
+                } catch (_) {}
             } else {
                 console.warn(`[CACHE] GPU hub queue clear failed for ${bookId} — the idempotency claims are KEPT (no duplicate window)`);
             }
 
             log('[CACHE] Cache cleared for', bookId);
-            res.json({ cleared: true, book_id: bookId, builds_removed: buildIds.size });
+            // Stage 120 (M-a): the response must not claim success it cannot
+            // confirm. When the hub lane clear FAILED the claims/markers were
+            // KEPT (the safe direction) and the book will NOT auto-regenerate
+            // until they expire — report that honestly instead of {cleared:true}.
+            if (!hubCleared) {
+                return res.json({
+                    cleared: false,
+                    hub_cleared: false,
+                    claims_kept: true,
+                    book_id: bookId,
+                    builds_removed: buildIds.size,
+                    error: 'hub_queue_clear_failed',
+                });
+            }
+            res.json({ cleared: true, hub_cleared: true, claims_released: true, book_id: bookId, builds_removed: buildIds.size });
         } catch (err) {
             console.error('[CACHE] Delete error:', err.message);
             res.status(500).json({ error: err.message });

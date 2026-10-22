@@ -104,6 +104,21 @@ function createMockRedis() {
             return ['0', entries];
         },
         eval: async (script, keysCount, ...args) => {
+            // Stage 120 (F2): state-aware claim TTL refresh — the exact mirror
+            // of queue-idempotency REFRESH_CLAIM_TTL_SCRIPT:
+            //   missing key → 0 (never resurrect a released claim);
+            //   'ambiguous' → -1 (the deliberately shortened 90-minute window
+            //   is NEVER extended back to the 24 h backstop);
+            //   otherwise  → SET XX EX ttl → 1.
+            if (script.includes("if v == 'ambiguous' then return -1 end")) {
+                const key = args[0];
+                const ttl = Number(args[keysCount]);
+                const value = store.get(key);
+                if (value === undefined) return 0;
+                if (value === 'ambiguous') return -1;
+                expiries.set(key, ttl);
+                return 1;
+            }
             if (script.includes('local metadata') && script.includes("ARGV[5] == '1'")) {
                 const [metadataKey, completedKey, leaseKey, quotaKey] = args.slice(0, keysCount);
                 const [

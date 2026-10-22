@@ -261,6 +261,61 @@ async function resetJobEpoch(redis, bookId, chapterId, sceneId, jobId) {
 }
 
 /**
+ * Drop the pinned intent epoch of EVERY task that belongs to ONE stage of a
+ * scene (Stage 120 · F1).
+ *
+ * WHY: `markDirtyScene` is the production signal «this stage must be
+ * regenerated» (reconciliation stuck-state repair, RELEASE_STALE_LEASE, C1/C1b
+ * audio+video recovery, scene restoration, placeholder audio, asset
+ * invalidation). It bumps the STAGE epoch, but Stage 118's per-task pin
+ * (M6) kept the OLD identity for every task of that stage ⇒ the re-dispatch
+ * was suppressed as `already_completed` and the regeneration never ran. The
+ * pin may only be dropped when the task's OWN intent changes — and a stage
+ * regeneration IS an intent change for every task of that stage.
+ *
+ * Only the pins of the AFFECTED stage are dropped (a sibling stage's tasks
+ * keep their pins — their identity must stay stable), and the drop is scoped
+ * to this scene's job-epoch key shape, so another book/scene is never
+ * touched.
+ *
+ * @returns {Promise<number>} how many pins were dropped.
+ */
+async function resetJobEpochForStage(redis, bookId, chapterId, sceneId, stage) {
+    if (!redis || !bookId || !chapterId || !sceneId || !stage) return 0;
+    const prefix = `${IDEM_JOB_EPOCH_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:`;
+    let jobSchema;
+    try { jobSchema = require('../runtime/job-schema'); } catch (_) { jobSchema = null; }
+    let dropped = 0;
+    let cursor = '0';
+    try {
+        do {
+            const [next, keys] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 200);
+            cursor = next;
+            for (const key of keys || []) {
+                if (!key.startsWith(prefix)) continue;
+                let jobId;
+                try { jobId = decodeURIComponent(key.slice(prefix.length)); } catch (_) { continue; }
+                // Resolve the stage of this pinned task from its job_id grammar.
+                let keyStage = null;
+                if (jobSchema) {
+                    if (typeof jobSchema.getStageForJobId === 'function') {
+                        keyStage = jobSchema.getStageForJobId(jobId);
+                    } else if (typeof jobSchema.parseJobId === 'function' && jobSchema.STAGE_BY_KIND) {
+                        const parsed = jobSchema.parseJobId(jobId);
+                        keyStage = parsed ? (jobSchema.STAGE_BY_KIND[parsed.kind] || null) : null;
+                    }
+                }
+                if (keyStage !== stage) continue;
+                if (await redis.del(key) > 0) dropped++;
+            }
+        } while (cursor !== '0');
+    } catch (_) {
+        /* best effort — a missed reset only delays a regeneration by one epoch read */
+    }
+    return dropped;
+}
+
+/**
  * Read the CURRENT generation epoch of a stage at the moment of the actual
  * send (Stage 116 / D1).
  *
@@ -309,12 +364,16 @@ function idemJobEpochKey(bookId, chapterId, sceneId, jobId) {
 
 /**
  * Atomically claim "this logical task may have at most ONE pending entry".
+ *
+ * Stage 120 (F2): the claim value carries its STATE — 'pending' (a normal
+ * backstop claim) or 'ambiguous' (the POST outcome was ambiguous). The state
+ * is what the TTL refresh consults so the two are never confused.
  * @returns {Promise<boolean>} true = this caller owns the enqueue.
  */
 async function claimTask(redis, idemKey, ttlSeconds = IDEM_CLAIM_TTL_S) {
     if (!redis || !idemKey) return false;
     try {
-        const ok = await redis.set(idemClaimKey(idemKey), '1', 'NX', 'EX', ttlSeconds);
+        const ok = await redis.set(idemClaimKey(idemKey), 'pending', 'NX', 'EX', ttlSeconds);
         return !!ok;
     } catch (_) {
         return false;
@@ -393,6 +452,64 @@ async function markTaskDone(redis, idemKey, ttlSeconds = IDEM_DONE_TTL_S) {
 async function isTaskDone(redis, idemKey) {
     if (!redis || !idemKey) return false;
     try { return (await redis.get(idemDoneKey(idemKey))) != null; } catch (_) { return false; }
+}
+
+/**
+ * Release a completion marker (Stage 120 · M-c).
+ *
+ * Called when a completion marker is found WITHOUT its artifact — an
+ * ORPHANED marker (the build dir / PG rows were wiped by a path that did not
+ * release the marker). Left in place it suppresses the task as
+ * `already_completed` forever: the dispatch engine defers it 900 s, retries,
+ * gets the same outcome, and the scene stays in the active index for good.
+ * Freeing the marker lets the task regenerate instead of looping.
+ */
+async function releaseTaskDone(redis, idemKey) {
+    if (!redis || !idemKey) return false;
+    try { return (await redis.del(idemDoneKey(idemKey))) > 0; } catch (_) { return false; }
+}
+
+/**
+ * Settle an ACCEPTED result (Stage 120 · M-f).
+ *
+ * The completion marker is only reachable THROUGH its ownership ref —
+ * `releaseClaimsForScene/Book` scan the ref family and free the marker
+ * derived from it. A marker written over a dead ref is therefore
+ * unreachable for its whole 7-day TTL: the task stays suppressed as
+ * `already_completed` with no authorized way out (audit 119 · M-f).
+ *
+ * Sequence (the marker is the LAST thing written):
+ *   1. extend the existing ref (it must outlive the marker);
+ *   2. if the ref is already gone (it expired between the dispatch and a
+ *      result landing at/after the 24 h boundary), REPAIR it from job_id —
+ *      the ref key is a pure function of book/chapter/scene/job;
+ *   3. re-read and verify the ref now points at THIS identity;
+ *   4. only then write the completion marker;
+ *   5. release the pending claim (the task is terminal either way).
+ *
+ * When the ref cannot be made to point at this identity (a concurrent
+ * dispatch re-mapped job_id → another idem_key), the marker is SKIPPED: a
+ * blind marker would be unreachable, and the artifact check stays the
+ * authority for "is this work done".
+ *
+ * @returns {Promise<{settled:boolean, markerWritten:boolean, refRepaired:boolean}>}
+ */
+async function settleCompletedTask(redis, { bookId, chapterId, sceneId, jobId, idemKey }) {
+    const out = { settled: false, markerWritten: false, refRepaired: false };
+    if (!redis || !idemKey || !bookId || !chapterId || !sceneId || !jobId) return out;
+    try {
+        if (!await extendTaskRef(redis, bookId, chapterId, sceneId, jobId)) {
+            await rememberTaskRef(redis, bookId, chapterId, sceneId, jobId, idemKey, IDEM_REF_DONE_TTL_S);
+            out.refRepaired = true;
+        }
+        const refLives = (await readTaskRef(redis, bookId, chapterId, sceneId, jobId)) === idemKey;
+        out.markerWritten = refLives ? await markTaskDone(redis, idemKey) : false;
+        await releaseTask(redis, idemKey);
+        out.settled = true;
+    } catch (_) {
+        /* best effort — an unsettled marker only delays a re-run */
+    }
+    return out;
 }
 
 /**
@@ -560,16 +677,38 @@ function resultDedupKey(jobId, buildId) {
  * Shorten the TTL of a claim whose POST outcome was ambiguous (the hub may
  * have taken the task). The claim is KEPT (releasing it would re-open the
  * duplicate hole) but it must not block the task for the full backstop TTL.
+ *
+ * Stage 120 (F2): the claim is marked 'ambiguous' AND shortened in ONE atomic
+ * `SET … XX EX` step. The state is what a later `refreshClaimTtl` consults, so
+ * the deliberate 90-minute window is never reset to the 24 h backstop.
  */
 async function shortenClaimTtl(redis, idemKey, ttlSeconds = IDEM_AMBIGUOUS_CLAIM_TTL_S) {
     if (!redis || !idemKey) return false;
     try {
-        await redis.expire(idemClaimKey(idemKey), ttlSeconds);
+        await redis.set(idemClaimKey(idemKey), 'ambiguous', 'XX', 'EX', ttlSeconds);
         return true;
     } catch (_) {
         return false;
     }
 }
+
+/**
+ * A claim whose POST outcome was ambiguous is deliberately SHORTENED to
+ * IDEM_AMBIGUOUS_CLAIM_TTL_S. The refresh must NEVER extend it back to the
+ * 24 h backstop (audit 119 · F2): the next scheduler tick would hit
+ * `duplicate_pending` and a state-blind refresh reset the 90-minute window to
+ * 24 h, blocking the task for a day instead of 90 minutes. The refresh is
+ * therefore STATE-AWARE and ATOMIC — a Lua script reads the claim value and
+ * extends only a 'pending' claim, never an 'ambiguous' one, and never
+ * resurrects a released claim.
+ */
+const REFRESH_CLAIM_TTL_SCRIPT = `
+local v = redis.call('GET', KEYS[1])
+if v == false then return 0 end
+if v == 'ambiguous' then return -1 end
+redis.call('SET', KEYS[1], v, 'XX', 'EX', tonumber(ARGV[1]))
+return 1
+`;
 
 /**
  * Extend the TTL of an EXISTING pending claim (Stage 118 · B5).
@@ -584,13 +723,31 @@ async function shortenClaimTtl(redis, idemKey, ttlSeconds = IDEM_AMBIGUOUS_CLAIM
  * key and does NOT create (or resurrect) a missing one — a released claim is
  * never re-created by a refresh.
  *
- * @returns {Promise<boolean>} true when the claim existed and was extended.
+ * Stage 120 (F2): the refresh is now STATE-AWARE. An 'ambiguous' claim keeps
+ * its 90-minute window (the refresh is a no-op for it); a 'pending' claim is
+ * pushed back to the full backstop TTL. Implemented as one atomic Lua script
+ * (production) with a read-then-extend fallback for Redis doubles that lack
+ * `eval`.
+ *
+ * @returns {Promise<boolean>} true when the claim existed, was pending and was extended.
  */
 async function refreshClaimTtl(redis, idemKey, ttlSeconds = IDEM_CLAIM_TTL_S) {
     if (!redis || !idemKey) return false;
+    const key = idemClaimKey(idemKey);
     try {
-        const ok = await redis.set(idemClaimKey(idemKey), '1', 'XX', 'EX', ttlSeconds);
-        return ok !== null && ok !== false;
+        if (typeof redis.eval === 'function') {
+            const r = await redis.eval(REFRESH_CLAIM_TTL_SCRIPT, 1, key, String(ttlSeconds));
+            return Number(r) === 1;
+        }
+    } catch (_) {
+        /* fall through to the non-atomic path (a double without a real eval) */
+    }
+    try {
+        const v = await redis.get(key);
+        if (v == null || v === false) return false;   // released / missing — never resurrect
+        if (v === 'ambiguous') return false;           // keep the 90-minute window (F2)
+        await redis.set(key, v, 'XX', 'EX', ttlSeconds);
+        return true;
     } catch (_) {
         return false;
     }
@@ -697,6 +854,7 @@ module.exports = {
     idemJobEpochKey,
     resolveJobEpoch,
     resetJobEpoch,
+    resetJobEpochForStage,
     refreshJobEpochTtl,
     // claims
     idemClaimKey,
@@ -713,6 +871,9 @@ module.exports = {
     forgetTaskRef,
     markTaskDone,
     isTaskDone,
+    releaseTaskDone,
+    // Stage 120 (M-f): settle an accepted result without orphaning the marker
+    settleCompletedTask,
     guardEnqueue,
     // ownership-scoped release (cancel / regenerate / deletion)
     releaseClaimsForScene,

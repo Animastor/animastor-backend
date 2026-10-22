@@ -352,6 +352,18 @@ module.exports = function(app, redis, deps) {
                 } catch (claimErr) {
                     console.warn(`[CANCEL-GENERATION] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
                 }
+                // Stage 120 (M-b): sweep the lane AGAIN after the release — a
+                // dispatch landing between the clear above and the release
+                // would leave an ORPHAN lane entry whose claim was just
+                // deleted (the next run would enqueue a second copy).
+                try {
+                    const sweepRes = await fetch(hubUrl, hubOptions);
+                    if (!sweepRes.ok) {
+                        console.warn(`[CANCEL-GENERATION] Post-release lane sweep failed for ${bookId} (status ${sweepRes.status}) — an orphan entry may survive (bounded by claim TTL)`);
+                    }
+                } catch (sweepErr) {
+                    console.warn(`[CANCEL-GENERATION] Post-release lane sweep failed for ${bookId}: ${sweepErr.message}`);
+                }
             } catch (hubErr) {
                 throw new Error(`GPU hub cleanup failed: ${hubErr.message}`);
             }
@@ -649,6 +661,19 @@ module.exports = function(app, redis, deps) {
                 }
                 if (releasedClaims > 0 || releasedDone > 0) {
                     log(`[REGENERATE] ${bookId}: released ${releasedClaims} idempotency claim(s) and ${releasedDone} completion marker(s) for the regenerated scenes`);
+                }
+                // Stage 120 (M-b): resetScenes cleared the hub lane BEFORE
+                // this release. A dispatch landing between that clear and the
+                // release above would leave an ORPHAN lane entry whose claim
+                // was just deleted (the next run would enqueue a second copy).
+                // Sweep the lane AGAIN for the regenerated scenes to remove it.
+                try {
+                    const hubPort = require('@animastor/orchestration').ports.hubCancel;
+                    if (hubPort && typeof hubPort.isHubCancelPortWired === 'function' && hubPort.isHubCancelPortWired()) {
+                        await hubPort.hubCancelOp('clearHubDispatches')([], { book_id: bookId });
+                    }
+                } catch (sweepErr) {
+                    console.warn(`[REGENERATE] Post-release lane sweep failed for ${bookId}: ${sweepErr.message}`);
                 }
             } catch (claimErr) {
                 console.warn(`[REGENERATE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);

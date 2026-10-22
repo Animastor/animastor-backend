@@ -170,6 +170,41 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
                 globalThis.fetch = savedFetch;
             }
         });
+
+        it('Stage 120 (M-b): the lane is swept a SECOND time after the claims are released', async () => {
+            stubBaseModules();
+            const redis = createMockRedis();
+            const order = [];
+            const savedFetch = globalThis.fetch;
+            globalThis.fetch = async (url) => {
+                order.push(`hub-clear:${String(url).includes('queue/clear')}`);
+                return { ok: true, status: 200 };
+            };
+            try {
+                const deps = {
+                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null },
+                    runtime: {
+                        sceneWindow: { setCancelFlag: async () => {}, clearCancelFlag: async () => {} },
+                        scheduler: { clearBookFromActiveIndex: async () => {}, addSceneToActiveIndex: async () => {} },
+                    },
+                    utils: { log: () => {} },
+                    queueIdempotency: makeQidem(order),
+                };
+                const handler = registerCancel(redis, deps);
+                const response = createResponse();
+                await handler({ params: { bookId: 'cancel-sweep-book' } }, response);
+                expect(response.statusCode).to.equal(200);
+                const releaseIdx = order.indexOf('release:cancel-sweep-book');
+                const hubClears = order.map((o, i) => (o.startsWith('hub-clear:') ? i : -1)).filter(i => i >= 0);
+                // clear → release → CLEAR: a dispatch landing between the two
+                // cannot leave an orphan lane entry behind
+                expect(hubClears).to.have.length(2);
+                expect(hubClears[0]).to.be.lessThan(releaseIdx);
+                expect(hubClears[1]).to.be.greaterThan(releaseIdx);
+            } finally {
+                globalThis.fetch = savedFetch;
+            }
+        });
     });
 
     // ── cache teardown ────────────────────────────────────────────────────
@@ -240,6 +275,197 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
             } finally {
                 globalThis.fetch = savedFetch;
             }
+        });
+
+        it('Stage 120 (M-a): a FAILED hub clear is reported honestly instead of {cleared:true}', async () => {
+            const redis = createMockRedis();
+            const order = [];
+            const savedFetch = globalThis.fetch;
+            globalThis.fetch = async () => { order.push('hub-clear:attempt'); return { ok: false, status: 500 }; };
+            try {
+                const handler = registerCache(redis, {
+                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null, OUTPUT_DIR: '/tmp/opencode/no-output' },
+                    storage: { postgres: { query: async () => {} } },
+                    path: require('path'),
+                    fs: require('fs'),
+                    getAllChunks: async () => [],
+                    getChunk: async () => null,
+                    cleanBookRedisKeys: async () => {},
+                    purgeAssistantForBook: async () => {},
+                    queueIdempotency: makeQidem(order),
+                    clearDeferrals: { book: async () => 0 },
+                    log: () => {},
+                });
+                const response = createResponse();
+                await handler({ params: { bookId: 'cache-ma-book' } }, response);
+                // the claims/markers were KEPT (the safe direction) — the
+                // caller must learn that the book will NOT auto-regenerate
+                // until they expire (audit 119 · M-a, proof-p11 P11.7)
+                expect(response.statusCode).to.equal(200);   // the teardown itself ran
+                expect(response.body).to.be.an('object');
+                expect(response.body.cleared).to.equal(false);
+                expect(response.body.hub_cleared).to.equal(false);
+                expect(response.body.claims_kept).to.equal(true);
+                expect(response.body.error).to.equal('hub_queue_clear_failed');
+                expect(response.body.book_id).to.equal('cache-ma-book');
+                // nothing was released and no post-release sweep runs
+                expect(order.filter(o => o.startsWith('release:'))).to.have.length(0);
+                expect(order).to.have.length(1);
+            } finally {
+                globalThis.fetch = savedFetch;
+            }
+        });
+
+        it('Stage 120 (M-b): the lane is swept a SECOND time after the claims are released', async () => {
+            const redis = createMockRedis();
+            const order = [];
+            const savedFetch = globalThis.fetch;
+            globalThis.fetch = async (url) => {
+                order.push(`hub-clear:${String(url).includes('queue/clear')}`);
+                return { ok: true, status: 200 };
+            };
+            try {
+                const handler = registerCache(redis, {
+                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null, OUTPUT_DIR: '/tmp/opencode/no-output' },
+                    storage: { postgres: { query: async () => {} } },
+                    path: require('path'),
+                    fs: require('fs'),
+                    getAllChunks: async () => [],
+                    getChunk: async () => null,
+                    cleanBookRedisKeys: async () => {},
+                    purgeAssistantForBook: async () => {},
+                    queueIdempotency: makeQidem(order),
+                    clearDeferrals: { book: async () => { order.push('clear-deferrals'); return 0; } },
+                    log: () => {},
+                });
+                const response = createResponse();
+                await handler({ params: { bookId: 'cache-sweep-book' } }, response);
+                expect(response.statusCode).to.equal(200);
+                expect(response.body.cleared).to.equal(true);
+                const releaseIdx = order.indexOf('release:cache-sweep-book');
+                const hubClears = order.map((o, i) => (o.startsWith('hub-clear:') ? i : -1)).filter(i => i >= 0);
+                // clear → release → CLEAR (the orphan-entry window of the
+                // Stage 118 order is closed)
+                expect(hubClears).to.have.length(2);
+                expect(hubClears[0]).to.be.lessThan(releaseIdx);
+                expect(hubClears[1]).to.be.greaterThan(releaseIdx);
+            } finally {
+                globalThis.fetch = savedFetch;
+            }
+        });
+
+        it('Stage 120 (M-b): a FAILED claim release still ends with the safety sweep (recoverable state)', async () => {
+            const redis = createMockRedis();
+            const order = [];
+            const savedFetch = globalThis.fetch;
+            globalThis.fetch = async (url) => {
+                order.push(`hub-clear:${String(url).includes('queue/clear')}`);
+                return { ok: true, status: 200 };
+            };
+            try {
+                const failingQidem = {
+                    ...makeQidem(order),
+                    releaseClaimsForBook: async () => { order.push('release:boom'); throw new Error('scan failed'); },
+                };
+                const handler = registerCache(redis, {
+                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null, OUTPUT_DIR: '/tmp/opencode/no-output' },
+                    storage: { postgres: { query: async () => {} } },
+                    path: require('path'),
+                    fs: require('fs'),
+                    getAllChunks: async () => [],
+                    getChunk: async () => null,
+                    cleanBookRedisKeys: async () => {},
+                    purgeAssistantForBook: async () => {},
+                    queueIdempotency: failingQidem,
+                    clearDeferrals: { book: async () => 0 },
+                    log: () => {},
+                });
+                const response = createResponse();
+                await handler({ params: { bookId: 'cache-release-fail' } }, response);
+                // the release error is contained (warn) and the SECOND sweep
+                // still runs — the state stays consistent either way
+                expect(response.statusCode).to.equal(200);
+                expect(order).to.include('release:boom');
+                expect(order[order.length - 1]).to.match(/^hub-clear:/);
+                expect(order.filter(o => o.startsWith('hub-clear:')).length).to.equal(2);
+            } finally {
+                globalThis.fetch = savedFetch;
+            }
+        });
+    });
+
+    // ── Stage 120 — book deletion cascade sweep (audit 119 · M-b) ─────────
+    describe('DELETE book cascade (audit 119 · M-b)', () => {
+        function makeDeletion(order) {
+            const { createBookDeletion } = require('../src/services/book-deletion.cjs');
+            return createBookDeletion({
+                book: { resetBook: async () => {} },
+                redis: createMockRedis(),
+                storage: { postgres: { query: async () => {} } },
+                config: { BOOKS_DIR: '/tmp/opencode/no-books', OUTPUT_DIR: '/tmp/opencode/no-output' },
+                getAllChunks: async () => [],
+                getChunk: async () => null,
+                cleanBookRedisKeys: async () => {},
+                log: () => {},
+                setCancelFlag: async () => {},
+                agentSessionControl: { cancelSessions: async () => {} },
+                purgeAssistantForBook: async () => {},
+                queueIdempotency: makeQidem(order),
+                clearDeferrals: { book: async () => { order.push('clear-deferrals'); return 0; } },
+            });
+        }
+
+        it('M-b: deleteBook sweeps the hub lane AGAIN after releasing the claims', async () => {
+            const order = [];
+            const savedFetch = globalThis.fetch;
+            globalThis.fetch = async (url) => {
+                order.push(`hub-clear:${String(url).includes('queue/clear')}`);
+                return { ok: true, status: 200 };
+            };
+            try {
+                const result = await makeDeletion(order).deleteBook('del-sweep-book');
+                expect(result.deleted).to.equal(true);
+                const releaseIdx = order.indexOf('release:del-sweep-book');
+                const hubClears = order.map((o, i) => (o.startsWith('hub-clear:') ? i : -1)).filter(i => i >= 0);
+                expect(releaseIdx).to.be.greaterThan(0);
+                expect(hubClears).to.have.length(2);
+                expect(hubClears[0]).to.be.lessThan(releaseIdx);
+                expect(hubClears[1]).to.be.greaterThan(releaseIdx);
+            } finally {
+                globalThis.fetch = savedFetch;
+            }
+        });
+
+        it('M-b: when the FIRST hub clear fails the claims are KEPT and no sweep runs', async () => {
+            const order = [];
+            const savedFetch = globalThis.fetch;
+            globalThis.fetch = async () => { order.push('hub-clear:attempt'); return { ok: false, status: 500 }; };
+            try {
+                const result = await makeDeletion(order).deleteBook('del-failed-hub');
+                expect(result.deleted).to.equal(true);
+                // safe direction: nothing released, exactly one (failed) attempt
+                expect(order.filter(o => o.startsWith('release:'))).to.have.length(0);
+                expect(order).to.have.length(1);
+            } finally {
+                globalThis.fetch = savedFetch;
+            }
+        });
+    });
+
+    // ── Stage 120 — regenerate path sweep (audit 119 · M-b) ───────────────
+    describe('/regenerate post-release sweep (audit 119 · M-b)', () => {
+        it('the regenerate path sweeps the hub lane again through the hubCancel port', () => {
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '../src/routes/book/generation-routes.cjs'), 'utf8');
+            const releaseIdx = src.indexOf('releaseClaimsForScene(');
+            const sweepIdx = src.indexOf("hubCancelOp('clearHubDispatches')");
+            expect(releaseIdx).to.be.greaterThan(0);
+            // the sweep must come AFTER the per-scene claim release
+            expect(sweepIdx).to.be.greaterThan(releaseIdx);
+            expect(src).to.include('Stage 120 (M-b)');
+            // the port is consulted (never a blind call on an unwired port)
+            expect(src).to.include('isHubCancelPortWired()');
         });
     });
 });

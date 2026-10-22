@@ -145,6 +145,18 @@ function getRedis() {
 
 const qidem = require('../helpers/queue-idempotency.cjs');
 
+// Stage 120 (M-e): HTTP 4xx that are DETERMINISTIC rejections — retrying them
+// cannot change the answer, so the dispatcher stops after the first one
+// instead of burning 3× response time + 2 s. The transient 4xx (400 in a
+// race, 408, 409, 425, 429) are deliberately EXCLUDED: the B2 contract
+// ("a definitive 4xx followed by an ambiguous attempt keeps the claim")
+// depends on still probing after a 400.
+const RETRYABLE_4XX = new Set([400, 408, 409, 425, 429]);
+function isFinalRejectionStatus(status) {
+    const s = Number(status);
+    return s >= 400 && s < 500 && !RETRYABLE_4XX.has(s);
+}
+
 // T4: Структурированный результат отправки
 // { sent: true, jobId } или { sent: false, error }
 async function sendUnified(taskSpec) {
@@ -347,6 +359,12 @@ async function sendUnified(taskSpec) {
         lastError = new Error(`HTTP ${res.status}`);
         if (res.status >= 400 && res.status < 500) {
             definitiveRejection = true;   // this attempt was definitive
+            // Stage 120 (M-e): a DETERMINISTIC rejection (auth / forbidden /
+            // not-found / unprocessable) will not change on a retry — stop
+            // instead of burning 2 more attempts + 2 s of backoff. Transient
+            // 4xx (400 bad-request race, 408, 409, 429) keep retrying so the
+            // B2 "definitive 4xx then ambiguous" classification still holds.
+            if (isFinalRejectionStatus(res.status)) break;
         } else {
             ambiguousOutcome = true;      // 5xx — the hub may have taken it
         }

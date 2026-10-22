@@ -405,6 +405,24 @@ module.exports = function(redis, deps = {}) {
                 `animastor:generation:cancel:${bookId}`,
                 // Mode
                 `animastor:mode:${bookId}`,
+                // Stage 120 (M-d): pinned per-task intent epochs — a
+                // book-keyed family that had no cleanup path (24 h TTL was
+                // the only bound). Every component of the key is
+                // percent-encoded (queue-idempotency.cjs encodeKeyComponent),
+                // so the encoded book id cannot reach into another book's
+                // key space.
+                //
+                // NOTE: the `animastor:idempotency:ref:*` family is
+                // deliberately NOT deleted here — the ref is the OWNERSHIP
+                // INDEX of the completion marker (Stage 118 · B1): it must
+                // live as long as the marker, and only the release paths
+                // (`releaseClaimsForScene/Book`) remove ref + claim + marker
+                // TOGETHER. A raw ref delete here would orphan every done
+                // marker (7 days of `already_completed` with no way out) and
+                // reopen audit B4.
+                // (encodeURIComponent leaves '*' literal, so it is glob-escaped
+                // here — a book id containing '*' must not match other books.)
+                `animastor:idempotency:job-epoch:${encodeURIComponent(bookId).replace(/[*?[\]]/g, '\\$&')}:*`,
                 // Legacy patterns (catch-all)
                 `animastor:book:${bookId}:*`,
                 `animastor:scope:${bookId}`,
