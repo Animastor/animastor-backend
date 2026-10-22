@@ -32,6 +32,10 @@ const mediaRegistry = require('@animastor/generation').mediaRegistry;
 // console output stays byte-identical.
 const logPrefix = '[ORCH]';
 
+// Stage 114 — asset types that map 1:1 onto a GPU stage. Only these carry a
+// generation epoch (the GPU queue idempotency identity).
+const STAGE_EPOCH_STAGES = ['audio', 'image', 'video'];
+
 function log(msg) {
     console.log(`${logPrefix} ${msg}`);
 }
@@ -83,6 +87,27 @@ async function markDirtyScene(redis, bookId, chapterId, sceneId, assets = mediaR
     const state = require('./asset-state-store');
     for (const asset of assets) {
         await state.unsafeRestoreAssetState(redis, bookId, chapterId, sceneId, asset, state.AssetState.DIRTY);
+    }
+
+    // Stage 114 — DIRTY means "new work is requested for this asset". That is
+    // the ONLY legitimate reason to change the generation epoch: the GPU
+    // queue idempotency key is derived from (workspace, job, build, params,
+    // epoch), so a regeneration needs a fresh epoch, while an ordinary
+    // re-dispatch (graceful shutdown → reconciliation) keeps the epoch and
+    // stays suppressed as a duplicate.
+    //
+    // The reconciliation rollback path (orchestrator.rollbackStageToPending)
+    // does NOT go through this function — it writes the FSM state directly —
+    // so a restart recovery never bumps the epoch.
+    try {
+        const qidem = require('../helpers/queue-idempotency.cjs');
+        for (const asset of assets) {
+            if (!STAGE_EPOCH_STAGES.includes(asset)) continue;
+            const epoch = await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, asset);
+            log(`[DIRTY-SCENE] ${bookId}/${chapterId}/${sceneId}: generation epoch bumped for ${asset} → ${epoch}`);
+        }
+    } catch (epochErr) {
+        warn(`markDirtyScene: generation epoch bump failed for ${bookId}/${chapterId}/${sceneId}: ${epochErr.message}`);
     }
 
     // Stage 50 (Фаза 4): терминальная FSM-запись не блокирует re-dispatch

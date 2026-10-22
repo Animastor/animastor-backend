@@ -118,6 +118,33 @@ function clearRoutingCaches() {
 // (generation/default-registrations.js, timeout.jobMs) — values preserved
 // from the former DEFAULT_TYPE_TIMEOUT_MS (audio/image 30 min, video 60 min).
 
+// ─────────────────────────────────────────────────────────────────────────
+// Stage 114 — REDIS CLIENT + QUEUE IDEMPOTENCY + EXECUTOR GATE
+// ─────────────────────────────────────────────────────────────────────────
+// The dispatcher needs Redis for two things that must happen BEFORE a job
+// reaches the GPU Hub queue:
+//   1. the single-pending-entry claim (queue-idempotency) — a re-dispatch of
+//      the same logical task must not append a second copy to the lane;
+//   2. the executor-availability gate — a job must not be enqueued when no
+//      live worker can pop it (otherwise the lane only grows).
+//
+// The client is registered by the composition root (backend.cjs) so the
+// dispatcher does not open a second connection on its own.
+let _redis = null;
+
+/** Register the composition-root Redis client (idempotent). */
+function setRedis(client) {
+    _redis = client || null;
+    return _redis;
+}
+
+/** The registered Redis client (null when the dispatcher runs standalone). */
+function getRedis() {
+    return _redis;
+}
+
+const qidem = require('../helpers/queue-idempotency.cjs');
+
 // T4: Структурированный результат отправки
 // { sent: true, jobId } или { sent: false, error }
 async function sendUnified(taskSpec) {
@@ -181,6 +208,70 @@ async function sendUnified(taskSpec) {
         ...(policyLane ? { policy_id: policyLane.policy_id } : {}),
     };
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Stage 114 — executor gate + single-pending-entry claim
+    // ─────────────────────────────────────────────────────────────────────
+    const redis = getRedis();
+    const stage = payload.stage;
+    let idemKey = null;
+
+    if (redis) {
+        // (1) EXECUTOR GATE — a job must not be enqueued into a lane that
+        //     no live worker can pop. The lane choice above stays
+        //     registration-based (it is an isolation decision: a workspace
+        //     with its own private worker keeps its jobs in its own lane),
+        //     but the SENDING requires a live, type-compatible worker.
+        const lane = workspaceId
+            ? { kind: 'private', workspaceId }
+            : (policyLane
+                ? { kind: 'policy', policyId: policyLane.policy_id, ownerWorkspaceId: policyLane.owner_workspace_id || null }
+                : { kind: 'system' });
+        const executorAvailable = await qidem.hasLiveExecutorForLane(redis, taskSpec.job_type, lane);
+        if (!executorAvailable) {
+            stats.jobs_gated_no_worker = (stats.jobs_gated_no_worker || 0) + 1;
+            log(`No live executor for ${taskSpec.job_type} in ${lane.kind} lane — job NOT enqueued (retryable): ${payload.job_id}`);
+            return {
+                sent: false,
+                reason: 'no_worker_available',
+                retryable: true,
+                jobId: payload.job_id,
+                dispatchId: taskSpec.dispatch_id,
+            };
+        }
+
+        // (2) SINGLE PENDING ENTRY — the epoch is frozen per dispatch, so all
+        //     jobs of one dispatch share one identity; a re-dispatch with a
+        //     NEW dispatch_id computes the SAME idem_key and is therefore
+        //     suppressed instead of appending a duplicate lane entry.
+        const epoch = await qidem.resolveDispatchEpoch(
+            redis, taskSpec.dispatch_id, parsed.bookId, parsed.chapterId, parsed.sceneId, stage
+        );
+        idemKey = qidem.computeIdemKey({
+            workspaceId: payload.workspace_id,
+            jobId: payload.job_id,
+            jobType: payload.job_type,
+            buildId: payload.build_id,
+            params: taskSpec.params,
+            generationEpoch: epoch,
+        });
+        const guard = await qidem.guardEnqueue(redis, idemKey);
+        if (!guard.allowed) {
+            stats.jobs_suppressed_duplicate = (stats.jobs_suppressed_duplicate || 0) + 1;
+            log(`Enqueue suppressed (${guard.reason}): ${payload.job_id} dispatch=${taskSpec.dispatch_id} idem=${idemKey.slice(0, 12)}`);
+            return {
+                sent: false,
+                reason: guard.reason,
+                suppressed: true,
+                retryable: guard.reason === 'duplicate_pending',
+                idem_key: idemKey,
+                jobId: payload.job_id,
+                dispatchId: taskSpec.dispatch_id,
+            };
+        }
+        // Remember the identity so the result callback can find it.
+        await qidem.rememberTaskRef(redis, payload.job_id, idemKey);
+    }
+
     // T9: Include GPU_HUB_API_KEY header for authenticated requests
     const headers = { "Content-Type": "application/json" };
     if (config.GPU_HUB_API_KEY) {
@@ -207,18 +298,24 @@ async function sendUnified(taskSpec) {
             // S-2: per-type counters keyed dynamically — no hardcoded media list
             const typeKey = `${payload.job_type}_jobs_started`;
             stats[typeKey] = (stats[typeKey] || 0) + 1;
-            return { sent: true, jobId: payload.job_id, dispatchId: payload.dispatch_id };
+            return { sent: true, jobId: payload.job_id, dispatchId: payload.dispatch_id, idem_key: idemKey };
         } catch (err) {
             lastError = err;
             if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
         }
     }
     stats.failed_jobs++;
-    return { sent: false, error: lastError ? lastError.message : 'max_retries' };
+    // The hub never took the job → the pending claim must be released, so a
+    // later justified attempt is not blocked by a claim nobody holds.
+    if (redis && idemKey) {
+        await qidem.releaseTask(redis, idemKey);
+        await qidem.forgetTaskRef(redis, payload.job_id);
+    }
+    return { sent: false, error: lastError ? lastError.message : 'max_retries', jobId: payload.job_id };
 }
 
 async function send(job_id, workflow, type, build_id, dispatch_id) {
     return sendUnified({ job_id, params: workflow, job_type: type, build_id, dispatch_id });
 }
 
-module.exports = { send, sendUnified, resolveWorkspaceForBook, workspaceHasPrivateWorker, workspaceGrantPolicyLane, clearRoutingCaches };
+module.exports = { send, sendUnified, resolveWorkspaceForBook, workspaceHasPrivateWorker, workspaceGrantPolicyLane, clearRoutingCaches, setRedis, getRedis };

@@ -708,7 +708,7 @@ async function hasGrantForUser(workerId, userId, now = Date.now()) {
 async function findGrantPolicyForRouting(workspaceId, ownerUserId, workerType, now = Date.now()) {
     if (!workspaceId || !ownerUserId || !WORKER_TYPES().includes(workerType)) return null;
     const { rows } = await query(`
-        SELECT p.policy_id, p.scope_kind, p.expires_at
+        SELECT p.policy_id, p.scope_kind, p.expires_at, w.workspace_id AS owner_workspace_id
         FROM share_policy_grants g
         JOIN share_policies p ON p.policy_id = g.policy_id
         JOIN workers w ON w.worker_id = p.worker_id

@@ -26,6 +26,10 @@ module.exports = function(app, redis, deps) {
         detectAvailableMode, recoverChunksFromDisk, recoverAllBooksFromDisk,
         cleanupService, iuRepo, computeWaveform,
         agentSessionControl,
+        // Stage 114 — queue idempotency port. Injected by the composition root
+        // (backend.cjs) so this route layer does NOT gain a new relative
+        // require edge (the contour-route require sets are frozen).
+        queueIdempotency,
     } = deps;
     const { log } = utils;
 
@@ -486,8 +490,17 @@ module.exports = function(app, redis, deps) {
                 }
             }
 
-            // Н.1: Dedup
-            const dedupKey = `animastor:result-processed:${dispatch_id}:${job_id}:${build_id}`;
+            // Н.1: Dedup.
+            // Stage 114: the key is DISPATCH-INDEPENDENT on purpose. The old
+            // key (`…:{dispatch_id}:{job_id}:{build_id}`) could not suppress a
+            // redelivered result that came with a different dispatch_id — and
+            // the backend-side "dedup clear" in iu-processor.js targeted a
+            // legacy key format (`…:{iu}:iu_image:{build}`) that this route
+            // never wrote, so the clear was a no-op. The result of one logical
+            // job is one result, regardless of which dispatch delivered it.
+            const dedupKey = (queueIdempotency
+                ? queueIdempotency.resultDedupKey(job_id, build_id)
+                : `animastor:result-processed:${job_id}:${build_id}`);
             const alreadyProcessed = await redis.set(dedupKey, '1', 'NX', 'EX', 3600);
             if (!alreadyProcessed) {
                 log(`[GPU RESULT] Dedup: ${job_id} (build=${build_id}) already processed — skipping`);
@@ -499,6 +512,22 @@ module.exports = function(app, redis, deps) {
                 log(`[GPU RESULT] Calling handleTaskResult for ${job_id}...`);
                 await deps.taskHandler.handleTaskResult(job_id, result_base64, build_id, dispatch_id);
                 log(`[GPU RESULT] handleTaskResult OK: ${job_id}`);
+                // Stage 114 — the logical task is COMPLETE now: release the
+                // pending-entry claim and record the completion marker. A
+                // queue entry was never proof of completion; a real, accepted
+                // result is.
+                try {
+                    const qidem = queueIdempotency;
+                    const idemKey = qidem ? await qidem.readTaskRef(redis, job_id) : null;
+                    if (idemKey) {
+                        await qidem.markTaskDone(redis, idemKey);
+                        await qidem.releaseTask(redis, idemKey);
+                        await qidem.forgetTaskRef(redis, job_id);
+                        log(`[GPU RESULT] Idempotency settled for ${job_id} (idem=${idemKey.slice(0, 12)})`);
+                    }
+                } catch (idemErr) {
+                    console.warn(`[GPU RESULT] idempotency settle failed for ${job_id}: ${idemErr.message}`);
+                }
             } catch (procErr) {
                 log(`[GPU RESULT] handleTaskResult FAILED: ${job_id} — ${procErr.message}`);
                 await redis.del(dedupKey).catch(() => {});
@@ -570,6 +599,25 @@ module.exports = function(app, redis, deps) {
             if (!first) return res.json({ ok: true, deduped: true });
 
             log(`[GPU ERROR] ${bookId}/${chapterId}/${sceneId} ${stage} failed: ${reason || 'unknown'} (job=${job_id})`);
+
+            // Stage 114 — a failed job is a JUSTIFIED retry: release the
+            // pending-entry claim (the task is no longer pending) and bump
+            // the stage generation epoch, so the next dispatch of this stage
+            // gets a fresh identity and may enqueue again. Without the epoch
+            // bump the retry would be suppressed as a duplicate.
+            try {
+                const qidem = queueIdempotency;
+                const idemKey = qidem ? await qidem.readTaskRef(redis, job_id) : null;
+                if (idemKey) {
+                    await qidem.releaseTask(redis, idemKey);
+                    await qidem.forgetTaskRef(redis, job_id);
+                }
+                if (qidem) {
+                    await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, stage);
+                }
+            } catch (idemErr) {
+                console.warn(`[GPU ERROR] idempotency settle failed for ${job_id}: ${idemErr.message}`);
+            }
 
             // F2: raw audioOrch.setFailed removed — orchestrator.failStage handles audio-orch sync
             const result = await orchestrator.failStage(

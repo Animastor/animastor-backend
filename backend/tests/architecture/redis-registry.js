@@ -694,6 +694,21 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'Local AI Connector liveness mirrors on the backend (ai-connector-routes; TTL 45s). LAC itself talks WS, not Redis.',
     },
+    {
+        // Stage 114 — GPU queue idempotency identity. The claim keeps ONE
+        // pending lane entry per logical task (workspace, job, build,
+        // canonical params, generation epoch) so a re-dispatch with a new
+        // dispatch_id cannot append a second copy. The done marker records a
+        // REAL accepted result (a queue entry is never proof of completion).
+        // The epoch counters make a justified retry / explicit regeneration
+        // distinguishable from an ordinary re-dispatch.
+        pattern: 'animastor:idempotency:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'GPU queue idempotency state: claim (one pending entry per logical task), done (accepted result), ref (job_id → identity), stage-epoch (generation epoch), dispatch-epoch (epoch frozen per dispatch).',
+    },
 ];
 
 module.exports = { REDIS_OWNERSHIP };

@@ -203,14 +203,33 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
             return { sent: false, cached: false, skipped: true };
         }
 
+        // Stage 114 — explicit regeneration of a dirty unit.
+        //
+        // 1. The hub dedup key is `animastor:job:{dispatch_id}:{job_id}`
+        //    (gpu-hub.js `jobDedupKey`). The previous code deleted
+        //    `animastor:job:{iu}:iu_image` / `:image` — a format the hub
+        //    NEVER writes, so the clear was a NO-OP and a re-send inside the
+        //    SAME dispatch could still be rejected by the hub as duplicate.
+        //    The correct key is rebuilt from the dispatch_id + the job id.
+        // 2. "The user asked for this unit to be regenerated" is also the
+        //    legitimate reason to move the stage generation epoch: the next
+        //    dispatch of the stage computes a NEW idempotency key and may
+        //    enqueue, while an ordinary re-dispatch keeps the epoch and stays
+        //    suppressed as a duplicate.
         try {
-            await redis.del(
-                `animastor:job:${imageIUId}:iu_image`,
-                `animastor:job:${imageIUId}:image`
-            );
-            helpers.log(`[DEDUP-CLEAR] Cleared hub dedup keys for ${imageIUId}`);
+            const jobId = provider.buildJobId(imageIUId, 'iu_image');
+            await redis.del(`animastor:job:${dispatchId}:${jobId}`);
+            helpers.log(`[DEDUP-CLEAR] Cleared hub dedup key for ${jobId} (dispatch=${dispatchId || 'none'})`);
         } catch (e) {
-            helpers.warn(`[DEDUP-CLEAR] Failed: ${e.message}`);
+            helpers.warn(`[DEDUP-CLEAR] Failed to clear hub dedup key: ${e.message}`);
+        }
+
+        try {
+            const qidem = require('../helpers/queue-idempotency.cjs');
+            const epoch = await qidem.bumpStageEpoch(redis, bookId, chapterId, sceneId, 'image');
+            helpers.log(`[DEDUP-CLEAR] Bumped image generation epoch for ${bookId}/${chapterId}/${sceneId} → ${epoch} (explicit regeneration of ${imageIUId})`);
+        } catch (e) {
+            helpers.warn(`[DEDUP-CLEAR] Failed to bump generation epoch: ${e.message}`);
         }
 
         try {
@@ -299,11 +318,19 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
     }
     if (!sendResult.sent) {
         await redis.del(inFlightKey).catch(() => {});
-        helpers.warn(`IMAGE (IU) enqueue failed for ${imageIUId}: ${sendResult.error || 'unknown'}`);
-        return { sent: false, cached: false, reason: 'enqueue_failed' };
+        // Stage 114 — keep the explicit reason of the dispatcher (e.g.
+        // 'no_worker_available' / 'duplicate_pending') so the caller can
+        // distinguish a retryable capacity gap from a real enqueue failure.
+        const reason = sendResult.reason || 'enqueue_failed';
+        helpers.warn(`IMAGE (IU) enqueue not sent for ${imageIUId}: ${reason}${sendResult.error ? ` (${sendResult.error})` : ''}`);
+        return { sent: false, cached: false, reason, retryable: !!sendResult.retryable };
     }
 
     try {
+        // Stage 114 — this key format now matches the one the result route
+        // writes (`animastor:result-processed:{job_id}:{build_id}`, where
+        // job_id = `{iuAssetId}:iu_image`). Before Stage 114 the route wrote
+        // a dispatch-scoped key, so this clear targeted a key nobody wrote.
         await redis.del(`animastor:result-processed:${imageIUId}:iu_image:${buildId}`);
         helpers.log(`[DEDUP-CLEAR-BACKEND] Post-cleared result-processed dedup for ${imageIUId}`);
     } catch (e) {

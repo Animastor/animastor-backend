@@ -297,6 +297,11 @@ const { PORT = 3000, HUB_URL = 'https://animastor.org/gpu', BUILD_TTL_HOURS = 48
 const crypto = require('crypto');
 
 const redis = new Redis({ host: 'redis', port: 6379 });
+// Stage 114 — the GPU dispatcher needs the Redis client for the queue
+// idempotency claim and the executor-availability gate (both must run BEFORE
+// a job reaches the hub queue). Registering it here keeps a single
+// connection instead of opening a second one inside the dispatcher.
+require('./runtime/gpu-dispatcher').setRedis(redis);
 const app = express();
 
 // Trust the single reverse proxy (nginx in docker-compose) so express-rate-limit
@@ -631,7 +636,12 @@ require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, boo
 createPlayerRoutes(app, redis, routeDeps);
 // Generation routes — import/generation leg, worker status/counts, progress
 // SSE, GPU Hub callbacks. No playback handlers remain here.
-require('./routes/generation-routes.cjs')(app, redis, { ...routeDeps, taskHandler });
+require('./routes/generation-routes.cjs')(app, redis, {
+    ...routeDeps, taskHandler,
+    // Stage 114 — queue idempotency port (injected, not required by the
+    // route layer: the contour-route require sets are frozen).
+    queueIdempotency: require('./helpers/queue-idempotency.cjs'),
+});
 // AI Assistant routes — registered through the @animastor/assistant
 // package API (the Assistant HTTP contour lives in
 // packages/animastor-assistant; the host must not require package
