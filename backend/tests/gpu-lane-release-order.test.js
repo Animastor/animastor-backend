@@ -468,4 +468,63 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
             expect(src).to.include('isHubCancelPortWired()');
         });
     });
+
+    // ── Stage 122 — behavioural book-scoped sweep (audit 121 · N1) ────────
+    // The Stage 120 structural test only checked the call SITE existed. Audit
+    // 121 · N1 proved the call was a NO-OP: clearHubDispatches ignored book_id
+    // and an empty id list issued ZERO hub requests. These cases pin the FIXED
+    // CONTRACT: the exact hub request and the real result accounting.
+    describe('clearHubDispatches book-scoped sweep (audit 121 · N1)', () => {
+        const clearHubDispatches = () => require('@animastor/orchestration').runtime.dispatch.clearHubDispatches;
+        const HUB = 'http://hub.test';
+
+        it('empty ids + book_id issues EXACTLY one book-scoped DELETE and reports it', async () => {
+            const requests = [];
+            const fetchImpl = async (url, opts) => {
+                requests.push({ url, method: opts.method });
+                return { ok: true, status: 200, json: async () => ({ ok: true, scope: { book_id: 'bk-n1' }, removed: {} }) };
+            };
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, apiKey: 'k', fetchImpl, warn: () => {} });
+            expect(requests).to.have.lengthOf(1);
+            expect(requests[0].method).to.equal('DELETE');
+            expect(requests[0].url).to.equal(`${HUB}/queue/clear?book_id=bk-n1`);
+            expect(result).to.deep.equal({ requested: 1, cleared: 1, failed: 0 });
+        });
+
+        it('a hub ERROR is reported honestly (failed, never cleared)', async () => {
+            const fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({}) });
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
+            expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
+        });
+
+        it('an UNREACHABLE hub counts as failed and never throws', async () => {
+            const fetchImpl = async () => { throw new Error('ECONNREFUSED 127.0.0.1:1'); };
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
+            expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
+        });
+
+        it('a hub that echoes a FOREIGN scope is a failure (never clears other books)', async () => {
+            const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ ok: true, scope: { book_id: 'OTHER-book' }, removed: {} }) });
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
+            expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
+        });
+
+        it('empty ids and NO book_id issues NO request at all (no fake HTTP)', async () => {
+            const requests = [];
+            const fetchImpl = async (url) => { requests.push(url); return { ok: true, status: 200, json: async () => ({}) }; };
+            const result = await clearHubDispatches()([], { hubUrl: HUB, fetchImpl, warn: () => {} });
+            expect(requests).to.have.lengthOf(0);
+            expect(result).to.deep.equal({ requested: 0, cleared: 0, failed: 0 });
+        });
+
+        it('the per-id form is unchanged (one DELETE per dispatch id)', async () => {
+            const requests = [];
+            const fetchImpl = async (url) => { requests.push(url); return { ok: true, status: 200 }; };
+            const result = await clearHubDispatches()(['d1', 'd2'], { hubUrl: HUB, fetchImpl, warn: () => {} });
+            expect(requests).to.have.lengthOf(2);
+            expect(requests[0]).to.include('dispatch_id=d1');
+            expect(requests[1]).to.include('dispatch_id=d2');
+            expect(result).to.deep.equal({ requested: 2, cleared: 2, failed: 0 });
+        });
+    });
 });

@@ -30,6 +30,12 @@
 //                        a cancelled dispatch still owns on the GPU Hub
 //                        (orchestrator resetScenes cancel leg,
 //                        reconciliation RELEASE_STALE_LEASE recovery leg).
+//                        Accepts EITHER an array of dispatch ids (one
+//                        `?dispatch_id=` DELETE per id) OR an empty list with
+//                        `options.book_id` (Stage 122 · N1 — a single
+//                        book-scoped `?book_id=` sweep, used by the
+//                        regenerate post-release lane sweep; audit 121 found
+//                        the empty-list + book_id form was a silent no-op).
 //                        Returns { requested, cleared, failed }; hub
 //                        unavailability is non-fatal per-id (warn + count),
 //                        never throws for a single failed id.

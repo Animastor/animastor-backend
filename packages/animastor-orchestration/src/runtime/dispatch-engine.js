@@ -1590,9 +1590,33 @@ async function clearLeasesForScenes(redis, bookId, scenes) {
 }
 
 /**
- * Remove specific cancelled dispatches from GPU Hub.
+ * Remove cancelled dispatches from GPU Hub.
  * Kept here with dispatch cancellation so every caller uses the same auth and
  * error-handling contract.
+ *
+ * Stage 122 (N1): the hub's `DELETE /queue/clear` accepts EITHER a
+ * `dispatch_id` (per-job) OR a `book_id` (whole-book lane sweep). Before this
+ * stage the function only honoured the per-id form; a caller that passed an
+ * EMPTY id list together with `book_id` (the regenerate post-release sweep,
+ * audit 121 · N1) fell straight through the id loop and issued ZERO requests —
+ * a silent NO-OP that left orphan lane entries behind while looking like a
+ * successful sweep.
+ *
+ * The contract now is:
+ *   - ids present        → one `?dispatch_id=` DELETE per id (unchanged);
+ *   - no ids + book_id   → exactly ONE `?book_id=` DELETE (the whole-book sweep
+ *                          the hub already supports and cache/delete paths use);
+ *   - neither            → NO request at all (never a fake HTTP call).
+ *
+ * A book-scoped sweep is checked against the hub's echoed `scope.book_id`:
+ * if the hub answers `ok` but echoes a DIFFERENT scope (or none at all while
+ * reporting a full wipe) it did not honour our ownership and other books may
+ * have been touched — that is counted as `failed` and warned, never as a
+ * success. Failures never throw (best-effort contract, callers keep claims).
+ *
+ * @returns {Promise<{requested:number, cleared:number, failed:number}>}
+ *   `requested` = number of hub requests actually attempted (1 for a
+ *   book-scoped sweep, ids.length for per-id, 0 when there is nothing to do).
  */
 async function clearHubDispatches(dispatchIds, options = {}) {
     const ids = [...new Set((dispatchIds || []).filter(Boolean))];
@@ -1603,16 +1627,59 @@ async function clearHubDispatches(dispatchIds, options = {}) {
     const context = options.context || 'DISPATCH';
     const reportWarning = typeof options.warn === 'function' ? options.warn : warn;
     const fetchImpl = options.fetchImpl || globalThis.fetch;
+    const bookId = options.book_id || options.bookId || null;
     let cleared = 0;
     let failed = 0;
 
+    const authHeaders = () => {
+        const headers = {};
+        if (apiKey) headers['x-api-key'] = apiKey;
+        return headers;
+    };
+
+    // ── Book-scoped sweep (no explicit dispatch ids) ──────────────────────
+    // Exactly one request; the hub filters by record.book_id so only this
+    // book's queue/running/result entries are removed.
+    if (ids.length === 0 && bookId) {
+        try {
+            const response = await fetchImpl(
+                `${hubUrl}/queue/clear?book_id=${encodeURIComponent(bookId)}`,
+                { method: 'DELETE', headers: authHeaders() }
+            );
+            if (!response.ok) {
+                failed++;
+                reportWarning(`${context}: GPU hub book cleanup returned ${response.status} for ${bookId}`);
+            } else {
+                // Verify the hub honoured OUR scope. A mismatched echo means it
+                // may have swept a different book (or everything) — that is a
+                // failure, not a success we can report.
+                let enforcedScope = true;
+                try {
+                    const body = typeof response.json === 'function' ? await response.json() : null;
+                    if (body && body.scope && body.scope.book_id != null && body.scope.book_id !== bookId) {
+                        enforcedScope = false;
+                    }
+                } catch (_) { /* unparseable body — trust the ok status */ }
+                if (!enforcedScope) {
+                    failed++;
+                    reportWarning(`${context}: GPU hub book cleanup echoed a foreign scope for ${bookId} — treated as failed`);
+                } else {
+                    cleared++;
+                }
+            }
+        } catch (err) {
+            failed++;
+            reportWarning(`${context}: GPU hub book cleanup failed for ${bookId}: ${err.message}`);
+        }
+        return { requested: 1, cleared, failed };
+    }
+
+    // ── Per-dispatch cleanup (unchanged) ─────────────────────────────────
     for (const dispatchId of ids) {
         try {
-            const headers = {};
-            if (apiKey) headers['x-api-key'] = apiKey;
             const response = await fetchImpl(
                 `${hubUrl}/queue/clear?dispatch_id=${encodeURIComponent(dispatchId)}`,
-                { method: 'DELETE', headers }
+                { method: 'DELETE', headers: authHeaders() }
             );
             if (!response.ok) {
                 failed++;

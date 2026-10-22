@@ -16,6 +16,8 @@ const validation = require('./validation');
 const chunks = require('./chunks');
 const segments = require('./segments');
 const ffmpeg = require('./ffmpeg');
+// Stage 122 (N2): shared orphan-marker release for the audio send paths.
+const queueIdempotency = require('../helpers/queue-idempotency.cjs');
 
 const WORKFLOW_NARRATION = 'tts-qwen-narrator';
 const WORKFLOW_DIALOGUE = 'tts-qwen-dialogue';
@@ -337,13 +339,29 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
                 dispatchId
             });
 
-            if (sendResult.sent) {
+            // Stage 122 (N2): free an orphaned completion marker (the chunk was
+            // probed absent above, so `already_completed` can only mean the
+            // marker outlived a wipe) and retry the send ONCE. Audit 121 · N2:
+            // audio/video had no such release and looped on `already_completed`.
+            let audioSend = sendResult;
+            if (await queueIdempotency.releaseTaskDoneIfOrphan(redis, audioSend)) {
+                helpers.log(`[IDEMPOTENT-RELEASE] Orphaned completion marker released for merged audio ${id} — regenerating`);
+                audioSend = await provider.generate({
+                    jobId: provider.buildJobId(id, 'audio'),
+                    workflow: mergedWf,
+                    jobType: 'audio',
+                    buildId,
+                    dispatchId
+                });
+            }
+
+            if (audioSend.sent) {
                 sentCount = 1;
                 helpers.log(`🎭 Merged dialogue dispatched: ${bookId}/${chapterId}/${sceneId} (${segList.length} segments in 1 workflow)`);
             } else {
                 // Stage 116 (D3): keep the reason for the capacity deferral.
-                deferState.notSentReasons.set(sendResult.reason || 'send_failed', 1);
-                helpers.warn(`Audio enqueue failed for merged dialogue ${id}: ${sendResult.error || 'unknown'}`);
+                deferState.notSentReasons.set(audioSend.reason || 'send_failed', 1);
+                helpers.warn(`Audio enqueue failed for merged dialogue ${id}: ${audioSend.error || 'unknown'}`);
                 // Cleanup the pending chunk
                 const chunkKey = `animastor:chunk:${id}`;
                 await redis.del(chunkKey);
@@ -528,22 +546,36 @@ async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildI
             }
         }
 
-        const sendResult = await provider.generate({
+        let audioSend = await provider.generate({
             jobId: provider.buildJobId(id, 'audio'),
             workflow: wfAudio,
             jobType: 'audio',
             buildId,
             dispatchId
         });
-        if (sendResult.sent) {
+        // Stage 122 (N2): free an orphaned completion marker (the chunk was
+        // probed absent above, so `already_completed` can only mean the marker
+        // outlived a wipe) and retry the send ONCE. Audit 121 · N2: audio
+        // previously had no such release and looped on `already_completed`.
+        if (await queueIdempotency.releaseTaskDoneIfOrphan(redis, audioSend)) {
+            helpers.log(`[IDEMPOTENT-RELEASE] Orphaned completion marker released for audio chunk ${id} — regenerating`);
+            audioSend = await provider.generate({
+                jobId: provider.buildJobId(id, 'audio'),
+                workflow: wfAudio,
+                jobType: 'audio',
+                buildId,
+                dispatchId
+            });
+        }
+        if (audioSend.sent) {
             sentCount++;
             helpers.log(`📤 Dispatched chunk ${chunkIndex}/${segList.length}: ${id} (${segment.segment_type}, padded=${!!segment.padded})`);
         } else {
             // Stage 116 (D3): keep WHY the chunk was not sent - the
             // orchestration layer turns it into a bounded capacity deferral
             // instead of a fatal 'no_jobs_generated' cancel.
-            notSentReasons.set(sendResult.reason || 'send_failed', (notSentReasons.get(sendResult.reason || 'send_failed') || 0) + 1);
-            helpers.warn(`Audio enqueue failed for ${id}: ${sendResult.error || sendResult.reason || 'unknown'}`);
+            notSentReasons.set(audioSend.reason || 'send_failed', (notSentReasons.get(audioSend.reason || 'send_failed') || 0) + 1);
+            helpers.warn(`Audio enqueue failed for ${id}: ${audioSend.error || audioSend.reason || 'unknown'}`);
         }
     }
 

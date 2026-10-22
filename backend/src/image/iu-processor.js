@@ -334,29 +334,30 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
     // retries, gets the same outcome, and the scene stays in the active index
     // for good (audit 119 · M-c). Free the marker and retry ONCE so the task
     // regenerates on this attempt instead of looping.
-    if (!sendResult.sent && sendResult.reason === 'already_completed' && sendResult.idem_key) {
-        try {
-            const qidem = require('../helpers/queue-idempotency.cjs');
-            await qidem.releaseTaskDone(redis, sendResult.idem_key);
+    //
+    // Stage 122 (N2): the detect+release is now the shared
+    // `releaseTaskDoneIfOrphan` helper (identical for image/audio/video);
+    // only the in-flight re-arm below stays image-specific.
+    {
+        const qidem = require('../helpers/queue-idempotency.cjs');
+        if (await qidem.releaseTaskDoneIfOrphan(redis, sendResult)) {
             helpers.log(`[IDEMPOTENT-RELEASE] Orphaned completion marker released for ${imageIUId} (artifact missing) — regenerating`);
-        } catch (relErr) {
-            helpers.warn(`[IDEMPOTENT-RELEASE] Failed to release completion marker for ${imageIUId}: ${relErr.message}`);
-        }
-        // Re-arm the in-flight marker and retry exactly once.
-        try {
-            await redis.set(inFlightKey, dispatchId || 'unknown', 'EX', IU_IN_FLIGHT_TTL_S);
-            const dispatchEngine = require('@animastor/orchestration').runtime.dispatch;
-            await dispatchEngine.registerInFlightMarker(redis, dispatchId, inFlightKey);
-        } catch (e) {
-            helpers.warn(`[IU-IN-FLIGHT] Failed to re-arm marker for ${imageIUId}: ${e.message}`);
-        }
-        await registry.saveIURegistry(redis, imageIUId, buildId);
-        sendResult = await provider.generate({ jobId: iuJobId, workflow: wfImg, jobType: 'image', buildId, dispatchId });
-        try {
-            const dispatchEngine = require('@animastor/orchestration').runtime.dispatch;
-            await dispatchEngine.unregisterInFlightMarker(redis, dispatchId, inFlightKey);
-        } catch (e) {
-            helpers.warn(`[IU-IN-FLIGHT] Failed to unregister retry marker for ${imageIUId}: ${e.message}`);
+            // Re-arm the in-flight marker and retry exactly once.
+            try {
+                await redis.set(inFlightKey, dispatchId || 'unknown', 'EX', IU_IN_FLIGHT_TTL_S);
+                const dispatchEngine = require('@animastor/orchestration').runtime.dispatch;
+                await dispatchEngine.registerInFlightMarker(redis, dispatchId, inFlightKey);
+            } catch (e) {
+                helpers.warn(`[IU-IN-FLIGHT] Failed to re-arm marker for ${imageIUId}: ${e.message}`);
+            }
+            await registry.saveIURegistry(redis, imageIUId, buildId);
+            sendResult = await provider.generate({ jobId: iuJobId, workflow: wfImg, jobType: 'image', buildId, dispatchId });
+            try {
+                const dispatchEngine = require('@animastor/orchestration').runtime.dispatch;
+                await dispatchEngine.unregisterInFlightMarker(redis, dispatchId, inFlightKey);
+            } catch (e) {
+                helpers.warn(`[IU-IN-FLIGHT] Failed to unregister retry marker for ${imageIUId}: ${e.message}`);
+            }
         }
     }
     if (!sendResult.sent) {

@@ -470,6 +470,38 @@ async function releaseTaskDone(redis, idemKey) {
 }
 
 /**
+ * Detect + free an ORPHANED completion marker on a SEND path (Stage 122 · N2).
+ *
+ * The M-c invariant (audit 119 · M-c): a send path reaches `provider.generate`
+ * only after probing the artifact/chunk ABSENT (a present artifact
+ * short-circuits to the cache-hit branch and never dispatches). Therefore an
+ * `already_completed` verdict that comes back from the SEND path is, by that
+ * invariant, an ORPHAN — the marker survived a wipe that did not release it.
+ * Left in place it suppresses the task forever: the dispatch engine defers it
+ * 900 s, retries, gets the same verdict, and the scene stays in the active
+ * index for good.
+ *
+ * Shared by the image (`image/iu-processor`), audio (`audio/generation`) and
+ * video (`orchestration/scene-orchestrator` via the persistence port) send
+ * paths so orphan handling is IDENTICAL for every job type. Stage 121 · N2
+ * found only the image path released the marker; audio/video still looped.
+ *
+ * @returns {Promise<boolean>}
+ *   true  — the verdict was `already_completed` on a send and an orphaned
+ *           marker was (best-effort) released; the caller should retry the
+ *           send ONCE (the retry re-claims the same logical task, so a later
+ *           dispatch still sees a normal bounded `duplicate_pending`).
+ *   false — anything else (sent, duplicate_pending, no idem_key); the caller
+ *           must NOT retry.
+ */
+async function releaseTaskDoneIfOrphan(redis, sendResult) {
+    if (!redis || !sendResult || sendResult.sent) return false;
+    if (sendResult.reason !== 'already_completed' || !sendResult.idem_key) return false;
+    try { await releaseTaskDone(redis, sendResult.idem_key); } catch (_) { /* best effort */ }
+    return true;
+}
+
+/**
  * Settle an ACCEPTED result (Stage 120 · M-f).
  *
  * The completion marker is only reachable THROUGH its ownership ref —
@@ -872,6 +904,8 @@ module.exports = {
     markTaskDone,
     isTaskDone,
     releaseTaskDone,
+    // Stage 122 (N2): shared orphan-marker detect+release for image/audio/video send paths
+    releaseTaskDoneIfOrphan,
     // Stage 120 (M-f): settle an accepted result without orphaning the marker
     settleCompletedTask,
     guardEnqueue,

@@ -667,10 +667,22 @@ module.exports = function(app, redis, deps) {
                 // release above would leave an ORPHAN lane entry whose claim
                 // was just deleted (the next run would enqueue a second copy).
                 // Sweep the lane AGAIN for the regenerated scenes to remove it.
+                //
+                // Stage 122 (N1, audit 121): the previous call passed an EMPTY
+                // dispatch-id list with { book_id } but clearHubDispatches only
+                // honoured the per-id form — it issued ZERO hub requests (a
+                // silent no-op). clearHubDispatches now resolves the empty
+                // list + book_id into ONE book-scoped `?book_id=` sweep. A
+                // failed sweep only warns (the claims were already released,
+                // the orphan is bounded by claim TTL) — it is never reported
+                // as a success.
                 try {
                     const hubPort = require('@animastor/orchestration').ports.hubCancel;
                     if (hubPort && typeof hubPort.isHubCancelPortWired === 'function' && hubPort.isHubCancelPortWired()) {
-                        await hubPort.hubCancelOp('clearHubDispatches')([], { book_id: bookId });
+                        const sweep = await hubPort.hubCancelOp('clearHubDispatches')([], { book_id: bookId, context: 'REGENERATE' });
+                        if (sweep && sweep.failed > 0) {
+                            console.warn(`[REGENERATE] Post-release lane sweep for ${bookId} incomplete (requested=${sweep.requested}, cleared=${sweep.cleared}, failed=${sweep.failed}) — an orphan entry may survive (bounded by claim TTL)`);
+                        }
                     }
                 } catch (sweepErr) {
                     console.warn(`[REGENERATE] Post-release lane sweep failed for ${bookId}: ${sweepErr.message}`);

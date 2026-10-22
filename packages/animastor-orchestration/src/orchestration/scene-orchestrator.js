@@ -21,6 +21,7 @@ const { classifyNotSentReasons } = require('../runtime/dispatch-outcomes');
 // storage/runtime-persistence-adapter) — the scene-assets repository left
 // this file. SQL lives host-side.
 const persist = require('../runtime/persistence-port').persist;
+const isPersistencePortWired = require('../runtime/persistence-port').isPersistencePortWired;
 // O-3: scene content arrives ONLY through the SceneDataPort (host adapter:
 // storage/scene-data-adapter) — the Book Model facade (../book →
 // @animastor/vbook-runtime) left this file. Aliased `sceneDataPort` because
@@ -588,7 +589,26 @@ async function executeVideoDispatch(redis, scene, loadedBook, buildId, dispatchI
     const notSentReasons = new Map();
     for (const jobSpec of jobsToSend) {
         try {
-            const sendResult = await provider.generate(jobSpec);
+            let sendResult = await provider.generate(jobSpec);
+            // Stage 122 (N2): the group file was probed absent above (a cached
+            // group never reaches this loop), so an `already_completed` verdict
+            // is by construction an ORPHANED completion marker. Free it and
+            // retry ONCE so the video regenerates instead of looping on a
+            // 900 s deferral with the scene stuck in the active index (audit
+            // 121 · N2). The release rides the persistence port — the
+            // orchestration tier cannot require the backend helper directly.
+            // Skipped when the port is unwired (harnesses that don't exercise
+            // orphan cleanup); production always wires it in backend.cjs.
+            if (isPersistencePortWired()) {
+                let released = false;
+                try {
+                    released = await persist('idem.releaseTaskDoneIfOrphan')(redis, sendResult);
+                } catch (_) { released = false; }
+                if (released) {
+                    log(`VIDEO_DISPATCH: orphaned completion marker released for ${jobSpec.job_id} — regenerating`);
+                    sendResult = await provider.generate(jobSpec);
+                }
+            }
             if (sendResult.sent) {
                 sentCount++;
             } else {

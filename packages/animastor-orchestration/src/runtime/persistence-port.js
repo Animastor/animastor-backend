@@ -82,6 +82,12 @@ const OPS = [
     'registry.registerSceneImageRedis',
     'registry.registerSceneVideoRedis',
 
+    // Stage 122 (N2 · audit 121): the video send path frees an ORPHANED
+    // completion marker through this op (Redis-domain, `redis`-first like the
+    // registry.*Redis ops) — the orchestration tier cannot require the backend
+    // queue-idempotency helper directly.
+    'idem.releaseTaskDoneIfOrphan',
+
     'filesystem.getSceneAudioPath',
 
     'listBooks',

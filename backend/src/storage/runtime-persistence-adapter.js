@@ -40,6 +40,10 @@ const generationCancelRepo = () => require('./postgres/repositories/generation-c
 // tier consumers consumed them pre-O-2 — harnesses that stub the barrel keep
 // intercepting these ops through the adapter's lazy resolution.
 const storageBarrel = () => require('./index');
+// Stage 122 (N2): the video send path frees an orphaned completion marker
+// through the persistence port (the orchestration tier cannot require the
+// backend queue-idempotency helper directly).
+const queueIdempotency = () => require('../helpers/queue-idempotency.cjs');
 
 // ── tasks ─────────────────────────────────────────────
 async function updateTaskStatus(taskId, status, error) {
@@ -212,6 +216,15 @@ function getSceneAudioPath(outputDir, buildId, bookId, chapterId, sceneId) {
     return storageBarrel().filesystem.getSceneAudioPath(outputDir, buildId, bookId, chapterId, sceneId);
 }
 
+// ── idem (Stage 122 · N2 — orphaned completion-marker release) ──────────
+// Redis-domain op (like the registry.*Redis ops): the video send path frees
+// a completion marker that survived a wipe, so the task regenerates instead
+// of looping on `already_completed`. Delegates straight to the backend
+// queue-idempotency helper (host tier).
+function releaseTaskDoneIfOrphan(redis, sendResult) {
+    return queueIdempotency().releaseTaskDoneIfOrphan(redis, sendResult);
+}
+
 // ── listBooks (rebuildWorkList Phase 1) ───────────────
 // Pre-O-2: `SELECT DISTINCT book_id FROM scenes` issued through the storage
 // barrel. Returns rows unchanged; the caller maps `.rows`.
@@ -254,6 +267,9 @@ module.exports = {
         registerSceneAudioRedis,
         registerSceneImageRedis,
         registerSceneVideoRedis,
+    },
+    idem: {
+        releaseTaskDoneIfOrphan,
     },
     filesystem: {
         getSceneAudioPath,
