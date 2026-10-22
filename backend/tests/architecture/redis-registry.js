@@ -707,7 +707,7 @@ const REDIS_OWNERSHIP = [
         readers: ['backend'],
         writers: ['backend'],
         crossModule: false,
-        note: 'GPU queue idempotency state: claim (one pending entry per logical task), done (accepted result), ref (job_id → identity), stage-epoch (generation epoch), dispatch-epoch (epoch frozen per dispatch).',
+        note: 'GPU queue idempotency state: claim (one pending entry per logical task), done (accepted result), ref (job_id → identity, the ownership index of the done marker), job-epoch (per-task pinned intent epoch), stage-epoch (per-stage generation epoch).',
     },
 ];
 

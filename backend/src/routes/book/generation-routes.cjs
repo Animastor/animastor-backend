@@ -317,30 +317,40 @@ module.exports = function(app, redis, deps) {
 
             // Also clear GPU hub stale jobs via HTTP endpoint (T4: владелец ключей — gpu-hub)
             try {
-                // Stage 116 (D4): the hub clears the LANE entries, but the
-                // backend-side pending claims of the same jobs would survive
-                // and suppress the next legitimate run of this book for the
-                // whole claim TTL. Release the claims of THIS book only
-                // (ownership-checked by the job_id prefix).
-                try {
-                    const qidem = queueIdempotency;
-                    if (qidem) {
-                        const released = await qidem.releaseClaimsForBook(redis, bookId);
-                        log(`[CANCEL-GENERATION] ${bookId}: released ${released.released} idempotency claim(s)`);
-                    }
-                } catch (claimErr) {
-                    console.warn(`[CANCEL-GENERATION] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
-                }
                 const hubUrl = `${config.HUB_URL}/queue/clear?book_id=${bookId}`;
                 const hubOptions = { method: 'DELETE', headers: {} };
                 if (config.GPU_HUB_API_KEY) {
                     hubOptions.headers['x-api-key'] = config.GPU_HUB_API_KEY;
                 }
                 const hubRes = await fetch(hubUrl, hubOptions);
-                if (hubRes.ok) {
-                    log(`[CANCEL-GENERATION] GPU hub queues cleared via HTTP for ${bookId}`);
-                } else {
+                if (!hubRes.ok) {
                     throw new Error(`GPU hub queue clear returned ${hubRes.status}`);
+                }
+                log(`[CANCEL-GENERATION] GPU hub queues cleared via HTTP for ${bookId}`);
+
+                // Stage 116 (D4) / Stage 118 (B4): the hub clears the LANE
+                // entries; the backend-side pending claims of the same jobs
+                // must go with them, otherwise the next run of this book would
+                // be suppressed as a duplicate until the claim TTL expires.
+                //
+                // Stage 118 (B4) — ORDER: the lane is cleared FIRST and the
+                // claims are released ONLY after the hub confirmed. The
+                // Stage 116 order (release → clear) opened a duplicate
+                // window: when the hub call failed, the claims were already
+                // free while the lane entries survived ⇒ the next dispatch
+                // enqueued a SECOND copy of a task that was still queued.
+                // On a hub failure the claims are kept — the safe direction.
+                try {
+                    const qidem = queueIdempotency;
+                    if (qidem) {
+                        const released = await qidem.releaseClaimsForBook(redis, bookId);
+                        log(`[CANCEL-GENERATION] ${bookId}: released ${released.released} idempotency claim(s), ${released.done} completion marker(s)`);
+                    }
+                    // The capacity backoff must not survive an explicit
+                    // cancel — the user asked for the work to run again.
+                    await dispatchEngine.clearDeferralsForBook(redis, bookId);
+                } catch (claimErr) {
+                    console.warn(`[CANCEL-GENERATION] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
                 }
             } catch (hubErr) {
                 throw new Error(`GPU hub cleanup failed: ${hubErr.message}`);
@@ -612,23 +622,33 @@ module.exports = function(app, redis, deps) {
                 readdToActiveIndex: false,
             });
 
-            // Stage 116 (D4): resetScenes cleared the hub lane entries of the
-            // cancelled dispatches; the backend-side pending claims of the
-            // SAME jobs must be released too, otherwise the regeneration
-            // would be suppressed as a duplicate (the claim outlives the lane
-            // entry it protected). Ownership-scoped per dirty scene.
+            // Stage 116 (D4) / Stage 118 (B1/B4): resetScenes cleared the hub
+            // lane entries of the cancelled dispatches; the backend-side
+            // pending claims of the SAME jobs must be released too, otherwise
+            // the regeneration would be suppressed as a duplicate (the claim
+            // outlives the lane entry it protected). Ownership-scoped per
+            // dirty scene.
+            //
+            // Stage 118: the release now also frees the COMPLETION MARKERS
+            // of the regenerated scene (B1) — the user explicitly asked for
+            // the work to run again, so the previous "already completed" no
+            // longer applies. The capacity backoff of the scene is dropped
+            // as well (M2): the regeneration is an explicit intent.
             try {
                 const qidem = queueIdempotency;
                 let releasedClaims = 0;
+                let releasedDone = 0;
                 if (!qidem) throw new Error('queue idempotency port not wired');
                 for (const ds of filteredDirty) {
                     const released = await qidem.releaseClaimsForScene(
                         redis, bookId, ds.chapter_id, ds.scene_id
                     );
                     releasedClaims += released.released;
+                    releasedDone += released.done;
+                    await dispatchEngine.clearDeferralsForScene(redis, bookId, ds.chapter_id, ds.scene_id);
                 }
-                if (releasedClaims > 0) {
-                    log(`[REGENERATE] ${bookId}: released ${releasedClaims} idempotency claim(s) for the regenerated scenes`);
+                if (releasedClaims > 0 || releasedDone > 0) {
+                    log(`[REGENERATE] ${bookId}: released ${releasedClaims} idempotency claim(s) and ${releasedDone} completion marker(s) for the regenerated scenes`);
                 }
             } catch (claimErr) {
                 console.warn(`[REGENERATE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);

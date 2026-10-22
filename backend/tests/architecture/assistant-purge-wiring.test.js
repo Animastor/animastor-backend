@@ -85,7 +85,16 @@ function buildComposition({ sessionRepo, order }) {
                     }),
                 };
             case '@animastor/orchestration':
-                return { runtime: { sceneWindow: { setCancelFlag: async () => { order.push('set-cancel-flag'); } } } };
+                return {
+                    runtime: {
+                        sceneWindow: { setCancelFlag: async () => { order.push('set-cancel-flag'); } },
+                        // Stage 118 (B4/M2): the capacity-deferral port.
+                        dispatch: {
+                            clearDeferralsForBook: async () => 0,
+                            clearDeferralsForScene: async () => 0,
+                        },
+                    },
+                };
             case './services/source-coverage-audit':
                 return async () => ({});
             case './services/agent-prompts':

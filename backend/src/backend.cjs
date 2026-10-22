@@ -525,12 +525,28 @@ const assistantPorts = createAssistantPorts({
 // composition root's module graph).
 const queueIdempotency = require('./helpers/queue-idempotency.cjs');
 
+// Stage 118 (B4/M2): the capacity backoff of the orchestration package must
+// not survive an explicit intent (a cancel, a cache teardown, a deletion, a
+// regeneration). The deferral key is owned by the package, so the package
+// clears it — the host only injects the port.
+const dispatchEngineForLifecycle = require('@animastor/orchestration').runtime.dispatch;
+const clearDeferrals = {
+    book: async (bookId) => (dispatchEngineForLifecycle && dispatchEngineForLifecycle.clearDeferralsForBook)
+        ? dispatchEngineForLifecycle.clearDeferralsForBook(redis, bookId)
+        : 0,
+    scene: async (bookId, chapterId, sceneId) => (dispatchEngineForLifecycle && dispatchEngineForLifecycle.clearDeferralsForScene)
+        ? dispatchEngineForLifecycle.clearDeferralsForScene(redis, bookId, chapterId, sceneId)
+        : 0,
+};
+
 const routeDeps = {
     config, state, audio, image, video, book, orchestrator, storage,
     // Stage 116 (D4): queue-idempotency port — injected into the routes that
     // release the claims of a cleared GPU lane (cancel / regenerate / cache
     // teardown). The route layers must not require backend/src/helpers.
     queueIdempotency,
+    // Stage 118 (B4/M2): capacity-deferral port (same injection discipline).
+    clearDeferrals,
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
@@ -550,6 +566,9 @@ const routeDeps = {
         // Stage 116 (D4): queue-idempotency port (injected — the Book Model
         // layer must not depend on backend/src/helpers).
         queueIdempotency,
+        // Stage 118 (B4/M2): capacity-deferral port (injected — the Book
+        // Model layer must not depend on the orchestration package either).
+        clearDeferrals,
         log: utils.log,
         setCancelFlag: (redisClient, id) => require('@animastor/orchestration').runtime.sceneWindow.setCancelFlag(redisClient, id),
         // Agent-session cancel port: the cascade delivers the cancellation

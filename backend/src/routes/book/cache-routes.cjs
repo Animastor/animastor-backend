@@ -113,21 +113,15 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 console.warn(`[CACHE] Assistant data cleanup failed: ${assistantErr.message}`);
             }
 
-            // Stage 116 (D4): the hub lane entries of this book are cleared
-            // below; the backend-side pending claims must go with them,
-            // otherwise the next run of the same book would be suppressed as a
-            // duplicate until the claim TTL expires.
-            try {
-                const qidem = ctx.queueIdempotency;
-                if (qidem) {
-                    const released = await qidem.releaseClaimsForBook(redis, bookId);
-                    log('[CACHE] Released', released.released, 'idempotency claim(s) for', bookId);
-                }
-            } catch (claimErr) {
-                console.warn(`[CACHE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
-            }
-
-            // Clear gpu-hub queue
+            // ── Clear gpu-hub queue ──
+            // Stage 118 (B4): the hub lane is cleared FIRST; the backend-side
+            // claims are released ONLY after the hub confirmed. The Stage 116
+            // order (release → clear) opened a duplicate window: when the hub
+            // call failed, the claims were already free while the lane
+            // entries survived ⇒ the next dispatch enqueued a SECOND copy of
+            // a task that was still queued. On a hub failure the claims are
+            // kept — the safe direction (no duplicates).
+            let hubCleared = false;
             try {
                 const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
                 const hubHeaders = { method: 'DELETE' };
@@ -135,8 +129,35 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 if (apiKey) {
                     hubHeaders.headers = { 'x-api-key': apiKey };
                 }
-                await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => {});
+                const hubRes = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
+                hubCleared = !!(hubRes && hubRes.ok);
             } catch (_) {}
+
+            if (hubCleared) {
+                // Stage 116 (D4) / Stage 118 (B1): the hub lane entries of
+                // this book are cleared; the backend-side pending claims must
+                // go with them, otherwise the next run of the same book would
+                // be suppressed as a duplicate until the claim TTL expires.
+                // The release also frees the COMPLETION MARKERS (B1): the
+                // cache was wiped on purpose, so the previous "already
+                // completed" no longer applies.
+                try {
+                    const qidem = ctx.queueIdempotency;
+                    if (qidem) {
+                        const released = await qidem.releaseClaimsForBook(redis, bookId);
+                        log('[CACHE] Released', released.released, 'idempotency claim(s) and', released.done, 'completion marker(s) for', bookId);
+                    }
+                    // The capacity backoff must not survive an explicit cache
+                    // teardown — the user asked for the work to run again.
+                    if (ctx.clearDeferrals) {
+                        await ctx.clearDeferrals.book(bookId);
+                    }
+                } catch (claimErr) {
+                    console.warn(`[CACHE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
+                }
+            } else {
+                console.warn(`[CACHE] GPU hub queue clear failed for ${bookId} — the idempotency claims are KEPT (no duplicate window)`);
+            }
 
             log('[CACHE] Cache cleared for', bookId);
             res.json({ cleared: true, book_id: bookId, builds_removed: buildIds.size });

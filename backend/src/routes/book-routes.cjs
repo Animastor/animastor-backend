@@ -120,6 +120,9 @@ module.exports = function(app, redis, deps) {
         // Stage 116 (D4): queue-idempotency port (injected, not required —
         // the Book Model layer must not depend on backend/src/helpers).
         queueIdempotency: deps.queueIdempotency,
+        // Stage 118 (B4/M2): capacity-deferral port (injected — the deferral
+        // key is owned by the orchestration package).
+        clearDeferrals: deps.clearDeferrals,
         log,
     });
 };

@@ -200,20 +200,15 @@ function createBookDeletion(deps) {
             console.warn(`[DELETE-BOOK] Assistant data cleanup failed: ${assistantErr.message}`);
         }
 
-        // Stage 116 (D4): the hub lane entries of this book are removed
-        // below; the backend-side pending claims must go with them, otherwise
-        // a later run of the same book would be suppressed as a duplicate.
-        try {
-            const qidem = deps.queueIdempotency;
-            if (qidem) {
-                const released = await qidem.releaseClaimsForBook(redis, bookId);
-                console.log(`[DELETE-BOOK] ${bookId}: released ${released.released} idempotency claim(s)`);
-            }
-        } catch (claimErr) {
-            console.warn(`[DELETE-BOOK] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
-        }
-
         // ── 6. GPU-hub queue clear (best-effort, external runtime) ──
+        // Stage 118 (B4): the hub lane is cleared FIRST; the backend-side
+        // claims are released ONLY after the hub confirmed. The Stage 116
+        // order (release → clear) opened a duplicate window: when the hub
+        // call failed, the claims were already free while the lane entries
+        // survived ⇒ a later run of the same book could enqueue a SECOND
+        // copy of a task that was still queued. On a hub failure the claims
+        // are kept — the safe direction (no duplicates).
+        let hubCleared = false;
         try {
             const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
             const hubHeaders = { method: 'DELETE' };
@@ -221,8 +216,32 @@ function createBookDeletion(deps) {
             if (apiKey) {
                 hubHeaders.headers = { 'x-api-key': apiKey };
             }
-            await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => {});
+            const hubRes = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
+            hubCleared = !!(hubRes && hubRes.ok);
         } catch (_) {}
+
+        if (hubCleared) {
+            // Stage 116 (D4) / Stage 118 (B1): the hub lane entries of this
+            // book are removed; the backend-side pending claims must go with
+            // them, otherwise a later run of the same book would be
+            // suppressed as a duplicate. The release also frees the COMPLETION
+            // MARKERS (B1) — the book is gone, its "already completed"
+            // markers must not survive it.
+            try {
+                const qidem = deps.queueIdempotency;
+                if (qidem) {
+                    const released = await qidem.releaseClaimsForBook(redis, bookId);
+                    console.log(`[DELETE-BOOK] ${bookId}: released ${released.released} idempotency claim(s), ${released.done} completion marker(s)`);
+                }
+                if (deps.clearDeferrals && deps.clearDeferrals.book) {
+                    await deps.clearDeferrals.book(bookId);
+                }
+            } catch (claimErr) {
+                console.warn(`[DELETE-BOOK] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
+            }
+        } else {
+            console.warn(`[DELETE-BOOK] GPU hub queue clear failed for ${bookId} — the idempotency claims are KEPT (no duplicate window)`);
+        }
 
         log(`[DELETE-BOOK] Book completely deleted: ${bookId}`);
         if (onEvent) onEvent(`Book completely deleted: ${bookId}`);
