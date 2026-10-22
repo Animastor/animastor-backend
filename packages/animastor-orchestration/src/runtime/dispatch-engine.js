@@ -730,9 +730,93 @@ async function shouldSkipDispatch(redis, bookId, chapterId, sceneId, stage) {
  * - { dispatched: true, dispatchId, stage, leaseKey }
  * - { dispatched: false, reason, skip: true/false }
  */
+// ======================================================
+// STAGE 116 (D3) — CAPACITY DEFERRAL (bounded retry/backoff)
+// ======================================================
+// The scheduler ticks every SCHEDULER_TICK_MS (5 s). A stage whose jobs could
+// not be enqueued (no live compatible worker, or every job already pending in
+// the lane) used to be re-dispatched on EVERY tick: lease created → executor
+// sent nothing → 'no_jobs_sent' → dispatch cancelled → FSM rolled back →
+// next tick repeats. That is an unbounded dispatch/cancel loop with FSM
+// churn, lease churn and unbounded event-journal growth (Stage 115 D3).
+//
+// The deferral is a bounded, per-stage backoff:
+//   • checked BEFORE any side effect (no lease, no metadata, no FSM write,
+//     no journal event) ⇒ a deferred stage costs one Redis GET per tick;
+//   • the stage stays PENDING and stays in the active index ⇒ recoverable;
+//   • an explicit cancel clears it (the user asked for the work to run).
+const DEFERRED_STAGE_KEY_PREFIX = 'animastor:runtime:deferred:';
+const DEFERRED_STAGE_TTL_S = 60;   // bounded retry/backoff window
+
+/**
+ * Executor outcomes that mean "nothing could be enqueued — retry later".
+ *
+ * ONLY the capacity outcomes are deferrable. The generic 'no_jobs_sent' /
+ * 'no_jobs_generated' / 'send_failed' outcomes keep their historic contract
+ * (retry on the next tick — the audit-6929ba5 regression tests rely on it):
+ * deferring them would change the meaning of an executor result that does not
+ * necessarily mean "no capacity".
+ */
+const DEFERRABLE_OUTCOMES = new Set([
+    'no_worker_available',   // no live, type-compatible worker
+    'duplicate_pending',     // every job is already pending in the lane
+    'already_completed',     // every job is already done (artifact missing)
+]);
+
+function deferredStageKey(bookId, chapterId, sceneId, stage) {
+    return `${DEFERRED_STAGE_KEY_PREFIX}${bookId}:${chapterId}:${sceneId}:${stage}`;
+}
+
+/** Is this stage currently deferred (capacity backoff active)? */
+async function isStageDeferred(redis, bookId, chapterId, sceneId, stage) {
+    try {
+        const value = await redis.get(deferredStageKey(bookId, chapterId, sceneId, stage));
+        return value != null;
+    } catch (_) {
+        return false;
+    }
+}
+
+/** Defer a stage for the bounded backoff window. */
+async function deferStage(redis, bookId, chapterId, sceneId, stage) {
+    try {
+        await redis.set(deferredStageKey(bookId, chapterId, sceneId, stage), '1', 'EX', DEFERRED_STAGE_TTL_S);
+    } catch (_) { /* best effort — a missed deferral only costs one extra attempt */ }
+}
+
+/** Clear the deferral (the stage dispatched, completed or was cancelled). */
+async function clearStageDeferral(redis, bookId, chapterId, sceneId, stage) {
+    try {
+        await redis.del(deferredStageKey(bookId, chapterId, sceneId, stage));
+    } catch (_) { /* best effort */ }
+}
+
+/** Is an executor outcome a capacity deferral (retryable, not fatal)? */
+function isDeferrableOutcome(reason) {
+    return DEFERRABLE_OUTCOMES.has(String(reason || ''));
+}
+
 async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBook, buildId, options = {}) {
     const { force = false } = options;
     const dispatchId = generateDispatchToken();
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Stage 116 (D3) — CAPACITY DEFERRAL (bounded retry/backoff)
+    // ─────────────────────────────────────────────────────────────────────
+    // A stage that could not enqueue anything (no live compatible worker, or
+    // every job already pending in the lane) must NOT be retried on every
+    // scheduler tick: the tick is 5 s, so the un-deferred path produced an
+    // endless dispatch → cancel → FSM-rollback cycle (lease churn, FSM churn
+    // and UNBOUNDED event-journal growth).
+    //
+    // The deferral is checked BEFORE any side effect (no lease, no dispatch
+    // metadata, no FSM write, no journal event) ⇒ a deferred stage costs one
+    // Redis GET per tick. The stage stays PENDING and stays in the active
+    // index ⇒ it is recoverable: as soon as the deferral window expires (or a
+    // worker appears) the next tick dispatches it again.
+    if (!force && await isStageDeferred(redis, bookId, chapterId, sceneId, stage)) {
+        return { dispatched: false, reason: 'deferred_capacity', retryable: true, dispatchId };
+    }
 
     log(`DISPATCH_REQUEST: ${bookId}/${chapterId}/${sceneId}:${stage}${force ? ' (force=true)' : ''}`);
 
@@ -908,6 +992,13 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
             if (!result.dispatched) {
                 log(`DISPATCH_SKIPPED: ${bookId}/${chapterId}/${sceneId}:${stage} - ${result.reason || 'already_done'}`);
                 if (!result.completed) {
+                    // Stage 116 (D3): a stage that enqueued NOTHING is not a
+                    // lost task and not a fatal cancellation — it is a
+                    // capacity deferral. Remember it for a bounded window so
+                    // the scheduler's 5 s tick does not spin.
+                    if (isDeferrableOutcome(result.reason)) {
+                        await deferStage(redis, bookId, chapterId, sceneId, stage);
+                    }
                     await finalizeDispatch(redis, bookId, chapterId, sceneId, stage, {
                         outcome: 'cancelled',
                         dispatchId,
@@ -918,12 +1009,19 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
                     if (result.rollbackFailed) {
                         error(`STATE_ROLLBACK_FAILED: ${bookId}/${chapterId}/${sceneId}:${stage}: ${result.rollbackReason || 'unknown'} — stage may be stuck in GENERATING`);
                     }
+                } else {
+                    // The stage completed (cache hit / already done) — it is no
+                    // longer waiting for capacity.
+                    await clearStageDeferral(redis, bookId, chapterId, sceneId, stage);
                 }
                 // Cancelled finalize does not touch the circuit breaker — release
                 // the test permit here so a half-open circuit can keep recovering.
                 await releaseTestPermit();
-                return { dispatched: false, dispatchId, reason: result.reason || 'already_done', result };
+                return { dispatched: false, dispatchId, reason: result.reason || 'already_done', retryable: isDeferrableOutcome(result.reason), result };
             }
+
+            // The stage really dispatched — capacity deferral is over.
+            await clearStageDeferral(redis, bookId, chapterId, sceneId, stage);
 
             // T6: Start lease renewal for this actively dispatched job
             // Only started after confirming dispatcher returned dispatched:true
@@ -1296,6 +1394,9 @@ async function markDispatchFailed(redis, bookId, chapterId, sceneId, stage, erro
  * T6: Останавливает in-memory renewal timer, чтобы избежать утечки.
  */
 async function cancelActiveDispatch(redis, bookId, chapterId, sceneId, stage, reason = 'cancelled') {
+    // Stage 116 (D3): an explicit cancel means the work is wanted again — a
+    // capacity deferral must not survive it.
+    await clearStageDeferral(redis, bookId, chapterId, sceneId, stage);
     const metadata = await getDispatchMetadata(redis, bookId, chapterId, sceneId, stage);
     if (metadata?.dispatch_id) {
         const result = await finalizeDispatch(redis, bookId, chapterId, sceneId, stage, {
@@ -1780,6 +1881,16 @@ module.exports = {
     // truth); exported for backward compatibility with tests/metrics.
     LEASE_TTLS,
     QUOTAS,
+
+    // Stage 116 (D3): capacity deferral (bounded retry/backoff) — the stage
+    // is not retried on every 5 s scheduler tick while it cannot enqueue.
+    DEFERRED_STAGE_KEY_PREFIX,
+    DEFERRED_STAGE_TTL_S,
+    deferredStageKey,
+    isStageDeferred,
+    deferStage,
+    clearStageDeferral,
+    isDeferrableOutcome,
 
     // PW-2: dispatch identity generation (crypto-hardened)
     generateDispatchToken

@@ -300,8 +300,14 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
         const completion = await completeStage(redis, bookId, chapterId, sceneId, 'audio', buildId, dispatchId);
         return { dispatched: false, jobs: 0, completed: completion.completed, reason: 'no_segments' };
     } else {
-        warn(`AUDIO_DISPATCH: generateSceneAudio did not send jobs for ${bookId}/${chapterId}/${sceneId}`);
-        return { dispatched: false, jobs: 0, reason: 'no_jobs_generated' };
+        // Stage 116 (D3): nothing was enqueued — carry the precise reason
+        // (no live worker / everything already queued) so the dispatch engine
+        // can apply a bounded capacity deferral instead of a fatal cancel.
+        const deferReason = (result && result.reason === 'no_jobs_accepted' && result.deferReason)
+            ? result.deferReason
+            : 'no_jobs_generated';
+        warn(`AUDIO_DISPATCH: generateSceneAudio did not send jobs for ${bookId}/${chapterId}/${sceneId} (${deferReason})`);
+        return { dispatched: false, jobs: 0, reason: deferReason, retryable: true };
     }
 }
 
@@ -352,8 +358,11 @@ async function executeImageDispatch(redis, scene, loadedBook, buildId, dispatchI
 
     // T3: generateSceneIUImages возвращает количество отправленных jobs
     let jobsSent = 0;
+    // Stage 116 (D3): the result is needed AFTER the try/catch (the deferral
+    // reason) — it must be visible outside the block.
+    let genResult = null;
     try {
-        const genResult = await image.generateSceneIUImages(
+        genResult = await image.generateSceneIUImages(
             redis,
             sceneData,
             bookData,
@@ -375,6 +384,16 @@ async function executeImageDispatch(redis, scene, loadedBook, buildId, dispatchI
     if (jobsSent > 0) {
         log(`IMAGE_DISPATCHED: ${bookId}/${chapterId}/${sceneId} (${jobsSent} IU job(s) sent)`);
         return { dispatched: true, jobs: jobsSent, reason: null };
+    }
+
+    // Stage 116 (D3): the executor sent NOTHING. That is not a lost task and
+    // not a fatal cancellation — it is a capacity deferral with a bounded
+    // retry/backoff (the dispatch engine owns the deferral window). The
+    // precise reason (no live worker / everything already queued) is carried
+    // through so the deferral can be classified.
+    if (genResult && genResult.deferReason) {
+        warn(`IMAGE_DISPATCH: ${bookId}/${chapterId}/${sceneId} — nothing enqueued (${genResult.deferReason}); deferring`);
+        return { dispatched: false, jobs: 0, reason: genResult.deferReason, retryable: true };
     }
 
     log(`IMAGE_DISPATCH: ${bookId}/${chapterId}/${sceneId} — no jobs sent (cache hit or empty units)`);
@@ -551,15 +570,22 @@ async function executeVideoDispatch(redis, scene, loadedBook, buildId, dispatchI
     await videoOrch.setWaitingChunks(redis, bookId, chapterId, sceneId);
 
     let sentCount = 0;
+    // Stage 116 (D3): collect WHY a job was not sent — the dominant reason
+    // becomes the deferral reason (bounded capacity backoff) instead of the
+    // generic 'send_failed'.
+    const notSentReasons = new Map();
     for (const jobSpec of jobsToSend) {
         try {
             const sendResult = await provider.generate(jobSpec);
             if (sendResult.sent) {
                 sentCount++;
             } else {
-                warn(`VIDEO_DISPATCH: Hub rejected job ${jobSpec.job_id}: ${sendResult.error || 'unknown'}`);
+                const reason = sendResult.reason || 'send_failed';
+                notSentReasons.set(reason, (notSentReasons.get(reason) || 0) + 1);
+                warn(`VIDEO_DISPATCH: Hub rejected job ${jobSpec.job_id}: ${sendResult.error || reason}`);
             }
         } catch (sendErr) {
+            notSentReasons.set('send_failed', (notSentReasons.get('send_failed') || 0) + 1);
             warn(`VIDEO_DISPATCH: provider generate failed for job ${jobSpec.job_id}: ${sendErr.message}`);
         }
     }
@@ -569,8 +595,17 @@ async function executeVideoDispatch(redis, scene, loadedBook, buildId, dispatchI
         return { dispatched: true, jobs: sentCount, reason: null };
     }
 
-    warn(`VIDEO_DISPATCH: ${bookId}/${chapterId}/${sceneId}: all provider.generate calls failed`);
-    return { dispatched: false, jobs: 0, reason: 'send_failed' };
+    // Only a single CAPACITY reason becomes a specific deferral reason; every
+    // other case keeps the historic 'send_failed' semantics.
+    let deferReason = 'send_failed';
+    if (notSentReasons.size === 1) {
+        const only = [...notSentReasons.keys()][0];
+        if (only === 'no_worker_available' || only === 'duplicate_pending' || only === 'already_completed') {
+            deferReason = only;
+        }
+    }
+    warn(`VIDEO_DISPATCH: ${bookId}/${chapterId}/${sceneId}: nothing enqueued (${deferReason})`);
+    return { dispatched: false, jobs: 0, reason: deferReason, retryable: true };
 }
 
 // T4: dispatchStage принимает dispatchId (из dispatch-engine) и передаёт executors
