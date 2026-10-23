@@ -6,7 +6,8 @@ const fs = require('fs');
 const Module = require('module');
 
 class FakeRedis {
-    constructor() { this.store = new Map(); this.sets = new Map(); }
+    // Declared test double — see queue-idempotency.ensureIntentAndReceipt.
+    constructor() { this.store = new Map(); this.sets = new Map(); this.__allowNonLuaFallback = true; }
     async get(k) { return this.store.has(k) ? this.store.get(k) : null; }
     async set(k, v) { this.store.set(k, v); return 'OK'; }
     async del(k) { this.store.delete(k); if (this.sets.has(k)) this.sets.delete(k); return 1; }

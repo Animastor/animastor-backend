@@ -80,6 +80,38 @@ const dispatchesTotal = new client.Counter({
     registers: [register],
 });
 
+// Stage 129 (audit 128 · F7): the intent-fence / dispatch-receipt verdicts.
+// `outcome` is the verdict itself (created, reused, stale_intent,
+// receipt_conflict, intent_not_active, intent_corrupt, intent_missing,
+// unavailable, busy, rollback_failed). A terminal rejection that keeps
+// happening is visible without reading the logs.
+const intentFenceTotal = new client.Counter({
+    name: 'animastor_intent_fence_total',
+    help: 'Intent fence + dispatch receipt verdicts by outcome',
+    labelNames: ['outcome'],
+    registers: [register],
+});
+
+// Stage 129 (audit 128 · B2/F7): every intent-fence operation that could NOT
+// use the atomic Lua path. This must stay at zero in production — a non-zero
+// value means sends are being refused (fail closed) or a double is in use.
+const intentFenceDegradedTotal = new client.Counter({
+    name: 'animastor_intent_fence_degraded_total',
+    help: 'Intent fence operations that could not use the atomic Lua path',
+    labelNames: ['reason'],
+    registers: [register],
+});
+
+/** Count one intent-fence verdict (never throws — metrics are best effort). */
+function observeIntentFence(outcome) {
+    try { intentFenceTotal.inc({ outcome: String(outcome || 'unknown') }); } catch (_) { /* ignore */ }
+}
+
+/** Count one degraded (non-atomic) intent-fence operation. */
+function observeIntentFenceDegraded(reason) {
+    try { intentFenceDegradedTotal.inc({ reason: String(reason || 'unknown') }); } catch (_) { /* ignore */ }
+}
+
 // ======================================================
 // HISTOGRAMS — duration distributions
 // ======================================================
@@ -271,4 +303,7 @@ module.exports = {
     collect,
     getMetricsContent,
     getContentType,
+    // Stage 129 — intent fence / dispatch receipt observability
+    observeIntentFence,
+    observeIntentFenceDegraded,
 };

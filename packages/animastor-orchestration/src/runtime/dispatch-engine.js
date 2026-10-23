@@ -782,8 +782,10 @@ const DEFERRED_IDEMPOTENT_TTL_S = 900;  // idempotent-suppression window (15 min
 const {
     CAPACITY_OUTCOMES,
     IDEMPOTENT_OUTCOMES,
+    FENCE_REJECTED_OUTCOMES,
     isCapacityOutcome,
     isIdempotentOutcome,
+    isFenceRejectedOutcome,
     isDeferrableOutcome,
 } = require('./dispatch-outcomes');
 
@@ -879,7 +881,13 @@ async function clearDeferralsByPrefix(redis, prefix) {
  * hour — it is not waiting for capacity, it is simply done.
  */
 function deferralWindowFor(reason) {
-    return isIdempotentOutcome(reason) ? DEFERRED_IDEMPOTENT_TTL_S : DEFERRED_STAGE_TTL_S;
+    // Stage 129 (audit 128 · F5): a fence rejection is terminal for THIS
+    // generation — retrying it immediately would only recreate the
+    // dispatch → cancel → rollback churn. It shares the long window with the
+    // idempotent suppressions and stays visible through the log/metric.
+    return (isIdempotentOutcome(reason) || isFenceRejectedOutcome(reason))
+        ? DEFERRED_IDEMPOTENT_TTL_S
+        : DEFERRED_STAGE_TTL_S;
 }
 
 async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBook, buildId, options = {}) {
@@ -2073,8 +2081,10 @@ module.exports = {
     isDeferrableOutcome,
     isCapacityOutcome,
     isIdempotentOutcome,
+    isFenceRejectedOutcome,
     CAPACITY_OUTCOMES,
     IDEMPOTENT_OUTCOMES,
+    FENCE_REJECTED_OUTCOMES,
 
     // PW-2: dispatch identity generation (crypto-hardened)
     generateDispatchToken

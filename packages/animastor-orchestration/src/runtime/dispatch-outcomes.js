@@ -28,10 +28,33 @@ const CAPACITY_OUTCOMES = new Set([
     'no_worker_available',   // no live, type-compatible worker
     'duplicate_pending',     // the job is already pending in the lane
     'ambiguous_post',        // the POST outcome was ambiguous (the hub may have taken the task)
+    // Stage 129: the intent-fence step could not run (Redis refused the atomic
+    // path / the client cannot run it). Nothing was enqueued and the send IS
+    // retryable, so it belongs to the bounded-retry bucket.
+    'intent_receipt_unavailable',
 ]);
 
 const IDEMPOTENT_OUTCOMES = new Set([
     'already_completed',     // the logical task is already complete (artifact missing)
+]);
+
+/**
+ * Fence rejections (Stage 129, audit 128 · F5): the backend refused this
+ * dispatch because it belongs to a generation the intent record already
+ * superseded, or because the dispatch/intent pair is inconsistent.
+ *
+ * Retrying the SAME generation can never succeed, so they are NOT retryable —
+ * but they must also not fall into the historic "immediate retry on the next
+ * tick" bucket, which would turn a stale send into a 5-second dispatch →
+ * cancel → rollback loop. They get the long (idempotent) deferral window and
+ * stay visible in the logs/metrics.
+ */
+const FENCE_REJECTED_OUTCOMES = new Set([
+    'stale_intent',
+    'receipt_conflict',
+    'intent_not_active',
+    'intent_corrupt',
+    'intent_missing',
 ]);
 
 /** Is this outcome a CAPACITY gap (bounded retry with a short window)? */
@@ -44,9 +67,14 @@ function isIdempotentOutcome(reason) {
     return IDEMPOTENT_OUTCOMES.has(String(reason || ''));
 }
 
-/** Is this outcome deferrable at all (capacity OR idempotent)? */
+/** Is this outcome a fence rejection (terminal for this generation)? */
+function isFenceRejectedOutcome(reason) {
+    return FENCE_REJECTED_OUTCOMES.has(String(reason || ''));
+}
+
+/** Is this outcome deferrable at all (capacity, idempotent OR fence-rejected)? */
 function isDeferrableOutcome(reason) {
-    return isCapacityOutcome(reason) || isIdempotentOutcome(reason);
+    return isCapacityOutcome(reason) || isIdempotentOutcome(reason) || isFenceRejectedOutcome(reason);
 }
 
 /**
@@ -87,8 +115,10 @@ function classifyNotSentReasons(reasons) {
 module.exports = {
     CAPACITY_OUTCOMES,
     IDEMPOTENT_OUTCOMES,
+    FENCE_REJECTED_OUTCOMES,
     isCapacityOutcome,
     isIdempotentOutcome,
+    isFenceRejectedOutcome,
     isDeferrableOutcome,
     classifyNotSentReasons,
 };

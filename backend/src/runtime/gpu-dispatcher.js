@@ -9,6 +9,40 @@ function warn(msg) { console.warn(`${logPrefix} ⚠️ ${msg}`); }
 
 const stats = { failed_jobs: 0 };
 
+/** In-process counters (getStats) + the shared Prometheus registry. */
+function getStats() { return { ...stats }; }
+function observeFence(outcome) {
+    try { require('../metrics/prometheus').observeIntentFence(outcome); } catch (_) { /* best effort */ }
+}
+function observeFenceDegraded(reason) {
+    try { require('../metrics/prometheus').observeIntentFenceDegraded(reason); } catch (_) { /* best effort */ }
+}
+
+/**
+ * Undo the enqueue side effects of THIS send — and only of this send.
+ *
+ * Stage 129 (audit 128 · F4): the claim key is derived from the idem_key, so
+ * the release cannot touch another generation; the ref is deleted only while
+ * it still points at OUR fence (compare-and-delete). Both outcomes are
+ * checked: a rollback that did not happen is counted and logged, never
+ * reported as a success.
+ */
+async function rollbackOwnEnqueue(redis, { idemKey, bookId, chapterId, sceneId, jobId }) {
+    const claim = await qidem.releaseTask(redis, idemKey);
+    const ref = await qidem.forgetTaskRef(redis, bookId, chapterId, sceneId, jobId, { fence: idemKey });
+
+    const claimOk = claim && (claim.released === true || claim.reason === 'absent');
+    const refOk = ref && (ref.deleted === true || ref.reason === 'absent' || ref.reason === 'not_owner');
+    if (!claimOk || !refOk) {
+        stats.jobs_fence_rollback_failed = (stats.jobs_fence_rollback_failed || 0) + 1;
+        observeFence('rollback_failed');
+        warn(`Rollback INCOMPLETE for ${jobId} fence=${String(idemKey).slice(0, 12)}: `
+            + `claim=${claim && claim.reason} ref=${ref && ref.reason}`);
+        return { failed: true, claim, ref };
+    }
+    return { failed: false, claim, ref };
+}
+
 // ======================================================
 // PW-2: WORKSPACE RESOLUTION & ROUTING (server-derived)
 // ======================================================
@@ -324,17 +358,34 @@ async function sendUnified(taskSpec) {
             dispatchId: taskSpec.dispatch_id,
             fence: idemKey,
             epoch,
+            // The generation counter orders supersedes; passing its key lets
+            // the fence step keep it alive for as long as the intent record
+            // it orders (Stage 129 · F3).
+            stageEpochKey: qidem.stageEpochKey(parsed.bookId, parsed.chapterId, parsed.sceneId, stage),
         });
         const fenceStatus = fenceVerdict && fenceVerdict.status;
+        // A non-atomic (or degraded) fence step is an operator signal even
+        // when the verdict itself is fine — it must never stay invisible
+        // (Stage 129 · audit 128 B2/F7).
+        if (fenceVerdict && fenceVerdict.degraded) {
+            stats.jobs_intent_fencing_degraded = (stats.jobs_intent_fencing_degraded || 0) + 1;
+            observeFenceDegraded(fenceVerdict.reason || 'non_lua_fallback');
+        }
         if (fenceStatus !== 'created' && fenceStatus !== 'reused') {
-            // Revert THIS sender's side effects: the claim was acquired by
-            // this call (SET NX) and the ref written by it, so no other
-            // sender's state is touched.
-            await qidem.releaseTask(redis, idemKey);
-            await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id);
+            // Revert THIS sender's side effects only: the claim was acquired
+            // by this call (SET NX) and the ref was written by it, so no
+            // other sender's state is touched (fence-scoped, checked).
+            const rollback = await rollbackOwnEnqueue(redis, {
+                idemKey,
+                bookId: parsed.bookId,
+                chapterId: parsed.chapterId,
+                sceneId: parsed.sceneId,
+                jobId: payload.job_id,
+            });
             // 'busy'/'unavailable'/'invalid'/'unknown' are transient (the
             // fence step is retried on the next tick); the terminal verdicts
-            // can never become valid by retrying.
+            // (stale_intent, receipt_conflict, intent_*) can never become
+            // valid by retrying.
             const fenceRetryable = fenceStatus === 'busy'
                 || fenceStatus === 'unavailable'
                 || fenceStatus === 'invalid'
@@ -348,6 +399,7 @@ async function sendUnified(taskSpec) {
                     suppressed: true,
                     retryable: true,
                     reason: 'intent_receipt_unavailable',
+                    rollbackFailed: rollback.failed,
                     idem_key: idemKey,
                     jobId: payload.job_id,
                     dispatchId: taskSpec.dispatch_id,
@@ -363,6 +415,7 @@ async function sendUnified(taskSpec) {
                 suppressed: false,
                 retryable: false,
                 reason: fenceStatus,
+                rollbackFailed: rollback.failed,
                 idem_key: idemKey,
                 jobId: payload.job_id,
                 dispatchId: taskSpec.dispatch_id,
@@ -449,8 +502,15 @@ async function sendUnified(taskSpec) {
             // The hub answered with an HTTP error on EVERY attempt => nothing
             // was enqueued => the pending claim must be released, so a later
             // justified attempt is not blocked by a claim nobody holds.
-            await qidem.releaseTask(redis, idemKey);
-            await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id);
+            // Stage 129 (F4): the same fence-scoped, outcome-checked rollback
+            // as the fence path — never a blind delete of somebody else's ref.
+            await rollbackOwnEnqueue(redis, {
+                idemKey,
+                bookId: parsed.bookId,
+                chapterId: parsed.chapterId,
+                sceneId: parsed.sceneId,
+                jobId: payload.job_id,
+            });
         } else {
             // Ambiguous: the hub may have taken the task. Keep the claim (a
             // release would allow a duplicate) and shorten its TTL - the
@@ -477,4 +537,4 @@ async function send(job_id, workflow, type, build_id, dispatch_id) {
     return sendUnified({ job_id, params: workflow, job_type: type, build_id, dispatch_id });
 }
 
-module.exports = { send, sendUnified, resolveWorkspaceForBook, workspaceHasPrivateWorker, workspaceGrantPolicyLane, clearRoutingCaches, setRedis, getRedis };
+module.exports = { send, sendUnified, resolveWorkspaceForBook, workspaceHasPrivateWorker, workspaceGrantPolicyLane, clearRoutingCaches, setRedis, getRedis, getStats };

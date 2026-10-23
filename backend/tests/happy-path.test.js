@@ -136,6 +136,10 @@ describe('Happy Path: GPU Task Result Idempotency (Н.1)', () => {
 class FakeRedis {
     constructor() {
         this.store = new Map();
+        // Declared test double (no Lua, no WATCH/MULTI): the production
+        // fail-closed gate of ensureIntentAndReceipt must not treat this as a
+        // real Redis that silently lost its atomic script (Stage 129).
+        this.__allowNonLuaFallback = true;
     }
 
     async get(k) {

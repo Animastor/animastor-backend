@@ -20,7 +20,8 @@ const config = require('../src/config/runtime-config');
 const redisHelpersFactory = require('../src/helpers/redis-helpers.cjs');
 
 class FakeRedis {
-    constructor() { this.store = new Map(); this.sets = new Map(); }
+    // Declared test double — see queue-idempotency.ensureIntentAndReceipt.
+    constructor() { this.store = new Map(); this.sets = new Map(); this.__allowNonLuaFallback = true; }
     async get(k) { return this.store.has(k) ? this.store.get(k) : null; }
     async set(k, v) { this.store.set(k, String(v)); return 'OK'; }
     async del(k) { this.store.delete(k); this.sets.delete(k); return 1; }

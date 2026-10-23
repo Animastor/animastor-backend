@@ -112,12 +112,23 @@ const IDEM_INTENT_TTL_S = 14 * 24 * 3600;
  */
 const IDEM_RECEIPT_TTL_S = 48 * 3600;
 /**
- * Short-lived lock for the FALLBACK (non-Lua) path of
- * `ensureIntentAndReceipt` — Redis doubles without a working `eval`. Production
- * ioredis always takes the atomic Lua script; this lock only keeps the
- * read-check-write of doubles from interleaving.
+ * Lock of the NON-LUA fallback of `ensureIntentAndReceipt` (test doubles that
+ * explicitly opt in via `__allowNonLuaFallback`). Production never takes this
+ * path: a client that cannot run the atomic script fails closed.
+ *
+ * Stage 129 (audit 128 · B2): the lock carries an OWNER TOKEN and its TTL
+ * covers the whole critical section (WATCH + reads + MULTI/EXEC ≈ 5–6
+ * roundtrips), refreshed before the read phase; a lapsed lock is never
+ * deleted by its previous owner (compare-and-delete on the token).
  */
-const INTENT_RECEIPT_LOCK_TTL_S = 5;
+const INTENT_RECEIPT_LOCK_TTL_S = 15;
+/**
+ * Length of the bounded supersede history inside an intent record. It is the
+ * durable proof that a fence WAS superseded — needed when the incoming fence
+ * is not older by epoch (equal epoch, different inputs) and after the
+ * stage-epoch key expired.
+ */
+const INTENT_HISTORY_MAX = 8;
 
 /** States of a current-intent record (contract 126 §1.2). */
 const INTENT_STATES = Object.freeze({
@@ -419,10 +430,26 @@ async function claimTask(redis, idemKey, ttlSeconds = IDEM_CLAIM_TTL_S) {
     }
 }
 
-/** Release the claim (terminal state of the task). */
+/**
+ * Release the claim (terminal state of the task).
+ *
+ * Stage 129 (audit 128 · F4): the outcome is returned, so a caller can tell
+ * «released» from «Redis refused» instead of reporting a rollback it never
+ * performed. The claim key is derived from the idem_key, i.e. it is already
+ * scoped to ONE fence — releasing it can never touch another generation.
+ *
+ * @returns {Promise<{released:boolean, reason:string}>}
+ */
 async function releaseTask(redis, idemKey) {
-    if (!redis || !idemKey) return;
-    try { await redis.del(idemClaimKey(idemKey)); } catch (_) { /* best effort */ }
+    if (!redis || !idemKey) return { released: false, reason: 'invalid' };
+    try {
+        const removed = await redis.del(idemClaimKey(idemKey));
+        return removed > 0
+            ? { released: true, reason: 'released' }
+            : { released: false, reason: 'absent' };
+    } catch (err) {
+        return { released: false, reason: 'error', error: (err && err.message) || 'redis error' };
+    }
 }
 
 /**
@@ -468,10 +495,55 @@ async function readTaskRef(redis, bookId, chapterId, sceneId, jobId) {
     try { return await redis.get(idemRefKey(bookId, chapterId, sceneId, jobId)); } catch (_) { return null; }
 }
 
-/** Forget the job_id → idem_key mapping (terminal state). */
-async function forgetTaskRef(redis, bookId, chapterId, sceneId, jobId) {
-    if (!redis || !jobId || !bookId || !chapterId || !sceneId) return;
-    try { await redis.del(idemRefKey(bookId, chapterId, sceneId, jobId)); } catch (_) { /* best effort */ }
+/**
+ * Forget the job_id → idem_key mapping (terminal state).
+ *
+ * Stage 129 (audit 128 · F4): a rollback must delete the ref ONLY when it
+ * still points at the caller's own fence. A concurrent regeneration can
+ * re-map job_id → a NEWER idem_key between the write and the rollback; a
+ * blind DEL would erase the ownership index of the live generation (the
+ * completion marker then becomes unreachable). The compare-and-delete is
+ * transactional (WATCH/MULTI); a client without transactions deletes
+ * nothing rather than deleting blindly.
+ *
+ * @param {{fence?:string}} [opts] expected owner fence (omit for a blind delete)
+ * @returns {Promise<{deleted:boolean, reason:string}>}
+ */
+async function forgetTaskRef(redis, bookId, chapterId, sceneId, jobId, opts = {}) {
+    if (!redis || !jobId || !bookId || !chapterId || !sceneId) {
+        return { deleted: false, reason: 'invalid' };
+    }
+    const key = idemRefKey(bookId, chapterId, sceneId, jobId);
+    const expected = opts && opts.fence != null ? String(opts.fence) : null;
+    try {
+        if (!expected) {
+            const removed = await redis.del(key);
+            return { deleted: removed > 0, reason: removed > 0 ? 'deleted' : 'absent' };
+        }
+        if (!_hasTransactions(redis)) {
+            // A double without optimistic transactions: read-then-delete, still
+            // scoped to OUR fence. Production ioredis always takes the
+            // compare-and-delete below.
+            const observed = await redis.get(key);
+            if (observed == null) return { deleted: false, reason: 'absent' };
+            if (String(observed) !== expected) return { deleted: false, reason: 'not_owner' };
+            const removed = await redis.del(key);
+            return { deleted: removed > 0, reason: removed > 0 ? 'deleted' : 'absent' };
+        }
+        await redis.watch(key);
+        const current = await redis.get(key);
+        if (current == null || String(current) !== expected) {
+            await redis.unwatch();
+            return { deleted: false, reason: current == null ? 'absent' : 'not_owner' };
+        }
+        const tx = redis.multi();
+        tx.del(key);
+        const res = await tx.exec();
+        if (res == null) return { deleted: false, reason: 'contended' };
+        return { deleted: true, reason: 'deleted' };
+    } catch (err) {
+        return { deleted: false, reason: 'error', error: (err && err.message) || 'redis error' };
+    }
 }
 
 /**
@@ -583,7 +655,7 @@ async function settleCompletedTask(redis, { bookId, chapterId, sceneId, jobId, i
     return out;
 }
 
-// ── Stage 127 — durable intent fence + immutable dispatch receipt ─────────
+// ── Stage 127/129 — durable intent fence + immutable dispatch receipt ─────
 //
 // Phase 1 of the result-fencing rollout (contract 126 §1). BEFORE the hub
 // POST, every send that won the single-pending claim records two things a
@@ -591,7 +663,7 @@ async function settleCompletedTask(redis, { bookId, chapterId, sceneId, jobId, i
 //
 //   animastor:intent:{book}:{chapter}:{scene}:{job}
 //       the CURRENT intent of the logical task:
-//       { fence, state, epoch, supersedes, updated_at }   (durable, 14 d)
+//       { fence, state, epoch, supersedes, updated_at, history }  (14 d)
 //   animastor:dispatch-intent:{dispatch_id}:{job_id}
 //       the immutable RECEIPT: this dispatch was authorized for exactly
 //       `fence` (SET NX, never rewritten, 48 h)
@@ -602,9 +674,147 @@ async function settleCompletedTask(redis, { bookId, chapterId, sceneId, jobId, i
 // task's own epoch was reset: consumed failure / explicit regeneration)
 // computes a NEW fence and the record supersedes the old one in place.
 //
+// STAGE 129 (audit 128 · B1/B2, F3–F8): the record is a VERSIONED admission
+// token, not a "last writer wins" cell. A fence that is not the current one
+// is admitted only when it is provably NEWER:
+//
+//   • a fence the record already superseded (bounded `history`, newest 8) or
+//     one carrying an OLDER epoch is rejected with `stale_intent` and nothing
+//     is written — a stale sender can never become current again, not even
+//     after a restart (B1), and the history keeps that proof for a supersede
+//     whose epoch key has expired (F3);
+//   • a record without a fence is corrupt → `intent_corrupt` (F6), never
+//     "the same intent" by default;
+//   • a receipt whose intent record is gone means the durable record was lost
+//     (eviction) while the receipt still authorizes a send → `intent_missing`,
+//     never a silent re-creation of an old generation (F3/E4);
+//   • a non-active record (cancelled/superseded) blocks later sends, but a
+//     STRICTLY newer epoch may revive it — the verifiable admission
+//     transition that keeps F8 from pinning a task for 14 days.
+//
 // Phase 1 deliberately does NOT change: the hub envelope, the result route,
 // canonical artifact paths, completion semantics or PG schema — the receipt
 // is written, read and verified here; consuming it is a later phase.
+
+/** Bounded supersede history kept inside the intent record. */
+function _intentHistory(intent) {
+    const out = [];
+    const raw = (intent && Array.isArray(intent.history)) ? intent.history : [];
+    for (const entry of raw) {
+        if (!Array.isArray(entry) || entry[0] == null) continue;
+        const fence = String(entry[0]);
+        if (!/^[0-9a-f]+$/i.test(fence)) continue;
+        const epoch = Number(entry[1]);
+        out.push([fence, Number.isFinite(epoch) ? epoch : 0]);
+    }
+    return out;
+}
+
+/** Serialize an intent record EXACTLY like ENSURE_INTENT_RECEIPT_SCRIPT. */
+function _formatIntentRecord(record, now) {
+    const history = (record.history || [])
+        .map(([fence, epoch]) => `["${fence}",${Number.isFinite(epoch) ? epoch : 0}]`)
+        .join(',');
+    const supersedes = record.supersedes ? `"${record.supersedes}"` : 'null';
+    return `{"fence":"${record.fence}","state":"${record.state}",` +
+        `"epoch":${JSON.stringify(String(record.epoch))},"supersedes":${supersedes},` +
+        `"updated_at":${Number(now) || 0},"history":[${history}]}`;
+}
+
+/** Non-active intent verdict (normalized state label). */
+function _intentStateReject(state) {
+    const label = String(state == null ? '' : state).replace(/[^\w-]/g, '').slice(0, 40);
+    return { status: 'intent_not_active', state: label || 'unknown' };
+}
+
+/**
+ * The ADMISSION DECISION of one ensure call — the single source of truth the
+ * non-Lua fallback uses, mirrored step by step by the Lua script below.
+ *
+ * @returns {{reject:object}|{write:'create'|'supersede'|'refresh',
+ *            verdict:'created'|'reused', record?:object}}
+ */
+function _decideIntentReceipt({ intentRaw, receiptRaw, fence, epoch, stageKnown = true }) {
+    const receiptExists = receiptRaw != null && receiptRaw !== false;
+    // A receipt is IMMUTABLE: the same (dispatch_id, job_id) can never be
+    // re-bound to another fence while it lives.
+    if (receiptExists && String(receiptRaw) !== fence) {
+        return { reject: { status: 'receipt_conflict' } };
+    }
+
+    if (intentRaw == null || intentRaw === false) {
+        // A live receipt proves an intent record was written to this slot
+        // before (they are written in one operation) — its absence is data
+        // loss, not a fresh start.
+        if (receiptExists) return { reject: { status: 'intent_missing' } };
+        return {
+            write: 'create',
+            verdict: 'created',
+            record: {
+                fence,
+                state: INTENT_STATES.ACTIVE,
+                epoch: String(epoch),
+                supersedes: null,
+                history: [],
+            },
+        };
+    }
+
+    let intent = null;
+    try { intent = JSON.parse(intentRaw); } catch (_) { intent = null; }
+    if (!intent || typeof intent !== 'object') return { reject: { status: 'intent_corrupt' } };
+
+    // F6: a record without a fence can never be "the same intent".
+    if (intent.fence == null) return { reject: { status: 'intent_corrupt' } };
+    const storedFence = String(intent.fence);
+    if (!/^[0-9a-f]+$/i.test(storedFence)) return { reject: { status: 'intent_corrupt' } };
+
+    const state = intent.state == null ? INTENT_STATES.ACTIVE : String(intent.state);
+    const storedEpochNum = intent.epoch == null ? NaN : Number(intent.epoch);
+    const storedEpoch = Number.isFinite(storedEpochNum) ? storedEpochNum : null;
+    const history = _intentHistory(intent);
+    const verdict = receiptExists ? 'reused' : 'created';
+
+    if (storedFence === fence) {
+        if (state !== INTENT_STATES.ACTIVE) return { reject: _intentStateReject(state) };
+        return { write: 'refresh', verdict };
+    }
+
+    // ── a DIFFERENT fence: a supersede attempt ─────────────────────────────
+    // 1. a fence this record already superseded can never come back (B1/F3)
+    const wasSuperseded = history.some(([f]) => f === fence)
+        || String(intent.supersedes == null ? '' : intent.supersedes) === fence;
+    if (wasSuperseded) return { reject: { status: 'stale_intent' } };
+    // 2. an older generation can never override a newer one (B1). The epoch
+    //    is only comparable while its COUNTER still exists: a lost counter
+    //    (30 d TTL, eviction) restarts at 1 and would otherwise look like a
+    //    regression and jam the task for the intent TTL. The history check
+    //    above keeps protecting that case.
+    if (stageKnown && storedEpoch !== null && epoch < storedEpoch) {
+        return { reject: { status: 'stale_intent' } };
+    }
+    // 3. non-active record: only a STRICTLY newer generation may revive it (F8)
+    if (state !== INTENT_STATES.ACTIVE) {
+        if (stageKnown && (storedEpoch === null || epoch <= storedEpoch)) {
+            return { reject: _intentStateReject(state) };
+        }
+    }
+
+    const nextHistory = history
+        .concat([[storedFence, storedEpoch === null ? 0 : storedEpoch]])
+        .slice(-INTENT_HISTORY_MAX);
+    return {
+        write: 'supersede',
+        verdict,
+        record: {
+            fence,
+            state: INTENT_STATES.ACTIVE,
+            epoch: String(epoch),
+            supersedes: storedFence,
+            history: nextHistory,
+        },
+    };
+}
 
 /** Key of the current-intent record of one logical task. */
 function intentKey(bookId, chapterId, sceneId, jobId) {
@@ -645,8 +855,36 @@ async function readDispatchReceipt(redis, dispatchId, jobId) {
     }
 }
 
+// ── observability (F7): the existing Prometheus registry, best effort ─────
+
+let _fenceMetrics = null;
+
+/** Count one fence verdict / degradation in the existing metrics registry. */
+function _fenceMetric(outcome) {
+    try {
+        if (!_fenceMetrics) _fenceMetrics = require('../metrics/prometheus');
+        if (_fenceMetrics && typeof _fenceMetrics.observeIntentFence === 'function') {
+            _fenceMetrics.observeIntentFence(outcome);
+        }
+    } catch (_) { /* metrics are best effort — never a reason to fail a send */ }
+}
+
+function _fenceDegraded(reason) {
+    try {
+        if (!_fenceMetrics) _fenceMetrics = require('../metrics/prometheus');
+        if (_fenceMetrics && typeof _fenceMetrics.observeIntentFenceDegraded === 'function') {
+            _fenceMetrics.observeIntentFenceDegraded(reason);
+        }
+    } catch (_) { /* best effort */ }
+}
+
+/** Structured warning (no secrets: keys are ids, values are verdicts). */
+function _fenceWarn(message) {
+    try { console.warn(`[INTENT-FENCE] ${message}`); } catch (_) { /* ignore */ }
+}
+
 /**
- * ATOMIC «ensure intent + write receipt» (Stage 127).
+ * ATOMIC «ensure intent + write receipt» (Stage 127, hardened in Stage 129).
  *
  * One operation, because the receipt must be written only while the intent
  * state is checked — a callback holding a receipt of a non-active intent is
@@ -657,70 +895,153 @@ async function readDispatchReceipt(redis, dispatchId, jobId) {
  *   'reused'             — intent already at this fence, receipt already existed
  *   'receipt_conflict'   — the receipt of THIS (dispatch_id, job_id) already
  *                          binds a DIFFERENT fence → immutable, reject
- *   'intent_not_active:<state>' — intent is cancelled/superseded → reject
- *   'intent_corrupt'     — stored intent unparseable → fail closed
+ *   'stale_intent'       — this fence is NOT the current generation (it was
+ *                          superseded, or carries an older epoch) → reject
+ *                          without writing: a stale sender can never win
+ *   'intent_not_active:<state>' — cancelled/superseded and no newer epoch
+ *   'intent_corrupt'     — stored intent unparseable / has no valid fence
+ *   'intent_missing'     — a receipt exists but its intent record is gone
  *   'invalid_fence'      — fence is not a sha256 hex id → fail closed
- *   'busy'               — fallback lock not acquired in the wait window
- *   'unavailable'        — Redis error on the fallback path
+ *   'busy'               — non-Lua fallback could not settle a transaction
+ *   'unavailable'        — the atomic path is not usable → FAIL CLOSED
  *   'invalid'            — missing arguments
  *
- * Nothing is written before the first reject verdict, so a caller may always
- * undo its own enqueue side effects (claim/ref) after a non-ok verdict.
+ * Nothing is written before a reject verdict, so a caller may always undo its
+ * own enqueue side effects (claim/ref) after a non-ok verdict.
  *
- * Production path: one Lua script (atomic on a single Redis). Doubles without
- * a working `eval` take a lock-guarded read-check-write fallback with the same
- * verdicts — never a silent success.
+ * Production path: one Lua script (atomic on a single Redis). Stage 129 makes
+ * the non-Lua path EXPLICIT and test-only (`redis.__allowNonLuaFallback`):
+ * it is transactional (WATCH/MULTI) and lock-guarded, but a production client
+ * that cannot run the script gets `unavailable` — never a silent degradation
+ * to a weaker read-check-write.
  */
 const ENSURE_INTENT_RECEIPT_SCRIPT = `
 local fence = ARGV[1]
 if not string.match(fence, '^%x+$') then return 'invalid_fence' end
-local epoch = ARGV[2]
-if not string.match(epoch, '^%-?%d+$') then epoch = '0' end
-local now = ARGV[3]
-if not string.match(now, '^%d+$') then now = '0' end
-local intentTtl = tonumber(ARGV[4])
-local receiptTtl = tonumber(ARGV[5])
-
-local receiptFence = redis.call('GET', KEYS[2])
-if receiptFence and receiptFence ~= fence then
-    return 'receipt_conflict'
+local epochStr = ARGV[2]
+local epoch = tonumber(epochStr)
+if not epoch then epochStr = '0'; epoch = 0 end
+if epoch ~= math.floor(epoch) then epoch = math.floor(epoch); epochStr = string.format('%d', epoch) end
+local now = tonumber(ARGV[3]) or 0
+local intentTtl = tonumber(ARGV[4]) or 1209600
+local receiptTtl = tonumber(ARGV[5]) or 172800
+local historyMax = tonumber(ARGV[6]) or 8
+local stageTtl = tonumber(ARGV[7]) or 2592000
+-- KEYS[3] is the stage generation counter. It is only authoritative while it
+-- still exists: an expired/evicted counter restarts at 1 and would look like
+-- a regression. Its TTL is refreshed on every accepted send, so it outlives
+-- the intent record it orders.
+local stageKey = KEYS[3]
+local stageKnown = true
+if stageKey and stageKey ~= '' then
+    stageKnown = redis.call('EXISTS', stageKey) == 1
 end
+
+local function touchStage()
+    if stageKey and stageKey ~= '' and stageKnown then
+        redis.call('EXPIRE', stageKey, stageTtl)
+    end
+end
+
+local function label(value)
+    local s = string.gsub(tostring(value), '[^%w_-]', '')
+    if s == '' then return 'unknown' end
+    if string.len(s) > 40 then return string.sub(s, 1, 40) end
+    return s
+end
+
+local function historyJson(entries)
+    local parts = {}
+    for i, entry in ipairs(entries) do
+        parts[i] = '["' .. entry[1] .. '",' .. string.format('%d', entry[2]) .. ']'
+    end
+    return table.concat(parts, ',')
+end
+
+-- 1. the receipt of this (dispatch_id, job_id) is immutable
+local receiptFence = redis.call('GET', KEYS[2])
+if receiptFence and receiptFence ~= fence then return 'receipt_conflict' end
 
 local intentRaw = redis.call('GET', KEYS[1])
-local supersedes = nil
-if intentRaw then
-    local ok, intent = pcall(cjson.decode, intentRaw)
-    if not ok or type(intent) ~= 'table' then return 'intent_corrupt' end
-    local state = 'active'
-    if intent.state then state = tostring(intent.state) end
-    if state ~= 'active' then
-        return 'intent_not_active:' .. string.gsub(state, '[^%w_-]', '')
-    end
-    if intent.fence and tostring(intent.fence) ~= fence then
-        local prev = tostring(intent.fence)
-        if not string.match(prev, '^%x+$') then return 'intent_corrupt' end
-        supersedes = prev
-    end
-end
 
 if not intentRaw then
-    redis.call('SET', KEYS[1], '{"fence":"' .. fence .. '","state":"active","epoch":"' .. epoch .. '","supersedes":null,"updated_at":' .. now .. '}', 'EX', intentTtl)
-elseif supersedes then
-    redis.call('SET', KEYS[1], '{"fence":"' .. fence .. '","state":"active","epoch":"' .. epoch .. '","supersedes":"' .. supersedes .. '","updated_at":' .. now .. '}', 'EX', intentTtl)
-else
-    redis.call('EXPIRE', KEYS[1], intentTtl)
+    if receiptFence then return 'intent_missing' end
+    local record = '{"fence":"' .. fence .. '","state":"active","epoch":"' .. epochStr ..
+        '","supersedes":null,"updated_at":' .. string.format('%d', now) .. ',"history":[]}'
+    redis.call('SET', KEYS[1], record, 'EX', intentTtl)
+    touchStage()
+    if not receiptFence then redis.call('SET', KEYS[2], fence, 'NX', 'EX', receiptTtl) end
+    return 'created'
 end
 
+local ok, intent = pcall(cjson.decode, intentRaw)
+if not ok or type(intent) ~= 'table' then return 'intent_corrupt' end
+
+-- F6: a record without a valid fence is corrupt, never "the same intent"
+if intent.fence == nil or intent.fence == cjson.null then return 'intent_corrupt' end
+local storedFence = tostring(intent.fence)
+if not string.match(storedFence, '^%x+$') then return 'intent_corrupt' end
+
+local state = 'active'
+if intent.state ~= nil and intent.state ~= cjson.null then state = tostring(intent.state) end
+
+local storedEpoch = nil
+if intent.epoch ~= nil and intent.epoch ~= cjson.null then storedEpoch = tonumber(intent.epoch) end
+
+local history = {}
+local wasSuperseded = false
+if type(intent.history) == 'table' then
+    for _, entry in ipairs(intent.history) do
+        if type(entry) == 'table' and entry[1] ~= nil then
+            local hf = tostring(entry[1])
+            if string.match(hf, '^%x+$') then
+                history[#history + 1] = { hf, tonumber(entry[2]) or 0 }
+                if hf == fence then wasSuperseded = true end
+            end
+        end
+    end
+end
+if intent.supersedes ~= nil and intent.supersedes ~= cjson.null
+    and tostring(intent.supersedes) == fence then wasSuperseded = true end
+
+-- 2. same fence: the current intent is confirmed
+if storedFence == fence then
+    if state ~= 'active' then return 'intent_not_active:' .. label(state) end
+    redis.call('EXPIRE', KEYS[1], intentTtl)
+    touchStage()
+    if not receiptFence then redis.call('SET', KEYS[2], fence, 'NX', 'EX', receiptTtl) end
+    if receiptFence then return 'reused' end
+    return 'created'
+end
+
+-- 3. a different fence: admit it only when it is provably newer (B1)
+if wasSuperseded then return 'stale_intent' end
+if stageKnown and storedEpoch and epoch < storedEpoch then return 'stale_intent' end
+if state ~= 'active' and stageKnown and (storedEpoch == nil or epoch <= storedEpoch) then
+    return 'intent_not_active:' .. label(state)
+end
+
+history[#history + 1] = { storedFence, storedEpoch or 0 }
+while #history > historyMax do table.remove(history, 1) end
+
+local record = '{"fence":"' .. fence .. '","state":"active","epoch":"' .. epochStr ..
+    '","supersedes":"' .. storedFence .. '","updated_at":' .. string.format('%d', now) ..
+    ',"history":[' .. historyJson(history) .. ']}'
+redis.call('SET', KEYS[1], record, 'EX', intentTtl)
+touchStage()
+if not receiptFence then redis.call('SET', KEYS[2], fence, 'NX', 'EX', receiptTtl) end
 if receiptFence then return 'reused' end
-redis.call('SET', KEYS[2], fence, 'NX', 'EX', receiptTtl)
 return 'created'
 `;
 
+const _ENSURE_VERDICTS = new Set([
+    'created', 'reused', 'receipt_conflict', 'stale_intent',
+    'intent_corrupt', 'intent_missing', 'invalid_fence', 'busy', 'unavailable',
+]);
+
 function _parseEnsureVerdict(raw) {
     const status = typeof raw === 'string' ? raw : String(raw == null ? '' : raw);
-    if (['created', 'reused', 'receipt_conflict', 'intent_corrupt', 'invalid_fence'].includes(status)) {
-        return { status };
-    }
+    if (_ENSURE_VERDICTS.has(status)) return { status };
     const NOT_ACTIVE = 'intent_not_active:';
     if (status.startsWith(NOT_ACTIVE)) {
         return { status: 'intent_not_active', state: status.slice(NOT_ACTIVE.length) || 'unknown' };
@@ -728,106 +1049,297 @@ function _parseEnsureVerdict(raw) {
     return { status: 'unknown', detail: status.slice(0, 120) };
 }
 
-/** Lock-guarded fallback for doubles without a working `eval`. */
-async function _ensureIntentReceiptLocked(redis, { intentK, receiptK, fence, epoch, now }) {
-    const lockK = `${IDEM_INTENT_LOCK_PREFIX}${intentK.slice(IDEM_INTENT_PREFIX.length)}`;
-    let acquired = false;
+/**
+ * Errors that mean «this client cannot run the script» (a capability gap)
+ * as opposed to «Redis refused / could not answer». Anything that is NOT in
+ * this list fails closed: an ACL refusal, a CROSSSLOT in a cluster, a
+ * READONLY replica or a timeout must never silently downgrade the write.
+ */
+const _LUA_CAPABILITY_ERROR = /unknown command|is not a function|not implemented|unsupported command|unknown subcommand/i;
+
+function _isLuaCapabilityError(err) {
+    const message = String((err && (err.message || err.stack)) || err || '');
+    return _LUA_CAPABILITY_ERROR.test(message);
+}
+
+/** 16-hex random owner token of a fallback lock. */
+function _randomToken() {
     try {
-        // Bounded wait: a concurrent holder finishes in milliseconds.
-        for (let i = 0; i < 25 && !acquired; i++) {
-            acquired = !!(await redis.set(lockK, '1', 'NX', 'EX', INTENT_RECEIPT_LOCK_TTL_S));
-            if (!acquired) await new Promise((r) => setTimeout(r, 20));
-        }
-        if (!acquired) return { status: 'busy' };
-
-        const receiptFence = await redis.get(receiptK);
-        const receiptExists = receiptFence != null && receiptFence !== false;
-        if (receiptExists && String(receiptFence) !== fence) {
-            return { status: 'receipt_conflict' };
-        }
-
-        const intentRaw = await redis.get(intentK);
-        let supersedes = null;
-        if (intentRaw != null && intentRaw !== false) {
-            let intent = null;
-            try { intent = JSON.parse(intentRaw); } catch (_) { return { status: 'intent_corrupt' }; }
-            if (!intent || typeof intent !== 'object') return { status: 'intent_corrupt' };
-            const state = intent.state == null ? INTENT_STATES.ACTIVE : String(intent.state);
-            if (state !== INTENT_STATES.ACTIVE) {
-                return { status: 'intent_not_active', state: state.replace(/[^\w-]/g, '').slice(0, 40) || 'unknown' };
-            }
-            if (intent.fence != null && String(intent.fence) !== fence) {
-                const prev = String(intent.fence);
-                if (!/^[0-9a-f]+$/i.test(prev)) return { status: 'intent_corrupt' };
-                supersedes = prev;
-            }
-        }
-
-        if (intentRaw == null || intentRaw === false || supersedes !== null) {
-            const record = JSON.stringify({
-                fence: String(fence),
-                state: INTENT_STATES.ACTIVE,
-                epoch: String(epoch),
-                supersedes,
-                updated_at: now,
-            });
-            await redis.set(intentK, record, 'EX', IDEM_INTENT_TTL_S);
-        } else {
-            await redis.expire(intentK, IDEM_INTENT_TTL_S);
-        }
-
-        if (receiptExists) return { status: 'reused' };
-        const written = await redis.set(receiptK, fence, 'NX', 'EX', IDEM_RECEIPT_TTL_S);
-        if (!written) {
-            // Someone outside the lock raced the SET NX — re-read, never overwrite.
-            const stored = await redis.get(receiptK);
-            return stored === fence ? { status: 'reused' } : { status: 'receipt_conflict' };
-        }
-        return { status: 'created' };
-    } catch (err) {
-        return { status: 'unavailable', detail: (err && err.message) || 'redis error' };
-    } finally {
-        if (acquired) { try { await redis.del(lockK); } catch (_) { /* best effort */ } }
+        return require('crypto').randomBytes(8).toString('hex');
+    } catch (_) {
+        return `${Date.now().toString(16)}${Math.floor(Math.random() * 0xffffffff).toString(16)}`;
     }
 }
 
-async function ensureIntentAndReceipt(redis, { bookId, chapterId, sceneId, jobId, dispatchId, fence, epoch } = {}) {
+function _intentLockKey(intentK) {
+    return `${IDEM_INTENT_LOCK_PREFIX}${intentK.slice(IDEM_INTENT_PREFIX.length)}`;
+}
+
+/** Acquire the fallback lock with an OWNER TOKEN (never a bare '1'). */
+async function _acquireIntentLock(redis, lockK, token) {
+    // Bounded wait: a concurrent holder finishes in a few roundtrips.
+    for (let i = 0; i < 25; i++) {
+        const acquired = !!(await redis.set(lockK, token, 'NX', 'EX', INTENT_RECEIPT_LOCK_TTL_S));
+        if (acquired) return true;
+        await new Promise((r) => setTimeout(r, 20));
+    }
+    return false;
+}
+
+/** Does this client support optimistic transactions (WATCH/MULTI)? */
+function _hasTransactions(redis) {
+    return typeof redis.watch === 'function'
+        && typeof redis.multi === 'function'
+        && typeof redis.unwatch === 'function';
+}
+
+/** Extend the lock only while WE still own it. */
+async function _renewIntentLock(redis, lockK, token) {
+    try {
+        if (!_hasTransactions(redis)) {
+            const current = await redis.get(lockK);
+            if (current == null || String(current) !== token) return false;
+            return (await redis.expire(lockK, INTENT_RECEIPT_LOCK_TTL_S)) > 0;
+        }
+        await redis.watch(lockK);
+        const current = await redis.get(lockK);
+        if (current == null || String(current) !== token) { await redis.unwatch(); return false; }
+        const tx = redis.multi();
+        tx.expire(lockK, INTENT_RECEIPT_LOCK_TTL_S);
+        const res = await tx.exec();
+        return Array.isArray(res);
+    } catch (_) {
+        return false;
+    }
+}
+
+/**
+ * Release the fallback lock — COMPARE-AND-DELETE on the owner token. A lock
+ * that expired and was re-acquired by somebody else is NEVER deleted by the
+ * previous owner (audit 128 · B2/E6). Without transaction support the
+ * compare-and-delete degrades to read-then-delete, which is still token
+ * scoped: a foreign token is never deleted.
+ */
+async function _releaseIntentLock(redis, lockK, token) {
+    try {
+        if (!_hasTransactions(redis)) {
+            const current = await redis.get(lockK);
+            if (current == null || String(current) !== token) return false;
+            await redis.del(lockK);
+            return true;
+        }
+        await redis.watch(lockK);
+        const current = await redis.get(lockK);
+        if (current == null || String(current) !== token) { await redis.unwatch(); return false; }
+        const tx = redis.multi();
+        tx.del(lockK);
+        const res = await tx.exec();
+        return Array.isArray(res);
+    } catch (_) {
+        return false;
+    }
+}
+
+/**
+ * TEST-DOUBLE fallback: lock-guarded, TRANSACTIONAL (WATCH/MULTI) ensure for
+ * Redis doubles that advertise `__allowNonLuaFallback` but have no `eval`.
+ *
+ * It is never reachable in production (see `ensureIntentAndReceipt`): a real
+ * client either runs the Lua script or gets `unavailable`. Writes go through
+ * ONE MULTI/EXEC, so a failure can never leave an intent without its receipt
+ * (or the reverse), and a lost WATCH aborts the transaction instead of
+ * overwriting a newer state.
+ */
+async function _ensureIntentReceiptFallback(redis, { intentK, receiptK, stageK, fence, epoch, now }) {
+    const transactional = _hasTransactions(redis);
+
+    const lockK = _intentLockKey(intentK);
+    const token = _randomToken();
+    let acquired = false;
+    try {
+        acquired = await _acquireIntentLock(redis, lockK, token);
+    } catch (err) {
+        _fenceDegraded('lock_error');
+        return { status: 'unavailable', reason: 'lock_error', degraded: true };
+    }
+    if (!acquired) return { status: 'busy', degraded: true };
+
+    try {
+        // The critical section is a handful of roundtrips; refresh the TTL
+        // before the read phase so a slow Redis cannot let the lock lapse
+        // half-way (and never delete somebody else's lock afterwards).
+        await _renewIntentLock(redis, lockK, token);
+
+        // The stage counter is authoritative only while it exists (see the
+        // Lua script) — a lost counter must not look like an older
+        // generation and jam the task for the whole intent TTL.
+        let stageKnown = true;
+        if (stageK) {
+            try { stageKnown = (await redis.get(stageK)) != null; } catch (_) { stageKnown = false; }
+        }
+
+        if (!transactional) {
+            // A double with neither Lua nor WATCH/MULTI: the legacy
+            // lock-guarded read-check-write, explicitly marked as
+            // NON-transactional. Unreachable in production — the fallback
+            // itself is gated behind `__allowNonLuaFallback`.
+            _fenceDegraded('lock_only_fallback');
+            let decision;
+            try {
+                decision = _decideIntentReceipt({
+                    intentRaw: await redis.get(intentK),
+                    receiptRaw: await redis.get(receiptK),
+                    fence,
+                    epoch,
+                    stageKnown,
+                });
+            } catch (err) {
+                return { status: 'unavailable', reason: 'redis_error', degraded: true, transactional: false };
+            }
+            if (decision.reject) {
+                return { ...decision.reject, degraded: true, transactional: false };
+            }
+            try {
+                if (decision.write === 'refresh') {
+                    await redis.expire(intentK, IDEM_INTENT_TTL_S);
+                } else {
+                    await redis.set(intentK, _formatIntentRecord(decision.record, now), 'EX', IDEM_INTENT_TTL_S);
+                }
+                if (decision.verdict === 'created') {
+                    await redis.set(receiptK, fence, 'NX', 'EX', IDEM_RECEIPT_TTL_S);
+                }
+                if (stageK && stageKnown) await redis.expire(stageK, STAGE_EPOCH_TTL_S);
+            } catch (err) {
+                return { status: 'unavailable', reason: 'redis_error', degraded: true, transactional: false };
+            }
+            return { status: decision.verdict, degraded: true, transactional: false };
+        }
+
+        for (let attempt = 0; attempt < 5; attempt++) {
+            await redis.watch(intentK, receiptK);
+            let decision;
+            try {
+                decision = _decideIntentReceipt({
+                    intentRaw: await redis.get(intentK),
+                    receiptRaw: await redis.get(receiptK),
+                    fence,
+                    epoch,
+                    stageKnown,
+                });
+            } catch (err) {
+                try { await redis.unwatch(); } catch (_) { /* ignore */ }
+                _fenceDegraded('redis_error');
+                return { status: 'unavailable', reason: 'redis_error', degraded: true };
+            }
+            if (decision.reject) {
+                await redis.unwatch();
+                return { ...decision.reject, degraded: true };
+            }
+
+            let queued = 0;
+            const tx = redis.multi();
+            if (decision.write === 'refresh') {
+                tx.expire(intentK, IDEM_INTENT_TTL_S); queued += 1;
+            } else {
+                tx.set(intentK, _formatIntentRecord(decision.record, now), 'EX', IDEM_INTENT_TTL_S); queued += 1;
+            }
+            if (decision.verdict === 'created') {
+                tx.set(receiptK, fence, 'NX', 'EX', IDEM_RECEIPT_TTL_S); queued += 1;
+            }
+            if (stageK && stageKnown) { tx.expire(stageK, STAGE_EPOCH_TTL_S); queued += 1; }
+
+            const replies = await tx.exec();
+            // null = a watched key changed between WATCH and EXEC: re-read.
+            if (replies == null) continue;
+            // A client whose MULTI is a no-op must never look like success.
+            if (!Array.isArray(replies) || replies.length !== queued) {
+                _fenceDegraded('transaction_not_applied');
+                _fenceWarn('MULTI/EXEC did not apply the ensure transaction — failing closed');
+                return { status: 'unavailable', reason: 'transaction_not_applied', degraded: true };
+            }
+            return { status: decision.verdict, degraded: true, transactional: true };
+        }
+        return { status: 'busy', degraded: true };
+    } catch (err) {
+        _fenceDegraded('redis_error');
+        return { status: 'unavailable', reason: 'redis_error', degraded: true };
+    } finally {
+        const released = await _releaseIntentLock(redis, lockK, token);
+        if (!released) _fenceWarn('fallback lock was not released by its owner (expired or contended)');
+    }
+}
+
+async function ensureIntentAndReceipt(redis, {
+    bookId, chapterId, sceneId, jobId, dispatchId, fence, epoch, stageEpochKey: stageK = null,
+} = {}) {
     if (!redis || !bookId || !chapterId || !sceneId || !jobId || !dispatchId || !fence) {
         return { status: 'invalid' };
     }
-    if (!/^[0-9a-f]+$/i.test(String(fence))) return { status: 'invalid_fence' };
+    const fenceStr = String(fence);
+    if (!/^[0-9a-f]+$/i.test(fenceStr)) return { status: 'invalid_fence' };
 
     const intentK = intentKey(bookId, chapterId, sceneId, jobId);
     const receiptK = dispatchReceiptKey(dispatchId, jobId);
     const now = Date.now();
     const epochNum = Number(epoch);
-    const epochStr = String(Number.isFinite(epochNum) ? epochNum : 0);
+    const epochStr = String(Number.isFinite(epochNum) ? Math.trunc(epochNum) : 0);
+    const fallbackAllowed = redis.__allowNonLuaFallback === true;
 
     if (typeof redis.eval === 'function') {
         try {
             const raw = await redis.eval(
                 ENSURE_INTENT_RECEIPT_SCRIPT,
-                2,
+                3,
                 intentK,
                 receiptK,
-                String(fence),
+                stageK || '',
+                fenceStr,
                 epochStr,
                 String(now),
                 String(IDEM_INTENT_TTL_S),
-                String(IDEM_RECEIPT_TTL_S)
+                String(IDEM_RECEIPT_TTL_S),
+                String(INTENT_HISTORY_MAX),
+                String(STAGE_EPOCH_TTL_S)
             );
-            const verdict = _parseEnsureVerdict(raw);
-            // An unrecognized return means the double does not really run the
-            // script — converge through the locked fallback instead of
-            // reporting a verdict nobody wrote.
-            if (verdict.status !== 'unknown') return verdict;
+            if (raw != null && raw !== false) {
+                const verdict = _parseEnsureVerdict(raw);
+                if (verdict.status !== 'unknown') {
+                    _fenceMetric(verdict.status);
+                    return verdict;
+                }
+                // An answer nobody can classify is NOT a reason to re-run the
+                // decision through a second, weaker path.
+                _fenceDegraded('unexpected_eval_reply');
+                _fenceWarn(`unexpected verdict from the atomic script: ${String(raw).slice(0, 80)} — failing closed`);
+                return { status: 'unavailable', reason: 'unexpected_eval_reply' };
+            }
+            // null/undefined: the client did not execute the script at all.
         } catch (err) {
-            // A Redis double whose eval does not understand the script (or a
-            // transient script error) — converge through the locked fallback
-            // below; verdicts are identical, never a silent success.
+            const message = String((err && err.message) || err || '');
+            if (!_isLuaCapabilityError(err)) {
+                // ACL / CROSSSLOT / READONLY / LOADING / timeout / connection
+                // reset — the write is NOT known to be atomic here.
+                _fenceDegraded('eval_error');
+                _fenceWarn(`atomic script failed (${message.slice(0, 120)}) — failing closed`);
+                return { status: 'unavailable', reason: 'eval_error', detail: message.slice(0, 200) };
+            }
+            _fenceWarn(`atomic script unsupported by this client (${message.slice(0, 120)})`);
         }
     }
-    return _ensureIntentReceiptLocked(redis, { intentK, receiptK, fence: String(fence), epoch: epochStr, now });
+
+    if (!fallbackAllowed) {
+        // Production: a Redis that cannot run the atomic script must fail
+        // closed — a read-check-write can always admit a stale generation.
+        _fenceDegraded('atomic_script_unavailable');
+        _fenceMetric('unavailable');
+        return { status: 'unavailable', reason: 'atomic_script_unavailable' };
+    }
+
+    const verdict = await _ensureIntentReceiptFallback(redis, {
+        intentK, receiptK, stageK, fence: fenceStr, epoch: Number(epochStr), now,
+    });
+    _fenceMetric(verdict.status);
+    return verdict;
 }
 
 /**
@@ -872,6 +1384,25 @@ const CAPACITY_REASONS = new Set([
     'no_worker_available',   // no live, type-compatible worker
     'duplicate_pending',     // the job is already pending in the lane
     'ambiguous_post',        // the POST outcome was ambiguous (hub may have taken it)
+    // Stage 129: the intent/receipt step could not run at all (Redis refused
+    // the atomic path). Nothing was enqueued, but the send is retryable —
+    // this is a bounded retry, never a reason to churn every 5 s.
+    'intent_receipt_unavailable',
+]);
+
+/**
+ * Fence verdicts that RETRYING CANNOT FIX (Stage 129, audit 128 · F5): the
+ * dispatch belongs to a generation the backend already superseded, or the
+ * receipt/intent pair is inconsistent. They are deferrable without being
+ * retryable: the stage waits in the long window instead of cycling
+ * dispatch → cancelled every 5 s, and the log/metric is the operator signal.
+ */
+const FENCE_REJECTED_REASONS = new Set([
+    'stale_intent',
+    'receipt_conflict',
+    'intent_not_active',
+    'intent_corrupt',
+    'intent_missing',
 ]);
 
 /** Is a not-sent reason a capacity reason? */
@@ -910,9 +1441,10 @@ function classifyNotSentReasons(reasons) {
 
 /**
  * The reasons that are deferrable at all (capacity + the idempotent
- * suppression). Mirrors the package's dispatch-outcomes taxonomy.
+ * suppression + the terminal fence rejections). Mirrors the package's
+ * dispatch-outcomes taxonomy.
  */
-const DEFERRABLE_REASONS = new Set([...CAPACITY_REASONS, 'already_completed']);
+const DEFERRABLE_REASONS = new Set([...CAPACITY_REASONS, ...FENCE_REJECTED_REASONS, 'already_completed']);
 
 function isDeferrableReason(reason) {
     return DEFERRABLE_REASONS.has(String(reason || ''));

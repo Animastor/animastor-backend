@@ -24,15 +24,25 @@ function createMockRedis() {
         const i = args.indexOf('EX');
         if (i !== -1 && args[i + 1] !== undefined) expiries.set(key, Number(args[i + 1]));
     };
-    return {
+    // WATCH/MULTI (Stage 129): per-key mutation counters, so a transaction
+    // can abort exactly like Redis when a watched key changed. `versioned`
+    // mirrors the real client's optimistic concurrency; the fallback of
+    // queue-idempotency relies on it for its atomicity.
+    const versions = new Map();
+    const bump = (key) => versions.set(key, (versions.get(key) || 0) + 1);
+    let watchState = null;
+    let transactionState = null;
+    const api = {
         hset: async (key, field, value) => {
             if (field && typeof field === 'object' && !Array.isArray(field)) {
                 for (const [name, fieldValue] of Object.entries(field)) {
                     store.set(`${key}:${name}`, fieldValue);
+                    bump(`${key}:${name}`);
                 }
                 return Object.keys(field).length;
             }
             store.set(`${key}:${field}`, value);
+            bump(`${key}:${field}`);
             return 1;
         },
         hget: async (key, field) => store.get(`${key}:${field}`) || null,
@@ -49,7 +59,7 @@ function createMockRedis() {
         hdel: async (key, ...fields) => {
             let n = 0;
             for (const field of fields) {
-                if (store.delete(`${key}:${field}`)) n++;
+                if (store.delete(`${key}:${field}`)) { n++; bump(`${key}:${field}`); }
             }
             return n;
         },
@@ -66,12 +76,14 @@ function createMockRedis() {
             if (nx && store.has(key)) return null;
             store.set(key, value);
             recordExpiry(key, args);
+            bump(key);
             return 'OK';
         },
-        del: async (...keys) => { let n = 0; for (const k of keys) { expiries.delete(k); if (store.delete(k)) n++; } return n; },
+        del: async (...keys) => { let n = 0; for (const k of keys) { expiries.delete(k); if (store.delete(k)) { n++; bump(k); } } return n; },
         expire: async (key, ttl) => {
             if (!store.has(key)) return 0;
             expiries.set(key, Number(ttl));
+            bump(key);
             return 1;
         },
         // Mirrors ioredis: -2 if key missing, -1 if no expiry, else seconds.
@@ -79,9 +91,9 @@ function createMockRedis() {
             if (!store.has(key)) return -2;
             return expiries.has(key) ? expiries.get(key) : -1;
         },
-        incr: async (key) => { const v = (parseInt(store.get(key) || '0', 10)) + 1; store.set(key, String(v)); return v; },
-        incrby: async (key, increment) => { const v = (parseInt(store.get(key) || '0', 10)) + Number(increment || 0); store.set(key, String(v)); return v; },
-        decr: async (key) => { const v = Math.max(0, (parseInt(store.get(key) || '0', 10)) - 1); store.set(key, String(v)); return v; },
+        incr: async (key) => { const v = (parseInt(store.get(key) || '0', 10)) + 1; store.set(key, String(v)); bump(key); return v; },
+        incrby: async (key, increment) => { const v = (parseInt(store.get(key) || '0', 10)) + Number(increment || 0); store.set(key, String(v)); bump(key); return v; },
+        decr: async (key) => { const v = Math.max(0, (parseInt(store.get(key) || '0', 10)) - 1); store.set(key, String(v)); bump(key); return v; },
         exists: async (key) => store.has(key) ? 1 : 0,
         scan: async (cursor, ...args) => {
             let pattern = null;
@@ -183,58 +195,103 @@ function createMockRedis() {
                 store.set(key, String(next));
                 return next;
             }
-            // Stage 127 — ensureIntentAndReceipt (queue-idempotency):
+            // Stage 127/129 — ensureIntentAndReceipt (queue-idempotency):
             // KEYS=[intentKey, receiptKey],
-            // ARGV=[fence, epoch, now, intentTtl, receiptTtl]
-            // Verdicts mirror ENSURE_INTENT_RECEIPT_SCRIPT exactly:
-            //   'created' | 'reused' | 'receipt_conflict'
-            //   | 'intent_not_active:<state>' | 'intent_corrupt' | 'invalid_fence'
-            if (script.includes("'receipt_conflict'") && script.includes('intent_not_active') && script.includes('intentTtl')) {
+            // ARGV=[fence, epoch, now, intentTtl, receiptTtl, historyMax]
+            // An INDEPENDENT mirror of ENSURE_INTENT_RECEIPT_SCRIPT (there is
+            // no Lua runtime in the test environment — a change to the script
+            // must be mirrored here, which is exactly what the verdict matrix
+            // in tests/gpu-intent-fence-regressions.test.js checks):
+            //   'created' | 'reused' | 'receipt_conflict' | 'stale_intent'
+            //   | 'intent_missing' | 'intent_not_active:<state>'
+            //   | 'intent_corrupt' | 'invalid_fence'
+            if (script.includes("'stale_intent'") && script.includes("'intent_missing'")) {
                 const intentKey = args[0];
                 const receiptKey = args[1];
-                const [fence, epoch, now, intentTtl, receiptTtl] = args.slice(keysCount);
-                if (!/^[0-9a-f]+$/i.test(String(fence))) return 'invalid_fence';
+                const stageKey = args[2];
+                const [fenceRaw, epochStr, now, intentTtl, receiptTtl, historyMaxArg, stageTtlArg] = args.slice(keysCount);
+                const fence = String(fenceRaw);
+                const epoch = Number(epochStr) || 0;
+                const historyMax = Number(historyMaxArg) || 8;
+                const stageTtl = Number(stageTtlArg) || 2592000;
+                // KEYS[3] is authoritative only while it exists (mirror of
+                // the stageKnown rule in ENSURE_INTENT_RECEIPT_SCRIPT).
+                const stageKnown = (!stageKey) ? true : store.has(stageKey);
+                const touchStage = () => {
+                    if (stageKey && stageKnown) { expiries.set(stageKey, stageTtl); bump(stageKey); }
+                };
+                const label = (value) => String(value).replace(/[^\w-]/g, '').slice(0, 40) || 'unknown';
+                if (!/^[0-9a-f]+$/i.test(fence)) return 'invalid_fence';
 
                 const receiptFence = store.get(receiptKey);
-                if (receiptFence !== undefined && String(receiptFence) !== String(fence)) {
-                    return 'receipt_conflict';
-                }
+                const hasReceipt = receiptFence !== undefined;
+                if (hasReceipt && String(receiptFence) !== fence) return 'receipt_conflict';
+
+                const writeReceipt = () => {
+                    if (hasReceipt) return;
+                    store.set(receiptKey, fence);
+                    expiries.set(receiptKey, Number(receiptTtl));
+                    bump(receiptKey);
+                };
 
                 const intentRaw = store.get(intentKey);
-                let supersedes = null;
-                if (intentRaw !== undefined) {
-                    let intent = null;
-                    try { intent = JSON.parse(intentRaw); } catch (_) { return 'intent_corrupt'; }
-                    if (!intent || typeof intent !== 'object') return 'intent_corrupt';
-                    const state = intent.state == null ? 'active' : String(intent.state);
-                    if (state !== 'active') {
-                        return `intent_not_active:${state.replace(/[^\w-]/g, '').slice(0, 40) || 'unknown'}`;
-                    }
-                    if (intent.fence != null && String(intent.fence) !== String(fence)) {
-                        const prev = String(intent.fence);
-                        if (!/^[0-9a-f]+$/i.test(prev)) return 'intent_corrupt';
-                        supersedes = prev;
-                    }
+                if (intentRaw === undefined) {
+                    if (hasReceipt) return 'intent_missing';
+                    store.set(intentKey, JSON.stringify({
+                        fence, state: 'active', epoch: String(epochStr), supersedes: null,
+                        updated_at: Number(now) || 0, history: [],
+                    }));
+                    expiries.set(intentKey, Number(intentTtl));
+                    bump(intentKey);
+                    touchStage();
+                    writeReceipt();
+                    return 'created';
                 }
 
-                if (intentRaw === undefined || supersedes !== null) {
-                    const record = JSON.stringify({
-                        fence: String(fence),
-                        state: 'active',
-                        epoch: String(epoch),
-                        supersedes,
-                        updated_at: Number(now) || 0,
-                    });
-                    store.set(intentKey, record);
+                let intent = null;
+                try { intent = JSON.parse(intentRaw); } catch (_) { return 'intent_corrupt'; }
+                if (!intent || typeof intent !== 'object') return 'intent_corrupt';
+                if (intent.fence == null) return 'intent_corrupt';
+                const storedFence = String(intent.fence);
+                if (!/^[0-9a-f]+$/i.test(storedFence)) return 'intent_corrupt';
+
+                const state = intent.state == null ? 'active' : String(intent.state);
+                const storedEpochNum = Number(intent.epoch);
+                const storedEpoch = Number.isFinite(storedEpochNum) ? storedEpochNum : null;
+                const history = Array.isArray(intent.history)
+                    ? intent.history.filter((entry) => Array.isArray(entry) && entry[0] != null && /^[0-9a-f]+$/i.test(String(entry[0])))
+                        .map((entry) => [String(entry[0]), Number(entry[1]) || 0])
+                    : [];
+                const wasSuperseded = history.some(([f]) => f === fence)
+                    || String(intent.supersedes == null ? '' : intent.supersedes) === fence;
+
+                if (storedFence === fence) {
+                    if (state !== 'active') return `intent_not_active:${label(state)}`;
                     expiries.set(intentKey, Number(intentTtl));
-                } else if (expiries.has(intentKey)) {
-                    expiries.set(intentKey, Number(intentTtl));
+                    bump(intentKey);
+                    touchStage();
+                    writeReceipt();
+                    return hasReceipt ? 'reused' : 'created';
                 }
 
-                if (receiptFence !== undefined) return 'reused';
-                store.set(receiptKey, String(fence));
-                expiries.set(receiptKey, Number(receiptTtl));
-                return 'created';
+                if (wasSuperseded) return 'stale_intent';
+                if (stageKnown && storedEpoch !== null && epoch < storedEpoch) return 'stale_intent';
+                if (state !== 'active' && stageKnown && (storedEpoch === null || epoch <= storedEpoch)) {
+                    return `intent_not_active:${label(state)}`;
+                }
+
+                const nextHistory = history
+                    .concat([[storedFence, storedEpoch === null ? 0 : storedEpoch]])
+                    .slice(-historyMax);
+                store.set(intentKey, JSON.stringify({
+                    fence, state: 'active', epoch: String(epochStr), supersedes: storedFence,
+                    updated_at: Number(now) || 0, history: nextHistory,
+                }));
+                expiries.set(intentKey, Number(intentTtl));
+                bump(intentKey);
+                touchStage();
+                writeReceipt();
+                return hasReceipt ? 'reused' : 'created';
             }
             // Return array mimicking Lua return: {true, 'corrected', old, new}
             // Callers (e.g. correctCounterWithLua) destructure result[0]..result[3]
@@ -279,11 +336,52 @@ function createMockRedis() {
             if (s && s instanceof Set) { return s.delete(member) ? 1 : 0; }
             return 0;
         },
-        multi: () => ({ exec: async () => [] }),
+        // ── WATCH / MULTI (Stage 129) ────────────────────────────────────
+        // Real optimistic concurrency: `watch` snapshots the mutation
+        // counters of the given keys, `exec` returns null (like Redis) when
+        // any of them changed, and otherwise applies the queued commands. A
+        // client whose MULTI silently does nothing would be caught by the
+        // `replies.length === queued` check in queue-idempotency.
+        watch: async (...keys) => {
+            watchState = new Map(keys.map((k) => [k, versions.get(k) || 0]));
+            return 'OK';
+        },
+        unwatch: async () => { watchState = null; return 'OK'; },
+        multi: () => {
+            const queue = [];
+            const builder = {
+                set: (key, value, ...rest) => { queue.push(() => api.set(key, value, ...rest)); return builder; },
+                del: (...keys) => { queue.push(() => api.del(...keys)); return builder; },
+                expire: (key, ttl) => { queue.push(() => api.expire(key, ttl)); return builder; },
+                exec: async () => {
+                    if (transactionState) return null; // nested MULTI is a client bug
+                    transactionState = queue;
+                    try {
+                        if (watchState) {
+                            for (const [key, version] of watchState) {
+                                if ((versions.get(key) || 0) !== version) return null;
+                            }
+                        }
+                        const out = [];
+                        for (const command of queue) out.push(await command());
+                        return out;
+                    } finally {
+                        watchState = null;
+                        transactionState = null;
+                    }
+                },
+            };
+            return builder;
+        },
+        // Stage 129: this double explicitly opts into the non-Lua fallback of
+        // ensureIntentAndReceipt (there is no Lua runtime here). A real
+        // client never carries this flag — it fails closed instead.
+        __allowNonLuaFallback: true,
         quit: async () => 'OK',
         disconnect: () => {},
         duplicate: () => createMockRedis(),
     };
+    return api;
 }
 
 module.exports = { createMockRedis };

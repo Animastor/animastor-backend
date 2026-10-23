@@ -32,7 +32,8 @@ const adapter = require('../src/storage/layer-config-adapter');
 const SERVICE_PATH = require.resolve('../src/services/layer-config');
 
 class FakeRedis {
-    constructor() { this.store = new Map(); }
+    // Declared test double — see queue-idempotency.ensureIntentAndReceipt.
+    constructor() { this.store = new Map(); this.__allowNonLuaFallback = true; }
     async get(k) { return this.store.has(k) ? this.store.get(k) : null; }
     async set(k, v, mode) {
         if (mode === 'NX') {

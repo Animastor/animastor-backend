@@ -274,7 +274,9 @@ describe('Stage 127: durable intent fence + immutable dispatch receipt', () => {
             await redis.set(qidem.intentKey(BOOK, CHAPTER, SCENE, JOB_2),
                 JSON.stringify({ fence: fence1, state: 'superseded', epoch: '0', supersedes: null, updated_at: 1 }), 'EX', 60);
             const notActive = await qidem.ensureIntentAndReceipt(r, ensureArgs(fence1, 'd3', { jobId: JOB_2 }));
-            expect(notActive).to.deep.equal({ status: 'intent_not_active', state: 'superseded' });
+            // Stage 129: the fallback verdicts carry `degraded: true` — a
+            // non-Lua path is never silent about being a weaker transport.
+            expect(notActive).to.deep.include({ status: 'intent_not_active', state: 'superseded', degraded: true });
 
             // The fallback lock is always released
             const [, locks] = await r.scan('0', 'MATCH', 'animastor:intent-lock:*');

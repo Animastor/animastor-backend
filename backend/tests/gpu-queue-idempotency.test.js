@@ -33,6 +33,8 @@ class FakeRedis {
         this.hashes = new Map();
         this.sets = new Map();
         this.now = Date.now();
+        // Declared test double (no Lua, no WATCH/MULTI) — see Stage 129.
+        this.__allowNonLuaFallback = true;
     }
     _expired(e) { return !!(e && e.expireAt != null && e.expireAt <= this.now); }
     _live(map, key) {
