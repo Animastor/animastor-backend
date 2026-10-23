@@ -205,7 +205,8 @@ function createMockRedis() {
             //   'created' | 'reused' | 'receipt_conflict' | 'stale_intent'
             //   | 'intent_missing' | 'intent_not_active:<state>'
             //   | 'intent_corrupt' | 'invalid_fence'
-            if (script.includes("'stale_intent'") && script.includes("'intent_missing'")) {
+            if (script.includes("'stale_intent'") && script.includes("'intent_missing'")
+                && !script.includes("'duplicate_same_fence'")) {
                 const intentKey = args[0];
                 const receiptKey = args[1];
                 const stageKey = args[2];
@@ -292,6 +293,40 @@ function createMockRedis() {
                 touchStage();
                 writeReceipt();
                 return hasReceipt ? 'reused' : 'created';
+            }
+            // Stage 131 — fenceCommitResult (queue-idempotency):
+            // KEYS=[intentKey, doneKey, claimKey, manifestKey, journalKey, refKey]
+            // ARGV=[fence, manifest, now, doneTtl, journalTtl, refTtl]
+            // An INDEPENDENT mirror of FENCE_COMMIT_SCRIPT (a change to the
+            // script must be mirrored here — the real execution is proven
+            // separately against an isolated redis:7, Stage 131 §real-Redis):
+            //   'committed' | 'duplicate_same_fence' | 'stale_intent'
+            //   | 'intent_missing' | 'intent_corrupt' | 'invalid_fence'
+            if (script.includes("'duplicate_same_fence'") && script.includes("'intent_missing'")) {
+                const [intentKey, doneKey, claimKey, manifestKey, journalKey, refKey] = args.slice(0, keysCount);
+                const [fenceRaw, manifest, now, doneTtl, journalTtl, refTtl] = args.slice(keysCount);
+                const fence = String(fenceRaw);
+                if (!/^[0-9a-f]+$/i.test(fence)) return 'invalid_fence';
+                if (store.has(doneKey)) return 'duplicate_same_fence';
+                const intentRaw = store.get(intentKey);
+                if (intentRaw === undefined) return 'intent_missing';
+                let intent = null;
+                try { intent = JSON.parse(intentRaw); } catch (_) { return 'intent_corrupt'; }
+                if (!intent || typeof intent !== 'object') return 'intent_corrupt';
+                if (intent.fence == null) return 'intent_corrupt';
+                const storedFence = String(intent.fence);
+                if (!/^[0-9a-f]+$/i.test(storedFence)) return 'intent_corrupt';
+                if (storedFence !== fence) return 'stale_intent';
+                const state = intent.state == null ? 'active' : String(intent.state);
+                if (state !== 'active') return 'stale_intent';
+                // The ref is a best-effort index: extend only while it agrees.
+                if (store.get(refKey) === fence) { expiries.set(refKey, Number(refTtl)); bump(refKey); }
+                store.set(manifestKey, manifest); bump(manifestKey);
+                store.set(doneKey, '1'); expiries.set(doneKey, Number(doneTtl)); bump(doneKey);
+                store.delete(claimKey); expiries.delete(claimKey); bump(claimKey);
+                store.set(journalKey, manifest); expiries.set(journalKey, Number(journalTtl)); bump(journalKey);
+                void now;
+                return 'committed';
             }
             // Return array mimicking Lua return: {true, 'corrected', old, new}
             // Callers (e.g. correctCounterWithLua) destructure result[0]..result[3]

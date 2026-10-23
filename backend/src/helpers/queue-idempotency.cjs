@@ -878,6 +878,16 @@ function _fenceDegraded(reason) {
     } catch (_) { /* best effort */ }
 }
 
+/** Count one fenced RESULT-commit verdict (Stage 131, separate registry). */
+function _commitMetric(outcome) {
+    try {
+        if (!_fenceMetrics) _fenceMetrics = require('../metrics/prometheus');
+        if (_fenceMetrics && typeof _fenceMetrics.observeFenceCommit === 'function') {
+            _fenceMetrics.observeFenceCommit(outcome);
+        }
+    } catch (_) { /* best effort */ }
+}
+
 /** Structured warning (no secrets: keys are ids, values are verdicts). */
 function _fenceWarn(message) {
     try { console.warn(`[INTENT-FENCE] ${message}`); } catch (_) { /* ignore */ }
@@ -1450,6 +1460,184 @@ function isDeferrableReason(reason) {
     return DEFERRABLE_REASONS.has(String(reason || ''));
 }
 
+// ── Stage 131 — fenced result commit (staged artifacts) ────────────────────
+//
+// Publication gate for a GPU result (contract 126 §3, Stage 131). The result
+// bytes are written to a STAGING directory first; the canonical artifact path
+// is only replaced after this commit returns `committed` (or
+// `duplicate_same_fence`). One atomic Lua script decides the verdict from the
+// DURABLE state (the intent record + the completion marker), never from the
+// existence of a file:
+//
+//   committed             — this fence is the current, active intent; the
+//                           manifest, the completion marker and the claim
+//                           transition happened atomically
+//   duplicate_same_fence  — THIS fence was already committed (its own done
+//                           marker exists) → idempotent repeat, nothing changed
+//   stale_intent          — the fence is not the current intent (superseded,
+//                           cancelled, or another generation is current)
+//   intent_missing        — no intent record: the only durable evidence of
+//                           "which fence is current" is gone → never publish
+//   intent_corrupt        — the intent record is unparseable / has no valid
+//                           fence → never publish
+//   invalid_fence         — the fence is not a hex id → fail closed
+//   unavailable           — the atomic script could not run at all → FAIL
+//                           CLOSED (no weaker read-check-write path exists)
+//
+// Redis and the filesystem are NOT one transaction: the commit lands in Redis
+// first, the staged→canonical rename follows. A crash between them leaves a
+// COMMITTED publication whose rename can be replayed idempotently from the
+// durable manifest (result-publication.resumePendingPublications) — never
+// from "a file exists".
+//
+// DEVIATION from contract 126 §3.3 step 3 (deliberate, audit 130 · obs. 2):
+// the job→fence ref is NOT a publication gate. `rememberTaskRef` is a blind
+// SET executed before the intent fence, so a rejected stale sender can
+// transiently overwrite the live ref with its own fence and then roll back
+// (delete) it — a ref-mismatch check would REJECT the commit of the CURRENT
+// fence during that window. The intent record is the sole authority; the ref
+// is a best-effort index whose TTL is extended here only while it agrees.
+
+const IDEM_MANIFEST_PREFIX = 'animastor:artifact-manifest:';
+const IDEM_FENCE_JOURNAL_PREFIX = 'animastor:fence-journal:';
+
+/** TTL of the idempotent (job, fence) commit journal entry. */
+const FENCE_JOURNAL_TTL_S = IDEM_DONE_TTL_S;
+
+/** Key of the durable "what is currently published" manifest of one task. */
+function artifactManifestKey(bookId, chapterId, sceneId, jobId) {
+    return `${IDEM_MANIFEST_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}`;
+}
+
+/** Key of the idempotent commit journal entry of one (task, fence). */
+function fenceJournalKey(bookId, chapterId, sceneId, jobId, fence) {
+    return `${IDEM_FENCE_JOURNAL_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}:${encodeKeyComponent(fence)}`;
+}
+
+const FENCE_COMMIT_SCRIPT = `
+local fence = ARGV[1]
+if not string.match(fence, '^%x+$') then return 'invalid_fence' end
+-- 1. a fence that already committed is terminal: a repeat changes nothing
+if redis.call('EXISTS', KEYS[2]) == 1 then return 'duplicate_same_fence' end
+-- 2. the intent record is the AUTHORITY for "which fence is current"
+local intentRaw = redis.call('GET', KEYS[1])
+if not intentRaw then return 'intent_missing' end
+local ok, intent = pcall(cjson.decode, intentRaw)
+if not ok or type(intent) ~= 'table' then return 'intent_corrupt' end
+if intent.fence == nil or intent.fence == cjson.null then return 'intent_corrupt' end
+local storedFence = tostring(intent.fence)
+if not string.match(storedFence, '^%x+$') then return 'intent_corrupt' end
+if storedFence ~= fence then return 'stale_intent' end
+local state = 'active'
+if intent.state ~= nil and intent.state ~= cjson.null then state = tostring(intent.state) end
+if state ~= 'active' then return 'stale_intent' end
+-- 3. the job->fence ref is a BEST-EFFORT index, never a publication gate
+--    (a concurrent stale sender can transiently overwrite it blind, then
+--    roll back): extend its TTL only while it agrees with this commit.
+local refFence = redis.call('GET', KEYS[6])
+if refFence == fence then redis.call('EXPIRE', KEYS[6], tonumber(ARGV[6])) end
+-- 4. publish: durable manifest first, then the terminal marker
+redis.call('SET', KEYS[4], ARGV[2])
+redis.call('SET', KEYS[2], '1', 'EX', tonumber(ARGV[4]))
+-- 5. release ONLY this fence's claim — never a derived or foreign one
+redis.call('DEL', KEYS[3])
+-- 6. idempotent commit journal (restart replay / operator audit)
+redis.call('SET', KEYS[5], ARGV[2], 'EX', tonumber(ARGV[5]))
+return 'committed'
+`;
+
+const FENCE_COMMIT_VERDICTS = new Set([
+    'committed', 'duplicate_same_fence', 'stale_intent',
+    'intent_missing', 'intent_corrupt', 'invalid_fence',
+]);
+
+/** Verdicts that are TERMINAL for this result (retrying cannot fix them). */
+const FENCE_COMMIT_REJECTED = new Set([
+    'stale_intent', 'intent_missing', 'intent_corrupt', 'invalid_fence',
+]);
+
+/** Verdicts after which the staged bytes may be published / already are. */
+const FENCE_COMMIT_PUBLISHED = new Set(['committed', 'duplicate_same_fence']);
+
+/**
+ * ATOMIC fenced commit of one staged result (Stage 131).
+ *
+ * There is deliberately NO non-Lua fallback: a client that cannot run the
+ * atomic script gets `unavailable` (fail closed) — a read-check-write commit
+ * could publish a superseded fence.
+ *
+ * @returns {Promise<{status:string, reason?:string, detail?:string}>}
+ */
+async function fenceCommitResult(redis, {
+    bookId, chapterId, sceneId, jobId, fence, manifest,
+} = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId || !fence || !manifest) {
+        return { status: 'invalid' };
+    }
+    const fenceStr = String(fence);
+    if (!/^[0-9a-f]+$/i.test(fenceStr)) return { status: 'invalid_fence' };
+
+    const keys = [
+        intentKey(bookId, chapterId, sceneId, jobId),
+        idemDoneKey(fenceStr),
+        idemClaimKey(fenceStr),
+        artifactManifestKey(bookId, chapterId, sceneId, jobId),
+        fenceJournalKey(bookId, chapterId, sceneId, jobId, fenceStr),
+        idemRefKey(bookId, chapterId, sceneId, jobId),
+    ];
+    const manifestStr = typeof manifest === 'string' ? manifest : JSON.stringify(manifest);
+    const now = Date.now();
+
+    if (typeof redis.eval !== 'function') {
+        _fenceDegraded('commit_no_eval');
+        _commitMetric('unavailable');
+        return { status: 'unavailable', reason: 'atomic_script_unavailable' };
+    }
+    try {
+        const raw = await redis.eval(
+            FENCE_COMMIT_SCRIPT,
+            6,
+            ...keys,
+            fenceStr,
+            manifestStr,
+            String(now),
+            String(IDEM_DONE_TTL_S),
+            String(FENCE_JOURNAL_TTL_S),
+            String(IDEM_REF_DONE_TTL_S)
+        );
+        const status = typeof raw === 'string' ? raw : String(raw == null ? '' : raw);
+        if (FENCE_COMMIT_VERDICTS.has(status)) {
+            _commitMetric(status);
+            return { status };
+        }
+        _fenceDegraded('commit_unexpected_eval_reply');
+        _fenceWarn(`unexpected verdict from the commit script: ${status.slice(0, 80)} — failing closed`);
+        return { status: 'unavailable', reason: 'unexpected_eval_reply' };
+    } catch (err) {
+        // ACL / CROSSSLOT / READONLY / LOADING / timeout — the commit is NOT
+        // known to have happened; the caller keeps the staged bytes and
+        // reports a retryable failure (never a success).
+        const message = String((err && err.message) || err || '');
+        _fenceDegraded('commit_eval_error');
+        _fenceWarn(`fenced commit script failed (${message.slice(0, 120)}) — failing closed`);
+        _commitMetric('unavailable');
+        return { status: 'unavailable', reason: 'eval_error', detail: message.slice(0, 200) };
+    }
+}
+
+/** Read the durable publication manifest of one task (null when absent). */
+async function readArtifactManifest(redis, bookId, chapterId, sceneId, jobId) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return null;
+    try {
+        const raw = await redis.get(artifactManifestKey(bookId, chapterId, sceneId, jobId));
+        if (raw == null || raw === false) return null;
+        const parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : null;
+    } catch (_) {
+        return null;
+    }
+}
+
 // ── worker liveness (execution capacity) ───────────────────────────────────
 
 /**
@@ -1751,6 +1939,18 @@ module.exports = {
     readIntent,
     readDispatchReceipt,
     ensureIntentAndReceipt,
+    // Stage 131 — fenced result commit (staged artifacts)
+    IDEM_MANIFEST_PREFIX,
+    IDEM_FENCE_JOURNAL_PREFIX,
+    FENCE_JOURNAL_TTL_S,
+    FENCE_COMMIT_SCRIPT,
+    FENCE_COMMIT_VERDICTS,
+    FENCE_COMMIT_REJECTED,
+    FENCE_COMMIT_PUBLISHED,
+    artifactManifestKey,
+    fenceJournalKey,
+    fenceCommitResult,
+    readArtifactManifest,
     // result idempotency
     resultDedupKey,
 };

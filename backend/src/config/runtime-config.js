@@ -249,6 +249,27 @@ function shareFeaturesEnabled() {
 }
 
 // ======================================================
+// RESULT FENCING (Stage 131 — staged artifacts & fenced commit)
+// ======================================================
+// GPU_FENCING_MODE gates the staged-artifact publication path of a GPU
+// result (services/result-publication.cjs):
+//   off     — byte-for-byte pre-Stage-131 behaviour (direct canonical write,
+//             settlement by the route; contract 126 §6 kill-switch);
+//   observe — staged write + atomic fenced commit for every callback that
+//             carries fence evidence (receipt/ref); callbacks WITHOUT fence
+//             evidence (legacy dispatches) keep the legacy path — the
+//             rollout phase-1 semantics of contract 126 §5;
+//   enforce — same publication path as observe in this stage (the legacy
+//             no-receipt gating of phase 2 requires the ≥48 h rollout
+//             window and is NOT enabled by the label alone).
+// Read LAZILY on every call (like shareFeaturesEnabled) so the kill-switch
+// can be flipped in a running process and exercised by tests.
+function resultFencingMode() {
+    const v = String(process.env.GPU_FENCING_MODE || 'observe').toLowerCase();
+    return (v === 'off' || v === 'observe' || v === 'enforce') ? v : 'observe';
+}
+
+// ======================================================
 // GPU HUB
 // ======================================================
 // T9: Единое имя env для API-ключа GPU Hub.
@@ -329,6 +350,7 @@ module.exports = {
 
     // Worker sharing V1 (kill-switch, default OFF)
     shareFeaturesEnabled,
+    resultFencingMode,
 
     // GPU Hub
     GPU_HUB_API_KEY,

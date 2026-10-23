@@ -16,10 +16,19 @@ module.exports = function(redis, config, deps) {
     const { log } = utils;
     const { resolveAssetPath } = cleanupService;
     const OUTPUT_DIR = config.OUTPUT_DIR;
+    const queueIdempotency = require('../helpers/queue-idempotency.cjs');
+    const resultPublication = require('./result-publication.cjs');
     // AUDIO_MERGE_RETRY_* removed (T7) — now in audioOrch.completeChunk
 
+    /** Fence-commit verdicts after which the staged bytes may be published. */
+    const FENCED_PUBLISHED = new Set(['committed', 'duplicate_same_fence']);
+    // NOTE: terminal fence verdicts (stale_intent / intent_missing /
+    // intent_corrupt / invalid_fence) are classified by the ROUTE via
+    // queue-idempotency.FENCE_COMMIT_REJECTED — the single source of truth
+    // shared with the commit script. This file throws them with `err.code`.
+
     // ── Handle GPU task result ────────────────────────
-    async function handleTaskResult(job_id, result_base64, build_id, dispatch_id) {
+    async function handleTaskResult(job_id, result_base64, build_id, dispatch_id, opts = {}) {
         log('🎬 Handling task result:', job_id, 'build:', build_id);
 
         // Единый разбор job_id (runtime/job-schema.js)
@@ -65,27 +74,80 @@ module.exports = function(redis, config, deps) {
         const asset = resolveAssetPath(job_id, build_id);
         if (!asset) {
             console.warn('⚠️ Unknown asset type for job_id:', job_id);
-            return;
+            return null;
         }
 
         log('📁 Resolved asset:', asset.type, '→', asset.fullPath);
-
-        // Save result to filesystem
         const outputDir = path.dirname(asset.fullPath);
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
-        }
 
         // Strip data URL prefix if present (e.g. "data:audio/mp3;base64,")
         const cleanBase64 = result_base64.includes(',')
             ? result_base64.split(',')[1]
             : result_base64;
         const resultBuffer = Buffer.from(cleanBase64, 'base64');
-        if (resultBuffer.length === 0) {
-            console.warn(`EMPTY RESULT from GPU for ${job_id} — writing 0-byte file!`);
+
+        // ── Stage 131 — staged artifacts & fenced commit ──────────────────
+        // The fence of THIS callback: the immutable dispatch receipt
+        // (Stage 127, written atomically BEFORE the hub POST) is
+        // authoritative; the caller (result route) may pass its own
+        // resolution in opts.fence. A result with NO fence evidence (a
+        // legacy dispatch without a receipt — e.g. the audio-recovery replay
+        // that carries no dispatch_id) keeps the legacy direct-write path
+        // below: it stays gated by verifyDispatchIdentity exactly as before
+        // (fencing rollout observe mode, contract 126 §5 phase 1).
+        const fencingMode = typeof config.resultFencingMode === 'function'
+            ? config.resultFencingMode()
+            : String(config.RESULT_FENCING_MODE || 'observe');
+        let fence = opts.fence ? String(opts.fence) : null;
+        if (!fence && dispatch_id) {
+            fence = await queueIdempotency.readDispatchReceipt(redis, dispatch_id, job_id);
         }
-        fs.writeFileSync(asset.fullPath, resultBuffer);
-        log(`Saved result to disk: ${asset.fullPath} (${resultBuffer.length} bytes, job=${job_id})`);
+
+        let commitStatus = null;
+        if (fence && fencingMode !== 'off') {
+            // NEW results go to staging first. The canonical artifact path
+            // is only replaced after the ATOMIC fence commit confirms this
+            // fence is still the current, active intent (Redis Lua —
+            // queue-idempotency.fenceCommitResult). A stale / missing /
+            // corrupt intent discards ONLY this fence's staged bytes and
+            // throws a terminal error: no metadata, no ready, no canonical.
+            // A failed staged→canonical rename throws `publish_failed` —
+            // never a false success; the retry/resume replays the rename.
+            const publication = await resultPublication.commitFencedResult(redis, config, {
+                bookId: parsed.bookId,
+                chapterId: parsed.chapterId,
+                sceneId: parsed.sceneId,
+                jobId: job_id,
+                buildId: build_id,
+                fence,
+                buffer: resultBuffer,
+                extension: `.${asset.extension}`,
+                canonicalPath: asset.fullPath,
+            });
+            commitStatus = publication.status;
+            if (!FENCED_PUBLISHED.has(commitStatus)) {
+                // Terminal rejects throw with a classified code (the route
+                // answers `rejected:true`); `unavailable` throws retryable
+                // (staged bytes + claim stay for a retry / the reconciler).
+                const err = new Error(`Rejected task result: ${commitStatus} (fenced commit, job=${job_id})`);
+                err.code = commitStatus;
+                throw err;
+            }
+            log(`💾 Fenced commit ${commitStatus}: ${asset.fullPath} (${resultBuffer.length} bytes, job=${job_id}, fence=${fence.slice(0, 12)})`);
+        } else {
+            // Save result to filesystem (legacy direct-write path —
+            // byte-for-byte the pre-Stage-131 behaviour, contract 126 §6
+            // kill-switch `GPU_FENCING_MODE=off`).
+            const outputDir = path.dirname(asset.fullPath);
+            if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true });
+            }
+            if (resultBuffer.length === 0) {
+                console.warn(`EMPTY RESULT from GPU for ${job_id} — writing 0-byte file!`);
+            }
+            fs.writeFileSync(asset.fullPath, resultBuffer);
+            log(`Saved result to disk: ${asset.fullPath} (${resultBuffer.length} bytes, job=${job_id})`);
+        }
 
         // Route by asset type
         switch (asset.type) {
@@ -231,6 +293,11 @@ module.exports = function(redis, config, deps) {
             default:
                 console.warn('⚠️ Unhandled asset type:', asset.type);
         }
+
+        // Stage 131 — report how the artifact reached its canonical path, so
+        // the route never runs the legacy settlement for a fenced publication
+        // (the commit already wrote the done marker + released the claim).
+        return { fenced: commitStatus != null, fence, commit: commitStatus };
     }
 
     // ── Book snapshot ─────────────────────────────────

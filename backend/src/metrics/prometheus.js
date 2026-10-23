@@ -112,6 +112,22 @@ function observeIntentFenceDegraded(reason) {
     try { intentFenceDegradedTotal.inc({ reason: String(reason || 'unknown') }); } catch (_) { /* ignore */ }
 }
 
+// Stage 131 — fenced RESULT commit verdicts (staged artifacts & fenced
+// commit). Distinct from the SEND-side intent fence above: `outcome` here is
+// the publication verdict (committed, duplicate_same_fence, stale_intent,
+// intent_missing, intent_corrupt, invalid_fence, unavailable).
+const fenceCommitTotal = new client.Counter({
+    name: 'animastor_fence_commit_total',
+    help: 'Fenced result-commit verdicts by outcome (staged artifact publication)',
+    labelNames: ['outcome'],
+    registers: [register],
+});
+
+/** Count one fenced result-commit verdict (never throws — best effort). */
+function observeFenceCommit(outcome) {
+    try { fenceCommitTotal.inc({ outcome: String(outcome || 'unknown') }); } catch (_) { /* ignore */ }
+}
+
 // ======================================================
 // HISTOGRAMS — duration distributions
 // ======================================================
@@ -306,4 +322,6 @@ module.exports = {
     // Stage 129 — intent fence / dispatch receipt observability
     observeIntentFence,
     observeIntentFenceDegraded,
+    // Stage 131 — fenced result commit (staged artifact publication)
+    observeFenceCommit,
 };

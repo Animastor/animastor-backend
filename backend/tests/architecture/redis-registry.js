@@ -744,6 +744,31 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'Short-lived NX lock of the intent/receipt fallback path (Stage 127) — only used by Redis doubles without EVAL; production takes the Lua script.',
     },
+    {
+        // Stage 131 — durable publication manifest (contract 126 §3.4). The
+        // authority for "what is currently published" for one logical task.
+        // Written ONLY inside the atomic fenced commit, never before it, and
+        // never from the existence of a file. Durable (no TTL): it is the
+        // restart-recovery pointer that lets a committed-but-unrenamed
+        // publication be replayed idempotently.
+        pattern: 'animastor:artifact-manifest:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Durable publication manifest per logical task (Stage 131): { published_fence, path, build_id, bytes, published_at } — written atomically by the fenced commit, authority for "what to read"; a restart replays the staged→canonical rename from it, never from a bare file.',
+    },
+    {
+        // Stage 131 — idempotent commit journal of one (task, fence). Replay
+        // / operator-audit evidence that this exact fence was committed. TTL
+        // mirrors the completion marker (7 d).
+        pattern: 'animastor:fence-journal:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Idempotent fenced-commit journal per (task, fence) (Stage 131): the same manifest payload, TTL 7 d — restart replay / audit evidence that a fence was committed; never a sole publication authority.',
+    },
 ];
 
 module.exports = { REDIS_OWNERSHIP };

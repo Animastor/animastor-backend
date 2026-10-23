@@ -508,10 +508,37 @@ module.exports = function(app, redis, deps) {
             }
             log(`[GPU RESULT] Dedup acquired for ${job_id}`);
 
+            // Stage 131 — fenced publication. The fence of THIS callback:
+            // the immutable dispatch receipt (Stage 127) is authoritative;
+            // the job→fence ref is only a fallback (a best-effort index —
+            // the commit Lua re-verifies the fence against the durable
+            // intent record, so a stale ref can never publish a stale
+            // result; audit 130 · observation 2). Without any fence evidence
+            // the handler keeps the legacy direct-write path (observe mode).
+            let resultFence = null;
+            if (queueIdempotency) {
+                try {
+                    resultFence = await queueIdempotency.readDispatchReceipt(redis, dispatch_id, job_id)
+                        || await queueIdempotency.readTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id);
+                } catch (fenceErr) {
+                    console.warn(`[GPU RESULT] fence resolution failed for ${job_id}: ${fenceErr.message}`);
+                }
+            }
+
+            let handlerOutcome = null;
             try {
                 log(`[GPU RESULT] Calling handleTaskResult for ${job_id}...`);
-                await deps.taskHandler.handleTaskResult(job_id, result_base64, build_id, dispatch_id);
+                handlerOutcome = await deps.taskHandler.handleTaskResult(job_id, result_base64, build_id, dispatch_id, { fence: resultFence });
                 log(`[GPU RESULT] handleTaskResult OK: ${job_id}`);
+                // Stage 131: a FENCED publication was already settled
+                // atomically by the commit (done marker + claim release +
+                // durable manifest) — the legacy settlement below must not
+                // run for it. Only after a confirmed commit may the
+                // completion/ready metadata chain proceed (handler switch).
+                if (handlerOutcome && handlerOutcome.fenced) {
+                    log(`[GPU RESULT] Fenced commit ${handlerOutcome.commit} for ${job_id} (fence=${(handlerOutcome.fence || '').slice(0, 12)}) — settlement done by the commit`);
+                    return res.json({ ok: true });
+                }
                 // Stage 114 — the logical task is COMPLETE now: release the
                 // pending-entry claim and record the completion marker. A
                 // queue entry was never proof of completion; a real, accepted
@@ -556,6 +583,20 @@ module.exports = function(app, redis, deps) {
                     console.warn(`[GPU RESULT] idempotency settle failed for ${job_id}: ${idemErr.message}`);
                 }
             } catch (procErr) {
+                // Stage 131 — fence-commit verdicts. A TERMINAL reject
+                // (stale/missing/corrupt intent) is answered `rejected:true`
+                // and its dedup marker is KEPT: retrying a superseded
+                // generation can never succeed and must not churn. Every
+                // other failure (including `unavailable` and
+                // `publish_failed`) stays retryable: the dedup marker is
+                // released exactly as before.
+                const terminalFenceReject = queueIdempotency
+                    && queueIdempotency.FENCE_COMMIT_REJECTED
+                    && queueIdempotency.FENCE_COMMIT_REJECTED.has(procErr.code);
+                if (terminalFenceReject) {
+                    log(`[GPU RESULT] Fenced commit REJECTED (${procErr.code}) for ${job_id} — terminal, not retried`);
+                    return res.json({ ok: true, rejected: true, reason: procErr.code });
+                }
                 log(`[GPU RESULT] handleTaskResult FAILED: ${job_id} — ${procErr.message}`);
                 await redis.del(dedupKey).catch(() => {});
                 throw procErr;

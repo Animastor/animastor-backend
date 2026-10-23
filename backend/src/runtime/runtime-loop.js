@@ -148,6 +148,29 @@ async function executeReconcileCycle(redis) {
     const startTime = Date.now();
 
     try {
+        // Stage 131 — staged-artifact recovery. Runs BEFORE the (locked)
+        // orchestration cycle so a committed-but-unrenamed publication is
+        // replayed early in the cycle. Idempotent, best-effort, and it
+        // decides from the DURABLE manifest + done marker (never from a bare
+        // file existing), so it can never resurrect a stale fence.
+        try {
+            const resultPublication = require('../services/result-publication.cjs');
+            const rec = await resultPublication.resumePendingPublications(redis, require('../config/runtime-config'));
+            if (rec.resumed > 0 || rec.cleaned > 0 || rec.errors > 0) {
+                log(`  Staged-artifact recovery: resumed=${rec.resumed} cleaned=${rec.cleaned} orphans=${rec.orphans} errors=${rec.errors}`);
+            }
+            // Staging GC (contract 126 §5.5): age-gated, bounded, strictly
+            // fail-closed — a Redis error aborts the pass WITHOUT deleting
+            // anything, so it can never discard a committed-but-unrenamed
+            // publication's staged bytes.
+            const gc = await resultPublication.collectStaleStaging(require('../config/runtime-config'), redis);
+            if (gc.removed > 0 || gc.aborted) {
+                log(`  Staging GC: removed=${gc.removed} scanned=${gc.scanned} skipped=${gc.skipped} aborted=${gc.aborted}`);
+            }
+        } catch (recErr) {
+            warn(`Staged-artifact recovery failed: ${recErr.message}`);
+        }
+
         log('Starting periodic reconciliation cycle');
         const result = await reconciliationEngine.reconcileCycle(redis, reconcileDeps, { startup: false });
         const elapsed = Date.now() - startTime;
