@@ -709,6 +709,41 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'GPU queue idempotency state: claim (one pending entry per logical task), done (accepted result), ref (job_id → identity, the ownership index of the done marker), job-epoch (per-task pinned intent epoch), stage-epoch (per-stage generation epoch).',
     },
+    {
+        // Stage 127 — durable current-intent fence (result fencing phase 1,
+        // contract 126 §1). One record per LOGICAL task:
+        // { fence, state, epoch, supersedes, updated_at }. The fence is the
+        // existing idem_key; the record is the authority for WHICH fence is
+        // current and survives restart (durable TTL outlives the claim).
+        pattern: 'animastor:intent:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Durable current-intent fence per logical task (Stage 127): { fence, state: active|superseded|cancelled, epoch, supersedes, updated_at } — written/refreshed atomically with the dispatch receipt before the hub POST.',
+    },
+    {
+        // Stage 127 — immutable dispatch receipt: the callback-side mapping
+        // (dispatch_id, job_id) → fence. SET NX ONLY: a receipt is never
+        // rewritten (a conflicting write is a terminal receipt_conflict).
+        pattern: 'animastor:dispatch-intent:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Immutable dispatch→fence receipt (Stage 127): dispatch_id + job_id → fence, written atomically BEFORE the hub POST, SET NX only, 48 h TTL (covers hub result retention + claim backstop + outage).',
+    },
+    {
+        // Stage 127 — fallback lock of ensureIntentAndReceipt for Redis
+        // doubles without a working EVAL (production ioredis runs the atomic
+        // Lua script and never touches this key). Short-lived (5 s).
+        pattern: 'animastor:intent-lock:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Short-lived NX lock of the intent/receipt fallback path (Stage 127) — only used by Redis doubles without EVAL; production takes the Lua script.',
+    },
 ];
 
 module.exports = { REDIS_OWNERSHIP };

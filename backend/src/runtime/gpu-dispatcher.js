@@ -300,6 +300,76 @@ async function sendUnified(taskSpec) {
         // Remember the identity so the result callback can find it (the ref
         // key carries the book/chapter/scene ownership structurally).
         await qidem.rememberTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id, idemKey);
+
+        // ─────────────────────────────────────────────────────────────────
+        // Stage 127 — durable intent fence + immutable dispatch receipt
+        // (phase 1 of the result-fencing rollout, contract 126 §1)
+        //
+        // Written AFTER the single-pending claim was won and BEFORE the hub
+        // POST: one atomic operation pins the CURRENT intent of this logical
+        // task to this fence and records an immutable receipt
+        // (dispatch_id, job_id) → fence. The fence is the idem_key computed
+        // above — a re-dispatch of the same intent reuses it; a new intent
+        // (reset task epoch) computes a new one and supersedes the old.
+        //
+        // A non-ok verdict means this dispatch may NOT reach the hub: nothing
+        // was written by the fence step, so this sender reverts the enqueue
+        // side effects it just made (its own claim + ref) and returns a
+        // structured not-sent outcome instead of POSTing.
+        const fenceVerdict = await qidem.ensureIntentAndReceipt(redis, {
+            bookId: parsed.bookId,
+            chapterId: parsed.chapterId,
+            sceneId: parsed.sceneId,
+            jobId: payload.job_id,
+            dispatchId: taskSpec.dispatch_id,
+            fence: idemKey,
+            epoch,
+        });
+        const fenceStatus = fenceVerdict && fenceVerdict.status;
+        if (fenceStatus !== 'created' && fenceStatus !== 'reused') {
+            // Revert THIS sender's side effects: the claim was acquired by
+            // this call (SET NX) and the ref written by it, so no other
+            // sender's state is touched.
+            await qidem.releaseTask(redis, idemKey);
+            await qidem.forgetTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id);
+            // 'busy'/'unavailable'/'invalid'/'unknown' are transient (the
+            // fence step is retried on the next tick); the terminal verdicts
+            // can never become valid by retrying.
+            const fenceRetryable = fenceStatus === 'busy'
+                || fenceStatus === 'unavailable'
+                || fenceStatus === 'invalid'
+                || fenceStatus === 'unknown'
+                || !fenceStatus;
+            if (fenceRetryable) {
+                stats.jobs_intent_fencing_unavailable = (stats.jobs_intent_fencing_unavailable || 0) + 1;
+                log(`Intent fence unavailable (${fenceStatus || 'no verdict'}): ${payload.job_id} dispatch=${taskSpec.dispatch_id} — NOT enqueued (retryable)`);
+                return {
+                    sent: false,
+                    suppressed: true,
+                    retryable: true,
+                    reason: 'intent_receipt_unavailable',
+                    idem_key: idemKey,
+                    jobId: payload.job_id,
+                    dispatchId: taskSpec.dispatch_id,
+                };
+            }
+            stats.jobs_fence_rejected = (stats.jobs_fence_rejected || 0) + 1;
+            const fenceDetail = fenceStatus === 'intent_not_active' && fenceVerdict.state
+                ? `${fenceStatus}:${fenceVerdict.state}`
+                : fenceStatus;
+            log(`Intent fence REJECTED (${fenceDetail}): ${payload.job_id} dispatch=${taskSpec.dispatch_id} fence=${idemKey.slice(0, 12)} — NOT enqueued`);
+            return {
+                sent: false,
+                suppressed: false,
+                retryable: false,
+                reason: fenceStatus,
+                idem_key: idemKey,
+                jobId: payload.job_id,
+                dispatchId: taskSpec.dispatch_id,
+                error: `intent fence rejected: ${fenceDetail}`,
+            };
+        }
+        log(`Intent fence ${fenceStatus}: ${payload.job_id} dispatch=${taskSpec.dispatch_id} fence=${idemKey.slice(0, 12)}`);
     }
 
     // T9: Include GPU_HUB_API_KEY header for authenticated requests

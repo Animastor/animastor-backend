@@ -183,6 +183,59 @@ function createMockRedis() {
                 store.set(key, String(next));
                 return next;
             }
+            // Stage 127 — ensureIntentAndReceipt (queue-idempotency):
+            // KEYS=[intentKey, receiptKey],
+            // ARGV=[fence, epoch, now, intentTtl, receiptTtl]
+            // Verdicts mirror ENSURE_INTENT_RECEIPT_SCRIPT exactly:
+            //   'created' | 'reused' | 'receipt_conflict'
+            //   | 'intent_not_active:<state>' | 'intent_corrupt' | 'invalid_fence'
+            if (script.includes("'receipt_conflict'") && script.includes('intent_not_active') && script.includes('intentTtl')) {
+                const intentKey = args[0];
+                const receiptKey = args[1];
+                const [fence, epoch, now, intentTtl, receiptTtl] = args.slice(keysCount);
+                if (!/^[0-9a-f]+$/i.test(String(fence))) return 'invalid_fence';
+
+                const receiptFence = store.get(receiptKey);
+                if (receiptFence !== undefined && String(receiptFence) !== String(fence)) {
+                    return 'receipt_conflict';
+                }
+
+                const intentRaw = store.get(intentKey);
+                let supersedes = null;
+                if (intentRaw !== undefined) {
+                    let intent = null;
+                    try { intent = JSON.parse(intentRaw); } catch (_) { return 'intent_corrupt'; }
+                    if (!intent || typeof intent !== 'object') return 'intent_corrupt';
+                    const state = intent.state == null ? 'active' : String(intent.state);
+                    if (state !== 'active') {
+                        return `intent_not_active:${state.replace(/[^\w-]/g, '').slice(0, 40) || 'unknown'}`;
+                    }
+                    if (intent.fence != null && String(intent.fence) !== String(fence)) {
+                        const prev = String(intent.fence);
+                        if (!/^[0-9a-f]+$/i.test(prev)) return 'intent_corrupt';
+                        supersedes = prev;
+                    }
+                }
+
+                if (intentRaw === undefined || supersedes !== null) {
+                    const record = JSON.stringify({
+                        fence: String(fence),
+                        state: 'active',
+                        epoch: String(epoch),
+                        supersedes,
+                        updated_at: Number(now) || 0,
+                    });
+                    store.set(intentKey, record);
+                    expiries.set(intentKey, Number(intentTtl));
+                } else if (expiries.has(intentKey)) {
+                    expiries.set(intentKey, Number(intentTtl));
+                }
+
+                if (receiptFence !== undefined) return 'reused';
+                store.set(receiptKey, String(fence));
+                expiries.set(receiptKey, Number(receiptTtl));
+                return 'created';
+            }
             // Return array mimicking Lua return: {true, 'corrected', old, new}
             // Callers (e.g. correctCounterWithLua) destructure result[0]..result[3]
             const key = args[0];

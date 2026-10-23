@@ -51,6 +51,13 @@ const IDEM_REF_PREFIX = 'animastor:idempotency:ref:';
 const IDEM_JOB_EPOCH_PREFIX = 'animastor:idempotency:job-epoch:';
 const STAGE_EPOCH_PREFIX = 'animastor:idempotency:stage-epoch:';
 
+// Stage 127 — durable intent fence + immutable dispatch receipt (phase 1 of
+// the result-fencing rollout, contract 126 §1). The fence itself is the
+// EXISTING `idem_key` — there is no second identity system.
+const IDEM_INTENT_PREFIX = 'animastor:intent:';
+const IDEM_RECEIPT_PREFIX = 'animastor:dispatch-intent:';
+const IDEM_INTENT_LOCK_PREFIX = 'animastor:intent-lock:';
+
 /** Backstop TTL for a pending claim (the claim is released on terminal state). */
 const IDEM_CLAIM_TTL_S = 24 * 3600;
 /**
@@ -86,6 +93,38 @@ const STAGE_EPOCH_TTL_S = 30 * 24 * 3600;
  * regenerated.
  */
 const IDEM_JOB_EPOCH_TTL_S = 24 * 3600;
+/**
+ * TTL of a CURRENT-INTENT record (Stage 127). It must outlive everything it
+ * authorizes: the pending claim (24 h), the ambiguous-claim window (90 min)
+ * and the completion marker (7 d) — an expired intent would erase the only
+ * evidence distinguishing an old result from a current retry. 14 d gives the
+ * artifact-retention window a full week of headroom; every send refreshes it.
+ */
+const IDEM_INTENT_TTL_S = 14 * 24 * 3600;
+/**
+ * TTL of an immutable dispatch receipt (Stage 127). The receipt maps
+ * `(dispatch_id, job_id)` → fence for a result callback, so it must survive:
+ * the hub's result retention (1 h), the ambiguous-claim window (90 min), the
+ * reconciliation result-key TTL (1 h), the 24 h claim backstop AND a backend
+ * outage longer than any of them — 48 h (contract 126 §5 window: strictly
+ * greater than the longest claim TTL so no live dispatch can lose its
+ * receipt before its claim).
+ */
+const IDEM_RECEIPT_TTL_S = 48 * 3600;
+/**
+ * Short-lived lock for the FALLBACK (non-Lua) path of
+ * `ensureIntentAndReceipt` — Redis doubles without a working `eval`. Production
+ * ioredis always takes the atomic Lua script; this lock only keeps the
+ * read-check-write of doubles from interleaving.
+ */
+const INTENT_RECEIPT_LOCK_TTL_S = 5;
+
+/** States of a current-intent record (contract 126 §1.2). */
+const INTENT_STATES = Object.freeze({
+    ACTIVE: 'active',
+    SUPERSEDED: 'superseded',
+    CANCELLED: 'cancelled',
+});
 
 // ── canonical hashing ──────────────────────────────────────────────────────
 
@@ -544,6 +583,253 @@ async function settleCompletedTask(redis, { bookId, chapterId, sceneId, jobId, i
     return out;
 }
 
+// ── Stage 127 — durable intent fence + immutable dispatch receipt ─────────
+//
+// Phase 1 of the result-fencing rollout (contract 126 §1). BEFORE the hub
+// POST, every send that won the single-pending claim records two things a
+// later result callback can use to prove WHICH generation authorized it:
+//
+//   animastor:intent:{book}:{chapter}:{scene}:{job}
+//       the CURRENT intent of the logical task:
+//       { fence, state, epoch, supersedes, updated_at }   (durable, 14 d)
+//   animastor:dispatch-intent:{dispatch_id}:{job_id}
+//       the immutable RECEIPT: this dispatch was authorized for exactly
+//       `fence` (SET NX, never rewritten, 48 h)
+//
+// The fence IS the existing `idem_key` (computeIdemKey over the pinned job
+// epoch) — no second identity system. A re-dispatch of the same intent
+// recomputes the same fence and REUSES the intent record; a new intent (the
+// task's own epoch was reset: consumed failure / explicit regeneration)
+// computes a NEW fence and the record supersedes the old one in place.
+//
+// Phase 1 deliberately does NOT change: the hub envelope, the result route,
+// canonical artifact paths, completion semantics or PG schema — the receipt
+// is written, read and verified here; consuming it is a later phase.
+
+/** Key of the current-intent record of one logical task. */
+function intentKey(bookId, chapterId, sceneId, jobId) {
+    return `${IDEM_INTENT_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}`;
+}
+
+/**
+ * Key of the immutable dispatch receipt. Both components are percent-encoded:
+ * dispatch_id is transported in callbacks and job_id is client-influenced —
+ * neither may break the key shape or collide across tasks.
+ */
+function dispatchReceiptKey(dispatchId, jobId) {
+    return `${IDEM_RECEIPT_PREFIX}${encodeKeyComponent(dispatchId)}:${encodeKeyComponent(jobId)}`;
+}
+
+/** Read the current-intent record (null when absent/corrupt). */
+async function readIntent(redis, bookId, chapterId, sceneId, jobId) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return null;
+    try {
+        const raw = await redis.get(intentKey(bookId, chapterId, sceneId, jobId));
+        if (raw == null || raw === false) return null;
+        const parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+/** Read back the fence a dispatch receipt binds (null when absent/expired). */
+async function readDispatchReceipt(redis, dispatchId, jobId) {
+    if (!redis || !dispatchId || !jobId) return null;
+    try {
+        const raw = await redis.get(dispatchReceiptKey(dispatchId, jobId));
+        if (raw == null || raw === false) return null;
+        return String(raw);
+    } catch (_) {
+        return null;
+    }
+}
+
+/**
+ * ATOMIC «ensure intent + write receipt» (Stage 127).
+ *
+ * One operation, because the receipt must be written only while the intent
+ * state is checked — a callback holding a receipt of a non-active intent is
+ * never acceptable later, and an intent rewrite must never race a receipt
+ * write. Verdicts:
+ *
+ *   'created'            — intent ensured, receipt written for this dispatch
+ *   'reused'             — intent already at this fence, receipt already existed
+ *   'receipt_conflict'   — the receipt of THIS (dispatch_id, job_id) already
+ *                          binds a DIFFERENT fence → immutable, reject
+ *   'intent_not_active:<state>' — intent is cancelled/superseded → reject
+ *   'intent_corrupt'     — stored intent unparseable → fail closed
+ *   'invalid_fence'      — fence is not a sha256 hex id → fail closed
+ *   'busy'               — fallback lock not acquired in the wait window
+ *   'unavailable'        — Redis error on the fallback path
+ *   'invalid'            — missing arguments
+ *
+ * Nothing is written before the first reject verdict, so a caller may always
+ * undo its own enqueue side effects (claim/ref) after a non-ok verdict.
+ *
+ * Production path: one Lua script (atomic on a single Redis). Doubles without
+ * a working `eval` take a lock-guarded read-check-write fallback with the same
+ * verdicts — never a silent success.
+ */
+const ENSURE_INTENT_RECEIPT_SCRIPT = `
+local fence = ARGV[1]
+if not string.match(fence, '^%x+$') then return 'invalid_fence' end
+local epoch = ARGV[2]
+if not string.match(epoch, '^%-?%d+$') then epoch = '0' end
+local now = ARGV[3]
+if not string.match(now, '^%d+$') then now = '0' end
+local intentTtl = tonumber(ARGV[4])
+local receiptTtl = tonumber(ARGV[5])
+
+local receiptFence = redis.call('GET', KEYS[2])
+if receiptFence and receiptFence ~= fence then
+    return 'receipt_conflict'
+end
+
+local intentRaw = redis.call('GET', KEYS[1])
+local supersedes = nil
+if intentRaw then
+    local ok, intent = pcall(cjson.decode, intentRaw)
+    if not ok or type(intent) ~= 'table' then return 'intent_corrupt' end
+    local state = 'active'
+    if intent.state then state = tostring(intent.state) end
+    if state ~= 'active' then
+        return 'intent_not_active:' .. string.gsub(state, '[^%w_-]', '')
+    end
+    if intent.fence and tostring(intent.fence) ~= fence then
+        local prev = tostring(intent.fence)
+        if not string.match(prev, '^%x+$') then return 'intent_corrupt' end
+        supersedes = prev
+    end
+end
+
+if not intentRaw then
+    redis.call('SET', KEYS[1], '{"fence":"' .. fence .. '","state":"active","epoch":"' .. epoch .. '","supersedes":null,"updated_at":' .. now .. '}', 'EX', intentTtl)
+elseif supersedes then
+    redis.call('SET', KEYS[1], '{"fence":"' .. fence .. '","state":"active","epoch":"' .. epoch .. '","supersedes":"' .. supersedes .. '","updated_at":' .. now .. '}', 'EX', intentTtl)
+else
+    redis.call('EXPIRE', KEYS[1], intentTtl)
+end
+
+if receiptFence then return 'reused' end
+redis.call('SET', KEYS[2], fence, 'NX', 'EX', receiptTtl)
+return 'created'
+`;
+
+function _parseEnsureVerdict(raw) {
+    const status = typeof raw === 'string' ? raw : String(raw == null ? '' : raw);
+    if (['created', 'reused', 'receipt_conflict', 'intent_corrupt', 'invalid_fence'].includes(status)) {
+        return { status };
+    }
+    const NOT_ACTIVE = 'intent_not_active:';
+    if (status.startsWith(NOT_ACTIVE)) {
+        return { status: 'intent_not_active', state: status.slice(NOT_ACTIVE.length) || 'unknown' };
+    }
+    return { status: 'unknown', detail: status.slice(0, 120) };
+}
+
+/** Lock-guarded fallback for doubles without a working `eval`. */
+async function _ensureIntentReceiptLocked(redis, { intentK, receiptK, fence, epoch, now }) {
+    const lockK = `${IDEM_INTENT_LOCK_PREFIX}${intentK.slice(IDEM_INTENT_PREFIX.length)}`;
+    let acquired = false;
+    try {
+        // Bounded wait: a concurrent holder finishes in milliseconds.
+        for (let i = 0; i < 25 && !acquired; i++) {
+            acquired = !!(await redis.set(lockK, '1', 'NX', 'EX', INTENT_RECEIPT_LOCK_TTL_S));
+            if (!acquired) await new Promise((r) => setTimeout(r, 20));
+        }
+        if (!acquired) return { status: 'busy' };
+
+        const receiptFence = await redis.get(receiptK);
+        const receiptExists = receiptFence != null && receiptFence !== false;
+        if (receiptExists && String(receiptFence) !== fence) {
+            return { status: 'receipt_conflict' };
+        }
+
+        const intentRaw = await redis.get(intentK);
+        let supersedes = null;
+        if (intentRaw != null && intentRaw !== false) {
+            let intent = null;
+            try { intent = JSON.parse(intentRaw); } catch (_) { return { status: 'intent_corrupt' }; }
+            if (!intent || typeof intent !== 'object') return { status: 'intent_corrupt' };
+            const state = intent.state == null ? INTENT_STATES.ACTIVE : String(intent.state);
+            if (state !== INTENT_STATES.ACTIVE) {
+                return { status: 'intent_not_active', state: state.replace(/[^\w-]/g, '').slice(0, 40) || 'unknown' };
+            }
+            if (intent.fence != null && String(intent.fence) !== fence) {
+                const prev = String(intent.fence);
+                if (!/^[0-9a-f]+$/i.test(prev)) return { status: 'intent_corrupt' };
+                supersedes = prev;
+            }
+        }
+
+        if (intentRaw == null || intentRaw === false || supersedes !== null) {
+            const record = JSON.stringify({
+                fence: String(fence),
+                state: INTENT_STATES.ACTIVE,
+                epoch: String(epoch),
+                supersedes,
+                updated_at: now,
+            });
+            await redis.set(intentK, record, 'EX', IDEM_INTENT_TTL_S);
+        } else {
+            await redis.expire(intentK, IDEM_INTENT_TTL_S);
+        }
+
+        if (receiptExists) return { status: 'reused' };
+        const written = await redis.set(receiptK, fence, 'NX', 'EX', IDEM_RECEIPT_TTL_S);
+        if (!written) {
+            // Someone outside the lock raced the SET NX — re-read, never overwrite.
+            const stored = await redis.get(receiptK);
+            return stored === fence ? { status: 'reused' } : { status: 'receipt_conflict' };
+        }
+        return { status: 'created' };
+    } catch (err) {
+        return { status: 'unavailable', detail: (err && err.message) || 'redis error' };
+    } finally {
+        if (acquired) { try { await redis.del(lockK); } catch (_) { /* best effort */ } }
+    }
+}
+
+async function ensureIntentAndReceipt(redis, { bookId, chapterId, sceneId, jobId, dispatchId, fence, epoch } = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId || !dispatchId || !fence) {
+        return { status: 'invalid' };
+    }
+    if (!/^[0-9a-f]+$/i.test(String(fence))) return { status: 'invalid_fence' };
+
+    const intentK = intentKey(bookId, chapterId, sceneId, jobId);
+    const receiptK = dispatchReceiptKey(dispatchId, jobId);
+    const now = Date.now();
+    const epochNum = Number(epoch);
+    const epochStr = String(Number.isFinite(epochNum) ? epochNum : 0);
+
+    if (typeof redis.eval === 'function') {
+        try {
+            const raw = await redis.eval(
+                ENSURE_INTENT_RECEIPT_SCRIPT,
+                2,
+                intentK,
+                receiptK,
+                String(fence),
+                epochStr,
+                String(now),
+                String(IDEM_INTENT_TTL_S),
+                String(IDEM_RECEIPT_TTL_S)
+            );
+            const verdict = _parseEnsureVerdict(raw);
+            // An unrecognized return means the double does not really run the
+            // script — converge through the locked fallback instead of
+            // reporting a verdict nobody wrote.
+            if (verdict.status !== 'unknown') return verdict;
+        } catch (err) {
+            // A Redis double whose eval does not understand the script (or a
+            // transient script error) — converge through the locked fallback
+            // below; verdicts are identical, never a silent success.
+        }
+    }
+    return _ensureIntentReceiptLocked(redis, { intentK, receiptK, fence: String(fence), epoch: epochStr, now });
+}
+
 /**
  * The enqueue guard used by the GPU dispatcher.
  *
@@ -921,6 +1207,18 @@ module.exports = {
     // worker liveness
     listAliveWorkers,
     hasLiveExecutorForLane,
+    // Stage 127 — durable intent fence + immutable dispatch receipt
+    IDEM_INTENT_PREFIX,
+    IDEM_RECEIPT_PREFIX,
+    IDEM_INTENT_LOCK_PREFIX,
+    IDEM_INTENT_TTL_S,
+    IDEM_RECEIPT_TTL_S,
+    INTENT_STATES,
+    intentKey,
+    dispatchReceiptKey,
+    readIntent,
+    readDispatchReceipt,
+    ensureIntentAndReceipt,
     // result idempotency
     resultDedupKey,
 };
