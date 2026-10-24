@@ -87,20 +87,38 @@ module.exports = function(redis, config, deps) {
         const resultBuffer = Buffer.from(cleanBase64, 'base64');
 
         // ── Stage 131 — staged artifacts & fenced commit ──────────────────
-        // The fence of THIS callback: the immutable dispatch receipt
-        // (Stage 127, written atomically BEFORE the hub POST) is
-        // authoritative; the caller (result route) may pass its own
-        // resolution in opts.fence. A result with NO fence evidence (a
-        // legacy dispatch without a receipt — e.g. the audio-recovery replay
-        // that carries no dispatch_id) keeps the legacy direct-write path
-        // below: it stays gated by verifyDispatchIdentity exactly as before
-        // (fencing rollout observe mode, contract 126 §5 phase 1).
+        // The fence of THIS result is proven by the immutable dispatch
+        // receipt (Stage 127, written atomically BEFORE the hub POST); the
+        // caller (result route / debug recovery) may pass its own resolution
+        // in opts.fence.
+        //
+        // Stage 133 (audit 132 · B1/B5): a missing receipt is NOT a reason to
+        // use the legacy direct-write path — the generation of such a result
+        // is unprovable and the result is rejected BEFORE any file, manifest
+        // or ready-metadata write. A Redis read error is retryable and writes
+        // nothing either. The only remaining legacy writer is the explicit
+        // `GPU_FENCING_MODE=off` kill-switch (contract 126 §6).
         const fencingMode = typeof config.resultFencingMode === 'function'
             ? config.resultFencingMode()
             : String(config.RESULT_FENCING_MODE || 'observe');
         let fence = opts.fence ? String(opts.fence) : null;
-        if (!fence && dispatch_id) {
-            fence = await queueIdempotency.readDispatchReceipt(redis, dispatch_id, job_id);
+        if (!fence && fencingMode !== 'off') {
+            const resolution = await queueIdempotency.resolveDispatchFence(redis, {
+                dispatchId: dispatch_id, jobId: job_id,
+            });
+            if (resolution.status === 'error') {
+                const err = new Error(`Fence resolution failed for ${job_id} (${resolution.error}) — retryable`);
+                err.code = 'fence_lookup_unavailable';
+                throw err;
+            }
+            if (resolution.status !== 'ok') {
+                const gateReason = resolution.status === 'corrupt' ? 'receipt_corrupt' : 'receipt_missing';
+                queueIdempotency.observeFenceGateReject(gateReason);
+                const err = new Error(`Rejected task result: ${gateReason} (no immutable dispatch receipt for job=${job_id})`);
+                err.code = gateReason;
+                throw err;
+            }
+            fence = resolution.fence;
         }
 
         let commitStatus = null;
@@ -135,9 +153,15 @@ module.exports = function(redis, config, deps) {
             }
             log(`💾 Fenced commit ${commitStatus}: ${asset.fullPath} (${resultBuffer.length} bytes, job=${job_id}, fence=${fence.slice(0, 12)})`);
         } else {
-            // Save result to filesystem (legacy direct-write path —
-            // byte-for-byte the pre-Stage-131 behaviour, contract 126 §6
-            // kill-switch `GPU_FENCING_MODE=off`).
+            // Save result to filesystem — ONLY reachable through the explicit
+            // `GPU_FENCING_MODE=off` kill-switch (contract 126 §6). Every
+            // automatic mode resolves a receipt first and throws above when it
+            // is missing, so no unproven result can reach this branch.
+            if (fencingMode !== 'off') {
+                const err = new Error(`Fence missing for ${job_id} in mode ${fencingMode} — refusing a direct canonical write`);
+                err.code = 'receipt_missing';
+                throw err;
+            }
             const outputDir = path.dirname(asset.fullPath);
             if (!fs.existsSync(outputDir)) {
                 fs.mkdirSync(outputDir, { recursive: true });

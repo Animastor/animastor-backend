@@ -506,12 +506,19 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     app.post('/api/v1/debug/audio/recover', async (req, res) => {
         try {
-            const { book_id, chapter_id, scene_id, build_id } = req.body || {};
+            // Stage 133 (audit 132 · B3): the recovery is GATED — the result
+            // must be bound to a dispatch that owns an immutable receipt. The
+            // dispatch identity normally travels inside the stored result
+            // payload; an operator may supply it here instead.
+            const { book_id, chapter_id, scene_id, build_id, dispatch_id } = req.body || {};
             if (!book_id || !chapter_id || !scene_id) {
                 return res.status(400).json({ error: 'book_id, chapter_id, scene_id required' });
             }
 
-            const result = await audioRecovery.recoverAudioForScene(book_id, chapter_id, scene_id, build_id || 'default');
+            const result = await audioRecovery.recoverAudioForScene(
+                book_id, chapter_id, scene_id, build_id || 'default',
+                { dispatchId: dispatch_id || null },
+            );
             log(`[DEBUG AUDIO RECOVER] ${book_id}/${chapter_id}/${scene_id}: ${result.reason}`);
             res.json(result);
         } catch (err) {

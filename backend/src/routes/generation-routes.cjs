@@ -508,21 +508,50 @@ module.exports = function(app, redis, deps) {
             }
             log(`[GPU RESULT] Dedup acquired for ${job_id}`);
 
-            // Stage 131 — fenced publication. The fence of THIS callback:
-            // the immutable dispatch receipt (Stage 127) is authoritative;
-            // the job→fence ref is only a fallback (a best-effort index —
-            // the commit Lua re-verifies the fence against the durable
-            // intent record, so a stale ref can never publish a stale
-            // result; audit 130 · observation 2). Without any fence evidence
-            // the handler keeps the legacy direct-write path (observe mode).
+            // Stage 133 (audit 132 · B1/B2/B5) — fenced publication gate.
+            //
+            // The fence of THIS callback is proven ONLY by the immutable
+            // dispatch receipt (Stage 127). The mutable job→fence ref is NOT
+            // a resolver: it is written with a blind SET by every sender, so
+            // a stale callback would read the CURRENT fence from it and commit
+            // its stale bytes under the live generation (audit 132 · B2).
+            //
+            // A callback without a provable fence is REJECTED — it never falls
+            // through to the legacy direct write (audit 132 · B1/T6/T8). And a
+            // Redis read error is not "no receipt": it fails closed as a
+            // retryable failure and writes nothing (audit 132 · B5).
+            const fencingMode = typeof config.resultFencingMode === 'function'
+                ? config.resultFencingMode()
+                : String(config.RESULT_FENCING_MODE || 'observe');
             let resultFence = null;
-            if (queueIdempotency) {
-                try {
-                    resultFence = await queueIdempotency.readDispatchReceipt(redis, dispatch_id, job_id)
-                        || await queueIdempotency.readTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, job_id);
-                } catch (fenceErr) {
-                    console.warn(`[GPU RESULT] fence resolution failed for ${job_id}: ${fenceErr.message}`);
+            if (fencingMode !== 'off') {
+                if (!queueIdempotency || typeof queueIdempotency.resolveDispatchFence !== 'function') {
+                    await redis.del(dedupKey).catch(() => {});
+                    log(`[GPU RESULT] Fence gate unavailable for ${job_id} — nothing written, retryable`);
+                    return res.status(503).json({ error: 'fence_gate_unavailable', retryable: true });
                 }
+                const resolution = await queueIdempotency.resolveDispatchFence(redis, {
+                    dispatchId: dispatch_id, jobId: job_id,
+                });
+                if (resolution.status === 'error') {
+                    // An outage must never look like "no receipt": the result
+                    // stays retryable and NOTHING was written.
+                    await redis.del(dedupKey).catch(() => {});
+                    log(`[GPU RESULT] Fence resolution FAILED for ${job_id} (${resolution.error}) — retryable, nothing written`);
+                    return res.status(503).json({ error: 'fence_lookup_unavailable', retryable: true });
+                }
+                if (resolution.status !== 'ok') {
+                    // No immutable receipt → the dispatch/generation of this
+                    // callback cannot be proven. Terminal for this dispatch:
+                    // no canonical write, no manifest, no chunk/ready metadata.
+                    const gateReason = resolution.status === 'corrupt' ? 'receipt_corrupt' : 'receipt_missing';
+                    if (typeof queueIdempotency.observeFenceGateReject === 'function') {
+                        queueIdempotency.observeFenceGateReject(gateReason);
+                    }
+                    log(`[GPU RESULT] Rejected ${job_id}: ${gateReason} — fail closed, nothing written`);
+                    return res.json({ ok: true, rejected: true, reason: gateReason });
+                }
+                resultFence = resolution.fence;
             }
 
             let handlerOutcome = null;

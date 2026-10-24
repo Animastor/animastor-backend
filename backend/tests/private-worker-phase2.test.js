@@ -56,6 +56,7 @@ const workerAuth = require('../src/services/worker-auth');
 const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
 const taskRepo = require('../src/storage/postgres/repositories/task-repo');
 const { createMockRedis } = require('./mocks/redis-mock');
+const qidem = require('../src/helpers/queue-idempotency.cjs');
 
 // B7/R-2 (pre-split decoupling, 2026-10): hub via npm devDependency.
 const hub = require('@animastor/gpu-hub/gpu-hub.js');
@@ -788,6 +789,10 @@ describe('Private worker Phase 2 — PG persistence & callback re-verification',
             taskHandler: { handleTaskResult: async () => {} },
             book: { loadBook: () => null },
             playerModel: { loadBook: () => null },
+            // Stage 133: the callback route resolves the fence from the
+            // immutable dispatch receipt, so the port must be wired here as it
+            // is in the composition root (backend.cjs).
+            queueIdempotency: qidem,
         });
         await new Promise((resolve) => {
             server = app.listen(0, () => {
@@ -824,6 +829,13 @@ describe('Private worker Phase 2 — PG persistence & callback re-verification',
             retry_attempt: 0,
             status: 'dispatched',
         });
+        // Stage 133: the same dispatch owns an immutable receipt (the proof the
+        // callback route requires before it may publish anything).
+        await redis.set(
+            qidem.dispatchReceiptKey('dispatch-cb-1', `${BOOK_A}_ch1_sc1_0001:audio`),
+            'a1b2c3d4'.repeat(8),
+            'EX', qidem.IDEM_RECEIPT_TTL_S,
+        );
     }
 
     it('PW-2 migration: generation_tasks.workspace_id exists and backfills from books', async () => {

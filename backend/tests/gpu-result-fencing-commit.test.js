@@ -383,9 +383,12 @@ describe('Stage 131: staged artifacts & fenced commit', () => {
         await seedIntent(redis, { fence: F2, epoch: 1, supersedes: F1, history: [[F1, 0]] });
         await commit(redis, F2, 'v2');
         expect(fs.readFileSync(canonicalPath(), 'utf8')).to.equal('v2');
-        // late redelivery of the already-committed F1 does NOT regress the file
+        // late redelivery of the already-committed F1 does NOT regress the file.
+        // Stage 133 (audit 132 · B4): the intent check runs BEFORE the done
+        // marker, so a superseded fence is `stale_intent` — its done marker no
+        // longer answers `duplicate_same_fence` (which would authorize a rename).
         const late = await commit(redis, F1, 'late-v1');
-        expect(late.status).to.equal('duplicate_same_fence');
+        expect(late.status).to.equal('stale_intent');
         expect(fs.readFileSync(canonicalPath(), 'utf8')).to.equal('v2');
     });
 

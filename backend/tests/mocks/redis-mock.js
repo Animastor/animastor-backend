@@ -307,7 +307,8 @@ function createMockRedis() {
                 const [fenceRaw, manifest, now, doneTtl, journalTtl, refTtl] = args.slice(keysCount);
                 const fence = String(fenceRaw);
                 if (!/^[0-9a-f]+$/i.test(fence)) return 'invalid_fence';
-                if (store.has(doneKey)) return 'duplicate_same_fence';
+                // Stage 133 · audit 132 B4 — intent FIRST: a done marker proves
+                // a commit happened, never that the fence is still current.
                 const intentRaw = store.get(intentKey);
                 if (intentRaw === undefined) return 'intent_missing';
                 let intent = null;
@@ -319,6 +320,7 @@ function createMockRedis() {
                 if (storedFence !== fence) return 'stale_intent';
                 const state = intent.state == null ? 'active' : String(intent.state);
                 if (state !== 'active') return 'stale_intent';
+                if (store.has(doneKey)) return 'duplicate_same_fence';
                 // The ref is a best-effort index: extend only while it agrees.
                 if (store.get(refKey) === fence) { expiries.set(refKey, Number(refTtl)); bump(refKey); }
                 store.set(manifestKey, manifest); bump(manifestKey);

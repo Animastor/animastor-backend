@@ -855,6 +855,59 @@ async function readDispatchReceipt(redis, dispatchId, jobId) {
     }
 }
 
+/**
+ * STRICT fence resolution for a RESULT callback (Stage 133 · audit 132 B1/B2/B5).
+ *
+ * The fence of a callback is proven ONLY by the immutable dispatch receipt
+ * (Stage 127). The mutable job→fence ref is deliberately NOT a resolver: it
+ * is written with a blind SET by every sender before its intent is fenced,
+ * so a STALE callback can read the CURRENT fence from it and commit its stale
+ * bytes under the live generation (audit 132 · B2).
+ *
+ * Unlike `readDispatchReceipt`, a Redis error is NOT reported as "no receipt":
+ * callers must distinguish "the key is absent" (terminal — this dispatch can
+ * never prove its generation) from "the read failed" (retryable — nothing may
+ * be written at all). Swallowing the error into `null` turned a Redis outage
+ * into the legacy direct-write path (audit 132 · B5).
+ *
+ * Absent / corrupt / error all mean "the caller has NO proven fence"; only
+ * `ok` authorizes a publication decision.
+ *
+ * @returns {Promise<{status:'ok'|'absent'|'corrupt'|'error', fence?:string, error?:string}>}
+ */
+async function resolveDispatchFence(redis, { dispatchId, jobId } = {}) {
+    // No dispatch identity at all → there is no receipt to read; this is the
+    // same terminal condition as an expired receipt, never an error.
+    if (!redis || !dispatchId || !jobId) return { status: 'absent' };
+    let raw;
+    try {
+        raw = await redis.get(dispatchReceiptKey(dispatchId, jobId));
+    } catch (err) {
+        _fenceDegraded('receipt_read_error');
+        return { status: 'error', error: String((err && err.message) || err || 'redis error').slice(0, 200) };
+    }
+    if (raw == null || raw === false) return { status: 'absent' };
+    const fence = String(raw);
+    // A receipt value that is not a fence id proves nothing (and would only
+    // reach the commit script's `invalid_fence` reject) — fail closed here.
+    if (!/^[0-9a-f]{1,128}$/i.test(fence)) return { status: 'corrupt', fence };
+    return { status: 'ok', fence };
+}
+
+/**
+ * Count one callback rejected by the publication gate (Stage 133).
+ *
+ * `receipt_missing` / `receipt_corrupt` replace the Stage 131 `legacy_no_receipt`
+ * exposure metric: after Stage 133 a callback without an immutable receipt is
+ * no longer published through a legacy path, it is REJECTED before any
+ * canonical/manifest/metadata write (fail closed). The counter therefore
+ * measures the rollout tail of pre-Stage-127 dispatches, not unsafe writes.
+ */
+function observeFenceGateReject(reason) {
+    _commitMetric(String(reason || 'receipt_missing'));
+    _fenceWarn(`publication gate rejected a callback: ${String(reason || 'receipt_missing')}`);
+}
+
 // ── observability (F7): the existing Prometheus registry, best effort ─────
 
 let _fenceMetrics = null;
@@ -1517,9 +1570,12 @@ function fenceJournalKey(bookId, chapterId, sceneId, jobId, fence) {
 const FENCE_COMMIT_SCRIPT = `
 local fence = ARGV[1]
 if not string.match(fence, '^%x+$') then return 'invalid_fence' end
--- 1. a fence that already committed is terminal: a repeat changes nothing
-if redis.call('EXISTS', KEYS[2]) == 1 then return 'duplicate_same_fence' end
--- 2. the intent record is the AUTHORITY for "which fence is current"
+-- 1. the intent record is the AUTHORITY for "which fence is current".
+--    This check comes FIRST (Stage 133 · audit 132 B4): a done marker proves
+--    that SOME commit of this fence happened, NOT that the fence is still
+--    current. Checking the marker first let a superseded fence answer
+--    duplicate_same_fence and — through the rename replay — publish its
+--    stale bytes into the canonical path after a crash window.
 local intentRaw = redis.call('GET', KEYS[1])
 if not intentRaw then return 'intent_missing' end
 local ok, intent = pcall(cjson.decode, intentRaw)
@@ -1531,6 +1587,9 @@ if storedFence ~= fence then return 'stale_intent' end
 local state = 'active'
 if intent.state ~= nil and intent.state ~= cjson.null then state = tostring(intent.state) end
 if state ~= 'active' then return 'stale_intent' end
+-- 2. a repeat of the CURRENT fence is terminal but idempotent: only the
+--    crashed-rename replay may still move bytes (caller side, overwrite=false)
+if redis.call('EXISTS', KEYS[2]) == 1 then return 'duplicate_same_fence' end
 -- 3. the job->fence ref is a BEST-EFFORT index, never a publication gate
 --    (a concurrent stale sender can transiently overwrite it blind, then
 --    roll back): extend its TTL only while it agrees with this commit.
@@ -1555,6 +1614,13 @@ const FENCE_COMMIT_VERDICTS = new Set([
 const FENCE_COMMIT_REJECTED = new Set([
     'stale_intent', 'intent_missing', 'intent_corrupt', 'invalid_fence',
 ]);
+
+/**
+ * Identity-gate rejects (Stage 133): the callback carries no immutable
+ * dispatch receipt, so its generation cannot be proven — terminal, and NOTHING
+ * may be written (no canonical file, no manifest, no chunk/ready metadata).
+ */
+const FENCE_IDENTITY_REJECTED = new Set(['receipt_missing', 'receipt_corrupt']);
 
 /** Verdicts after which the staged bytes may be published / already are. */
 const FENCE_COMMIT_PUBLISHED = new Set(['committed', 'duplicate_same_fence']);
@@ -1938,6 +2004,9 @@ module.exports = {
     dispatchReceiptKey,
     readIntent,
     readDispatchReceipt,
+    // Stage 133 — strict receipt-only fence resolution for result callbacks
+    resolveDispatchFence,
+    observeFenceGateReject,
     ensureIntentAndReceipt,
     // Stage 131 — fenced result commit (staged artifacts)
     IDEM_MANIFEST_PREFIX,
@@ -1946,6 +2015,7 @@ module.exports = {
     FENCE_COMMIT_SCRIPT,
     FENCE_COMMIT_VERDICTS,
     FENCE_COMMIT_REJECTED,
+    FENCE_IDENTITY_REJECTED,
     FENCE_COMMIT_PUBLISHED,
     artifactManifestKey,
     fenceJournalKey,

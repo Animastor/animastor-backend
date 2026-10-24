@@ -318,6 +318,11 @@ async function commitFencedResult(redis, config, {
     }
 
     // 3. PUBLISH — only now may the canonical path change.
+    //
+    // `duplicate_same_fence` here means the commit script verified that THIS
+    // fence is the CURRENT active intent and only then found its done marker
+    // (Stage 133 · audit 132 B4 reordered the script): the replay can only
+    // finish a crashed rename of the current publication.
     const published = publishStaged(config, {
         buildId, jobId, fence, canonicalPath,
         // A first commit publishes unconditionally (regeneration replaces the
@@ -340,15 +345,19 @@ async function commitFencedResult(redis, config, {
  * Idempotent and safe to run every reconciliation cycle:
  *   · manifest without done marker → NOT published (an uncommitted manifest
  *     write is impossible by construction, but never trust one signal);
+ *   · fence is NOT the current intent → skipped (Stage 133 · audit 132 B4):
+ *     manifest + done prove a commit HAPPENED, not that the fence is still
+ *     current. Replaying a superseded fence would put dead bytes into the
+ *     canonical path while the current generation still owes a publication;
  *   · canonical already present    → staged leftover of THIS fence removed,
  *     nothing else touched;
  *   · both files missing            → reported as orphan, nothing recreated.
  *
- * @returns {Promise<{scanned:number, resumed:number, cleaned:number, orphans:number, errors:number}>}
+ * @returns {Promise<{scanned:number, resumed:number, cleaned:number, orphans:number, superseded:number, errors:number}>}
  */
 async function resumePendingPublications(redis, config, { limit = RESUME_MANIFEST_LIMIT } = {}, deps = {}) {
     const fsImpl = deps.fs || fs;
-    const out = { scanned: 0, resumed: 0, cleaned: 0, orphans: 0, errors: 0 };
+    const out = { scanned: 0, resumed: 0, cleaned: 0, orphans: 0, superseded: 0, errors: 0 };
     if (!redis || typeof redis.scan !== 'function') return out;
     const prefix = qidem.IDEM_MANIFEST_PREFIX;
     let cursor = '0';
@@ -363,13 +372,41 @@ async function resumePendingPublications(redis, config, { limit = RESUME_MANIFES
                 let manifest = null;
                 try { manifest = JSON.parse(await redis.get(key)); } catch (_) { manifest = null; }
                 if (!manifest || typeof manifest !== 'object') { out.errors++; continue; }
-                const { published_fence: fence, build_id: buildId, job_id: jobId } = manifest;
-                if (!FENCE_RE.test(String(fence || '')) || !isValidBuildId(buildId) || !jobId) { out.errors++; continue; }
+                const {
+                    published_fence: fence, build_id: buildId, job_id: jobId,
+                    book_id: bookId, chapter_id: chapterId, scene_id: sceneId,
+                } = manifest;
+                if (!FENCE_RE.test(String(fence || '')) || !isValidBuildId(buildId)
+                    || !jobId || !bookId || !chapterId || !sceneId) { out.errors++; continue; }
                 // BOTH the manifest AND the done marker must agree — a lone
                 // file or a lone key never authorizes a publication.
                 let committed = false;
                 try { committed = await qidem.isTaskDone(redis, String(fence).toLowerCase()); } catch (_) { committed = false; }
                 if (!committed) continue;
+
+                // Stage 133 (audit 132 · B4) — the CURRENT intent decides
+                // whether these committed bytes may still appear. A superseded
+                // fence is skipped (its staged dir is left to the age-gated
+                // GC); a missing intent is not a contradiction (it expired
+                // after the commit) and the durable pair still authorizes the
+                // replay. Any read/parse failure means "cannot prove" → no
+                // write at all for this key.
+                let intentRaw = null;
+                try {
+                    intentRaw = await redis.get(qidem.intentKey(bookId, chapterId, sceneId, jobId));
+                } catch (err) {
+                    out.errors++;
+                    continue;
+                }
+                if (intentRaw != null && intentRaw !== false) {
+                    let intent = null;
+                    try { intent = JSON.parse(intentRaw); } catch (_) { intent = null; }
+                    if (!intent || typeof intent !== 'object' || intent.fence == null) { out.errors++; continue; }
+                    if (String(intent.fence).toLowerCase() !== String(fence).toLowerCase()) {
+                        out.superseded++;
+                        continue;
+                    }
+                }
 
                 const buildDir = path.resolve(config.OUTPUT_DIR, buildId);
                 const canonical = path.resolve(buildDir, String(manifest.canonical_path || ''));

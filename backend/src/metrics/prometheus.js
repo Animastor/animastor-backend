@@ -116,6 +116,10 @@ function observeIntentFenceDegraded(reason) {
 // commit). Distinct from the SEND-side intent fence above: `outcome` here is
 // the publication verdict (committed, duplicate_same_fence, stale_intent,
 // intent_missing, intent_corrupt, invalid_fence, unavailable).
+// Stage 133 adds the gate rejects that never reach the commit script:
+// `receipt_missing` / `receipt_corrupt` (a callback without an immutable
+// dispatch receipt — the replacement for the unimplemented `legacy_no_receipt`
+// exposure metric of audit 132 §1.2).
 const fenceCommitTotal = new client.Counter({
     name: 'animastor_fence_commit_total',
     help: 'Fenced result-commit verdicts by outcome (staged artifact publication)',

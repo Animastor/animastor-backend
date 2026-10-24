@@ -254,14 +254,19 @@ function shareFeaturesEnabled() {
 // GPU_FENCING_MODE gates the staged-artifact publication path of a GPU
 // result (services/result-publication.cjs):
 //   off     — byte-for-byte pre-Stage-131 behaviour (direct canonical write,
-//             settlement by the route; contract 126 §6 kill-switch);
-//   observe — staged write + atomic fenced commit for every callback that
-//             carries fence evidence (receipt/ref); callbacks WITHOUT fence
-//             evidence (legacy dispatches) keep the legacy path — the
-//             rollout phase-1 semantics of contract 126 §5;
-//   enforce — same publication path as observe in this stage (the legacy
-//             no-receipt gating of phase 2 requires the ≥48 h rollout
-//             window and is NOT enabled by the label alone).
+//             settlement by the route; contract 126 §6 kill-switch — the ONLY
+//             path that writes a canonical artifact without a fenced commit);
+//   observe — staged write + atomic fenced commit. The fence must be proven
+//             by the immutable dispatch receipt: a callback without a receipt
+//             is REJECTED before any canonical/manifest/metadata write and is
+//             counted as `receipt_missing`/`receipt_corrupt` (Stage 133 ·
+//             audit 132 B1/B2/B5 — there is no legacy no-receipt publication
+//             path left);
+//   enforce — identical to observe BY CONSTRUCTION, not by omission: the
+//             unsafe branch observe used to fall through to no longer exists,
+//             so the label cannot add or remove a write. It remains the
+//             documented end state of the migration; flipping it in
+//             production is a separate, operator-owned decision.
 // Read LAZILY on every call (like shareFeaturesEnabled) so the kill-switch
 // can be flipped in a running process and exercised by tests.
 function resultFencingMode() {
