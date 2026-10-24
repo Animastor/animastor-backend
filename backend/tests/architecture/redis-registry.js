@@ -769,6 +769,20 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'Idempotent fenced-commit journal per (task, fence) (Stage 131): the same manifest payload, TTL 7 d — restart replay / audit evidence that a fence was committed; never a sole publication authority.',
     },
+    {
+        // Stage 135 (audit 134 B6) — per-task publication marker. Records the
+        // LAST publication attempt of the task: { fence, stage:'renaming' }
+        // written durably BEFORE the staged→canonical rename, { fence,
+        // stage:'published' } after it. It is the only proof that the shared
+        // canonical path belongs to THIS fence (done/manifest only prove the
+        // commit); a marker is never written for a rejected fence.
+        pattern: 'animastor:fence-publish:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Per-task publication marker (Stage 135): fence + stage (renaming|published), TTL mirrors the done marker (7 d). Distinguishes "this fence is in canonical" from "an older generation leaves a file there"; drives retry/resume and the ready-metadata chain.',
+    },
 ];
 
 module.exports = { REDIS_OWNERSHIP };

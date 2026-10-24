@@ -25,14 +25,30 @@
 //                                       fresh dispatch re-stages the same
 //                                       fence dir; stale fences are removed
 //                                       by `collectStaleStaging` (age-gated)
-//   crash after commit, before rename → the manifest + done marker are the
-//                                       durable proof; `resumePendingPublications`
-//                                       replays the rename (never inferred
-//                                       from "a file exists")
-//   rename failed in-process          → same as above: NO success is
-//                                       reported, the metadata/ready chain
-//                                       does not run, the retry/resume
-//                                       completes the rename
+//   crash after commit, before rename → the manifest + done marker prove the
+//                                       COMMIT; the per-task publication
+//                                       marker proves the RENAME (Stage 135):
+//                                       `resumePendingPublications` completes
+//                                       it, never inferring from "a file
+//                                       exists" at the shared canonical path
+//   rename failed in-process          → NO success is reported, the
+//                                       metadata/ready chain does not run; the
+//                                       retry/resume completes the rename
+//
+// Publication state (Stage 135 · audit 134 B6) is decided by
+// `publishCommittedFence` from the durable per-task marker
+// (queue-idempotency.fencePublishKey):
+//
+//   marker 'renaming'  written BEFORE the rename  → crash before the rename
+//                        leaves staged bytes + 'renaming' (redo the rename);
+//   marker 'published' written AFTER the rename   → crash after it leaves no
+//                        staged file + 'renaming' (the rename is verified and
+//                        the marker repaired).
+//
+// A failed marker write before the rename ABORTS the publication (staged bytes
+// stay, nothing is renamed blind); a failed marker write after it only leaves
+// the verifiable window above. A marker is never written for a rejected
+// (stale / receipt-less) fence.
 //
 // Invariants this module is built around (Stage 131 §2):
 //   · a stale fence never becomes current through a file write or recovery;
@@ -183,7 +199,13 @@ function stageResult(config, { buildId, jobId, fence, buffer, extension }, deps 
 }
 
 /**
- * Atomically move the staged file to the canonical artifact path.
+ * Raw atomic rename of the staged file onto the canonical artifact path.
+ *
+ * LOW-LEVEL PRIMITIVE — publication decisions belong to
+ * `publishCommittedFence` (Stage 135 · audit 134 B6). Calling this directly
+ * cannot tell whether the canonical file belongs to the calling fence, which
+ * is exactly how a retry used to report success over the previous
+ * generation's bytes.
  *
  * On `duplicate_same_fence` (an already-committed fence is re-delivered) the
  * rename happens ONLY when the canonical file is absent — a redelivery may
@@ -232,6 +254,126 @@ function _stagedFilesIn(fsImpl, fenceDir) {
     } catch (_) {
         return [];
     }
+}
+
+// ── publication state machine (Stage 135 · audit 134 B6) ──────────────────
+//
+// `done` proves a COMMIT; it never proves that the staged bytes reached the
+// canonical path. The canonical path is shared by every generation of the
+// same task, so "the canonical file exists" proves nothing about THIS fence —
+// the Stage 134 audit showed a retry reporting success over the PREVIOUS
+// generation's bytes and a resume deleting the current fence's only copy.
+//
+// The decision is taken from the per-task publication marker (written durably
+// BEFORE the rename, see queue-idempotency.fencePublishKey):
+//
+//   marker.published == fence  → THIS fence is already in canonical;
+//   marker.renaming  == fence  → a rename of THIS fence was in flight;
+//   anything else             → the canonical file (if any) is another
+//                               generation's and may be replaced.
+//
+// Crash windows and their resolution are listed next to the marker helpers; a
+// marker write that fails BEFORE the rename aborts the publication (the staged
+// bytes stay and a retry/recovery replays it) rather than renaming blind.
+
+const PUBLICATION_RENAMING = 'renaming';
+const PUBLICATION_PUBLISHED = 'published';
+
+/**
+ * Bring one COMMITTED fence to its final published state. Used by BOTH the
+ * in-process publication (`commitFencedResult`) and restart recovery
+ * (`resumePendingPublications`) so the two can never disagree.
+ *
+ * @returns {Promise<{published:boolean, reason:'published'|'rename_verified'|'already_published', cleaned:boolean}>}
+ * @throws code `invalid_stage_path` (unsafe path), `publish_failed`
+ *         (marker/rename failure — retryable, nothing was renamed),
+ *         `staged_missing` (committed bytes and canonical both gone),
+ *         `publication_unproven` (staged bytes gone, canonical belongs to an
+ *         unproven fence — never reported as success).
+ */
+async function publishCommittedFence(config, redis, {
+    bookId, chapterId, sceneId, jobId, buildId, fence, canonicalPath,
+}, deps = {}) {
+    const fsImpl = deps.fs || fs;
+    const fenceDir = fenceDirFor(config, { buildId, jobId, fence });
+    const canonical = canonicalPath ? path.resolve(canonicalPath) : null;
+    const outRoot = config && config.OUTPUT_DIR ? path.resolve(config.OUTPUT_DIR) : null;
+    if (!fenceDir || !canonical || !outRoot || !_isInside(outRoot, canonical)) {
+        throw _err('invalid_stage_path', 'cannot publish: unsafe staging or canonical path');
+    }
+    const stagedPath = _stagedFilesIn(fsImpl, fenceDir)[0] || null;
+
+    const read = await qidem.readFencePublication(redis, { bookId, chapterId, sceneId, jobId });
+    if (read.status === 'error') {
+        // Cannot prove anything about the canonical file → do not touch it.
+        throw _err('publish_failed', `publication marker read failed: ${read.error}`);
+    }
+    const sameFence = read.status === 'ok' && read.marker.fence === String(fence);
+    const canonicalExists = fsImpl.existsSync(canonical);
+
+    // 1. THIS fence is already published: idempotent, never flaps. A stray
+    //    staged copy of the same fence (a redelivery that re-staged before the
+    //    commit verdict) is garbage.
+    if (sameFence && read.marker.stage === PUBLICATION_PUBLISHED && canonicalExists) {
+        let cleaned = false;
+        if (stagedPath) {
+            try { fsImpl.rmSync(stagedPath, { force: true }); cleaned = true; } catch (_) { /* leftover only */ }
+        }
+        return { published: false, reason: 'already_published', cleaned };
+    }
+
+    // 2. No staged bytes: the rename either already happened (the marker is
+    //    written BEFORE it, so "renaming" + no staged file + canonical present
+    //    is exactly the post-rename crash window) or the committed bytes are
+    //    gone. The second case is NEVER a success.
+    if (!stagedPath) {
+        if (sameFence && read.marker.stage === PUBLICATION_RENAMING && canonicalExists) {
+            await qidem.markFencePublication(redis, {
+                bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_PUBLISHED,
+            });
+            return { published: true, reason: 'rename_verified', cleaned: false };
+        }
+        if (!canonicalExists) {
+            throw _err('staged_missing', `staged bytes of a committed fence are gone (job=${jobId})`);
+        }
+        throw _err('publication_unproven', `canonical file is not proven to belong to fence ${String(fence).slice(0, 12)} (job=${jobId})`);
+    }
+
+    // 3. Complete the rename. The marker is durable BEFORE it; if it cannot be
+    //    written, nothing is renamed (a blind rename would be unrecoverable).
+    const marked = await qidem.markFencePublication(redis, {
+        bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_RENAMING,
+    });
+    if (!marked) {
+        throw _err('publish_failed', 'publication marker write failed — the rename was not attempted');
+    }
+
+    try {
+        fsImpl.mkdirSync(path.dirname(canonical), { recursive: true });
+        fsImpl.renameSync(stagedPath, canonical);
+        _fsyncDir(fsImpl, path.dirname(canonical));
+    } catch (err) {
+        // A concurrent publisher of the SAME fence may have moved the staged
+        // file between our marker write and our rename.
+        if (err && err.code === 'ENOENT' && fsImpl.existsSync(canonical)) {
+            await qidem.markFencePublication(redis, {
+                bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_PUBLISHED,
+            });
+            return { published: true, reason: 'rename_verified', cleaned: false };
+        }
+        throw _err('publish_failed', `rename staged → canonical failed: ${err.message}`);
+    }
+
+    // Best effort: the rename is complete, so the publication itself is not
+    // undone by a failed marker write — recovery proves it from the absent
+    // staged file (window 3) and repairs the marker.
+    const finalized = await qidem.markFencePublication(redis, {
+        bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_PUBLISHED,
+    });
+    if (!finalized) {
+        console.warn(`[RESULT-PUBLICATION] publication marker not finalized for job=${jobId} fence=${String(fence).slice(0, 12)} (rename is complete; recovery repairs it)`);
+    }
+    return { published: true, reason: 'published', cleaned: false };
 }
 
 /**
@@ -317,21 +459,25 @@ async function commitFencedResult(redis, config, {
         return { status: verdict.status, staged, published: false };
     }
 
-    // 3. PUBLISH — only now may the canonical path change.
-    //
-    // `duplicate_same_fence` here means the commit script verified that THIS
-    // fence is the CURRENT active intent and only then found its done marker
-    // (Stage 133 · audit 132 B4 reordered the script): the replay can only
-    // finish a crashed rename of the current publication.
-    const published = publishStaged(config, {
-        buildId, jobId, fence, canonicalPath,
-        // A first commit publishes unconditionally (regeneration replaces the
-        // previous generation's file — the current behaviour); a repeat only
-        // finishes a crashed rename, it never flaps a published file.
-        overwrite: verdict.status === 'committed',
+    // 3. PUBLISH — only now may the canonical path change. The state machine
+    //    (Stage 135 · B6) decides from the durable publication marker whether
+    //    the canonical file already belongs to THIS fence:
+    //      · marker.published == fence        → idempotent, no overwrite;
+    //      · marker.renaming  == fence        → finish the interrupted rename;
+    //      · marker of another fence / absent → the canonical file is another
+    //        generation's and is replaced (the intent gate above proved that
+    //        THIS fence is the current one).
+    // `duplicate_same_fence` therefore still finishes a crashed rename of the
+    // current publication, without ever flapping an already-published file.
+    const publication = await publishCommittedFence(config, redis, {
+        bookId, chapterId, sceneId, jobId, buildId, fence, canonicalPath,
     }, { fs: fsImpl });
 
-    return { status: verdict.status, staged, published: published.published };
+    return {
+        status: verdict.status, staged,
+        published: publication.published,
+        publication: publication.reason,
+    };
 }
 
 // ── restart recovery ──────────────────────────────────────────────────────
@@ -349,9 +495,12 @@ async function commitFencedResult(redis, config, {
  *     manifest + done prove a commit HAPPENED, not that the fence is still
  *     current. Replaying a superseded fence would put dead bytes into the
  *     canonical path while the current generation still owes a publication;
- *   · canonical already present    → staged leftover of THIS fence removed,
- *     nothing else touched;
- *   · both files missing            → reported as orphan, nothing recreated.
+ *   · canonical already holds THIS fence (publication marker) → staged
+ *     leftover of the same fence removed, nothing else touched;
+ *   · the rename was interrupted      → completed (marker written before it);
+ *   · both files missing              → reported as orphan, nothing recreated;
+ *   · staged missing, canonical of an unproven fence → NOT a success, left to
+ *     an operator / a fresh delivery (Stage 135 · audit 134 B6).
  *
  * @returns {Promise<{scanned:number, resumed:number, cleaned:number, orphans:number, superseded:number, errors:number}>}
  */
@@ -413,22 +562,20 @@ async function resumePendingPublications(redis, config, { limit = RESUME_MANIFES
                 const staged = path.resolve(buildDir, String(manifest.staged_path || ''));
                 if (!_isInside(buildDir, canonical) || !_isInside(buildDir, staged)) { out.errors++; continue; }
                 try {
-                    if (fsImpl.existsSync(canonical)) {
-                        // Already published (possibly by a previous pass): a
-                        // staged leftover of this committed fence is garbage.
-                        if (fsImpl.existsSync(staged)) {
-                            fsImpl.rmSync(staged, { force: true });
-                            out.cleaned++;
-                        }
-                        continue;
+                    // The SAME state machine as the in-process publication:
+                    // only the publication marker can prove that the canonical
+                    // file belongs to this fence (Stage 135 · audit 134 B6).
+                    const publication = await publishCommittedFence(config, redis, {
+                        bookId, chapterId, sceneId, jobId, buildId, fence, canonicalPath: canonical,
+                    }, { fs: fsImpl });
+                    if (publication.published) {
+                        out.resumed++;
+                    } else if (publication.reason === 'already_published' && publication.cleaned) {
+                        out.cleaned++;
                     }
-                    if (!fsImpl.existsSync(staged)) { out.orphans++; continue; }
-                    fsImpl.mkdirSync(path.dirname(canonical), { recursive: true });
-                    fsImpl.renameSync(staged, canonical);
-                    _fsyncDir(fsImpl, path.dirname(canonical));
-                    out.resumed++;
                 } catch (err) {
-                    out.errors++;
+                    if (err && err.code === 'staged_missing') out.orphans++;
+                    else out.errors++;
                     console.warn(`[RESULT-PUBLICATION] resume failed for job=${jobId} fence=${String(fence).slice(0, 12)}: ${err.message}`);
                 }
             }
@@ -534,6 +681,7 @@ module.exports = {
     canonicalPathFor,
     stageResult,
     publishStaged,
+    publishCommittedFence,
     discardStagedFence,
     buildCommitManifest,
     commitFencedResult,

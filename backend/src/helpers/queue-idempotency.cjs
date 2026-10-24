@@ -1562,6 +1562,78 @@ function artifactManifestKey(bookId, chapterId, sceneId, jobId) {
     return `${IDEM_MANIFEST_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}`;
 }
 
+// ── publication marker (Stage 135 · audit 134 B6) ─────────────────────────
+// `done` proves that a fence was COMMITTED; the manifest proves WHAT was
+// committed. Neither proves that the staged bytes actually reached the
+// canonical path — and the canonical path is shared by every generation of a
+// task, so "a file exists there" proves nothing about THIS fence.
+//
+// The marker records the last publication attempt of the task:
+//
+//   { fence, stage: 'renaming' }   — written durably BEFORE the rename;
+//   { fence, stage: 'published' }  — written after the rename (best effort).
+//
+// Crash windows (all decided from the marker + the staged file):
+//   crash after commit, before 'renaming' → marker absent, staged present
+//                                         → the staged bytes are published;
+//   crash after 'renaming', before rename → marker renaming, staged present
+//                                         → the rename is completed;
+//   crash after rename, before 'published'→ marker renaming, staged gone,
+//                                         canonical present → the rename is
+//                                         verified and the marker repaired.
+// A marker is never written for a RECEIVED-but-rejected fence, so a stale
+// fence cannot gain any publication evidence.
+const IDEM_PUBLISH_PREFIX = 'animastor:fence-publish:';
+
+/** TTL of the per-task publication marker (mirrors the done marker). */
+const FENCE_PUBLISH_TTL_S = IDEM_DONE_TTL_S;
+
+/** Key of the per-task publication marker. */
+function fencePublishKey(bookId, chapterId, sceneId, jobId) {
+    return `${IDEM_PUBLISH_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}`;
+}
+
+/**
+ * STRICT read of the publication marker.
+ *
+ * @returns {Promise<{status:'ok'|'absent'|'corrupt'|'error', marker?:{fence:string,stage:string,at:number}, error?:string}>}
+ */
+async function readFencePublication(redis, { bookId, chapterId, sceneId, jobId } = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return { status: 'absent' };
+    let raw;
+    try {
+        raw = await redis.get(fencePublishKey(bookId, chapterId, sceneId, jobId));
+    } catch (err) {
+        return { status: 'error', error: String((err && err.message) || err || 'redis error').slice(0, 200) };
+    }
+    if (raw == null || raw === false) return { status: 'absent' };
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.fence || !parsed.stage) return { status: 'corrupt' };
+    return {
+        status: 'ok',
+        marker: { fence: String(parsed.fence), stage: String(parsed.stage), at: Number(parsed.at) || 0 },
+    };
+}
+
+/**
+ * Write the publication marker. Returns false on any Redis error — the caller
+ * decides whether that is fatal (before a rename: yes) or best effort (after).
+ */
+async function markFencePublication(redis, { bookId, chapterId, sceneId, jobId, fence, stage, now = Date.now() } = {}) {
+    if (!redis || !fence || !stage) return false;
+    try {
+        await redis.set(
+            fencePublishKey(bookId, chapterId, sceneId, jobId),
+            JSON.stringify({ fence: String(fence), stage: String(stage), at: Number(now) || 0 }),
+            'EX', FENCE_PUBLISH_TTL_S,
+        );
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 /** Key of the idempotent commit journal entry of one (task, fence). */
 function fenceJournalKey(bookId, chapterId, sceneId, jobId, fence) {
     return `${IDEM_FENCE_JOURNAL_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}:${encodeKeyComponent(fence)}`;
@@ -2011,7 +2083,12 @@ module.exports = {
     // Stage 131 — fenced result commit (staged artifacts)
     IDEM_MANIFEST_PREFIX,
     IDEM_FENCE_JOURNAL_PREFIX,
+    IDEM_PUBLISH_PREFIX,
+    FENCE_PUBLISH_TTL_S,
     FENCE_JOURNAL_TTL_S,
+    fencePublishKey,
+    readFencePublication,
+    markFencePublication,
     FENCE_COMMIT_SCRIPT,
     FENCE_COMMIT_VERDICTS,
     FENCE_COMMIT_REJECTED,
