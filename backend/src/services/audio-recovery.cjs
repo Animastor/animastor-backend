@@ -9,6 +9,7 @@ const path = require('path');
 const artifactNaming = require('@animastor/generation').artifactNaming;
 const fs = require('fs');
 const qidem = require('../helpers/queue-idempotency.cjs');
+const resultPublication = require('./result-publication.cjs');
 
 /**
  * Publication-gate rejects (Stage 133): the result's generation cannot be
@@ -149,31 +150,61 @@ module.exports = function(redis, config, deps) {
             }
             const fence = resolution.fence;
 
-            // Idempotency short-circuits (read-only checks; they only drop the
-            // replay key of an already satisfied scene).
+            // ── Publication proof BEFORE any idempotency short-circuit ──────
+            // Stage 137 (audit 136 B3e/f/g): a chunk-1 `audio_status=ready`,
+            // a scene file or a PG ready flag may all belong to a PREVIOUS
+            // generation. They only authorize a short-circuit when the CURRENT
+            // fence's committed artifact is proven to be at its canonical path
+            // (intent == fence, manifest fence == fence, marker published,
+            // canonical sha256/size == manifest). Otherwise the current result
+            // goes through the fenced publication flow.
+            const published = await resultPublication.verifyPublishedFence(config, redis, {
+                bookId, chapterId, sceneId, jobId: job_id, buildId, fence,
+            });
+            if (published.status === 'error') {
+                // Cannot prove the current generation either way → retryable,
+                // no success, result key preserved.
+                log(`⚠️ Recovery could not prove publication for ${bookId}/${chapterId}/${sceneId}: ${published.reason} (nothing deleted)`);
+                return { recovered: false, reason: 'publication_unproven', gated: true, detail: published.reason };
+            }
+            const currentPublished = published.status === 'published';
+
             const baseId = artifactNaming.scenePrefix(bookId, chapterId, sceneId);
             const buildDir = path.join(config.OUTPUT_DIR, buildId);
             const canonicalAudioPath = path.join(buildDir, `${baseId}.mp3`);
 
-            if (fs.existsSync(canonicalAudioPath)) {
-                log(`🔁 Audio already on disk: ${canonicalAudioPath} — cleaning up result key`);
-                await redis.del(sceneResultKey);
-                return { recovered: true, reason: 'already_on_disk' };
-            }
+            if (currentPublished) {
+                // Idempotency short-circuits are now backed by the content
+                // proof: dropping the replay key cannot discard a result of
+                // the current generation.
+                if (fs.existsSync(canonicalAudioPath)) {
+                    log(`🔁 Audio already on disk: ${canonicalAudioPath} — cleaning up result key`);
+                    await redis.del(sceneResultKey);
+                    return { recovered: true, reason: 'already_on_disk' };
+                }
 
-            const chunkId = artifactNaming.sceneChunkAudioName(bookId, chapterId, sceneId, 1).replace(/\.mp3$/, '');
-            const chunk = await getChunk(chunkId);
-            if (chunk && chunk.audio && chunk.audio_status === 'ready') {
-                log(`🔁 Audio already marked ready — cleaning up result key`);
-                await redis.del(sceneResultKey);
-                return { recovered: true, reason: 'already_ready' };
-            }
+                const chunkId = artifactNaming.sceneChunkAudioName(bookId, chapterId, sceneId, 1).replace(/\.mp3$/, '');
+                const chunk = await getChunk(chunkId);
+                if (chunk && chunk.audio && chunk.audio_status === 'ready') {
+                    log(`🔁 Audio already marked ready — cleaning up result key`);
+                    await redis.del(sceneResultKey);
+                    return { recovered: true, reason: 'already_ready' };
+                }
 
-            const sceneAudioReady = await audio.isSceneAudioReady(buildId, bookId, chapterId, sceneId);
-            if (sceneAudioReady) {
-                log(`🔁 Scene audio already ready — cleaning up result key`);
+                try {
+                    const sceneAudioReady = await audio.isSceneAudioReady(buildId, bookId, chapterId, sceneId);
+                    if (sceneAudioReady) {
+                        log(`🔁 Scene audio already ready — cleaning up result key`);
+                        await redis.del(sceneResultKey);
+                        return { recovered: true, reason: 'already_ready_pg' };
+                    }
+                } catch (pgErr) {
+                    // A PG error is not a recovered result.
+                    return { recovered: false, reason: 'publication_unproven', gated: true, detail: `pg_ready_check_failed: ${pgErr.message}` };
+                }
+
                 await redis.del(sceneResultKey);
-                return { recovered: true, reason: 'already_ready_pg' };
+                return { recovered: true, reason: 'already_published' };
             }
 
             // Gated publication: the handler stages the bytes, commits the

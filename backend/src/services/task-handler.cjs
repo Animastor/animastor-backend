@@ -122,6 +122,7 @@ module.exports = function(redis, config, deps) {
         }
 
         let commitStatus = null;
+        let publication = null;
         if (fence && fencingMode !== 'off') {
             // NEW results go to staging first. The canonical artifact path
             // is only replaced after the ATOMIC fence commit confirms this
@@ -131,7 +132,7 @@ module.exports = function(redis, config, deps) {
             // throws a terminal error: no metadata, no ready, no canonical.
             // A failed staged→canonical rename throws `publish_failed` —
             // never a false success; the retry/resume replays the rename.
-            const publication = await resultPublication.commitFencedResult(redis, config, {
+            const publicationResult = await resultPublication.commitFencedResult(redis, config, {
                 bookId: parsed.bookId,
                 chapterId: parsed.chapterId,
                 sceneId: parsed.sceneId,
@@ -142,6 +143,7 @@ module.exports = function(redis, config, deps) {
                 extension: `.${asset.extension}`,
                 canonicalPath: asset.fullPath,
             });
+            publication = publicationResult;
             commitStatus = publication.status;
             if (!FENCED_PUBLISHED.has(commitStatus)) {
                 // Terminal rejects throw with a classified code (the route
@@ -149,6 +151,32 @@ module.exports = function(redis, config, deps) {
                 // (staged bytes + claim stay for a retry / the reconciler).
                 const err = new Error(`Rejected task result: ${commitStatus} (fenced commit, job=${job_id})`);
                 err.code = commitStatus;
+                throw err;
+            }
+            // Stage 137 — a commit verdict is not a publication success. The
+            // canonical rename must have been proven (or be a content-verified
+            // idempotent replay); otherwise the ready chain must not run.
+            if (!publication.published && publication.publication !== 'already_published') {
+                const err = new Error(`Publication of ${job_id} was not confirmed (fence=${fence.slice(0, 12)})`);
+                err.code = 'publish_failed';
+                throw err;
+            }
+            // Re-read the authority once more before any ready metadata is
+            // written: a fence superseded after its (valid) publication must
+            // not mark the new generation ready.
+            const currentIntent = await queueIdempotency.readIntentStrict(redis, {
+                bookId: parsed.bookId, chapterId: parsed.chapterId, sceneId: parsed.sceneId, jobId: job_id,
+            });
+            if (currentIntent.status === 'error') {
+                const err = new Error(`Intent re-check failed for ${job_id} (${currentIntent.error}) — retryable`);
+                err.code = 'fence_lookup_unavailable';
+                throw err;
+            }
+            if (currentIntent.status !== 'ok'
+                || String(currentIntent.fence).toLowerCase() !== String(fence).toLowerCase()
+                || currentIntent.state !== 'active') {
+                const err = new Error(`Rejected task result: stale_intent (fence=${fence.slice(0, 12)} is no longer current)`);
+                err.code = 'stale_intent';
                 throw err;
             }
             log(`💾 Fenced commit ${commitStatus}: ${asset.fullPath} (${resultBuffer.length} bytes, job=${job_id}, fence=${fence.slice(0, 12)})`);
@@ -321,7 +349,13 @@ module.exports = function(redis, config, deps) {
         // Stage 131 — report how the artifact reached its canonical path, so
         // the route never runs the legacy settlement for a fenced publication
         // (the commit already wrote the done marker + released the claim).
-        return { fenced: commitStatus != null, fence, commit: commitStatus };
+        return {
+            fenced: commitStatus != null,
+            fence,
+            commit: commitStatus,
+            published: publication ? publication.published : false,
+            publication: publication ? publication.publication : null,
+        };
     }
 
     // ── Book snapshot ─────────────────────────────────

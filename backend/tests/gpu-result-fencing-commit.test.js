@@ -118,15 +118,23 @@ describe('Stage 131: staged artifacts & fenced commit', () => {
         await seedIntent(redis, { fence: F1 });
         // stage + commit manually, then "crash" before the rename
         pub.stageResult(config(), { buildId: BUILD, jobId: JOB, fence: F1, buffer: buf('v1'), extension: EXT });
+        const manifest = pub.buildCommitManifest({
+            bookId: BOOK, chapterId: CHAPTER, sceneId: SCENE, jobId: JOB, buildId: BUILD,
+            buildDir: path.join(tmpRoot, BUILD), fence: F1,
+            stagedPath: stagedPathFor(F1), canonicalPath: canonicalPath(), bytes: buf('v1').length,
+        });
         const verdict = await qidem.fenceCommitResult(redis, {
-            bookId: BOOK, chapterId: CHAPTER, sceneId: SCENE, jobId: JOB, fence: F1, manifest: { x: 1 },
+            bookId: BOOK, chapterId: CHAPTER, sceneId: SCENE, jobId: JOB, fence: F1, manifest,
         });
         expect(verdict.status).to.equal('committed');
         expect(fs.existsSync(canonicalPath())).to.equal(false);
 
-        const out = await commit(redis, F1, 'v1-redelivery');
+        // Stage 137: the redelivery must carry the COMMITTED bytes — a
+        // content proof gates the rename (a different payload under the same
+        // fence is refused instead of silently replacing the artifact).
+        const out = await commit(redis, F1, 'v1');
         expect(out.status).to.equal('duplicate_same_fence');
-        expect(fs.readFileSync(canonicalPath(), 'utf8')).to.equal('v1-redelivery');
+        expect(fs.readFileSync(canonicalPath(), 'utf8')).to.equal('v1');
     });
 
     // ── 3. supersede between staging and commit ───────────────────────────

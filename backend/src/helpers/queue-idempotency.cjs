@@ -843,6 +843,31 @@ async function readIntent(redis, bookId, chapterId, sceneId, jobId) {
     }
 }
 
+/**
+ * STRICT current-intent read (Stage 137). Unlike `readIntent`, a Redis error is
+ * reported as `error` instead of being collapsed into "absent": a publication
+ * that cannot read the authority must fail closed, not guess.
+ *
+ * @returns {Promise<{status:'ok'|'absent'|'corrupt'|'error'|'invalid', fence?:string, state?:string, error?:string}>}
+ */
+async function readIntentStrict(redis, { bookId, chapterId, sceneId, jobId } = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return { status: 'invalid' };
+    let raw;
+    try {
+        raw = await redis.get(intentKey(bookId, chapterId, sceneId, jobId));
+    } catch (err) {
+        return { status: 'error', error: String((err && err.message) || err || 'redis error').slice(0, 200) };
+    }
+    if (raw == null || raw === false) return { status: 'absent' };
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+    if (!parsed || typeof parsed !== 'object' || parsed.fence == null) return { status: 'corrupt' };
+    const fence = String(parsed.fence);
+    if (!/^[0-9a-f]+$/i.test(fence)) return { status: 'corrupt' };
+    const state = parsed.state == null ? 'active' : String(parsed.state);
+    return { status: 'ok', fence, state };
+}
+
 /** Read back the fence a dispatch receipt binds (null when absent/expired). */
 async function readDispatchReceipt(redis, dispatchId, jobId) {
     if (!redis || !dispatchId || !jobId) return null;
@@ -1610,22 +1635,28 @@ async function readFencePublication(redis, { bookId, chapterId, sceneId, jobId }
     let parsed = null;
     try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
     if (!parsed || typeof parsed !== 'object' || !parsed.fence || !parsed.stage) return { status: 'corrupt' };
-    return {
-        status: 'ok',
-        marker: { fence: String(parsed.fence), stage: String(parsed.stage), at: Number(parsed.at) || 0 },
-    };
+    const marker = { fence: String(parsed.fence), stage: String(parsed.stage), at: Number(parsed.at) || 0 };
+    // Stage 137 — optional content proof bound to the marker's fence.
+    if (/^[0-9a-f]{64}$/i.test(String(parsed.sha256 || ''))) marker.sha256 = String(parsed.sha256).toLowerCase();
+    if (Number.isFinite(Number(parsed.bytes))) marker.bytes = Number(parsed.bytes);
+    return { status: 'ok', marker };
 }
 
 /**
  * Write the publication marker. Returns false on any Redis error — the caller
  * decides whether that is fatal (before a rename: yes) or best effort (after).
  */
-async function markFencePublication(redis, { bookId, chapterId, sceneId, jobId, fence, stage, now = Date.now() } = {}) {
+async function markFencePublication(redis, { bookId, chapterId, sceneId, jobId, fence, stage, sha256 = null, bytes = null, now = Date.now() } = {}) {
     if (!redis || !fence || !stage) return false;
+    const record = { fence: String(fence), stage: String(stage), at: Number(now) || 0 };
+    // Stage 137 — persist the content proof with the marker so a marker read
+    // can never prove a publication without also naming the expected bytes.
+    if (/^[0-9a-f]{64}$/i.test(String(sha256 || ''))) record.sha256 = String(sha256).toLowerCase();
+    if (Number.isFinite(Number(bytes)) && Number(bytes) >= 0) record.bytes = Number(bytes);
     try {
         await redis.set(
             fencePublishKey(bookId, chapterId, sceneId, jobId),
-            JSON.stringify({ fence: String(fence), stage: String(stage), at: Number(now) || 0 }),
+            JSON.stringify(record),
             'EX', FENCE_PUBLISH_TTL_S,
         );
         return true;
@@ -2075,6 +2106,7 @@ module.exports = {
     intentKey,
     dispatchReceiptKey,
     readIntent,
+    readIntentStrict,
     readDispatchReceipt,
     // Stage 133 — strict receipt-only fence resolution for result callbacks
     resolveDispatchFence,

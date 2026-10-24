@@ -59,7 +59,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const qidem = require('../helpers/queue-idempotency.cjs');
+const { withPublicationLock } = require('./publication-lock.cjs');
 
 /** Name of the per-build staging root (hidden dir, never a canonical path). */
 const STAGING_DIR_NAME = '.staging';
@@ -71,6 +73,12 @@ const EXTENSION_RE = /^\.[A-Za-z0-9]+$/;
 const BUILD_ID_RE = /^[a-zA-Z0-9._-]+$/;
 /** Fences are sha256 hex ids (computeIdemKey). */
 const FENCE_RE = /^[0-9a-f]{64}$/i;
+/** Content proof stored in the commit manifest (Stage 137 · audit 136 P1-B). */
+const SHA256_RE = /^[0-9a-f]{64}$/i;
+/** Manifest schema written by Stage 137 (adds sha256; version 1 had none). */
+const MANIFEST_VERSION = 2;
+/** Backup of the previous canonical bytes, kept inside the fence dir. */
+const ROLLBACK_FILE_NAME = '.previous-canonical';
 /** A staging fence dir older than this, not current, is removable garbage. */
 const STAGING_MAX_AGE_MS = 24 * 3600 * 1000;
 /** Bounded scan of manifest keys per recovery pass. */
@@ -96,6 +104,160 @@ function _fsyncDir(fsImpl, dir) {
     } finally {
         if (fd != null) { try { fsImpl.closeSync(fd); } catch (_) { /* ignore */ } }
     }
+}
+
+// ── content proof (Stage 137 · audit 136 P1-B) ────────────────────────────
+//
+// A marker (or a `done` key) proves that a fence was COMMITTED, never that the
+// bytes currently at the shared canonical path are the bytes of that fence.
+// The manifest therefore carries a cryptographic hash + size of the staged
+// artifact, and every "already published" / "rename verified" decision checks
+// the canonical file against it. No hash, no success.
+
+/** SHA-256 of an in-memory result buffer. */
+function sha256Buffer(buffer) {
+    return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+/**
+ * Hash + size of one file, read in bounded chunks.
+ *
+ * @returns {{ok:true, sha256:string, bytes:number}|{ok:false, reason:'missing'|'unreadable'|'not_file', error?:string}}
+ */
+function artifactProof(fsImpl, file) {
+    let st;
+    try {
+        st = fsImpl.statSync(file);
+    } catch (err) {
+        return {
+            ok: false,
+            reason: err && err.code === 'ENOENT' ? 'missing' : 'unreadable',
+            error: String((err && err.message) || err || 'stat failed'),
+        };
+    }
+    if (typeof st.isFile === 'function' && !st.isFile()) {
+        return { ok: false, reason: 'not_file' };
+    }
+    let fd = null;
+    try {
+        fd = fsImpl.openSync(file, 'r');
+        const hash = crypto.createHash('sha256');
+        const chunk = Buffer.allocUnsafe(64 * 1024);
+        let total = 0;
+        let n;
+        while ((n = fsImpl.readSync(fd, chunk, 0, chunk.length, null)) > 0) {
+            hash.update(chunk.subarray(0, n));
+            total += n;
+        }
+        return { ok: true, sha256: hash.digest('hex'), bytes: total };
+    } catch (err) {
+        return { ok: false, reason: 'unreadable', error: String((err && err.message) || err || 'read failed') };
+    } finally {
+        if (fd != null) { try { fsImpl.closeSync(fd); } catch (_) { /* ignore */ } }
+    }
+}
+
+/** Expected content proof of a committed manifest, or null when unprovable. */
+function expectedProofOf(manifest) {
+    if (!manifest || typeof manifest !== 'object') return null;
+    const sha256 = String(manifest.sha256 || '').toLowerCase();
+    const bytes = Number(manifest.bytes);
+    if (!SHA256_RE.test(sha256) || !Number.isFinite(bytes) || bytes < 0) return null;
+    return { sha256, bytes };
+}
+
+function proofMatches(proof, expected) {
+    return !!(proof && proof.ok && expected
+        && proof.sha256 === expected.sha256 && proof.bytes === expected.bytes);
+}
+
+/** STRICT manifest read: a Redis error is `error`, never "absent". */
+async function readManifestStrict(redis, { bookId, chapterId, sceneId, jobId }) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return { status: 'invalid' };
+    let raw;
+    try {
+        raw = await redis.get(qidem.artifactManifestKey(bookId, chapterId, sceneId, jobId));
+    } catch (err) {
+        return { status: 'error', error: String((err && err.message) || err || 'redis error').slice(0, 200) };
+    }
+    if (raw == null || raw === false) return { status: 'absent' };
+    let manifest = null;
+    try { manifest = JSON.parse(raw); } catch (_) { manifest = null; }
+    if (!manifest || typeof manifest !== 'object') return { status: 'corrupt' };
+    return { status: 'ok', manifest };
+}
+
+function _removeBackup(fsImpl, backup) {
+    if (backup && backup.kind === 'file') {
+        try { fsImpl.rmSync(backup.path, { force: true }); } catch (_) { /* ignore */ }
+    }
+}
+
+/**
+ * Preserve the bytes currently at canonical before replacing them, so a
+ * publication that turns out to be superseded can be rolled back atomically
+ * (hardlink where supported, copy otherwise).
+ */
+function _backupCanonical(fsImpl, fenceDir, canonical, canonicalExists) {
+    const backupPath = path.join(fenceDir, ROLLBACK_FILE_NAME);
+    try { fsImpl.rmSync(backupPath, { force: true }); } catch (_) { /* ignore */ }
+    if (!canonicalExists) return { kind: 'absent' };
+    try {
+        fsImpl.linkSync(canonical, backupPath);
+        return { kind: 'file', path: backupPath };
+    } catch (_) {
+        try {
+            fsImpl.copyFileSync(canonical, backupPath);
+            return { kind: 'file', path: backupPath };
+        } catch (err) {
+            throw _err('publish_failed', `cannot preserve the previous canonical bytes: ${err.message}`);
+        }
+    }
+}
+
+function _restoreCanonical(fsImpl, backup, canonical, expected, stagedPath = null) {
+    if (backup && backup.kind === 'file') {
+        try {
+            fsImpl.renameSync(backup.path, canonical);
+            _fsyncDir(fsImpl, path.dirname(canonical));
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+    // No previous canonical existed: put OUR bytes back where they came from
+    // (the staged copy is the recoverable state), and only delete when the
+    // bytes are provably ours and cannot be moved (never touch a newer fence
+    // that raced in after lock loss).
+    const current = artifactProof(fsImpl, canonical);
+    if (current.ok && proofMatches(current, expected)) {
+        if (stagedPath) {
+            try {
+                fsImpl.mkdirSync(path.dirname(stagedPath), { recursive: true });
+                fsImpl.renameSync(canonical, stagedPath);
+                _fsyncDir(fsImpl, path.dirname(stagedPath));
+                return true;
+            } catch (_) { /* fall through to delete */ }
+        }
+        try { fsImpl.rmSync(canonical, { force: true }); return true; } catch (_) { return false; }
+    }
+    return false;
+}
+
+async function _restoreMarker(redis, { bookId, chapterId, sceneId, jobId }, previous) {
+    try {
+        if (previous && previous.status === 'ok') {
+            await qidem.markFencePublication(redis, {
+                bookId, chapterId, sceneId, jobId,
+                fence: previous.marker.fence,
+                stage: previous.marker.stage,
+                sha256: previous.marker.sha256 || null,
+                bytes: previous.marker.bytes == null ? null : previous.marker.bytes,
+            });
+        } else {
+            await redis.del(qidem.fencePublishKey(bookId, chapterId, sceneId, jobId));
+        }
+    } catch (_) { /* best effort: a stale marker is corrected by the next owner */ }
 }
 
 // ── path derivation (traversal-safe) ──────────────────────────────────────
@@ -280,16 +442,26 @@ const PUBLICATION_RENAMING = 'renaming';
 const PUBLICATION_PUBLISHED = 'published';
 
 /**
- * Bring one COMMITTED fence to its final published state. Used by BOTH the
- * in-process publication (`commitFencedResult`) and restart recovery
- * (`resumePendingPublications`) so the two can never disagree.
+ * Publish one COMMITTED fence under the per-task CROSS-PROCESS lock.
+ *
+ * Stage 137 (audit 136 P1-A): the intent is re-read INSIDE the lock, the lock
+ * token is verified immediately before AND after the rename, and the intent is
+ * read once more after the rename. A publication that was superseded while it
+ * held the lock rolls its canonical replacement back and reports `stale_intent`
+ * — it never reports success and never reaches the ready-metadata chain.
+ *
+ * Stage 137 (audit 136 P1-B): every success-looking branch checks the canonical
+ * file against the manifest's sha256 + byte size. `marker.published == fence`
+ * or "a file exists" alone is never accepted.
  *
  * @returns {Promise<{published:boolean, reason:'published'|'rename_verified'|'already_published', cleaned:boolean}>}
  * @throws code `invalid_stage_path` (unsafe path), `publish_failed`
- *         (marker/rename failure — retryable, nothing was renamed),
+ *         (marker/lock/rename/read failure — retryable, no false success),
  *         `staged_missing` (committed bytes and canonical both gone),
- *         `publication_unproven` (staged bytes gone, canonical belongs to an
- *         unproven fence — never reported as success).
+ *         `publication_unproven` / `canonical_content_mismatch` (canonical is
+ *         not the committed artifact — never reported as success),
+ *         `staged_content_mismatch` (staged bytes do not match the manifest),
+ *         `stale_intent` (the fence was superseded while publishing).
  */
 async function publishCommittedFence(config, redis, {
     bookId, chapterId, sceneId, jobId, buildId, fence, canonicalPath,
@@ -301,79 +473,274 @@ async function publishCommittedFence(config, redis, {
     if (!fenceDir || !canonical || !outRoot || !_isInside(outRoot, canonical)) {
         throw _err('invalid_stage_path', 'cannot publish: unsafe staging or canonical path');
     }
-    const stagedPath = _stagedFilesIn(fsImpl, fenceDir)[0] || null;
+    const task = { bookId, chapterId, sceneId, jobId };
+    const fenceStr = String(fence);
 
-    const read = await qidem.readFencePublication(redis, { bookId, chapterId, sceneId, jobId });
-    if (read.status === 'error') {
-        // Cannot prove anything about the canonical file → do not touch it.
-        throw _err('publish_failed', `publication marker read failed: ${read.error}`);
-    }
-    const sameFence = read.status === 'ok' && read.marker.fence === String(fence);
-    const canonicalExists = fsImpl.existsSync(canonical);
-
-    // 1. THIS fence is already published: idempotent, never flaps. A stray
-    //    staged copy of the same fence (a redelivery that re-staged before the
-    //    commit verdict) is garbage.
-    if (sameFence && read.marker.stage === PUBLICATION_PUBLISHED && canonicalExists) {
-        let cleaned = false;
-        if (stagedPath) {
-            try { fsImpl.rmSync(stagedPath, { force: true }); cleaned = true; } catch (_) { /* leftover only */ }
+    return withPublicationLock(config, task, async (lock) => {
+        // ── 1. Authority: the CURRENT intent, re-read inside the lock ─────
+        // A superseded fence must not even inspect marker/staged state, and
+        // certainly must not rename. This is the check Stage 136 found missing
+        // between the earlier intent check and the filesystem rename.
+        const intent = await qidem.readIntentStrict(redis, task);
+        if (intent.status === 'error') {
+            throw _err('publish_failed', `intent read failed inside the publication lock: ${intent.error}`);
         }
-        return { published: false, reason: 'already_published', cleaned };
-    }
-
-    // 2. No staged bytes: the rename either already happened (the marker is
-    //    written BEFORE it, so "renaming" + no staged file + canonical present
-    //    is exactly the post-rename crash window) or the committed bytes are
-    //    gone. The second case is NEVER a success.
-    if (!stagedPath) {
-        if (sameFence && read.marker.stage === PUBLICATION_RENAMING && canonicalExists) {
-            await qidem.markFencePublication(redis, {
-                bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_PUBLISHED,
-            });
-            return { published: true, reason: 'rename_verified', cleaned: false };
+        if (intent.status === 'absent') {
+            throw _err('intent_missing', `intent vanished before publication (job=${jobId})`);
         }
-        if (!canonicalExists) {
-            throw _err('staged_missing', `staged bytes of a committed fence are gone (job=${jobId})`);
+        if (intent.status === 'corrupt') {
+            throw _err('intent_corrupt', `intent is unreadable before publication (job=${jobId})`);
         }
-        throw _err('publication_unproven', `canonical file is not proven to belong to fence ${String(fence).slice(0, 12)} (job=${jobId})`);
-    }
-
-    // 3. Complete the rename. The marker is durable BEFORE it; if it cannot be
-    //    written, nothing is renamed (a blind rename would be unrecoverable).
-    const marked = await qidem.markFencePublication(redis, {
-        bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_RENAMING,
-    });
-    if (!marked) {
-        throw _err('publish_failed', 'publication marker write failed — the rename was not attempted');
-    }
-
-    try {
-        fsImpl.mkdirSync(path.dirname(canonical), { recursive: true });
-        fsImpl.renameSync(stagedPath, canonical);
-        _fsyncDir(fsImpl, path.dirname(canonical));
-    } catch (err) {
-        // A concurrent publisher of the SAME fence may have moved the staged
-        // file between our marker write and our rename.
-        if (err && err.code === 'ENOENT' && fsImpl.existsSync(canonical)) {
-            await qidem.markFencePublication(redis, {
-                bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_PUBLISHED,
-            });
-            return { published: true, reason: 'rename_verified', cleaned: false };
+        if (intent.fence.toLowerCase() !== fenceStr.toLowerCase() || intent.state !== 'active') {
+            throw _err('stale_intent',
+                `fence ${fenceStr.slice(0, 12)} is no longer the active intent (job=${jobId})`);
         }
-        throw _err('publish_failed', `rename staged → canonical failed: ${err.message}`);
-    }
 
-    // Best effort: the rename is complete, so the publication itself is not
-    // undone by a failed marker write — recovery proves it from the absent
-    // staged file (window 3) and repairs the marker.
-    const finalized = await qidem.markFencePublication(redis, {
-        bookId, chapterId, sceneId, jobId, fence, stage: PUBLICATION_PUBLISHED,
-    });
-    if (!finalized) {
-        console.warn(`[RESULT-PUBLICATION] publication marker not finalized for job=${jobId} fence=${String(fence).slice(0, 12)} (rename is complete; recovery repairs it)`);
-    }
-    return { published: true, reason: 'published', cleaned: false };
+        // ── 2. Durable content proof of THIS fence ───────────────────────
+        const manifestRead = await readManifestStrict(redis, task);
+        if (manifestRead.status === 'error') {
+            throw _err('publish_failed', `manifest read failed: ${manifestRead.error}`);
+        }
+        if (manifestRead.status === 'absent') {
+            throw _err('manifest_missing', `no committed manifest for fence ${fenceStr.slice(0, 12)} (job=${jobId})`);
+        }
+        if (manifestRead.status === 'corrupt') {
+            throw _err('manifest_corrupt', `committed manifest is unreadable (job=${jobId})`);
+        }
+        const manifest = manifestRead.manifest;
+        if (String(manifest.published_fence || '').toLowerCase() !== fenceStr.toLowerCase()) {
+            throw _err('stale_intent',
+                `manifest belongs to another fence (job=${jobId}) — refusing to publish ${fenceStr.slice(0, 12)}`);
+        }
+        const expected = expectedProofOf(manifest);
+        if (!expected) {
+            throw _err('content_proof_missing',
+                `manifest of fence ${fenceStr.slice(0, 12)} carries no sha256/bytes proof (job=${jobId})`);
+        }
+
+        // ── 3. Publication marker + staged/canonical content ─────────────
+        const read = await qidem.readFencePublication(redis, task);
+        if (read.status === 'error') {
+            throw _err('publish_failed', `publication marker read failed: ${read.error}`);
+        }
+        const sameFence = read.status === 'ok' && String(read.marker.fence).toLowerCase() === fenceStr.toLowerCase();
+        const stagedPath = _stagedFilesIn(fsImpl, fenceDir)[0] || null;
+        const canonicalExists = fsImpl.existsSync(canonical);
+        const canonicalProof = canonicalExists
+            ? artifactProof(fsImpl, canonical)
+            : { ok: false, reason: 'missing' };
+        const canonicalMatches = proofMatches(canonicalProof, expected);
+
+        // 4. THIS fence is already published: idempotent, never flaps — but
+        //    ONLY when the canonical bytes still match the committed manifest.
+        //    A mismatch must never delete the staged copy: it may be the only
+        //    correct copy left (audit 136 · M8).
+        if (sameFence && read.marker.stage === PUBLICATION_PUBLISHED && canonicalMatches) {
+            let cleaned = false;
+            if (stagedPath) {
+                try { fsImpl.rmSync(stagedPath, { force: true }); cleaned = true; } catch (_) { /* leftover only */ }
+            }
+            _removeBackup(fsImpl, { kind: 'file', path: path.join(fenceDir, ROLLBACK_FILE_NAME) });
+            return { published: false, reason: 'already_published', cleaned };
+        }
+        if (sameFence && read.marker.stage === PUBLICATION_PUBLISHED && canonicalExists
+            && !canonicalMatches && !stagedPath) {
+            throw _err('canonical_content_mismatch',
+                `canonical does not match the committed artifact of fence ${fenceStr.slice(0, 12)} and no staged copy remains (job=${jobId}); a redelivery must re-stage the result`);
+        }
+
+        // 5. No staged bytes. `renaming` + canonical is only proof when the
+        //    canonical BYTES match this fence's manifest. If the staged file
+        //    disappeared concurrently (ENOENT / discardStagedFence) and the
+        //    canonical belongs to another fence, never report success
+        //    (audit 136 · M9).
+        if (!stagedPath) {
+            if (sameFence && read.marker.stage === PUBLICATION_RENAMING && canonicalMatches) {
+                await qidem.markFencePublication(redis, {
+                    bookId, chapterId, sceneId, jobId, fence: fenceStr,
+                    stage: PUBLICATION_PUBLISHED,
+                    sha256: expected.sha256, bytes: expected.bytes,
+                });
+                return { published: true, reason: 'rename_verified', cleaned: false };
+            }
+            if (!canonicalExists) {
+                throw _err('staged_missing', `staged bytes of a committed fence are gone (job=${jobId})`);
+            }
+            if (!canonicalMatches) {
+                throw _err('publication_unproven',
+                    `canonical bytes do not belong to fence ${fenceStr.slice(0, 12)} (job=${jobId})`);
+            }
+            // Canonical matches but there is no marker evidence of a rename
+            // (evicted marker). This is NOT success: the commit cannot prove
+            // the rename. A redelivery may re-stage and complete it.
+            throw _err('publication_unproven',
+                `rename of fence ${fenceStr.slice(0, 12)} is not proven by the durable marker (job=${jobId})`);
+        }
+
+        // 6. The staged bytes must be the committed artifact before they are
+        //    allowed to touch canonical (partial write / tampering).
+        const stagedProof = artifactProof(fsImpl, stagedPath);
+        if (!stagedProof.ok) {
+            if (stagedProof.reason === 'missing') {
+                throw _err('staged_missing', `staged bytes vanished before publication (job=${jobId})`);
+            }
+            throw _err('publish_failed', `cannot read staged artifact: ${stagedProof.error || stagedProof.reason}`);
+        }
+        if (!proofMatches(stagedProof, expected)) {
+            throw _err('staged_content_mismatch',
+                `staged bytes do not match the committed manifest of fence ${fenceStr.slice(0, 12)} (job=${jobId})`);
+        }
+
+        // 7. Preserve the previous canonical bytes and take the durable
+        //    `renaming` marker BEFORE the rename.
+        const backup = _backupCanonical(fsImpl, fenceDir, canonical, canonicalExists);
+        const marked = await qidem.markFencePublication(redis, {
+            bookId, chapterId, sceneId, jobId, fence: fenceStr,
+            stage: PUBLICATION_RENAMING,
+            sha256: expected.sha256, bytes: expected.bytes,
+        });
+        if (!marked) {
+            _removeBackup(fsImpl, backup);
+            throw _err('publish_failed', 'publication marker write failed — the rename was not attempted');
+        }
+
+        // 8. The lock must still be ours at the rename boundary. A stale owner
+        //    that lost its lock may never move bytes.
+        if (!lock.verify()) {
+            _removeBackup(fsImpl, backup);
+            await _restoreMarker(redis, task, read);
+            throw _err('publication_lock_lost', 'publication lock was lost before the rename — nothing was renamed');
+        }
+
+        try {
+            fsImpl.mkdirSync(path.dirname(canonical), { recursive: true });
+            fsImpl.renameSync(stagedPath, canonical);
+            _fsyncDir(fsImpl, path.dirname(canonical));
+        } catch (err) {
+            // A concurrent publisher of the SAME fence may have moved the
+            // staged file. Accept that ONLY if the canonical bytes are proven
+            // to be this fence's committed artifact.
+            if (err && err.code === 'ENOENT') {
+                const nowProof = artifactProof(fsImpl, canonical);
+                if (proofMatches(nowProof, expected)) {
+                    await qidem.markFencePublication(redis, {
+                        bookId, chapterId, sceneId, jobId, fence: fenceStr,
+                        stage: PUBLICATION_PUBLISHED,
+                        sha256: expected.sha256, bytes: expected.bytes,
+                    });
+                    _removeBackup(fsImpl, backup);
+                    return { published: true, reason: 'rename_verified', cleaned: false };
+                }
+            }
+            _removeBackup(fsImpl, backup);
+            throw _err('publish_failed', `rename staged → canonical failed: ${err.message}`);
+        }
+
+        // 9. Prove the rename produced the committed bytes.
+        const postRenameProof = artifactProof(fsImpl, canonical);
+        if (!proofMatches(postRenameProof, expected)) {
+            _removeBackup(fsImpl, backup);
+            throw _err('publish_verification_failed',
+                `canonical bytes after rename do not match the committed artifact (job=${jobId})`);
+        }
+
+        // 10. Post-rename authority check: the fence may have been superseded
+        //     while it held the lock, and the lock itself may have been lost.
+        //     Either way: no success, no ready metadata; roll the canonical
+        //     replacement back if it is still ours.
+        const after = await qidem.readIntentStrict(redis, task);
+        const lockOwned = lock.verify();
+        const stillCurrent = after.status === 'ok'
+            && after.fence.toLowerCase() === fenceStr.toLowerCase() && after.state === 'active';
+        if (!lockOwned || !stillCurrent) {
+            if (after.status === 'error') {
+                _removeBackup(fsImpl, backup);
+                throw _err('publish_failed',
+                    `intent read failed after the rename (job=${jobId}) — publication is not confirmed`);
+            }
+            const currentProof = artifactProof(fsImpl, canonical);
+            if (proofMatches(currentProof, expected)) {
+                _restoreCanonical(fsImpl, backup, canonical, expected, stagedPath);
+            }
+            _removeBackup(fsImpl, backup);
+            await _restoreMarker(redis, task, read);
+            throw _err(lockOwned ? 'stale_intent' : 'publication_lock_lost',
+                lockOwned
+                    ? `fence ${fenceStr.slice(0, 12)} was superseded during publication — canonical rolled back (job=${jobId})`
+                    : `publication lock was lost during publication — canonical rolled back (job=${jobId})`);
+        }
+
+        // 11. Best effort finalization: the rename is complete and verified, so
+        //     a failed marker write is repaired by recovery from the same
+        //     content proof (never from "a file exists").
+        const finalized = await qidem.markFencePublication(redis, {
+            bookId, chapterId, sceneId, jobId, fence: fenceStr,
+            stage: PUBLICATION_PUBLISHED,
+            sha256: expected.sha256, bytes: expected.bytes,
+        });
+        if (!finalized) {
+            console.warn(`[RESULT-PUBLICATION] publication marker not finalized for job=${jobId} fence=${fenceStr.slice(0, 12)} (rename is complete and verified; recovery repairs it)`);
+        }
+        _removeBackup(fsImpl, backup);
+        return { published: true, reason: 'published', cleaned: false };
+    }, { fs: fsImpl, waitMs: deps.lockWaitMs });
+}
+
+/**
+ * Read-only proof that the CURRENT fence's committed artifact is really at the
+ * canonical path. Used by debug recovery before any "already ready / already on
+ * disk / PG ready" short-circuit (Stage 137 · audit 136 B3e/f/g): a ready flag
+ * or a file left by a PREVIOUS generation is not proof for the current one.
+ *
+ * Takes the same per-task lock as publication so it observes a complete
+ * publication, never a marker/rename in flight.
+ *
+ * @returns {Promise<{status:'published'|'not_published'|'superseded'|'error', reason?:string, manifest?:object, proof?:object}>}
+ */
+async function verifyPublishedFence(config, redis, {
+    bookId, chapterId, sceneId, jobId, buildId = null, fence, canonicalPath = null,
+}, deps = {}) {
+    const fsImpl = deps.fs || fs;
+    const task = { bookId, chapterId, sceneId, jobId };
+    const fenceStr = String(fence || '');
+    return withPublicationLock(config, task, async () => {
+        const intent = await qidem.readIntentStrict(redis, task);
+        if (intent.status === 'error') return { status: 'error', reason: 'intent_read_error' };
+        if (intent.status !== 'ok') return { status: 'not_published', reason: `intent_${intent.status}` };
+        if (intent.fence.toLowerCase() !== fenceStr.toLowerCase() || intent.state !== 'active') {
+            return { status: 'superseded', reason: 'intent_of_another_fence' };
+        }
+        const manifestRead = await readManifestStrict(redis, task);
+        if (manifestRead.status === 'error') return { status: 'error', reason: 'manifest_read_error' };
+        if (manifestRead.status !== 'ok') return { status: 'not_published', reason: `manifest_${manifestRead.status}` };
+        const manifest = manifestRead.manifest;
+        if (String(manifest.published_fence || '').toLowerCase() !== fenceStr.toLowerCase()) {
+            return { status: 'not_published', reason: 'manifest_of_another_fence' };
+        }
+        const expected = expectedProofOf(manifest);
+        if (!expected) return { status: 'not_published', reason: 'content_proof_missing' };
+        const outRoot = path.resolve(config.OUTPUT_DIR);
+        const manifestBuild = buildId || manifest.build_id;
+        if (!isValidBuildId(manifestBuild)) return { status: 'not_published', reason: 'invalid_build' };
+        const buildDir = path.resolve(outRoot, String(manifestBuild));
+        const canonical = canonicalPath
+            ? path.resolve(canonicalPath)
+            : path.resolve(buildDir, String(manifest.canonical_path || ''));
+        if (!_isInside(buildDir, canonical) || !_isInside(outRoot, canonical)) {
+            return { status: 'error', reason: 'unsafe_canonical_path' };
+        }
+        const marker = await qidem.readFencePublication(redis, task);
+        if (marker.status === 'error') return { status: 'error', reason: 'marker_read_error' };
+        if (marker.status !== 'ok'
+            || String(marker.marker.fence).toLowerCase() !== fenceStr.toLowerCase()
+            || marker.marker.stage !== PUBLICATION_PUBLISHED) {
+            return { status: 'not_published', reason: 'marker_not_published' };
+        }
+        const proof = artifactProof(fsImpl, canonical);
+        if (!proof.ok) return { status: 'not_published', reason: `canonical_${proof.reason}` };
+        if (!proofMatches(proof, expected)) return { status: 'not_published', reason: 'canonical_content_mismatch' };
+        return { status: 'published', manifest, proof };
+    }, { fs: fsImpl, waitMs: deps.lockWaitMs });
 }
 
 /**
@@ -398,11 +765,28 @@ function discardStagedFence(config, { buildId, jobId, fence }, deps = {}) {
 
 // ── fenced commit protocol ────────────────────────────────────────────────
 
-/** The durable publication manifest stored in Redis (and journaled). */
-function buildCommitManifest({ bookId, chapterId, sceneId, jobId, buildId, buildDir, fence, stagedPath, canonicalPath, bytes, now = Date.now() }) {
+/**
+ * The durable publication manifest stored in Redis (and journaled).
+ *
+ * Stage 137 (audit 136 P1-B): `sha256` is the cryptographic proof that the
+ * canonical path contains the committed artifact. It is computed from the
+ * staged file when not supplied by the caller (the in-process commit passes
+ * the buffer hash); a manifest that cannot name its bytes is never written.
+ */
+function buildCommitManifest({ bookId, chapterId, sceneId, jobId, buildId, buildDir, fence, stagedPath, canonicalPath, bytes, sha256 = null, now = Date.now() }) {
     const base = path.resolve(buildDir);
+    let digest = String(sha256 || '').toLowerCase();
+    let size = Number(bytes) || 0;
+    if (!SHA256_RE.test(digest)) {
+        const proof = artifactProof(fs, stagedPath);
+        if (!proof.ok) {
+            throw _err('staged_unreadable', `cannot hash the staged artifact: ${proof.error || proof.reason}`);
+        }
+        digest = proof.sha256;
+        size = proof.bytes;
+    }
     return {
-        version: 1,
+        version: MANIFEST_VERSION,
         published_fence: String(fence),
         book_id: String(bookId),
         chapter_id: String(chapterId),
@@ -413,7 +797,8 @@ function buildCommitManifest({ bookId, chapterId, sceneId, jobId, buildId, build
         // valid across mounts, and every consumer re-validates containment.
         staged_path: path.relative(base, path.resolve(stagedPath)),
         canonical_path: path.relative(base, path.resolve(canonicalPath)),
-        bytes: Number(bytes) || 0,
+        bytes: size,
+        sha256: digest,
         published_at: Number(now) || 0,
     };
 }
@@ -440,7 +825,8 @@ async function commitFencedResult(redis, config, {
     const manifest = buildCommitManifest({
         bookId, chapterId, sceneId, jobId, buildId,
         buildDir: path.join(path.resolve(config.OUTPUT_DIR), buildId),
-        fence, stagedPath: staged.stagedPath, canonicalPath, bytes: staged.bytes, now,
+        fence, stagedPath: staged.stagedPath, canonicalPath, bytes: staged.bytes,
+        sha256: sha256Buffer(buffer), now,
     });
     const verdict = await qidem.fenceCommitResult(redis, {
         bookId, chapterId, sceneId, jobId, fence, manifest,
@@ -574,9 +960,13 @@ async function resumePendingPublications(redis, config, { limit = RESUME_MANIFES
                         out.cleaned++;
                     }
                 } catch (err) {
+                    // Stage 137 — a fence that lost its intent (or its
+                    // publication lock) while the rename was in flight is
+                    // SUPERSEDED, never "resumed". No success is reported.
                     if (err && err.code === 'staged_missing') out.orphans++;
+                    else if (err && (err.code === 'stale_intent' || err.code === 'publication_lock_lost')) out.superseded++;
                     else out.errors++;
-                    console.warn(`[RESULT-PUBLICATION] resume failed for job=${jobId} fence=${String(fence).slice(0, 12)}: ${err.message}`);
+                    console.warn(`[RESULT-PUBLICATION] resume failed for job=${jobId} fence=${String(fence).slice(0, 12)}: ${err.code || ''} ${err.message}`);
                 }
             }
         } while (cursor !== '0');
@@ -682,6 +1072,10 @@ module.exports = {
     stageResult,
     publishStaged,
     publishCommittedFence,
+    verifyPublishedFence,
+    sha256Buffer,
+    artifactProof,
+    expectedProofOf,
     discardStagedFence,
     buildCommitManifest,
     commitFencedResult,
