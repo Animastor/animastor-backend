@@ -169,8 +169,13 @@ module.exports = function(redis, config, deps) {
             fs.mkdirSync(path.dirname(absTemp.path), { recursive: true });
             fs.mkdirSync(path.dirname(absFinal.path), { recursive: true });
 
-            // 1 — write the temp file and fsync it before it can be published.
-            const tmpFd = fs.openSync(absTemp.path, 'w');
+            // 1 — write the temp file and fsync it before it can be
+            // published. The path is UNIQUE per attempt (pid + random
+            // suffix, see stagingRelPath) and is opened with `wx` (O_EXCL):
+            // after a crash the leftover temp shares its inode with the
+            // already-published file, so a truncating open('w') would cut
+            // the published bytes — `wx` refuses a collision instead.
+            const tmpFd = fs.openSync(absTemp.path, 'wx');
             try {
                 fs.writeFileSync(tmpFd, buffer);
                 fs.fsyncSync(tmpFd);

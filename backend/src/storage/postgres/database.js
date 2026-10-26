@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const POOL_CONFIG = {
     host: process.env.PG_HOST || 'localhost',
     port: parseInt(process.env.PG_PORT || '5432', 10),
-    database: process.env.PG_DB || 'animastor',
+    database: process.env.PG_DB || 'stage143a',
     user: process.env.PG_USER || 'animastor',
     password: process.env.PG_PASSWORD || 'animastor_secret_2026',
     max: 20,

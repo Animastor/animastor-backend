@@ -1,0 +1,39 @@
+# ============================================================
+# Backend pinned-image cutover (mirror of overlay-gpu-hub-standalone)
+# ============================================================
+# DRAFT-копия для deploy/ (этап 27). Источник:
+#   /home/animastor/animastor/docker/compose/overlay-backend-standalone.yml
+#   (sha256 eac32cb0bb7f1f6a806e03b3c64fd052808ac7a569345f8377a1af35579a36a1)
+#
+# ЕДИНСТВЕННОЕ отличие от оригинала (см. отчёт этапа 27, §3): пути bind-mount
+# переведены в АБСОЛЮТНЫЕ, т.к. относительные `./…` в этом каталоге
+# разрешались бы как /home/animastor/animastor-backend/deploy/data/… и
+# монтировали пустые каталоги. Абсолютные пути указывают на те же
+# production-каталоги mono, что и сейчас. Требует подтверждения G4.
+#
+# Use when BACKEND_IMAGE is set to a pinned registry digest.
+#
+# Usage (всегда ОБА файла и --project-name animastor):
+#   docker compose --project-name animastor --env-file .env \
+#     -f docker-compose.yml \
+#     -f overlay-backend-standalone.yml \
+#     config   # проверка; up -d — только в фазе H (G7)
+#
+# RULES:
+#   - NEVER use a moving tag. Pin by digest.
+#   - Set BACKEND_IMAGE in .env first, e.g.:
+#       BACKEND_IMAGE=ghcr.io/animastor/animastor-backend@sha256:<digest>
+#   - Rollback: point BACKEND_IMAGE at the previous production digest and re-up.
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE:?set BACKEND_IMAGE=<pinned digest ref> in .env}
+    build: !reset null
+    # The image ships the authoritative src/ — the legacy ./backend/src bind
+    # mount is REMOVED here so production can never serve a stale host tree
+    # over the verified image code. Data/AI-config mounts stay.
+    volumes: !override
+      - /home/animastor/animastor/data/output:/data/output
+      - /home/animastor/animastor/data/books:/data/books
+      - /home/animastor/animastor/backend/ai:/app/ai
+      - /home/animastor/animastor/backend/tests:/app/tests

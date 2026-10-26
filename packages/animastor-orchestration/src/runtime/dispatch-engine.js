@@ -1661,16 +1661,19 @@ async function clearHubDispatches(dispatchIds, options = {}) {
                 // Verify the hub honoured OUR scope. A mismatched echo means it
                 // may have swept a different book (or everything) — that is a
                 // failure, not a success we can report.
-                let enforcedScope = true;
+                // A book sweep is destructive.  HTTP 200 alone is never
+                // evidence that the hub applied our ownership filter: fail
+                // CLOSED unless a well-formed echo names exactly this book.
+                let enforcedScope = false;
                 try {
                     const body = typeof response.json === 'function' ? await response.json() : null;
-                    if (body && body.scope && body.scope.book_id != null && body.scope.book_id !== bookId) {
-                        enforcedScope = false;
-                    }
-                } catch (_) { /* unparseable body — trust the ok status */ }
+                    enforcedScope = !!(body && body.scope
+                        && typeof body.scope.book_id === 'string'
+                        && body.scope.book_id === bookId);
+                } catch (_) { /* malformed body is an unsafe, failed sweep */ }
                 if (!enforcedScope) {
                     failed++;
-                    reportWarning(`${context}: GPU hub book cleanup echoed a foreign scope for ${bookId} — treated as failed`);
+                    reportWarning(`${context}: GPU hub book cleanup did not confirm exact scope for ${bookId} — treated as failed`);
                 } else {
                     cleared++;
                 }

@@ -1,0 +1,149 @@
+# ============================================================
+# Animastor deploy compose (DRAFT — этап 27, G4 ещё не утверждён)
+# ============================================================
+# 3-way merge: mono docker-compose.yml + overlay-backend-standalone.yml
+#              vs animastor-backend/docker-compose.yml (этап 26 §3.1, runbook E1).
+#
+# Отличия от исходных файлов (все задокументированы в отчёте этапа 27):
+#   1. Все bind-mount источники сделаны АБСОЛЮТНЫМИ (runbook E1) — иначе
+#      относительные `./…` разрешались бы относительно deploy/ и создавали
+#      пустые точки монтирования. Абсолютные пути указывают на ТЕ ЖЕ
+#      production-каталоги mono, что и сейчас (монты не меняются).
+#   2. gpu-hub — версия из animastor-backend/docker-compose.yml: без `build:`,
+#      `image: ${GPU_HUB_IMAGE:?…}` (обязательный pin) — финальный конфиг не
+#      содержит build: ни у backend, ни у gpu-hub (критерий E1 PASS).
+#   3. backend сохраняет `build: ./backend` из базовых compose — он сбрасывается
+#      overlay-файлом (`build: !reset null`), как и в production.
+#
+# ПРАВИЛА ИСПОЛЬЗОВАНИЯ (до G4/H2):
+#   - всегда ОБА файла: -f docker-compose.yml -f overlay-backend-standalone.yml;
+#   - --project-name animastor (иначе другие имена томов pg-data/redis-data!);
+#   - --env-file .env (секреты вносит владелец, chmod 600);
+#   - ЗАПРЕЩЕНО запускать `up` из этого каталога до фазы H (G7).
+#
+# НЕ содержит секретов: только ссылки на переменные окружения.
+
+networks:
+  net:
+    driver: bridge
+
+volumes:
+  pg-data:
+  redis-data:           # Redis persistence — prevents data loss on restart
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: animastor-pg
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    networks:
+      - net
+    environment:
+      POSTGRES_DB: animastor
+      POSTGRES_USER: animastor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U animastor -d animastor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: animastor-redis
+    restart: unless-stopped
+    networks:
+      - net
+    volumes:
+      - redis-data:/data  # Persistent storage — canonical state survives restart
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    build: ./backend
+    container_name: animastor-backend
+    restart: unless-stopped
+    networks:
+      - net
+    environment:
+      - HUB_URL=http://gpu-hub:5000
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DB=animastor
+      - PG_USER=animastor
+      - PG_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - AI_API_BASE_URL=https://api.aicredits.in/v1
+      # Global AI key is now OPTIONAL (Experimental Beta): each workspace may
+      # carry its own provider stored in PG; global env config stays the
+      # backward-compatible fallback. Leave empty to rely on workspace keys.
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=qwen/qwen3-32b
+      - AI_MODEL=qwen/qwen3-32b
+      # Workspace AI provider secret store: encrypts apiKey at rest (AES-256-GCM).
+      # REQUIRED — no weak dev fallback in deployment.
+      - WORKSPACE_SECRET_KEY=${WORKSPACE_SECRET_KEY:?set WORKSPACE_SECRET_KEY in .env}
+      # GPU Hub API key — должно совпадать с GPU_HUB_API_KEY в gpu-hub секции
+      - GPU_HUB_API_KEY=${GPU_HUB_API_KEY:-}
+      # Cross-subdomain session/guest cookie scope (public website + app on
+      # one parent domain). Empty = host-only (legacy single-host behavior).
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-animastor.org}
+      # TEMPORARY (research): keep source audio chunks after merge
+      - KEEP_AUDIO_CHUNKS=${KEEP_AUDIO_CHUNKS:-}
+      # TEMPORARY (research): tail-only cleanup + chunk durations tracking
+      - AUDIO_CLEANUP_TAIL_ONLY=${AUDIO_CLEANUP_TAIL_ONLY:-}
+      - TRACK_CHUNK_DURATIONS=${TRACK_CHUNK_DURATIONS:-}
+      # SH-1 kill-switch (worker sharing V1) — DEFAULT OFF.
+      - SHARE_FEATURES_ENABLED=${SHARE_FEATURES_ENABLED:-0}
+    volumes:
+      # АБСОЛЮТНЫЕ пути (E1) — те же каталоги, что смонтированы в production сейчас:
+      - /home/animastor/animastor/data/output:/data/output
+      - /home/animastor/animastor/data/books:/data/books
+      - /home/animastor/animastor/backend/ai:/app/ai
+      - /home/animastor/animastor/backend/src:/app/src
+      - /home/animastor/animastor/backend/tests:/app/tests
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  gpu-hub:
+    # GPU Hub consumed as a published image (repo-version compose, no build:).
+    # NEVER use a moving tag — pin by digest in .env:
+    #   GPU_HUB_IMAGE=ghcr.io/animastor/animastor-gpu-hub@sha256:<digest>
+    image: ${GPU_HUB_IMAGE:?set GPU_HUB_IMAGE=<pinned digest ref> in .env}
+    container_name: gpu-hub
+    restart: unless-stopped
+    networks:
+      - net
+    environment:
+      - GPU_HUB_API_KEY=${GPU_HUB_API_KEY:-}
+      - GPU_TIMEOUT=${GPU_TIMEOUT:-600000}
+      - SHARE_FEATURES_ENABLED=${SHARE_FEATURES_ENABLED:-0}
+
+  nginx:
+    image: nginx:alpine
+    container_name: animastor-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - net
+    volumes:
+      - /home/animastor/animastor/proxy/conf/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${LETS_ENCRYPT_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
+      - /home/animastor/animastor/frontends/website:/usr/share/nginx/frontends/website:ro
+      - /home/animastor/animastor/frontends/app:/usr/share/nginx/frontends/app:ro
+      - /home/animastor/animastor-docs-deploy:/usr/share/nginx/docs:ro
+      - /home/animastor/animastor/proxy/conf/.htpasswd:/etc/nginx/.htpasswd:ro
+    depends_on:
+      - backend

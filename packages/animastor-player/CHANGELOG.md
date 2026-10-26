@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.2 (2026-10-26)
+
+Stage 143a phase 2a — versioned-pointer readers in the IU-media contour
+(B0 / N3 / N4): with `IU_IMAGE_VERSIONED` on, the published pointer is the
+authority; with the flag off every path is byte-identical and issues zero
+new PG calls.
+
+### Changed
+
+- `GET /iu-image` — the route answers from the three-way verdict of
+  `resolveIuImagePath`: ok → serve the versioned file (200 + ETag), absent
+  → the legacy fallback exactly as before, missing (row present, target
+  unsafe/absent) → **404 + log** (a broken publication can never be masked
+  by stale legacy bytes), pointer-store outage → **503 + log**.
+- `/chunk/:id` (N3) — auto-redispatch fires only when NEITHER the legacy
+  scan NOR a live pointer proves the image; a pointer-store outage blocks
+  the repair instead of silently re-dispatching.
+- `image_ready` (N4) — the ready verdict accounts for the published
+  pointer and never reports READY on a pointer-store outage.
+
+### API
+
+- No breaking changes: consumers reach the pointer only through the
+  injected image facade (the package itself never requires PG); with the
+  flag OFF the behavior matches 0.1.1 byte for byte.
+
 ## 0.1.1 (2026-10-17)
 
 BOOK-RECOVER registry gate (stage 59, released via stage 61): the scene

@@ -1,6 +1,6 @@
 {
     "name": "@animastor/player",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Animastor Player — playback HTTP contour: scene media serving (Range/206/ETag/If-Range), scene data (status/storyboard/timings/waveform), IU media, playback queue and assets-state. Reads book content only through the injected playerModel (VBook boundary); every host dependency arrives as an injected port — no config, no generation, no workflows, no Redis/PG/Redis internals in the package.",
     "keywords": [
         "animastor",

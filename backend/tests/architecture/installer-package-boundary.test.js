@@ -234,13 +234,17 @@ describe('installer package boundary guards (@animastor/installer)', () => {
             .to.include("path.join(repoRoot, 'animastor-installer', wf.source.repository_path)");
     });
 
-    it('IB-G15: package.json pins (main, bin, private)', () => {
+    it('IB-G15: package.json pins (main, bin, public publish)', () => {
         const pkg = JSON.parse(fs.readFileSync(INSTALLER_PKG_JSON, 'utf8'));
         expect(pkg.main, 'main must be src/installer/index.js').to.equal('src/installer/index.js');
         expect(pkg.bin, 'bin.animastor-installer must be declared').to.deep.equal({
             'animastor-installer': 'src/installer/cli.js',
         });
-        expect(pkg.private, 'package stays private (no publish yet)').to.equal(true);
+        // Published as a public scoped package at 8f3a3d6 (npm 0.1.x):
+        // "private": true was intentionally removed and publishConfig.access
+        // pins the public visibility — the package must stay publishable.
+        expect(pkg.private, 'installer is intentionally public (npm-published)').to.not.equal(true);
+        expect(pkg.publishConfig && pkg.publishConfig.access, 'publishConfig.access must stay public').to.equal('public');
     });
 
     it('IB-G16: manifests are physically inside the package', () => {
