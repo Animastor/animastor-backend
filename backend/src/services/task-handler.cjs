@@ -6,6 +6,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { publishProgress } = require('./progress-pubsub.cjs');
 const jobSchema = require('../runtime/job-schema');
 // S-4: filename grammar composed from the canonical owner (bytes unchanged)
@@ -46,6 +47,57 @@ module.exports = function(redis, config, deps) {
     // age-based GC, and the pointer is untouched.
     function iuImageVersionedEnabled() {
         return require('../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled();
+    }
+
+    /** SHA-256 of the callback bytes — the comparison key of step 3/4b. */
+    function sha256Hex(buf) {
+        return crypto.createHash('sha256').update(buf).digest('hex');
+    }
+
+    /**
+     * Compare an already-existing immutable file with the callback bytes.
+     * Size AND SHA-256 must both match: size alone would accept a truncated
+     * file that happens to carry the same length prefix, the hash alone would
+     * silently accept a short write.
+     *
+     * @returns {{ok:true, sha256:string}
+     *           |{ok:false, reason:string, detail?:string}}
+     */
+    function verifyVersionedBytes(absPath, buffer, shaExpected) {
+        let existing;
+        try {
+            existing = fs.readFileSync(absPath);
+        } catch (readErr) {
+            return { ok: false, reason: 'unreadable', detail: readErr.message };
+        }
+        if (existing.length !== buffer.length) {
+            return {
+                ok: false,
+                reason: 'size_mismatch',
+                detail: `existing=${existing.length}B callback=${buffer.length}B`,
+            };
+        }
+        const sha = sha256Hex(existing);
+        if (sha !== shaExpected) {
+            return { ok: false, reason: 'hash_mismatch', detail: `existing=${sha} callback=${shaExpected}` };
+        }
+        return { ok: true, sha256: sha };
+    }
+
+    /** fsync a directory so a new directory entry survives a crash. */
+    function fsyncDir(dir) {
+        let fd = null;
+        try {
+            fd = fs.openSync(dir, 'r');
+            fs.fsyncSync(fd);
+        } catch (_) {
+            // Directory fsync is best-effort (not supported on every fs); the
+            // data itself was already fsynced through the temp file.
+        } finally {
+            if (fd !== null) {
+                try { fs.closeSync(fd); } catch (_) { /* ignore */ }
+            }
+        }
     }
 
     async function publishVersionedIuImage({ parsed, jobId, buildId, buffer, hexFence, assetId }) {
@@ -102,23 +154,69 @@ module.exports = function(redis, config, deps) {
             throw err;
         }
 
-        // 4 — bytes: temp file first, then an EXCLUSIVE copy into the
-        // immutable versioned path (EEXIST = this version already exists —
-        // keep the first bytes, never overwrite).
+        // 4 — bytes: fsync'd temp → ATOMIC hard link into the immutable
+        // versioned path → fsync of the parent directory.
+        //
+        // Why not COPYFILE_EXCL (Phase 1): a crash in the middle of the copy
+        // left a TRUNCATED file at the immutable path forever, and the next
+        // delivery treated that EEXIST as "our own bytes" — the pointer could
+        // then advance onto a half-written file. `link(2)` never overwrites
+        // and only ever publishes the INODE OF A FULLY-WRITTEN temp file, so
+        // the immutable path can no longer hold a partial write; an EEXIST is
+        // only accepted after a byte-for-byte comparison with the callback.
+        const shaExpected = sha256Hex(buffer);
         try {
             fs.mkdirSync(path.dirname(absTemp.path), { recursive: true });
-            fs.writeFileSync(absTemp.path, buffer);
+            fs.mkdirSync(path.dirname(absFinal.path), { recursive: true });
+
+            // 1 — write the temp file and fsync it before it can be published.
+            const tmpFd = fs.openSync(absTemp.path, 'w');
             try {
-                fs.copyFileSync(absTemp.path, absFinal.path, fs.constants.COPYFILE_EXCL);
-            } catch (copyErr) {
-                if (copyErr.code !== 'EEXIST') throw copyErr;
-                log(`Versioned file already present (idempotent replay): ${absFinal.path}`);
+                fs.writeFileSync(tmpFd, buffer);
+                fs.fsyncSync(tmpFd);
+            } finally {
+                fs.closeSync(tmpFd);
             }
-            try { fs.unlinkSync(absTemp.path); } catch (_) { /* GC collects staging */ }
+
+            // 2 — atomic, no-overwrite publication of the immutable name.
+            try {
+                fs.linkSync(absTemp.path, absFinal.path);
+            } catch (linkErr) {
+                if (linkErr.code !== 'EEXIST') throw linkErr;
+                // 3 — EEXIST: the fence's file already exists. Only a
+                // byte-identical copy is an idempotent replay; anything else
+                // (a truncated file from an older writer, a foreign payload)
+                // is a TERMINAL conflict: the pointer does not move and the
+                // existing file is neither deleted nor overwritten.
+                const cmp = verifyVersionedBytes(absFinal.path, buffer, shaExpected);
+                if (!cmp.ok) {
+                    const err = new Error(`Rejected task result: version_conflict (immutable file at ${relFinal} does not match the callback bytes: ${cmp.reason}${cmp.detail ? ' — ' + cmp.detail : ''}; pointer NOT moved, existing file kept)`);
+                    err.code = 'version_conflict';
+                    throw err;
+                }
+                log(`Versioned file already present, bytes verified (idempotent replay): ${relFinal}`);
+            }
+
+            // Make the new directory entry durable as well.
+            fsyncDir(path.dirname(absFinal.path));
+
+            // 4b — never move the pointer onto bytes we have not verified.
+            const finalCheck = verifyVersionedBytes(absFinal.path, buffer, shaExpected);
+            if (!finalCheck.ok) {
+                const err = new Error(`Rejected task result: publish_failed (final versioned file failed verification: ${finalCheck.reason}${finalCheck.detail ? ' — ' + finalCheck.detail : ''})`);
+                err.code = 'publish_failed';
+                throw err;
+            }
         } catch (writeErr) {
+            if (writeErr.code === 'version_conflict') throw writeErr;
             const err = new Error(`Versioned write failed for ${jobId}: ${writeErr.message}`);
             err.code = 'publish_failed';
             throw err;
+        } finally {
+            // 5 — THIS writer's temp file goes away on every path (success,
+            // reject, crash-recovered). Only the immutable file is kept for
+            // the age-based GC; a leftover temp is never a publication.
+            try { fs.unlinkSync(absTemp.path); } catch (_) { /* GC collects staging */ }
         }
 
         // 5 — pointer UPDATE: PG decides the ordering (fence <= current ⇒

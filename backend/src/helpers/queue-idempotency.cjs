@@ -1716,6 +1716,12 @@ const FENCE_COMMIT_VERDICTS = new Set([
 /** Verdicts that are TERMINAL for this result (retrying cannot fix them). */
 const FENCE_COMMIT_REJECTED = new Set([
     'stale_intent', 'intent_missing', 'intent_corrupt', 'invalid_fence',
+    // Stage 143a fix: the immutable path already holds bytes that do NOT
+    // match this callback (size/SHA-256 differ). The file is never
+    // overwritten and the pointer never moves, so replaying the SAME
+    // callback can only fail again — the route answers `rejected:true` and
+    // keeps the dedup marker instead of churning retries.
+    'version_conflict',
 ]);
 
 /**

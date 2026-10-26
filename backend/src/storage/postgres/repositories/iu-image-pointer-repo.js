@@ -22,6 +22,41 @@
 // DDL is NOT here: guardrail PG-5 keeps all DDL in storage/postgres/schema.js
 // (backend/tests/architecture/postgres-host-infrastructure.test.js).
 //
+// ── OPERATOR RULE (contract B7 / Stage 143a fix · A2) ────────────────────
+//
+// Mode exclusivity, in both directions:
+//   • flag ON  → every `iu_image` result goes down the versioned branch
+//     (task-handler `versionedIuPublication`); the legacy canonical writer is
+//     unreachable for `iu_image`, so a legacy write can never race a
+//     publication while the flag is on.
+//   • flag OFF → this module answers "disabled" and the POINTER IS INERT:
+//     every reader returns null with ZERO PG calls and serves the legacy
+//     canonical file byte-identically, even when rows from an earlier ON
+//     period are still in the table.
+//
+// The dangerous state is therefore: flag flipped OFF after a period of
+// publications, a LEGACY writer then updated the canonical file, flag flipped
+// back ON — the reader would serve a STALE pointer (the older generation)
+// instead of the newer legacy bytes. Before RE-enabling the flag an operator
+// must drop the pointers (and, when the affected receipts must not be
+// replayed, the reservations) of the books/builds that went through the
+// legacy window:
+//
+//   -- one build of one book
+//   DELETE FROM iu_image_pointers           WHERE book_id = $1 AND build_id = $2;
+//   -- every build of one book
+//   DELETE FROM iu_image_pointers           WHERE book_id = $1;
+//   -- optional: drop the durable fence reservations of the same scope (a
+//   -- dropped reservation makes an old hex receipt fail closed with
+//   -- reservation_missing → terminal reject; nothing is published)
+//   DELETE FROM iu_image_fence_reservations WHERE book_id = $1 AND build_id = $2;
+//   DELETE FROM iu_image_fence_reservations WHERE book_id = $1;
+//
+// Never "reset" a pointer by hand (no manual UPDATE) and never delete
+// immutable files: the pointer only moves forward through
+// publishIuImagePointer (`publish_fence <= EXCLUDED`), and
+// `{build}/.versions/**` is write-once.
+//
 // Path safety (Stage 143a condition 3): pointers store paths RELATIVE to
 // OUTPUT_DIR; every read resolves through resolveOutputPath() which rejects
 // traversal, absolute paths and symlinks escaping OUTPUT_DIR.
