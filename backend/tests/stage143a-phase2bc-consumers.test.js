@@ -36,6 +36,7 @@ const qidem = require('../src/helpers/queue-idempotency.cjs');
 const taskHandlerFactory = require('../src/services/task-handler.cjs');
 const redisHelpersFactory = require('../src/helpers/redis-helpers.cjs');
 const preview = require('../src/image/preview');
+const imageHelpers = require('../src/image/helpers');
 const exportRoutes = require('../src/routes/book/export-routes.cjs');
 const dispatch = require('@animastor/orchestration').runtime.dispatch;
 const { createMockRedis } = require('./mocks/redis-mock');
@@ -331,6 +332,94 @@ describe('stage143a phase2bc — getOrCreatePreview versioned source (isolated P
         try {
             const out = await preview.getOrCreatePreview(BOOK, CHAPTER, SCENE, IU_SEG, BUILD);
             expect(out).to.equal(null);
+            expect(calls, 'flag OFF ⇒ zero PG calls').to.deep.equal([]);
+        } finally {
+            database.query = originalQuery;
+        }
+    });
+
+    // ── FIX: the published pointer must win over a stale legacy source ─────
+    async function referencePreview(srcPath, destPath) {
+        await sharp(srcPath)
+            .resize({ width: imageHelpers.PREVIEW_WIDTH, withoutEnlargement: true })
+            .png()
+            .toFile(destPath);
+        return fs.readFileSync(destPath);
+    }
+
+    it('FIX: a stale legacy source does not win — the preview is rebuilt from the versioned bytes', async () => {
+        // A legacy canonical source (pre-flag generation) is still on disk…
+        const legacySrc = await makePng(path.join(tmpRoot, 'legacy-src.png'), { r: 200, g: 10, b: 10 });
+        fs.mkdirSync(path.join(tmpRoot, BUILD), { recursive: true });
+        fs.writeFileSync(path.join(tmpRoot, BUILD, `${PREFIX}_iu01.png`), legacySrc);
+        // …and the IU was regenerated in versioned mode (different bytes). The
+        // task-handler already deleted the canonical preview of this build.
+        setFlagOn();
+        const versionedSrc = await makePng(path.join(tmpRoot, 'versioned-src.png'), { r: 10, g: 10, b: 200 });
+        await publishLive(tmpRoot, { fence: 41, bytes: versionedSrc });
+
+        const expectedFromVersioned = await referencePreview(path.join(tmpRoot, 'versioned-src.png'), path.join(tmpRoot, 'ref-versioned.png'));
+        const expectedFromLegacy = await referencePreview(path.join(tmpRoot, 'legacy-src.png'), path.join(tmpRoot, 'ref-legacy.png'));
+
+        const out = await preview.getOrCreatePreview(BOOK, CHAPTER, SCENE, IU_SEG, BUILD);
+        expect(out).to.not.equal(null);
+        expect(out.path).to.equal(previewPath());
+        const bytes = fs.readFileSync(out.path);
+        expect(bytes.equals(expectedFromVersioned), 'preview built from the new versioned source').to.equal(true);
+        expect(bytes.equals(expectedFromLegacy), 'NOT the stale legacy source').to.equal(false);
+    });
+
+    it('FIX: a stale preview in ANOTHER build is ignored — the pointer of the requested build wins', async () => {
+        const otherBuild = 'build-143a-2bc-other';
+        const legacySrc = await makePng(path.join(tmpRoot, 'legacy-src-2.png'), { r: 30, g: 200, b: 30 });
+        fs.mkdirSync(path.join(tmpRoot, otherBuild), { recursive: true });
+        fs.writeFileSync(path.join(tmpRoot, otherBuild, `${PREFIX}_iu01.png`), legacySrc);
+        // A stale preview already exists in the OTHER build dir.
+        await referencePreview(path.join(tmpRoot, 'legacy-src-2.png'), path.join(tmpRoot, otherBuild, previewName));
+
+        setFlagOn();
+        const versionedSrc = await makePng(path.join(tmpRoot, 'versioned-src-2.png'), { r: 60, g: 60, b: 210 });
+        await publishLive(tmpRoot, { fence: 42, bytes: versionedSrc });
+        const expectedFromVersioned = await referencePreview(path.join(tmpRoot, 'versioned-src-2.png'), path.join(tmpRoot, 'ref-versioned-2.png'));
+
+        const out = await preview.getOrCreatePreview(BOOK, CHAPTER, SCENE, IU_SEG, BUILD);
+        expect(out).to.not.equal(null);
+        expect(out.path, 'the requested build, not the other build').to.equal(previewPath());
+        expect(out.path.startsWith(path.join(tmpRoot, otherBuild)), 'never the other build preview').to.equal(false);
+        expect(fs.readFileSync(out.path).equals(expectedFromVersioned)).to.equal(true);
+    });
+
+    it('FIX: a broken (missing) publication is 404 even when a legacy source exists', async () => {
+        const legacySrc = await makePng(path.join(tmpRoot, 'legacy-src-3.png'));
+        fs.mkdirSync(path.join(tmpRoot, BUILD), { recursive: true });
+        fs.writeFileSync(path.join(tmpRoot, BUILD, `${PREFIX}_iu01.png`), legacySrc);
+
+        setFlagOn();
+        await pointerRepo.publishIuImagePointer(Object.assign({}, RES, {
+            relPath: pointerRepo.versionedRelPath(BUILD, ASSET_ID, 43), fence: 43,
+        }));
+        const out = await preview.getOrCreatePreview(BOOK, CHAPTER, SCENE, IU_SEG, BUILD);
+        expect(out, 'the broken publication must not fall back to the legacy source').to.equal(null);
+        expect(fs.existsSync(previewPath())).to.equal(false);
+    });
+
+    it('FIX flag OFF: the legacy source still decides, zero PG calls', async () => {
+        setFlagOn();
+        await publishLive(tmpRoot, { fence: 44, bytes: await makePng(path.join(tmpRoot, 'versioned-src-4.png'), { r: 5, g: 5, b: 220 }) });
+        delete process.env.IU_IMAGE_VERSIONED;
+
+        const legacySrc = await makePng(path.join(tmpRoot, 'legacy-src-4.png'), { r: 220, g: 5, b: 5 });
+        fs.mkdirSync(path.join(tmpRoot, BUILD), { recursive: true });
+        fs.writeFileSync(path.join(tmpRoot, BUILD, `${PREFIX}_iu01.png`), legacySrc);
+        const expectedFromLegacy = await referencePreview(path.join(tmpRoot, 'legacy-src-4.png'), path.join(tmpRoot, 'ref-legacy-4.png'));
+
+        const originalQuery = database.query;
+        const calls = [];
+        database.query = (...args) => { calls.push(String(args[0])); return originalQuery.apply(database, args); };
+        try {
+            const out = await preview.getOrCreatePreview(BOOK, CHAPTER, SCENE, IU_SEG, BUILD);
+            expect(out).to.not.equal(null);
+            expect(fs.readFileSync(out.path).equals(expectedFromLegacy), 'flag OFF keeps the legacy decision').to.equal(true);
             expect(calls, 'flag OFF ⇒ zero PG calls').to.deep.equal([]);
         } finally {
             database.query = originalQuery;
