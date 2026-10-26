@@ -16,6 +16,31 @@ const naming = require('./artifact-naming.cjs');
 module.exports = function(app, ctx, deps) {
     const { image, state, activeScenes, placeholderAudio } = deps;
 
+    // ── Stage 143a (phase 2a) — published-pointer proof ─────────────────
+    // The legacy scans in this file run FIRST; this helper is only consulted
+    // when they came up empty. The facade is flag-gated, so flag OFF returns
+    // "absent" with ZERO PostgreSQL calls and behavior stays byte-identical.
+    //
+    //   present → a live versioned pointer exists for the scene build
+    //   absent  → nothing published (legacy semantics apply)
+    //   error   → the pointer store could not be read; callers must NOT read
+    //             this as "file exists" (that would block a real repair) and
+    //             must NOT read it as "no publication" either (that would
+    //             trigger a silent regeneration) — they leave state as-is.
+    async function versionedImageProof(bookId, chapterId, sceneId, buildId) {
+        if (!image || typeof image.resolveVersionedSceneProof !== 'function') {
+            return { status: 'absent' };
+        }
+        try {
+            const proof = await image.resolveVersionedSceneProof(
+                ctx.outputRoot, buildId, bookId, chapterId, sceneId);
+            return proof ? { status: 'present', path: proof } : { status: 'absent' };
+        } catch (pgErr) {
+            ctx.log(`versioned image proof unavailable for ${bookId}/${chapterId}/${sceneId}: ${pgErr.message}`);
+            return { status: 'error' };
+        }
+    }
+
     // ── Chunk status (playback readiness, auto-redispatch repair) ────────
     app.get('/api/v1/chunk/:id', async (req, res) => {
         try {
@@ -72,7 +97,20 @@ module.exports = function(app, ctx, deps) {
                     const dirFiles = fs.readdirSync(buildDir);
                     hasIuFiles = dirFiles.some(f => f.startsWith(iuPrefix) && f.endsWith('.png'));
                 } catch {}
+                // Stage 143a (phase 2a · N3): a versioned-only build keeps its
+                // IU files under {build}/.versions/**, invisible to the scan
+                // above. Only when the legacy scan is empty do we ask for the
+                // published pointer: a LIVE pointer proves the image exists
+                // (no reset, no re-dispatch). An UNREADABLE pointer store
+                // blocks the repair too — never a silent regeneration on an
+                // outage.
+                let pointerBlocksRepair = false;
                 if (!hasIuFiles) {
+                    const proof = await versionedImageProof(c.book_id, c.chapter_id, c.scene_id, c.build_id);
+                    if (proof.status === 'present') hasIuFiles = true;
+                    else if (proof.status === 'error') pointerBlocksRepair = true;
+                }
+                if (!hasIuFiles && !pointerBlocksRepair) {
                     ctx.log(`Missing image file for ${req.params.id} — resetting state for redispatch`);
                     c.image = false;
                     await ctx.redis.set(`animastor:chunk:${req.params.id}`, JSON.stringify(c));
@@ -104,6 +142,14 @@ module.exports = function(app, ctx, deps) {
                             const dirFiles = fs.readdirSync(buildDir);
                             imageReady = dirFiles.some(f => f.startsWith(iuPrefix) && f.endsWith('.png'));
                         } catch {}
+                    }
+                    // Stage 143a (phase 2a · N4): versioned-only builds are
+                    // proven by the published pointer. Flag OFF ⇒ the helper
+                    // answers "absent" with zero PG calls; a pointer-store
+                    // error stays NOT ready (never a false READY).
+                    if (!imageReady) {
+                        const proof = await versionedImageProof(c.book_id, c.chapter_id, c.scene_id, c.build_id);
+                        if (proof.status === 'present') imageReady = true;
                     }
                 }
             }
@@ -269,16 +315,31 @@ module.exports = function(app, ctx, deps) {
             const { bookId, chapterId, sceneId, iuId } = req.params;
             const buildId = ctx.getEffectiveBuildId(bookId, req.query.build_id, ctx.log);
             // Stage 143a — published versioned pointer first. The resolver
-            // is a host seam on the injected image facade: it returns null
-            // IMMEDIATELY while IU_IMAGE_VERSIONED is off (zero PG calls) and
-            // rejects any path that would leave OUTPUT_DIR, so the canonical
-            // branch below keeps byte-identical legacy behavior (flag off,
-            // no pointer, or unsafe/missing target).
+            // is a host seam on the injected image facade and returns null
+            // IMMEDIATELY while IU_IMAGE_VERSIONED is off (zero PG calls), so
+            // with the flag off this block behaves exactly like Phase 1.
+            //
+            // Phase 2a — three verdicts instead of one null:
+            //   ok      → serve the immutable versioned bytes (ETag below),
+            //   absent  → no pointer for this key → the legacy branch runs
+            //             unchanged,
+            //   missing → a PUBLISHED pointer whose target is unsafe/absent:
+            //             404 with a log, never a silent fallback to the
+            //             legacy file (the pointer is the authority and it is
+            //             broken — legacy bytes here would be stale).
+            // A pointer-store ERROR is also fail-closed: 503 + log, no legacy
+            // fallback, because an outage must not serve a superseded image.
             let published = null;
             if (image && typeof image.resolveIuImagePath === 'function') {
-                published = await image.resolveIuImagePath(ctx.outputRoot, buildId, bookId, chapterId, sceneId, iuId);
+                try {
+                    published = await image.resolveIuImagePath(ctx.outputRoot, buildId, bookId, chapterId, sceneId, iuId);
+                } catch (pgErr) {
+                    ctx.log(`/iu-image pointer lookup failed for ${bookId}/${chapterId}/${sceneId}/${iuId}: ${pgErr.message}`);
+                    res.status(503).json({ error: 'image pointer store unavailable' });
+                    return;
+                }
             }
-            if (published) {
+            if (published && published.status === 'ok') {
                 let stat = null;
                 try { stat = fs.statSync(published.path); } catch (_) { stat = null; }
                 if (stat && stat.isFile()) {
@@ -287,7 +348,16 @@ module.exports = function(app, ctx, deps) {
                     fs.createReadStream(published.path).pipe(res);
                     return;
                 }
+                ctx.log(`/iu-image published target vanished (${published.relativePath}) — 404`);
+                res.status(404).json({ error: 'IU image not found' });
+                return;
             }
+            if (published && published.status === 'missing') {
+                ctx.log(`/iu-image published target unusable (${published.relativePath}: ${published.reason}) — 404`);
+                res.status(404).json({ error: 'IU image not found' });
+                return;
+            }
+            // null (flag OFF) or {status:'absent'} → legacy branch, unchanged.
             const imagePath = path.join(ctx.buildDir(buildId), naming.iuImageName(bookId, chapterId, sceneId, iuId));
             if (!fs.existsSync(imagePath)) return res.status(404).json({ error: 'IU image not found' });
             res.setHeader('Content-Type', 'image/png');

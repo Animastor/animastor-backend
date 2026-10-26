@@ -101,6 +101,11 @@ function mockDeps(redis, overrides = {}) {
     const imageMock = {
         resolveCanonicalSceneImage: overrides.resolveCanonicalSceneImage ||
             (() => `/data/output/default/${BOOK_ID}_${CHAPTER_ID}_${SCENE_ID}.png`),
+        // Stage 143a (phase 2a · B2): the versioned-pointer proof. Default =
+        // "no publication" which is what the REAL facade answers with
+        // IU_IMAGE_VERSIONED off (zero PG calls), so every pre-existing test
+        // keeps its legacy semantics.
+        resolveVersionedSceneProof: overrides.resolveVersionedSceneProof || (() => null),
     };
     require.cache[IMAGE_PATH] = { exports: imageMock, loaded: true };
 
@@ -321,6 +326,130 @@ describe('checkOrphanImageState', () => {
         expect(result).to.not.be.null;
         expect(result.type).to.equal('orphan_image_state');
         expect(result.recommendation).to.equal('regenerate_image');
+    });
+
+    // ── Stage 143a (phase 2a · B2) ───────────────────────────────────
+    it('empty legacy scan + a LIVE versioned pointer → no orphan (no false regeneration)', async () => {
+        redis = createMockRedis();
+        setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'image', 'ready');
+        const engine = mockDeps(redis, {
+            resolveCanonicalSceneImage: () => null,
+            resolveVersionedSceneProof: async () => '/data/output/default/.versions/asset/7.png',
+        });
+        expect(await engine.checkOrphanImageState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID)).to.be.null;
+    });
+
+    it('empty legacy scan + flag ON but NO pointer → orphan still reported (repair must happen)', async () => {
+        redis = createMockRedis();
+        setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'image', 'ready');
+        const engine = mockDeps(redis, {
+            resolveCanonicalSceneImage: () => null,
+            resolveVersionedSceneProof: async () => null,
+        });
+        const result = await engine.checkOrphanImageState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+        expect(result).to.not.be.null;
+        expect(result.type).to.equal('orphan_image_state');
+    });
+
+    it('an unreadable pointer store aborts the check (pass_incomplete) — never a regeneration on an outage', async () => {
+        redis = createMockRedis();
+        setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'image', 'ready');
+        const engine = mockDeps(redis, {
+            resolveCanonicalSceneImage: () => null,
+            resolveVersionedSceneProof: async () => { throw new Error('ECONNREFUSED'); },
+        });
+        let err = null;
+        try {
+            await engine.checkOrphanImageState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+        } catch (e) { err = e; }
+        expect(err, 'the check must fail closed').to.not.be.null;
+        expect(err.code).to.equal('pass_incomplete');
+    });
+
+    it('reconcileScene on a pointer-store outage returns WITHOUT orphan issues (no recommendation, no auto-fix)', async () => {
+        redis = createMockRedis();
+        setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'image', 'ready');
+        const engine = mockDeps(redis, {
+            getSceneAssetsRedis: async () => null,
+            resolveCanonicalSceneImage: () => null,
+            resolveVersionedSceneProof: async () => { throw new Error('ECONNREFUSED'); },
+        });
+        const report = await engine.reconcileScene(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+        const imageIssues = report.inconsistentScenes.filter((s) => s.issue === 'orphan_image_state');
+        expect(imageIssues, 'an outage must not produce a regeneration recommendation').to.have.length(0);
+        expect(report.orphanStates.filter((o) => o.type === 'orphan_image_state')).to.have.length(0);
+    });
+});
+
+// ======================================================
+// TESTS: checkOrphanAssets — Stage 143a (phase 2a · B2)
+// ======================================================
+
+describe('checkOrphanAssets — stage143a phase2a (B2)', () => {
+    let redis;
+    let origAccess;
+
+    const ASSET_IMAGE_PATH = '/data/output/default/test.png';
+    const assetsWithImage = async () => ({
+        image: { path: ASSET_IMAGE_PATH, ready: true },
+        audio: null,
+        video: null,
+    });
+
+    beforeEach(() => {
+        redis = createMockRedis();
+        // The canonical file is gone (versioned-only build).
+        origAccess = require('fs').promises.access;
+        require('fs').promises.access = async (fp) => {
+            if (fp === ASSET_IMAGE_PATH) throw new Error('ENOENT');
+        };
+    });
+    afterEach(() => {
+        require('fs').promises.access = origAccess;
+        delete require.cache[RECONCILE_PATH];
+    });
+
+    it('missing canonical file + LIVE versioned pointer → no issue', async () => {
+        const engine = mockDeps(redis, {
+            getSceneAssetsRedis: assetsWithImage,
+            resolveVersionedSceneProof: async () => '/data/output/default/.versions/asset/7.png',
+        });
+        expect(await engine.checkOrphanAssets(redis, BOOK_ID, CHAPTER_ID, SCENE_ID)).to.be.null;
+    });
+
+    it('missing canonical file + no pointer → missing_image_file is still reported (legacy semantics)', async () => {
+        const engine = mockDeps(redis, {
+            getSceneAssetsRedis: assetsWithImage,
+            resolveVersionedSceneProof: async () => null,
+        });
+        const issues = await engine.checkOrphanAssets(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+        expect(issues).to.be.an('array').that.is.not.empty;
+        expect(issues[0].type).to.equal('missing_image_file');
+    });
+
+    it('an unreadable pointer store aborts the check (pass_incomplete) instead of recommending a regeneration', async () => {
+        const engine = mockDeps(redis, {
+            getSceneAssetsRedis: assetsWithImage,
+            resolveVersionedSceneProof: async () => { throw new Error('ECONNREFUSED'); },
+        });
+        let err = null;
+        try {
+            await engine.checkOrphanAssets(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
+        } catch (e) { err = e; }
+        expect(err).to.not.be.null;
+        expect(err.code).to.equal('pass_incomplete');
+    });
+
+    it('canonical file present → untouched legacy path (no facade call)', async () => {
+        let proofCalls = 0;
+        const engine = mockDeps(redis, {
+            getSceneAssetsRedis: async () => ({
+                image: { path: '/data/output/default/present.png', ready: true }, audio: null, video: null,
+            }),
+            resolveVersionedSceneProof: async () => { proofCalls += 1; return '/x.png'; },
+        });
+        expect(await engine.checkOrphanAssets(redis, BOOK_ID, CHAPTER_ID, SCENE_ID)).to.be.null;
+        expect(proofCalls, 'legacy hit never reaches the facade (flag OFF ⇒ 0 PG calls)').to.equal(0);
     });
 });
 

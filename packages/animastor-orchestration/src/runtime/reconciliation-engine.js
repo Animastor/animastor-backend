@@ -157,13 +157,38 @@ async function checkOrphanImageState(redis, bookId, chapterId, sceneId) {
     // Orphan-check uses the canonical book build identity (audit d9d67a3).
     const buildId = resolveBookBuildId(bookId);
     const imageModule = lazyHostBinding('media.image');
-    const imageInfo = imageModule.resolveCanonicalSceneImage(
+    let imageInfo = imageModule.resolveCanonicalSceneImage(
         artifactRoot(),
         buildId,
         bookId,
         chapterId,
         sceneId,
     );
+
+    // ── Stage 143a (phase 2a · B2) ───────────────────────────────────
+    // Legacy scan first (byte-identical legacy behavior). A versioned-only
+    // build never writes the canonical file, so with the scan empty we ask
+    // the image facade for the published pointer of this scene build — the
+    // facade is flag-gated, flag OFF answers null with ZERO PG calls.
+    //
+    // An UNREADABLE pointer store ABORTS this reconcile pass (logged,
+    // `pass_incomplete`) instead of being read as "no publication": that
+    // reading would recommend regenerating a scene that is already
+    // published. No orphan issue is emitted on the aborted pass, so no
+    // regeneration is launched.
+    if (!imageInfo) {
+        try {
+            if (typeof imageModule.resolveVersionedSceneProof === 'function') {
+                imageInfo = await imageModule.resolveVersionedSceneProof(
+                    artifactRoot(), buildId, bookId, chapterId, sceneId);
+            }
+        } catch (pgErr) {
+            error(`versioned image proof unavailable for ${bookId}/${chapterId}/${sceneId}: ${pgErr.message} — pass skipped, no regeneration launched`);
+            const err = new Error(`reconcile_pass_incomplete: image proof unavailable for ${bookId}/${chapterId}/${sceneId} (${pgErr.message})`);
+            err.code = 'pass_incomplete';
+            throw err;
+        }
+    }
 
     if (!imageInfo) {
         return {
@@ -251,11 +276,37 @@ async function checkOrphanAssets(redis, bookId, chapterId, sceneId) {
         try {
             await fs.access(assets.image.path);
         } catch (err) {
-            orphanAssets.push({
-                type: 'missing_image_file',
-                scene: { bookId, chapterId, sceneId },
-                path: assets.image.path
-            });
+            // ── Stage 143a (phase 2a · B2) ───────────────────────────
+            // With the flag ON a published pointer is the authority: a LIVE
+            // versioned file for this scene build explains the missing
+            // canonical file (versioned-only build) → no issue is emitted.
+            // Flag OFF ⇒ the facade answers null with ZERO PG calls and the
+            // legacy issue is reported exactly as before.
+            // An UNREADABLE pointer store aborts the pass (logged) instead of
+            // emitting a regeneration recommendation on a guess.
+            let coveredByPointer = false;
+            const imageModule = lazyHostBinding('media.image');
+            try {
+                if (typeof imageModule.resolveVersionedSceneProof === 'function') {
+                    const buildId = resolveBookBuildId(bookId);
+                    coveredByPointer = !!(await imageModule.resolveVersionedSceneProof(
+                        artifactRoot(), buildId, bookId, chapterId, sceneId));
+                }
+            } catch (pgErr) {
+                error(`versioned image proof unavailable for ${bookId}/${chapterId}/${sceneId}: ${pgErr.message} — pass skipped, no recommendation emitted`);
+                const e = new Error(`reconcile_pass_incomplete: image proof unavailable for ${bookId}/${chapterId}/${sceneId} (${pgErr.message})`);
+                e.code = 'pass_incomplete';
+                throw e;
+            }
+            if (coveredByPointer) {
+                log(`missing_image_file suppressed: ${bookId}/${chapterId}/${sceneId} is covered by a published versioned pointer`);
+            } else {
+                orphanAssets.push({
+                    type: 'missing_image_file',
+                    scene: { bookId, chapterId, sceneId },
+                    path: assets.image.path
+                });
+            }
         }
     }
 

@@ -48,6 +48,7 @@ module.exports = {
     // this host facade so the package keeps its zero-host-require contract.
     resolveIuImagePath: registry.resolveIuImagePath,
     resolveVersionedSceneProof: registry.resolveVersionedSceneProof,
+    listPublishedIuIdsForScene: registry.listPublishedIuIdsForScene,
     collectSceneUnits: registry.collectSceneUnits,
 
     // prompt-builder

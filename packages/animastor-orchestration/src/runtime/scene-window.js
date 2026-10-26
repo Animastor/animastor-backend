@@ -158,6 +158,34 @@ async function getSceneFilesStatus(buildDir, bookId, chapterId, sceneId) {
         result.image.exists = files.some(f => f.startsWith(imagePrefix) && f.endsWith('.png'));
     } catch (_) {}
 
+    // ── Stage 143a (phase 2a · B1) ───────────────────────────────────
+    // A versioned-only build keeps its IU images under {build}/.versions/**,
+    // which this scan can never see. Only when the LEGACY scan came up empty
+    // do we ask the image facade for a published pointer; the facade is
+    // flag-gated, so flag OFF answers null with ZERO PostgreSQL calls and
+    // this function behaves exactly as before (condition 2).
+    //
+    // A pointer-store ERROR is logged and treated as "no proof" — image
+    // stays NOT existing. It is never read as "the file is there" (that
+    // would write a false READY) and never throws: this is an advisory
+    // checker whose five callers (checkSceneContentCache,
+    // restoreChunkStatusForScene, reconcileWindowStatuses, scene-restoration,
+    // rebuildWorkList) must keep running on a PG outage.
+    if (!result.image.exists) {
+        try {
+            const imageModule = lazyHostBinding('media.image');
+            if (imageModule && typeof imageModule.resolveVersionedSceneProof === 'function') {
+                const buildId = path.basename(path.resolve(buildDir));
+                const proof = await imageModule.resolveVersionedSceneProof(
+                    OUTPUT_DIR, buildId, bookId, chapterId, sceneId);
+                if (proof) result.image.exists = true;
+            }
+        } catch (err) {
+            warn(`image pointer proof unavailable for ${bookId}/${chapterId}/${sceneId} (${err.message}) — image treated as absent`);
+            result.image.exists = false;
+        }
+    }
+
     // Check video file
     const videoPath = path.join(buildDir, artifactNaming.sceneVideoName(bookId, chapterId, sceneId));
     result.video.exists = fs.existsSync(videoPath);

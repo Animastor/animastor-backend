@@ -342,7 +342,28 @@ async function handleImageCompleted(redis, bookId, chapterId, sceneId, buildId) 
             const stillPending = [];
             for (const uid of dirtyIds) {
                 const pngPath = path.join(buildDir, artifactNaming.sceneImageName(bookId, chapterId, sceneId, uid));
-                if (!fs.existsSync(pngPath)) {
+                if (fs.existsSync(pngPath)) continue;
+                // ── Stage 143a (phase 2a · N1) ─────────────────────
+                // A versioned-only build never writes the canonical file, so
+                // the published pointer is the completion proof for this
+                // unit. Without it the dirty marker is never cleared and the
+                // unit is force-regenerated on EVERY reconcile pass (infinite
+                // regeneration loop with the flag on).
+                // Flag OFF ⇒ the facade answers null with zero PG calls → the
+                // legacy check above decides, exactly as before.
+                // A pointer-store ERROR keeps the unit pending (never cleared
+                // on an unknown verdict) and is logged.
+                let provenByPointer = false;
+                try {
+                    if (image && typeof image.resolveIuImagePath === 'function') {
+                        const published = await image.resolveIuImagePath(
+                            artifactRoot(), buildId, bookId, chapterId, sceneId, uid);
+                        provenByPointer = !!(published && published.status === 'ok');
+                    }
+                } catch (pgErr) {
+                    warn(`[DIRTY-UNITS] pointer proof unavailable for ${uid}: ${pgErr.message} — keeping it pending`);
+                }
+                if (!provenByPointer) {
                     stillPending.push(uid);
                 }
             }
@@ -351,8 +372,31 @@ async function handleImageCompleted(redis, bookId, chapterId, sceneId, buildId) 
                 log(`[DIRTY-UNITS-CLEARED] ${bookId}/${chapterId}/${sceneId}: all ${dirtyIds.length} dirty unit(s) completed, cleared`);
                 try {
                     const iuPrefix = artifactNaming.iuImagePrefix(bookId, chapterId, sceneId);
+                    const scenePrefix = artifactNaming.scenePrefix(bookId, chapterId, sceneId);
                     const allFiles = fs.existsSync(buildDir) ? fs.readdirSync(buildDir) : [];
-                    const iuFileCount = allFiles.filter(f => f.startsWith(iuPrefix) && f.endsWith('.png')).length;
+                    // ── Stage 143a (phase 2a · N2) ─────────────────
+                    // Ready units = canonical file names ∪ published pointer
+                    // ids (versioned files are invisible to this scan). The
+                    // counter is a DISPLAY source (consumers clamp it), so a
+                    // pointer-store error here only logs and leaves the
+                    // legacy count — never a readiness decision.
+                    const readyIds = new Set();
+                    for (const f of allFiles) {
+                        if (f.startsWith(iuPrefix) && f.endsWith('.png')) {
+                            readyIds.add(f.startsWith(`${scenePrefix}_`)
+                                ? f.slice(scenePrefix.length + 1, -4)
+                                : f);
+                        }
+                    }
+                    if (image && typeof image.listPublishedIuIdsForScene === 'function') {
+                        try {
+                            const publishedIds = await image.listPublishedIuIdsForScene(buildId, bookId, chapterId, sceneId);
+                            for (const id of publishedIds) readyIds.add(String(id));
+                        } catch (pgErr) {
+                            warn(`[IU-COUNTER-RESET] published ids unavailable for ${bookId}/${chapterId}/${sceneId}: ${pgErr.message} — counting canonical files only`);
+                        }
+                    }
+                    const iuFileCount = readyIds.size;
                     if (iuFileCount > 0) {
                         const progKey = `animastor:iu-progress:${bookId}:${chapterId}:${sceneId}:image`;
                         await redis.set(progKey, String(iuFileCount), 'EX', 14400);

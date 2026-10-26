@@ -63,34 +63,68 @@ function resolveCanonicalSceneImage(OUTPUT_DIR, buildId, bookId, chapterId, scen
 /**
  * Stage 143a — resolve the PUBLISHED versioned image of one IU.
  *
- * Flag OFF → returns null immediately (zero PG calls — condition 2), so the
- * caller keeps serving the canonical file exactly as before.
- * Flag ON  → reads the pointer, resolves it strictly INSIDE OUTPUT_DIR
- * (traversal/absolute/symlink escapes are rejected — condition 3) and
- * returns null when the file is missing (caller falls back to legacy).
+ * Three-way verdict (Phase 2a) instead of a single `null`, so a caller can
+ * tell "nothing was ever published here" apart from "the publication is
+ * broken" — the second one must NEVER silently fall back to legacy bytes:
+ *
+ *   null                          flag OFF → legacy callers keep today's
+ *                                 contract and NO PostgreSQL call is made
+ *   {status:'ok', ...}             pointer row + a safely resolved file that
+ *                                 exists on disk (path, fence, relativePath)
+ *   {status:'absent'}              no pointer row for this key → the caller
+ *                                 may fall back to the legacy canonical file
+ *   {status:'missing', ...}        pointer row exists but the target is
+ *                                 unsafe (traversal/symlink) or absent → the
+ *                                 caller must NOT fall back to legacy: the
+ *                                 pointer is the authority and it is broken
  *
  * A PG ERROR (as opposed to "no row") THROWS: an outage must never look
  * like "no publication" and silently serve stale canonical bytes.
  *
- * @returns {Promise<{path:string, fence:number, relativePath:string}|null>}
+ * Path resolution still rejects traversal/absolute/symlink escapes
+ * (condition 3).
+ *
+ * @returns {Promise<null
+ *                 |{status:'ok', path:string, fence:number, relativePath:string}
+ *                 |{status:'absent'}
+ *                 |{status:'missing', relativePath:string, reason:string}>}
  */
 async function resolveIuImagePath(OUTPUT_DIR, buildId, bookId, chapterId, sceneId, iuId) {
     const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
     if (!pointerRepo.versionedEnabled()) return null;
 
     const row = await pointerRepo.getIuImagePointer({ bookId, chapterId, sceneId, iuId, buildId });
-    if (!row) return null;
+    if (!row) return { status: 'absent' };
 
     const resolved = pointerRepo.resolveOutputPath(OUTPUT_DIR, row.path);
     if (!resolved.ok) {
         helpers.error(`resolveIuImagePath: rejected pointer path (${resolved.reason}): ${row.path}`);
-        return null;
+        return { status: 'missing', relativePath: row.path, reason: resolved.reason };
     }
     if (!fs.existsSync(resolved.path)) {
         helpers.warn(`resolveIuImagePath: pointer target missing on disk: ${row.path}`);
-        return null;
+        return { status: 'missing', relativePath: row.path, reason: 'target_missing' };
     }
-    return { path: resolved.path, fence: row.publishFence, relativePath: row.path };
+    return {
+        status: 'ok',
+        path: resolved.path,
+        fence: row.publishFence,
+        relativePath: row.path,
+    };
+}
+
+/**
+ * Stage 143a (Phase 2a) — published IU ids of one scene build, for readers
+ * that COUNT ready units (the iu-progress counter reset in scene-callbacks).
+ * Flag OFF ⇒ [] with zero PG calls; a PG error THROWS (the caller decides
+ * whether the count is display-only).
+ *
+ * @returns {Promise<string[]>}
+ */
+async function listPublishedIuIdsForScene(buildId, bookId, chapterId, sceneId) {
+    const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
+    if (!pointerRepo.versionedEnabled()) return [];
+    return pointerRepo.listPublishedIuIds({ bookId, chapterId, sceneId, buildId });
 }
 
 /**
@@ -136,5 +170,6 @@ module.exports = {
     resolveCanonicalSceneImage,
     resolveIuImagePath,
     resolveVersionedSceneProof,
+    listPublishedIuIdsForScene,
     collectSceneUnits,
 };
