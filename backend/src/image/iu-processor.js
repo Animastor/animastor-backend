@@ -19,6 +19,14 @@ const assemblyProfile = require('@animastor/generation').promptProfiles.assembly
 const registry = require('./registry');
 const { collectSceneUnits } = require('./registry');
 
+/**
+ * Stage 143a kill-switch (IU_IMAGE_VERSIONED). Read lazily; while OFF the
+ * versioned contour performs no PG access at all (condition 2).
+ */
+function iuImageVersionedEnabled() {
+    return require('../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled();
+}
+
 // TTL маркера animastor:iu-in-flight:* — ЕДИНЫЙ источник: runtime-config
 // (используется также per-dispatch индексом в dispatch-engine).
 const IU_IN_FLIGHT_TTL_S = config.TIMEOUTS.IU_IN_FLIGHT_TTL_S;
@@ -182,7 +190,25 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
             helpers.log(`[IU-ALREADY-IN-FLIGHT] Skipping ${imageIUId} — already dispatched (marker owner=${flight.owner})`);
             return { sent: false, cached: false, skipped: true };
         }
-        const cachedIU = registry.probeIUImage(imageIUId, buildId, config.OUTPUT_DIR);
+        let cachedIU = registry.probeIUImage(imageIUId, buildId, config.OUTPUT_DIR);
+        if (!cachedIU?.image && iuImageVersionedEnabled()) {
+            // Stage 143a: the published POINTER is an equal cache-hit proof —
+            // versioned files live under .versions/ and are invisible to the
+            // canonical scan. Flag OFF ⇒ no PG call, legacy probe decides.
+            try {
+                const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
+                const iuId = imageIUId.slice(artifactNaming.scenePrefix(bookId, chapterId, sceneId).length + 1);
+                const ptr = await pointerRepo.getIuImagePointer({ bookId, chapterId, sceneId, iuId, buildId });
+                if (ptr) {
+                    const resolved = pointerRepo.resolveOutputPath(config.OUTPUT_DIR, ptr.path);
+                    if (resolved.ok && fs.existsSync(resolved.path)) {
+                        cachedIU = { image: true, path: resolved.path, versioned: true };
+                    }
+                }
+            } catch (ptrErr) {
+                helpers.warn(`Versioned pointer cache probe failed for ${imageIUId}: ${ptrErr.message}`);
+            }
+        }
         if (cachedIU?.image) {
             try {
                 await saveIUMetadata(buildId, bookId, chapterId, sceneId, unit, sceneDuration, fullText, uIdx);

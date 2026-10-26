@@ -43,6 +43,11 @@ module.exports = {
     getIURegistry: registry.getIURegistry,
     probeIUImage: registry.probeIUImage,
     resolveCanonicalSceneImage: registry.resolveCanonicalSceneImage,
+    // Stage 143a — versioned-pointer readers (flag-gated; null/legacy when
+    // IU_IMAGE_VERSIONED is off). Injected into the player contour through
+    // this host facade so the package keeps its zero-host-require contract.
+    resolveIuImagePath: registry.resolveIuImagePath,
+    resolveVersionedSceneProof: registry.resolveVersionedSceneProof,
     collectSceneUnits: registry.collectSceneUnits,
 
     // prompt-builder

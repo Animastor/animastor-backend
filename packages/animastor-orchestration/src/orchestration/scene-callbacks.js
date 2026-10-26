@@ -277,9 +277,17 @@ async function handleImageCompleted(redis, bookId, chapterId, sceneId, buildId) 
     // T1: возвращает { ok, retryable, reason, artifact }
     log(`IMAGE_CALLBACK: ${bookId}/${chapterId}/${sceneId}`);
 
-    const sceneImage = image.resolveCanonicalSceneImage(
+    // Stage 143a: legacy canonical scan first (unchanged behavior, also the
+    // path every host stub knows), then — flag on and scan empty — the
+    // published pointer of this scene build as the completion proof.
+    let sceneImage = image.resolveCanonicalSceneImage(
         artifactRoot(), buildId, bookId, chapterId, sceneId
     );
+    if (!sceneImage && typeof image.resolveVersionedSceneProof === 'function') {
+        sceneImage = await image.resolveVersionedSceneProof(
+            artifactRoot(), buildId, bookId, chapterId, sceneId
+        );
+    }
 
     // Per-asset check
     const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);

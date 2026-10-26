@@ -1,4 +1,8 @@
 const { query } = require('./database');
+// Stage 143a — flag accessor of the versioned iu_image contour (see
+// repositories/iu-image-pointer-repo; the DDL itself stays in this file,
+// guardrail PG-5).
+const iuImagePointerRepo = require('./repositories/iu-image-pointer-repo');
 
 const SCHEMA_SQL = `
 -- ======================================================
@@ -1804,6 +1808,47 @@ async function runMigrations() {
     }
 
     console.log('[PG] System AI control schema initialized');
+
+    // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
+    // DDL lives here (guardrail PG-5 — single DDL owner). The statements
+    // are executed ONLY while the IU_IMAGE_VERSIONED kill-switch is on, so
+    // a flag-OFF process issues zero new PG calls (Stage 143a condition 2).
+    // Enable → restart: the tables must exist before the first reservation.
+    if (iuImagePointerRepo.versionedEnabled()) {
+        for (const stmt of IU_IMAGE_VERSIONED_SQL) {
+            await query(stmt);
+        }
+        console.log('[PG] Stage 143a: iu_image fence reservations + pointers initialized');
+    }
 }
 
-module.exports = { runMigrations, SCHEMA_SQL };
+// Stage 143a — durable dispatch fence (checkpoint B1) + published pointer
+// (B2). Kept as a statement ARRAY (runMigrations does not split SCHEMA_SQL
+// for these) so nothing here depends on the naive ';' split above.
+const IU_IMAGE_VERSIONED_SQL = [
+    `CREATE SEQUENCE IF NOT EXISTS iu_image_fence_seq`,
+    `CREATE TABLE IF NOT EXISTS iu_image_fence_reservations (
+        idem_key    TEXT PRIMARY KEY,
+        book_id     TEXT NOT NULL,
+        chapter_id  TEXT NOT NULL,
+        scene_id    TEXT NOT NULL,
+        iu_id       TEXT NOT NULL,
+        build_id    TEXT NOT NULL,
+        fence       BIGINT NOT NULL,
+        created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
+    )`,
+    `CREATE TABLE IF NOT EXISTS iu_image_pointers (
+        book_id       TEXT NOT NULL,
+        chapter_id    TEXT NOT NULL,
+        scene_id      TEXT NOT NULL,
+        iu_id         TEXT NOT NULL,
+        build_id      TEXT NOT NULL,
+        path          TEXT NOT NULL,
+        publish_fence BIGINT NOT NULL,
+        created_at    BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
+        updated_at    BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
+        PRIMARY KEY (book_id, chapter_id, scene_id, iu_id, build_id)
+    )`,
+];
+
+module.exports = { runMigrations, SCHEMA_SQL, IU_IMAGE_VERSIONED_SQL };

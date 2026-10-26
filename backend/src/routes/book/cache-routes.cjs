@@ -97,6 +97,17 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 // NOTE: 'books', 'book_source', 'book_snapshots', 'book_events'
                 // are NOT deleted on cache clear — they are book identity data.
             ];
+            // Stage 143a — versioned iu_image contour (GC of the pointers and
+            // the durable fence reservations when a book's cache is wiped, so
+            // no pointer survives its files). Flag-gated: a flag-OFF process
+            // never queries tables that do not exist (condition 2).
+            try {
+                if (require('../../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled()) {
+                    pgTables.push('iu_image_fence_reservations', 'iu_image_pointers');
+                }
+            } catch (flagErr) {
+                console.warn(`[CACHE] versioned iu_image flag check failed: ${flagErr.message}`);
+            }
             for (const table of pgTables) {
                 try {
                     await storage.postgres.query(`DELETE FROM ${table} WHERE book_id = $1`, [bookId]);

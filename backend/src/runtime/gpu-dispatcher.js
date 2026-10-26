@@ -336,6 +336,61 @@ async function sendUnified(taskSpec) {
         await qidem.rememberTaskRef(redis, parsed.bookId, parsed.chapterId, parsed.sceneId, payload.job_id, idemKey);
 
         // ─────────────────────────────────────────────────────────────────
+        // Stage 143a — durable dispatch fence reservation (contract B1)
+        //
+        // For `iu_image` jobs with the IU_IMAGE_VERSIONED kill-switch on,
+        // the INTEGER fence is reserved in PostgreSQL BEFORE the hub POST:
+        // one atomic INSERT binds idem_key → fence + resource identity, so
+        // a re-dispatch of this intent reuses the original number and a new
+        // intent (user regeneration → new epoch → new idem_key) always gets
+        // a strictly greater one. A re-delivery of the SAME dispatch keeps
+        // both idem_key and fence.
+        //
+        // A PG failure means no durable fence exists for this dispatch —
+        // the send is reverted exactly like a failed intent-receipt step
+        // below (nothing reaches the hub without a provable fence).
+        // Flag OFF: this block never runs → zero new PG calls (condition 2).
+        // ─────────────────────────────────────────────────────────────────
+        if (parsed && parsed.kind === 'iu_image') {
+            const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
+            if (pointerRepo.versionedEnabled()) {
+                try {
+                    const reservation = await pointerRepo.reserveDispatchFence({
+                        idemKey,
+                        bookId: parsed.bookId,
+                        chapterId: parsed.chapterId,
+                        sceneId: parsed.sceneId,
+                        iuId: parsed.iuId,
+                        buildId: payload.build_id,
+                    });
+                    if (reservation && reservation.status !== 'disabled') {
+                        log(`Fence reservation ${reservation.status}: ${payload.job_id} idem=${idemKey.slice(0, 12)} fence=${reservation.fence}`);
+                    }
+                } catch (resErr) {
+                    const rollback = await rollbackOwnEnqueue(redis, {
+                        idemKey,
+                        bookId: parsed.bookId,
+                        chapterId: parsed.chapterId,
+                        sceneId: parsed.sceneId,
+                        jobId: payload.job_id,
+                    });
+                    stats.jobs_fence_reservation_unavailable = (stats.jobs_fence_reservation_unavailable || 0) + 1;
+                    warn(`Fence reservation FAILED for ${payload.job_id} (${resErr.message}) — NOT enqueued (retryable)`);
+                    return {
+                        sent: false,
+                        suppressed: true,
+                        retryable: true,
+                        reason: 'fence_reservation_unavailable',
+                        rollbackFailed: rollback.failed,
+                        idem_key: idemKey,
+                        jobId: payload.job_id,
+                        dispatchId: taskSpec.dispatch_id,
+                    };
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
         // Stage 127 — durable intent fence + immutable dispatch receipt
         // (phase 1 of the result-fencing rollout, contract 126 §1)
         //

@@ -27,6 +27,134 @@ module.exports = function(redis, config, deps) {
     // queue-idempotency.FENCE_COMMIT_REJECTED — the single source of truth
     // shared with the commit script. This file throws them with `err.code`.
 
+    // ── Stage 143a — versioned iu_image publication (contract B1/B4/B6) ──
+    //
+    // Admission chain, in order, BEFORE anything is written:
+    //   1. immutable hex receipt  — proven by the ROUTE (opts.fence) / above;
+    //   2. durable reservation    — idem_key → integer fence + resource
+    //                               identity (PG, must match this job/build);
+    //   3. active intent          — readIntentStrict: state='active' and the
+    //                               current fence equals THIS receipt;
+    //   4. file immutability      — temp → O_EXCL copy (existing bytes of a
+    //                               version are never overwritten);
+    //   5. pointer UPDATE         — `publish_fence <= EXCLUDED` in PG is the
+    //                               sole ordering authority (Redis never
+    //                               orders publications).
+    // A reject at 2/3/5 throws a FENCE_COMMIT_REJECTED code (the route
+    // answers `rejected:true` and keeps the dedup marker); at 5 only THIS
+    // writer's temp file is removed — the immutable file stays for the
+    // age-based GC, and the pointer is untouched.
+    function iuImageVersionedEnabled() {
+        return require('../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled();
+    }
+
+    async function publishVersionedIuImage({ parsed, jobId, buildId, buffer, hexFence, assetId }) {
+        const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
+
+        // 2 — durable reservation: hex receipt → integer fence + identity.
+        const admission = await pointerRepo.resolveCallbackFence({
+            idemKey: hexFence,
+            bookId: parsed.bookId,
+            chapterId: parsed.chapterId,
+            sceneId: parsed.sceneId,
+            iuId: parsed.iuId,
+            buildId,
+        });
+        if (!admission.ok) {
+            const err = new Error(`Rejected task result: ${admission.reason} (durable fence reservation unavailable for job=${jobId}, fence=${String(hexFence).slice(0, 12)})`);
+            err.code = admission.reason === 'reservation_mismatch' ? 'invalid_fence' : 'intent_missing';
+            throw err;
+        }
+
+        // 3 — the intent must still be active for THIS receipt.
+        const intent = await queueIdempotency.readIntentStrict(redis, {
+            bookId: parsed.bookId,
+            chapterId: parsed.chapterId,
+            sceneId: parsed.sceneId,
+            jobId,
+        });
+        if (intent.status === 'error') {
+            const err = new Error(`Intent re-check failed for ${jobId} (${intent.error}) — retryable`);
+            err.code = 'fence_lookup_unavailable';
+            throw err;
+        }
+        if (intent.status !== 'ok'
+            || String(intent.fence).toLowerCase() !== String(hexFence).toLowerCase()
+            || intent.state !== 'active') {
+            const err = new Error(`Rejected task result: stale_intent (fence=${String(hexFence).slice(0, 12)} is not the active intent, status=${intent.status}, state=${intent.state || 'none'})`);
+            err.code = 'stale_intent';
+            throw err;
+        }
+
+        const fenceInt = admission.fence;
+        const relFinal = pointerRepo.versionedRelPath(buildId, assetId, fenceInt);
+        const relTemp = pointerRepo.stagingRelPath(buildId, assetId, fenceInt);
+        if (!relFinal || !relTemp) {
+            const err = new Error(`Rejected task result: invalid_fence (unsafe versioned path for job=${jobId})`);
+            err.code = 'invalid_fence';
+            throw err;
+        }
+        const absFinal = pointerRepo.resolveOutputPath(OUTPUT_DIR, relFinal);
+        const absTemp = pointerRepo.resolveOutputPath(OUTPUT_DIR, relTemp);
+        if (!absFinal.ok || !absTemp.ok) {
+            const err = new Error(`Versioned path rejected for ${jobId}: final=${absFinal.ok ? 'ok' : absFinal.reason} temp=${absTemp.ok ? 'ok' : absTemp.reason}`);
+            err.code = 'publish_failed';
+            throw err;
+        }
+
+        // 4 — bytes: temp file first, then an EXCLUSIVE copy into the
+        // immutable versioned path (EEXIST = this version already exists —
+        // keep the first bytes, never overwrite).
+        try {
+            fs.mkdirSync(path.dirname(absTemp.path), { recursive: true });
+            fs.writeFileSync(absTemp.path, buffer);
+            try {
+                fs.copyFileSync(absTemp.path, absFinal.path, fs.constants.COPYFILE_EXCL);
+            } catch (copyErr) {
+                if (copyErr.code !== 'EEXIST') throw copyErr;
+                log(`Versioned file already present (idempotent replay): ${absFinal.path}`);
+            }
+            try { fs.unlinkSync(absTemp.path); } catch (_) { /* GC collects staging */ }
+        } catch (writeErr) {
+            const err = new Error(`Versioned write failed for ${jobId}: ${writeErr.message}`);
+            err.code = 'publish_failed';
+            throw err;
+        }
+
+        // 5 — pointer UPDATE: PG decides the ordering (fence <= current ⇒
+        // stale/replay; replay of the SAME fence is idempotent-success).
+        let pub;
+        try {
+            pub = await pointerRepo.publishIuImagePointer({
+                bookId: parsed.bookId,
+                chapterId: parsed.chapterId,
+                sceneId: parsed.sceneId,
+                iuId: parsed.iuId,
+                buildId,
+                relPath: relFinal,
+                fence: fenceInt,
+            });
+        } catch (pgErr) {
+            const err = new Error(`Pointer publication failed for ${jobId} (${pgErr.message}) — retryable`);
+            err.code = 'publish_failed';
+            throw err;
+        }
+        if (!pub.published) {
+            const err = new Error(`Rejected task result: stale_intent (fence=${fenceInt} lost to publish_fence=${pub.current} for ${jobId})`);
+            err.code = 'stale_intent';
+            throw err;
+        }
+
+        log(`💾 Versioned publication: ${relFinal} (fence=${fenceInt}, job=${jobId})`);
+        return {
+            published: true,
+            publication: 'versioned_pointer',
+            fence: fenceInt,
+            path: absFinal.path,
+            relPath: relFinal,
+        };
+    }
+
     // ── Handle GPU task result ────────────────────────
     async function handleTaskResult(job_id, result_base64, build_id, dispatch_id, opts = {}) {
         log('🎬 Handling task result:', job_id, 'build:', build_id);
@@ -123,7 +251,22 @@ module.exports = function(redis, config, deps) {
 
         let commitStatus = null;
         let publication = null;
-        if (fence && fencingMode !== 'off') {
+        // ── Stage 143a — versioned iu_image publication (flag-gated) ────
+        // With IU_IMAGE_VERSIONED on, an `iu_image` result is NOT committed
+        // through the legacy canonical path: it goes through the admission
+        // chain (receipt → durable reservation → active intent), lands in an
+        // immutable versioned file (temp → O_EXCL) and moves the PostgreSQL
+        // pointer. Flag OFF ⇒ this branch is never taken and the legacy
+        // fenced/legacy flow below runs byte-identically (condition 2).
+        const versionedIuPublication = asset.type === 'iu_image' && iuImageVersionedEnabled();
+        if (versionedIuPublication) {
+            if (!fence) {
+                const err = new Error(`Rejected task result: receipt_missing (no immutable dispatch receipt for job=${job_id})`);
+                err.code = 'receipt_missing';
+                throw err;
+            }
+            publication = await publishVersionedIuImage({ parsed, jobId: job_id, buildId: build_id, buffer: resultBuffer, hexFence: fence, assetId: path.basename(asset.fullPath, `.${asset.extension}`) });
+        } else if (fence && fencingMode !== 'off') {
             // NEW results go to staging first. The canonical artifact path
             // is only replaced after the ATOMIC fence commit confirms this
             // fence is still the current, active intent (Redis Lua —
@@ -239,13 +382,31 @@ module.exports = function(redis, config, deps) {
                     const pgRows = await deps.iuRepo.getImageUnitsForScene(build_id, bookId, chapterId, sceneId);
                     const totalIUs = pgRows.length;
                     const iuPrefix = artifactNaming.iuImagePrefix(bookId, chapterId, sceneId);
+                    const scenePrefix = artifactNaming.scenePrefix(bookId, chapterId, sceneId);
                     let iuFiles = [];
                     try {
                         iuFiles = fs.readdirSync(outputDir).filter(f => f.startsWith(iuPrefix) && f.endsWith('.png'));
                     } catch (_) {}
-                    log(`📊 IU progress: ${iuFiles.length}/${totalIUs} images for scene ${chapterId}/${sceneId}`);
+                    // Stage 143a: "ready" = the set of IU ids proven by the
+                    // canonical file OR by the published pointer — versioned
+                    // files live under .versions/ and are invisible to the
+                    // disk scan. Flag OFF ⇒ no PG call, set == file count.
+                    const readyIds = new Set();
+                    for (const f of iuFiles) {
+                        readyIds.add(f.startsWith(`${scenePrefix}_`) ? f.slice(scenePrefix.length + 1, -4) : f);
+                    }
+                    if (iuImageVersionedEnabled()) {
+                        // A PG failure here lands in the catch below — the
+                        // same "defer to reconciliation" posture as a failed
+                        // units read (never mask an error with a completion).
+                        const publishedIds = await require('../storage/postgres/repositories/iu-image-pointer-repo')
+                            .listPublishedIuIds({ bookId, chapterId, sceneId, buildId: build_id });
+                        for (const id of publishedIds) readyIds.add(id);
+                    }
+                    const readyCount = readyIds.size;
+                    log(`📊 IU progress: ${readyCount}/${totalIUs} images for scene ${chapterId}/${sceneId}`);
 
-                    if (iuFiles.length >= totalIUs && totalIUs > 0) {
+                    if (readyCount >= totalIUs && totalIUs > 0) {
                         log('🎯 All IUs complete for scene — triggering image completed');
                         await orchestrator.completeStage(redis, bookId, chapterId, sceneId, 'image', build_id, dispatch_id);
                     } else if (totalIUs === 0) {
@@ -351,6 +512,7 @@ module.exports = function(redis, config, deps) {
         // (the commit already wrote the done marker + released the claim).
         return {
             fenced: commitStatus != null,
+            versioned: versionedIuPublication,
             fence,
             commit: commitStatus,
             published: publication ? publication.published : false,

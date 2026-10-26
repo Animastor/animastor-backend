@@ -268,6 +268,26 @@ module.exports = function(app, ctx, deps) {
         try {
             const { bookId, chapterId, sceneId, iuId } = req.params;
             const buildId = ctx.getEffectiveBuildId(bookId, req.query.build_id, ctx.log);
+            // Stage 143a — published versioned pointer first. The resolver
+            // is a host seam on the injected image facade: it returns null
+            // IMMEDIATELY while IU_IMAGE_VERSIONED is off (zero PG calls) and
+            // rejects any path that would leave OUTPUT_DIR, so the canonical
+            // branch below keeps byte-identical legacy behavior (flag off,
+            // no pointer, or unsafe/missing target).
+            let published = null;
+            if (image && typeof image.resolveIuImagePath === 'function') {
+                published = await image.resolveIuImagePath(ctx.outputRoot, buildId, bookId, chapterId, sceneId, iuId);
+            }
+            if (published) {
+                let stat = null;
+                try { stat = fs.statSync(published.path); } catch (_) { stat = null; }
+                if (stat && stat.isFile()) {
+                    res.setHeader('Content-Type', 'image/png');
+                    res.setHeader('ETag', `W/"${published.fence}-${stat.size}-${stat.mtimeMs}"`);
+                    fs.createReadStream(published.path).pipe(res);
+                    return;
+                }
+            }
             const imagePath = path.join(ctx.buildDir(buildId), naming.iuImageName(bookId, chapterId, sceneId, iuId));
             if (!fs.existsSync(imagePath)) return res.status(404).json({ error: 'IU image not found' });
             res.setHeader('Content-Type', 'image/png');
