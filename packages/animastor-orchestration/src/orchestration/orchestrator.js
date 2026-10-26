@@ -20,6 +20,10 @@
 
 // S-2: media-type knowledge (stage lists, fail-event map) resolved via registry
 const mediaRegistry = require('@animastor/generation').mediaRegistry;
+// S-4: filename grammar composed from the canonical owner (bytes unchanged).
+// D1 (stage146): must live at module scope — resetScenes() uses it outside the
+// beginStage() body, so a per-function declaration threw ReferenceError there.
+const artifactNaming = require('@animastor/generation').artifactNaming;
 // S-5: pure FSM-writer ownership (markDirtyScene/setScene*) — re-exported from
 // the state layer; bodies moved verbatim (see state/scene-state-ops.js header).
 const { lazyHostBinding } = require('../host/host-bindings');
@@ -56,8 +60,6 @@ async function planScene(redis, bookId, chapterId, sceneId) {
 // для исполнения генерации).
 async function beginStage(redis, scene, loadedBook, buildId, stage) {
     const dispatchEngine = require('../runtime/dispatch-engine');
-    // S-4: filename grammar composed from the canonical owner (bytes unchanged)
-const artifactNaming = require('@animastor/generation').artifactNaming;
     const bookId = scene.book_id;
     const chapterId = scene.chapter_id;
     const sceneId = scene.scene_id;

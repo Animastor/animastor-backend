@@ -33,11 +33,15 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // DEBUG ROUTES — middleware for runtime access
     // ======================================================
-    app.use('/api/v1/debug/runtime', (req, res) => {
+    app.use('/api/v1/debug/runtime', (req, res, next) => {
         res.locals.redis = redis;
         res.locals.runtime = runtime;
         res.locals.config = config;
         res.locals.state = state;
+        // D2 (stage146): without next() the middleware never yields to the
+        // downstream route handlers, so every /api/v1/debug/runtime/* request
+        // hangs (curl HTTP 000) instead of responding.
+        next();
     });
 
     // ======================================================
