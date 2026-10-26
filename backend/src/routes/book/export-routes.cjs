@@ -79,15 +79,69 @@ module.exports = function(app, redis, deps) {
             const dir = path.join(OUTPUT_DIR, ctx.buildId);
             if (!fs.existsSync(dir)) return res.status(404).json({ error: 'no build output for this book' });
 
-            const pngs = fs.readdirSync(dir)
+            const pointerRepo = require('../../storage/postgres/repositories/iu-image-pointer-repo');
+
+            // Archive name → absolute source path. Keyed by the CANONICAL
+            // `{iuId}.png` name so a legacy canonical file and its published
+            // pointer for the SAME IU collapse to one entry. The rename only
+            // happens while the versioned contour is ON — with the flag OFF
+            // the legacy entry names (and therefore the zip bytes) are
+            // unchanged (condition 2).
+            const versioned = pointerRepo.versionedEnabled();
+            const byName = new Map();
+
+            // 1 — legacy disk scan (a build dir may contain files from more
+            // than one book; keep the historical `${bookId}_` filter).
+            const legacyPngs = fs.readdirSync(dir)
                 .filter(f => f.startsWith(`${bookId}_`) && f.endsWith('.png'))
                 .sort();
-            if (pngs.length === 0) return res.status(404).json({ error: 'no storyboard images to export' });
+            const scenePrefixes = (ctx.scenes || []).map(sc =>
+                `${bookId}_${sc.chapter_id}_${sc.scene_id}_`);
+            for (const f of legacyPngs) {
+                const prefix = versioned ? scenePrefixes.find(p => f.startsWith(p)) : null;
+                const name = prefix ? f.slice(prefix.length) : f;
+                byName.set(name, path.join(dir, f));
+            }
+
+            // 2 — Stage 143a (phase 2c · consumer 5): union the published
+            // pointers. Flag OFF ⇒ disabled verdict, ZERO PG calls, and the
+            // archive is byte-identical to the legacy-only one above.
+            //
+            // The pointer list is deliberately UNBOUNDED (no LIMIT): a silent
+            // cap would ship a truncated zip that looks complete. Per-pointer
+            // failures (unsafe path, file missing on disk) are skipped with a
+            // log; a per-pointer problem never fails the whole export. A
+            // POINTER-STORE error (as opposed to a missing row) degrades to a
+            // legacy-only archive + a warning — this is a read-only action, so
+            // it can never manufacture a false "ready".
+            let pointerStoreDegraded = false;
+            if (versioned) {
+                try {
+                    const rows = await require('../../storage/postgres/repositories/iu-image-pointer-repo')
+                        .listBuildPointerPaths({ bookId, buildId: ctx.buildId });
+                    for (const row of rows) {
+                        if (!row.iuId) continue;
+                        const resolved = pointerRepo.resolveOutputPath(OUTPUT_DIR, row.path);
+                        if (!resolved.ok || !fs.existsSync(resolved.path)) {
+                            log(`[EXPORT] storyboard pointer skipped (${row.iuId}: ${resolved.ok ? 'target_missing' : resolved.reason})`);
+                            continue;
+                        }
+                        // Pointer wins over a legacy file with the same name.
+                        byName.set(`${row.iuId}.png`, resolved.path);
+                    }
+                } catch (pgErr) {
+                    pointerStoreDegraded = true;
+                    log(`[EXPORT] storyboard pointer lookup failed for ${bookId} (${pgErr.message}) — exporting legacy files only`);
+                }
+            }
+
+            const entries = [...byName.entries()].sort(([a], [b]) => a.localeCompare(b));
+            if (entries.length === 0) return res.status(404).json({ error: 'no storyboard images to export' });
 
             const zip = new AdmZip();
-            for (const f of pngs) zip.addLocalFile(path.join(dir, f));
+            for (const [name, filePath] of entries) zip.addLocalFile(filePath, '', name);
             const buf = zip.toBuffer();
-            log(`[EXPORT] storyboard ${bookId} build=${ctx.buildId} (${pngs.length} images)`);
+            log(`[EXPORT] storyboard ${bookId} build=${ctx.buildId} (${entries.length} images${pointerStoreDegraded ? ', pointer store unavailable' : ''})`);
             sendBuffer(res, buf, 'application/zip', `${bookId}_storyboard.zip`);
         } catch (err) {
             res.status(500).json({ error: err.message });

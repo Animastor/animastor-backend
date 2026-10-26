@@ -346,6 +346,30 @@ async function listScenePointerPaths({ bookId, chapterId, sceneId, buildId, limi
     return res.rows.map((r) => ({ iuId: String(r.iu_id), path: r.path }));
 }
 
+/**
+ * Stage 143a (phase 2c) — every published pointer of one BUILD, for the
+ * storyboard export (read-only; the caller unions it with the legacy disk
+ * scan). Flag OFF ⇒ [] with zero PG calls; a PG error THROWS so the caller
+ * can degrade to a legacy-only export with a warning.
+ *
+ * Deliberately NO `LIMIT`: a silent cap would produce a TRUNCATED zip that
+ * looks complete (a data-loss bug for the user). If a bounded query is ever
+ * needed, the caller must detect the overflow and FAIL the export instead of
+ * returning a partial archive — never just add a LIMIT here.
+ *
+ * @returns {Promise<Array<{iuId:string, path:string}>>}
+ */
+async function listBuildPointerPaths({ bookId, buildId }) {
+    if (!versionedEnabled()) return [];
+    const res = await database.query(
+        `SELECT iu_id, path FROM ${POINTER_TABLE}
+         WHERE book_id = $1 AND build_id = $2
+         ORDER BY chapter_id, scene_id, iu_id`,
+        [bookId, buildId]
+    );
+    return res.rows.map((r) => ({ iuId: String(r.iu_id), path: r.path }));
+}
+
 module.exports = {
     VERSIONED_ENV,
     versionedEnabled,
@@ -363,4 +387,5 @@ module.exports = {
     getIuImagePointer,
     listPublishedIuIds,
     listScenePointerPaths,
+    listBuildPointerPaths,
 };

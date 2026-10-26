@@ -91,7 +91,7 @@ module.exports = function(app, redis, deps) {
         image, state, activeScenes, placeholderAudio,
     });
     require('./playback-queue.cjs')(app, ctx, {
-        getAllChunks, getBookWindowStatus, layerConfig, sceneAssetsRepo, computeIuReady,
+        getAllChunks, getBookWindowStatus, layerConfig, sceneAssetsRepo, computeIuReady, image,
     });
 
     log('[ROUTES] Player routes loaded');

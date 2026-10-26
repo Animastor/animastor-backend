@@ -266,6 +266,25 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
             helpers.warn(`[DEDUP-CLEAR] Failed to bump generation epoch: ${e.message}`);
         }
 
+        // Stage 143a (phase 2b · consumer 2) — dirty-regeneration cleanup is
+        // scoped to the LEGACY canonical names ONLY:
+        //
+        //   • oldPng     = {OUTPUT_DIR}/{buildId}/{iuId}.png  (canonical write)
+        //   • oldPreview = {OUTPUT_DIR}/{buildId}/{prefix}_pr{iu}.png
+        //
+        // Neither path is ever under `{buildId}/.versions/**`, so a dirty
+        // regeneration can NOT touch an immutable versioned file: the pointer
+        // in PostgreSQL still names the previous immutable generation, which
+        // is exactly what a concurrent reader must keep seeing until the new
+        // publication moves it. With the versioned flag ON the canonical PNG
+        // is normally absent (the versioned branch never writes it), so the
+        // first deletion is usually a no-op; it is kept because legacy leftovers
+        // from before the flag was enabled are genuinely stale.
+        //
+        // The canonical preview deletion is intentionally KEPT for both modes:
+        // a preview is a derived cache, and a dirty regeneration invalidates
+        // it (the next /preview request rebuilds it from the current source).
+        // Deletion is best-effort and never blocks dispatching the job.
         try {
             if (fs.existsSync(oldPng)) {
                 fs.unlinkSync(oldPng);

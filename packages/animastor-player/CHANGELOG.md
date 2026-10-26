@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.3 (2026-10-26)
+
+Stage 143a phase 2c — versioned-pointer readers in the two remaining
+read-only Player consumers (N6 / N7): with `IU_IMAGE_VERSIONED` on, a
+versioned-only build (IU images under `{build}/.versions/**`) is proven
+through the published pointer; with the flag off every path is byte-identical
+and issues zero new PG calls.
+
+### Changed
+
+- `GET /book/:bookId/assets-state` (N6) — `cover_iu_ready` now counts the
+  union of canonical cover IU files AND published pointer ids. A
+  pointer-store outage leaves the cover NOT ready (no false READY).
+- `GET /scene/:b/:ch/:sc/status` (N7) — `image_ready` accounts for a
+  published pointer when the legacy disk scan is empty; a pointer-store
+  outage leaves it NOT ready.
+- `playback-queue.cjs` now receives the injected `image` facade (through the
+  composition root) — reached only with a `typeof` guard, so older hosts
+  without the seam keep working.
+
+### API
+
+- No breaking changes: the package still never requires PG itself; both
+  readers go through the injected facade, and with the flag OFF the behavior
+  matches 0.1.2 byte for byte.
+
 ## 0.1.2 (2026-10-26)
 
 Stage 143a phase 2a — versioned-pointer readers in the IU-media contour

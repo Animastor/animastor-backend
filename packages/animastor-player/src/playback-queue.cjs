@@ -22,7 +22,7 @@ const fs = require('fs');
 const naming = require('./artifact-naming.cjs');
 
 module.exports = function(app, ctx, deps) {
-    const { getAllChunks, getBookWindowStatus, layerConfig, sceneAssetsRepo, computeIuReady } = deps;
+    const { getAllChunks, getBookWindowStatus, layerConfig, sceneAssetsRepo, computeIuReady, image } = deps;
 
     // ── BOOK CHUNKS (playback queue) ─────────────────────────────────────
     app.get('/api/v1/book/:bookId/chunks', async (req, res) => {
@@ -205,14 +205,39 @@ module.exports = function(app, ctx, deps) {
                             }
 
                             if (coverIuReady < coverIuTotal && buildId) {
+                                // A versioned-only build keeps its IU images
+                                // under {build}/.versions/**, invisible to the
+                                // legacy scan below. Collect the ready ids from
+                                // BOTH sources, keyed by the canonical iu id, so
+                                // the union (not either source alone) decides.
+                                const readyIds = new Set();
                                 try {
                                     const buildDir = path.join(ctx.outputRoot, buildId);
                                     if (fs.existsSync(buildDir)) {
                                         const iuPrefix = naming.iuImagePrefix(bookId, coverChapterId, coverSceneId);
-                                        const pngFiles = fs.readdirSync(buildDir).filter(f => f.startsWith(iuPrefix) && f.endsWith('.png'));
-                                        if (pngFiles.length >= coverIuTotal) coverIuReady = coverIuTotal;
+                                        for (const f of fs.readdirSync(buildDir)) {
+                                            if (f.startsWith(iuPrefix) && f.endsWith('.png')) {
+                                                readyIds.add(f.slice(iuPrefix.length, -4));
+                                            }
+                                        }
                                     }
                                 } catch (_) {}
+                                // Stage 143a (phase 2c · N6): published pointers.
+                                // Injected facade with a typeof-guard (old hosts
+                                // simply skip it); flag OFF ⇒ [] with zero PG
+                                // calls; a pointer-store ERROR is "not ready"
+                                // (never a false READY).
+                                if (readyIds.size < coverIuTotal
+                                    && image && typeof image.listPublishedIuIdsForScene === 'function') {
+                                    try {
+                                        const publishedIds = await image.listPublishedIuIdsForScene(
+                                            buildId, bookId, coverChapterId, coverSceneId);
+                                        for (const id of publishedIds || []) readyIds.add(String(id));
+                                    } catch (ptrErr) {
+                                        console.warn('[CHUNKS] cover pointer proof unavailable:', ptrErr.message);
+                                    }
+                                }
+                                if (readyIds.size >= coverIuTotal) coverIuReady = coverIuTotal;
                             }
                         }
                     }

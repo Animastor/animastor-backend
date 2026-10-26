@@ -249,6 +249,27 @@ module.exports = function(redis, config, deps) {
         }
 
         log(`💾 Versioned publication: ${relFinal} (fence=${fenceInt}, job=${jobId})`);
+
+        // Stage 143a (phase 2c · consumer 4) — invalidate the derived preview.
+        // The canonical preview file is a CACHE keyed by the IU name, not by
+        // the generation: after a regeneration the old thumbnail would
+        // otherwise keep being served. Delete it here, AFTER the pointer moved,
+        // so the next /preview request rebuilds it from the new versioned
+        // source. Best-effort: a failed unlink is logged and NEVER rolls the
+        // publication back (the pointer is already the truth; a stale preview
+        // is a cosmetic cache miss, not a correctness problem).
+        try {
+            const previewName = artifactNaming.sceneImagePreviewName(
+                parsed.bookId, parsed.chapterId, parsed.sceneId, parsed.iuId);
+            const previewPath = path.join(OUTPUT_DIR, buildId, previewName);
+            if (fs.existsSync(previewPath)) {
+                fs.unlinkSync(previewPath);
+                log(`[PREVIEW-INVALIDATE] Deleted stale preview: ${previewName}`);
+            }
+        } catch (previewErr) {
+            log(`[PREVIEW-INVALIDATE] Failed to delete preview for ${parsed.iuId}: ${previewErr.message} (publication kept)`);
+        }
+
         return {
             published: true,
             publication: 'versioned_pointer',

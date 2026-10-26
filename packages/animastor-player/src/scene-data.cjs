@@ -58,6 +58,24 @@ module.exports = function(app, ctx, deps) {
                 } catch {}
             }
 
+            // Stage 143a (phase 2c · N7) — a versioned-only build keeps its IU
+            // images under {build}/.versions/**, invisible to the scan above.
+            // Only when that scan came up empty do we ask the injected image
+            // facade for a published pointer; the facade is flag-gated (flag OFF
+            // ⇒ null, zero PG calls) and reached through a typeof-guard so an
+            // older host without the seam is unaffected. A pointer-store ERROR
+            // stays NOT ready — never a false READY.
+            if (!imageReady && image && typeof image.resolveVersionedSceneProof === 'function') {
+                try {
+                    const proof = await image.resolveVersionedSceneProof(
+                        ctx.outputRoot, buildId, bookId, chapterId, sceneId);
+                    if (proof) imageReady = true;
+                } catch (pgErr) {
+                    ctx.log(`versioned image proof unavailable for ${bookId}/${chapterId}/${sceneId}: ${pgErr.message} — image not ready`);
+                    imageReady = false;
+                }
+            }
+
             // Scene type from book JSON
             let sceneType = 'narration';
             try {

@@ -190,7 +190,31 @@ module.exports = function(redis, deps = {}) {
             const scenePrefix = artifactNaming.iuImagePrefix(bookId, chapterId, sceneId);
             let dirFiles = [];
             try { dirFiles = fs.readdirSync(dir); } catch (_) {}
-            const hasIuImages = dirFiles.some(f => f.startsWith(scenePrefix) && f.endsWith('.png'));
+            let hasIuImages = dirFiles.some(f => f.startsWith(scenePrefix) && f.endsWith('.png'));
+
+            // Stage 143a (phase 2b · consumer 1) — versioned proof.
+            // The legacy scan above runs FIRST and, on its own, already decides
+            // a legacy build. Only when it came up EMPTY do we ask the image
+            // facade for a published pointer with a live file; the facade is
+            // flag-gated, so flag OFF answers null with ZERO PostgreSQL calls
+            // and this block is a no-op (byte-identical recovery).
+            //
+            // A pointer-store ERROR is caught here and logged: recovery keeps
+            // ONLY the legacy verdict. This can never fabricate a false READY,
+            // because the legacy scan has already run (hasIuImages is its
+            // result, not a default). A pointer whose target is missing is not
+            // counted either — resolveVersionedSceneProof only returns a path
+            // for a safely resolved file that exists on disk.
+            if (!hasIuImages) {
+                try {
+                    const versionedProof = await require('../image/registry')
+                        .resolveVersionedSceneProof(config.OUTPUT_DIR, buildId, bookId, chapterId, sceneId);
+                    if (versionedProof) hasIuImages = true;
+                } catch (proofErr) {
+                    log('Recovery: versioned pointer proof failed for',
+                        chapterId + '/' + sceneId, '(' + proofErr.message + ') — using legacy scan result');
+                }
+            }
             const videoPath = path.join(dir, artifactNaming.sceneVideoName(bookId, chapterId, sceneId));
             const hasVideo = fs.existsSync(videoPath);
 
