@@ -38,9 +38,14 @@ const state = require('../src/state');
 const artifactNaming = require('@animastor/generation').artifactNaming;
 const { createMockRedis } = require('./mocks/redis-mock');
 
-const sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
-const callbacks = require('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
-const iuMedia = require('../node_modules/@animastor/player/src/iu-media.cjs');
+// Stage 143a fix 3: load the CANONICAL monorepo sources, not the published
+// copies in node_modules — on a clean install those carry the older release
+// without the B1–B4 code under test. Bare requires of the package files
+// resolve on a clean clone via tests/monorepo-source-bindings.cjs (loaded
+// through .mocharc.json).
+const sceneWindow = require('../../packages/animastor-orchestration/src/runtime/scene-window');
+const callbacks = require('../../packages/animastor-orchestration/src/orchestration/scene-callbacks');
+const iuMedia = require('../../packages/animastor-player/src/iu-media.cjs');
 
 const BOOK = 'b143a2a';
 const CHAPTER = 'ch-1';

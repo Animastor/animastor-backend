@@ -73,6 +73,11 @@ const EXTENSION_RE = /^\.[A-Za-z0-9]+$/;
 const BUILD_ID_RE = /^[a-zA-Z0-9._-]+$/;
 /** Fences are sha256 hex ids (computeIdemKey). */
 const FENCE_RE = /^[0-9a-f]{64}$/i;
+// Versioned-publish writer temps (Stage 143a fix 2): `{fence}.{pid}.{rand}.tmp`
+// and the legacy `{fence}.tmp` — FILES directly under `{build}/.staging/{asset}/`.
+// The fence here is an integer (iu_image fence sequence), unlike the 64-hex
+// result-publication fence DIRS below.
+const VERSIONED_STAGING_TMP_RE = /^(\d+)(?:\.[0-9]+\.[0-9a-f]+)?\.tmp$/i;
 /** Content proof stored in the commit manifest (Stage 137 · audit 136 P1-B). */
 const SHA256_RE = /^[0-9a-f]{64}$/i;
 /** Manifest schema written by Stage 137 (adds sha256; version 1 had none). */
@@ -1019,8 +1024,32 @@ async function collectStaleStaging(config, redis, { maxAgeMs = STAGING_MAX_AGE_M
                 let jobId;
                 try { jobId = decodeURIComponent(jobDir.name); } catch (_) { continue; }
                 const jobPath = path.join(root, jobDir.name);
-                let fenceNames = [];
-                try { fenceNames = fsImpl.readdirSync(jobPath, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch (_) { continue; }
+                let jobEntries = [];
+                try { jobEntries = fsImpl.readdirSync(jobPath, { withFileTypes: true }); } catch (_) { continue; }
+
+                // Versioned-publish writer temps are FILES directly inside
+                // `{build}/.staging/{assetId}/` (`{fence}.{pid}.{rand}.tmp`,
+                // legacy `{fence}.tmp`): a writer that died between link(2)
+                // and unlink leaves one behind, sharing its inode with the
+                // already-published immutable file (unlink of the temp only
+                // drops a link — the published file stays). After the age
+                // gate such a leftover is pure garbage: an in-flight publish
+                // writes for milliseconds, and the fence dirs of the RESULT
+                // contour live one level deeper, so their `artifact.tmp` is
+                // never matched here. Authority for a versioned fence is PG,
+                // not Redis — a Redis outage must not keep these leftovers.
+                for (const entry of jobEntries) {
+                    if (!entry.isFile()) continue;
+                    if (!VERSIONED_STAGING_TMP_RE.test(entry.name)) continue;
+                    out.scanned++;
+                    const filePath = path.join(jobPath, entry.name);
+                    let tmpSt = null;
+                    try { tmpSt = fsImpl.statSync(filePath); } catch (_) { continue; }
+                    if (now - tmpSt.mtimeMs < maxAgeMs) { out.skipped++; continue; }
+                    try { fsImpl.unlinkSync(filePath); out.removed++; } catch (_) { out.skipped++; }
+                }
+
+                const fenceNames = jobEntries.filter((e) => e.isDirectory());
                 for (const fenceDir of fenceNames) {
                     out.scanned++;
                     const fence = fenceDir.name.toLowerCase();

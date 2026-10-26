@@ -6,7 +6,12 @@ const { expect } = require('chai');
 const path = require('path');
 const { createMockRedis } = require('./mocks/redis-mock');
 
-const RECONCILE_PATH = path.resolve(__dirname, '../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
+// Stage 143a fix 3: the module under test is the CANONICAL monorepo source
+// (packages/), not the published copy in node_modules — a clean clone then
+// exercises the current code without anyone hand-syncing node_modules.
+// Bare requires of the package files resolve on a clean clone via
+// tests/monorepo-source-bindings.cjs (loaded through .mocharc.json).
+const RECONCILE_PATH = path.resolve(__dirname, '../../packages/animastor-orchestration/src/runtime/reconciliation-engine');
 
 // ======================================================
 // HELPERS
@@ -45,7 +50,9 @@ const AUDIO_ORCH_PATH = path.join(CWD, 'src/services/audio-orchestrator.js');
 // require.cache) so the stage-46 recovery tests can drive C1 through the REAL
 // audio FSM (VALID_TRANSITIONS map) instead of a setFailed stub.
 const realAudioOrch = require('../src/services/audio-orchestrator');
-const ORCH_PATH = path.join(CWD, 'node_modules/@animastor/orchestration/src/orchestration/orchestrator.js');
+// The orchestrator mock must sit where THIS tree resolves it — the
+// canonical packages/ copy (see RECONCILE_PATH).
+const ORCH_PATH = path.resolve(__dirname, '../../packages/animastor-orchestration/src/orchestration/orchestrator.js');
 const JOURNAL_PATH = path.join(CWD, 'src/state/event-journal.js');
 
 function mockDeps(redis, overrides = {}) {
@@ -690,8 +697,8 @@ describe('checkStaleDispatchLeases (audit c8b79f6: TTL-based liveness)', () => {
     let redis;
     afterEach(() => { delete require.cache[RECONCILE_PATH]; });
 
-    const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
-    const leaseManager = require('../node_modules/@animastor/orchestration/src/runtime/lease-manager');
+    const dispatchEngine = require('../../packages/animastor-orchestration/src/runtime/dispatch-engine');
+    const leaseManager = require('../../packages/animastor-orchestration/src/runtime/lease-manager');
 
     // Seed lease + metadata like dispatchStage does, with a controllable started_at.
     async function seedDispatch(stage, dispatchId, startedAtAgoMs) {
@@ -834,8 +841,8 @@ describe('applyFix — RELEASE_STALE_LEASE (audit c8b79f6 recovery)', () => {
     let redis;
     afterEach(() => { delete require.cache[RECONCILE_PATH]; });
 
-    const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
-    const leaseManager = require('../node_modules/@animastor/orchestration/src/runtime/lease-manager');
+    const dispatchEngine = require('../../packages/animastor-orchestration/src/runtime/dispatch-engine');
+    const leaseManager = require('../../packages/animastor-orchestration/src/runtime/lease-manager');
 
     it('releases a truly stale lease, frees quota, marks scene dirty, re-activates it', async () => {
         redis = createMockRedis();
@@ -1620,13 +1627,26 @@ describe('orch invariants — FAILED + DIRTY (stage 47)', () => {
     });
 
     describe('the copy under test is the canonical package source', () => {
-        it('node_modules/@animastor/orchestration reconciliation-engine matches packages/', function () {
+        it('the suite loads the canonical packages/ bytes (and the npm copy matches them once it is the same release)', function () {
             const fs = require('fs');
             const crypto = require('crypto');
             const canonical = path.resolve(__dirname, '../../packages/animastor-orchestration/src/runtime/reconciliation-engine.js');
-            if (!fs.existsSync(canonical)) this.skip(); // post-split checkout: only the npm copy exists
+            expect(fs.existsSync(canonical), 'canonical package source present').to.equal(true);
+            expect(RECONCILE_PATH + '.js', 'the module under test IS the canonical source — no manual node_modules sync')
+                .to.equal(canonical);
+
+            // The npm copy in backend/node_modules is what production installs.
+            // While it is an OLDER release (clean clone before the owner
+            // publishes 0.1.5) byte equality is meaningless — the byte-sync
+            // requirement is the publish gate: same version ⇒ same bytes.
+            const npmCopy = path.resolve(__dirname, '../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine.js');
+            if (!fs.existsSync(npmCopy)) this.skip(); // post-split checkout: only the packages copy exists
+            const installedVersion = require('../node_modules/@animastor/orchestration/package.json').version;
+            const sourceVersion = require('../../packages/animastor-orchestration/package.json').version;
+            if (installedVersion !== sourceVersion) this.skip(); // npm carries the previous release
+
             const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-            expect(sha(RECONCILE_PATH + '.js'), 'tests must exercise the canonical package bytes — sync backend/node_modules')
+            expect(sha(npmCopy), 'same release ⇒ the npm copy must be byte-identical to packages/')
                 .to.equal(sha(canonical));
         });
     });

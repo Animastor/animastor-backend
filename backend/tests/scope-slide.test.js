@@ -230,6 +230,15 @@ function loadSceneWindowWithStubs({ redis, startedStateByScene = new Set(), addA
         }),
     };
     require.cache[activeScenesPath] = { exports: activeScenesStub, id: activeScenesPath, loaded: true, filename: activeScenesPath, children: [], paths: [] };
+    // NOTE (test isolation): requiring scene-window below may load the REAL
+    // `runtime-scheduler`, whose module-scope `activeScenes` const then closes
+    // over this STUB. Deleting active-scenes-index alone does not undo that
+    // captured reference — the polluted scheduler stays in require.cache and
+    // silently drops every addActiveScene call for later suites (e.g. the
+    // worklist-rebuild Option E test, which reads animastor:active-scenes from
+    // its own redis). Every afterEach() below therefore ALSO purges
+    // runtime-scheduler.js so the next require reloads it against the real
+    // active-scenes-index.
 
     const audioPath = path.join(cwd, 'src/audio/audio-service.js');
     const audioStub = {
@@ -307,6 +316,7 @@ describe('scope-aware slideWindow', () => {
             path.join(cwd, 'src/book/index.js'),
             path.join(cwd, 'src/state/index.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/active-scenes-index.js'),
+            path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/runtime-scheduler.js'),
             path.join(cwd, 'src/audio/audio-service.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/scene-window.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/orchestration/orchestrator.js'),
@@ -478,6 +488,7 @@ describe('cancel-generation flag', () => {
             path.join(cwd, 'src/book/index.js'),
             path.join(cwd, 'src/state/index.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/active-scenes-index.js'),
+            path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/runtime-scheduler.js'),
             path.join(cwd, 'src/audio/audio-service.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/scene-window.js'),
         ]) {
@@ -571,6 +582,7 @@ describe('scene cache-skip (content on disk)', () => {
             path.join(cwd, 'src/book/index.js'),
             path.join(cwd, 'src/state/index.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/active-scenes-index.js'),
+            path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/runtime-scheduler.js'),
             path.join(cwd, 'src/audio/audio-service.js'),
             path.join(cwd, 'node_modules/@animastor/orchestration/src/runtime/scene-window.js'),
             path.join(cwd, 'src/config/runtime-config.js'),

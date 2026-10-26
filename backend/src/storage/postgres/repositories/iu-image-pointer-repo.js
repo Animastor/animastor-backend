@@ -63,6 +63,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 // Keep the module object (not a destructured snapshot) so tests can spy on
 // `database.query` without losing the reference this module captured.
 const database = require('../database');
@@ -155,13 +156,27 @@ function versionedRelPath(buildId, assetId, fence) {
     return path.posix.join(b, '.versions', a, `${f}.png`);
 }
 
-/** Writer staging path (relative to OUTPUT_DIR) for one fence. */
+/**
+ * Writer staging path (relative to OUTPUT_DIR) for ONE delivery attempt.
+ *
+ * Stage 143a fix 2: the name is unique per attempt
+ * (`{fence}.{pid}.{rand}.tmp`), never a shared `{fence}.tmp`. After
+ * `link(2)` the temp file and the immutable versioned file are the SAME
+ * inode — if a crashed attempt left its temp behind (or two deliveries of
+ * one fence run concurrently), a second attempt opening the old name with
+ * a truncating `open('w')` would cut the PUBLISHED file. The writer opens
+ * this path with the exclusive flag `wx` (O_EXCL), which rejects any
+ * collision instead of truncating. Leftovers of crashed attempts are
+ * collected by the age-based `.staging` GC (`collectStaleStaging`), which
+ * recognises this name pattern.
+ */
 function stagingRelPath(buildId, assetId, fence) {
     const b = safeComponent(buildId);
     const a = safeComponent(assetId);
     const f = Number(fence);
     if (!b || !a || !Number.isInteger(f) || f <= 0) return null;
-    return path.posix.join(b, '.staging', a, `${f}.tmp`);
+    const attempt = `${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+    return path.posix.join(b, '.staging', a, `${f}.${attempt}.tmp`);
 }
 
 // ── B1 — durable fence reservation (dispatch-time) ───────────────────────

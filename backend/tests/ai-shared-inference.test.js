@@ -803,7 +803,12 @@ describe('LLM Sharing Phase 2 — consumer resolver & shared inference (SH-AI-3)
     it('16b. shared snapshot is safe for health checks (no crash, no fetch)', async () => {
         const snap = await workspaceAi.resolveAIForWorkspace(wsB);
         const n = await aiService.checkAIHealth({}, snap);
-        expect(n).to.equal(0); // connector snapshots carry no HTTP credential
+        // Contract since 5b98fbf (LAC §9): connector snapshots carry NO HTTP
+        // credential — the health signal is the connector's own registry
+        // liveness (Map lookup, no probe, no token spend). Pin it exactly:
+        // live connector → 1, offline → 0; never an HTTP fetch either way.
+        expect(snap.transport).to.equal('connector');
+        expect(n).to.equal(registry.isLive(snap.connectorId) ? 1 : 0);
     });
 
     // ── 17. Resolver caching discipline (Phase 2 regression) ──────────────

@@ -157,3 +157,38 @@ try {
 try {
     require('../../packages/animastor-orchestration/src/index.js').bindHostModules(HOST_MODULE_BINDINGS);
 } catch (_) { /* post-split: monorepo checkout not present */ }
+
+// Same dual-wiring for the O-2..O-10 PORTS (Stage 143a fix 3): the setters
+// above ran on the npm copy; tests that load the canonical packages/**
+// sources directly (reconciliation-engine, stage143a consumers) resolve
+// their ports from the monorepo copy — an UNWIRED copy would throw
+// "port: not wired" where the wired production process succeeds. Both
+// instances bind the SAME host adapters (call-time lazy requires inside
+// them), so require.cache stubbing keeps working identically in either.
+try {
+    const monorepoOrchestration = require('../../packages/animastor-orchestration/src/index.js');
+    monorepoOrchestration.ports.persistence.setPersistencePort(
+        require('../src/storage/runtime-persistence-adapter')
+    );
+    monorepoOrchestration.ports.sceneData.setSceneDataPort(
+        require('../src/storage/scene-data-adapter')
+    );
+    monorepoOrchestration.ports.placeholderAudio.setPlaceholderAudioPort(
+        require('../src/storage/placeholder-audio-adapter')
+    );
+    monorepoOrchestration.ports.progressEvents.setProgressEventsPort(
+        require('../src/storage/progress-events-adapter')
+    );
+    monorepoOrchestration.ports.audioFsm.setAudioFsmPort(
+        require('../src/storage/audio-fsm-adapter')
+    );
+    monorepoOrchestration.ports.videoFsm.setVideoFsmPort(
+        require('../src/storage/video-fsm-adapter')
+    );
+    monorepoOrchestration.ports.hubCancel.setHubCancelPort(
+        require('../src/storage/hub-cancel-adapter')
+    );
+    monorepoOrchestration.ports.layerConfig.setLayerConfigPort(
+        require('../src/storage/layer-config-adapter')
+    );
+} catch (_) { /* post-split: monorepo checkout not present */ }

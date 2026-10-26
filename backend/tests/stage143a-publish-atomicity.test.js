@@ -33,6 +33,7 @@ const registry = require('../src/image/registry');
 const { createMockRedis } = require('./mocks/redis-mock');
 const dispatch = require('@animastor/orchestration').runtime.dispatch;
 const artifactNaming = require('@animastor/generation').artifactNaming;
+const resultPublication = require('../src/services/result-publication.cjs');
 
 const BOOK = 'b143afix';
 const CHAPTER = 'ch-1';
@@ -64,8 +65,20 @@ let savedFlag;
 
 const finalPathFor = (fenceInt) =>
     pointerRepo.resolveOutputPath(tmpRoot, pointerRepo.versionedRelPath(BUILD, ASSET_ID, fenceInt));
-const tempPathFor = (fenceInt) =>
-    pointerRepo.resolveOutputPath(tmpRoot, pointerRepo.stagingRelPath(BUILD, ASSET_ID, fenceInt));
+
+/**
+ * Every staging temp one fence's writer left behind. Temp names are UNIQUE
+ * per attempt (`{fence}.{pid}.{rand}.tmp`, Stage 143a fix 2), so a test can
+ * never predict the exact path — it lists the pattern instead.
+ */
+const stagingTmpsFor = (fenceInt) => {
+    const dir = path.join(tmpRoot, BUILD, '.staging', ASSET_ID);
+    if (!fs.existsSync(dir)) return [];
+    const re = new RegExp(`^${fenceInt}\\.[0-9]+\\.[0-9a-f]+\\.tmp$`);
+    return fs.readdirSync(dir).filter((f) => re.test(f)).map((f) => path.join(dir, f));
+};
+const expectNoTempLeft = (fenceInt, why) =>
+    expect(stagingTmpsFor(fenceInt), why || 'this writer\'s temp file is always removed').to.deep.equal([]);
 
 async function cleanupPg() {
     await database.query(`DELETE FROM iu_image_fence_reservations WHERE book_id = $1`, [BOOK]);
@@ -192,8 +205,7 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         // existing bytes untouched, pointer never created, temp removed
         expect(fs.readFileSync(finalRes.path, 'utf8'), 'the immutable file is never overwritten').to.equal(truncated);
         expect(await pointerRepo.getIuImagePointer(POINTER_RES), 'the pointer must not move onto bad bytes').to.equal(null);
-        const tempRes = tempPathFor(fenceInt);
-        expect(fs.existsSync(tempRes.path), 'this writer\'s temp file is always removed').to.equal(false);
+        expectNoTempLeft(fenceInt);
     });
 
     // ── 2 — byte-identical replay ───────────────────────────────────────
@@ -219,8 +231,7 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         expect(row.publishFence).to.equal(fenceInt);
         expect(row.path).to.equal(pointerRepo.versionedRelPath(BUILD, ASSET_ID, fenceInt));
 
-        const tempRes = tempPathFor(fenceInt);
-        expect(fs.existsSync(tempRes.path)).to.equal(false);
+        expectNoTempLeft(fenceInt);
     });
 
     // ── 3 — first publication (the happy path) ──────────────────────────
@@ -238,8 +249,7 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         expect(resolved.ok).to.equal(true);
         expect(fs.readFileSync(resolved.path, 'utf8')).to.equal(BYTES_V1);
 
-        const tempRes = tempPathFor(row.publishFence);
-        expect(fs.existsSync(tempRes.path), 'temp removed on success').to.equal(false);
+        expectNoTempLeft(row.publishFence, 'temp removed on success');
         // staging/ and .versions/ live under the same build directory
         expect(fs.existsSync(path.dirname(resolved.path))).to.equal(true);
     });
@@ -268,7 +278,7 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         expect(fs.existsSync(finalRes.path), 'the immutable file made it to disk').to.equal(true);
         expect(fs.readFileSync(finalRes.path, 'utf8'), '…complete, never truncated').to.equal(BYTES_V1);
         expect(await pointerRepo.getIuImagePointer(POINTER_RES), 'PG untouched: the pointer did not move').to.equal(null);
-        expect(fs.existsSync(tempPathFor(fenceInt).path), 'the temp file is gone even on the failure path').to.equal(false);
+        expectNoTempLeft(fenceInt, 'the temp file is gone even on the failure path');
 
         // ── retry of the same callback converges (idempotent replay) ──
         const retry = await deliver(handler);
@@ -276,7 +286,7 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         const row = await pointerRepo.getIuImagePointer(POINTER_RES);
         expect(row.publishFence).to.equal(fenceInt);
         expect(fs.readFileSync(finalRes.path, 'utf8')).to.equal(BYTES_V1);
-        expect(fs.existsSync(tempPathFor(fenceInt).path)).to.equal(false);
+        expectNoTempLeft(fenceInt, 'the retry removes its own temp as well');
     });
 
     // ── 5 — temp cleanup on a terminal pointer reject ───────────────────
@@ -298,7 +308,7 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         expect(err.code).to.equal('stale_intent');
 
         expect((await pointerRepo.getIuImagePointer(POINTER_RES)).publishFence, 'the winner stays').to.equal(ahead);
-        expect(fs.existsSync(tempPathFor(fenceInt).path), 'temp removed on the reject path').to.equal(false);
+        expectNoTempLeft(fenceInt, 'temp removed on the reject path');
         // The immutable file of THIS fence exists (age-based GC owns it) — it
         // is never deleted and never overwrites the winner's file.
         expect(fs.existsSync(finalPathFor(fenceInt).path)).to.equal(true);
@@ -349,6 +359,122 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
         expect(fs.readFileSync(legacyPath, 'utf8')).to.equal('LEGACY-NEWER-BYTES');
     });
 
+    // ── 8 — crash between link() and unlink() (Stage 143a fix 2) ─────────
+    it('a crash between link() and unlink() keeps temp+final together; the re-delivery never truncates the published file', async () => {
+        await primeDelivery(redis);
+        const fenceInt = await reservedFence();
+        const handler = makeHandler(redis);
+
+        // Simulate the crash: after link(2) the temp and the immutable file
+        // are ONE inode; the process dies BEFORE unlink and BEFORE the
+        // pointer UPDATE, so both files remain and no pointer row exists.
+        const realUnlink = fs.unlinkSync;
+        const originalPublish = pointerRepo.publishIuImagePointer;
+        fs.unlinkSync = function (p, ...rest) {
+            if (String(p).includes(`${path.sep}.staging${path.sep}`)) return undefined; // "death" before unlink
+            return realUnlink.call(fs, p, ...rest);
+        };
+        pointerRepo.publishIuImagePointer = async () => { throw new Error('simulated crash before the pointer UPDATE'); };
+        let err;
+        try {
+            err = await caught(() => deliver(handler));
+        } finally {
+            fs.unlinkSync = realUnlink;
+            pointerRepo.publishIuImagePointer = originalPublish;
+        }
+        expect(err, 'the crashed publication must fail').to.not.equal(null);
+        expect(err.code).to.equal('publish_failed');
+
+        const finalRes = finalPathFor(fenceInt);
+        const crashedTmps = stagingTmpsFor(fenceInt);
+        expect(crashedTmps.length, 'the crashed attempt\'s temp is still next to the final file').to.equal(1);
+        expect(fs.existsSync(finalRes.path)).to.equal(true);
+        expect(fs.readFileSync(finalRes.path, 'utf8')).to.equal(BYTES_V1);
+        expect(fs.statSync(crashedTmps[0]).ino, 'after link() both paths are one inode')
+            .to.equal(fs.statSync(finalRes.path).ino);
+        expect(await pointerRepo.getIuImagePointer(POINTER_RES), 'the crash happened before the UPDATE').to.equal(null);
+
+        // ── the SAME fence is delivered again ──
+        const bytesBefore = fs.readFileSync(finalRes.path);
+        const before = fs.statSync(finalRes.path);
+        const out = await deliver(handler);
+        expect(out.published).to.equal(true);
+
+        const after = fs.statSync(finalRes.path);
+        expect(fs.readFileSync(finalRes.path), 'the published file is byte-identical').to.deep.equal(bytesBefore);
+        expect(after.ino, 'same inode — the leftover temp name was never reopened').to.equal(before.ino);
+        expect(after.mtimeMs, 'never truncated for an instant (mtime untouched)').to.equal(before.mtimeMs);
+        expect(after.size).to.equal(before.size);
+
+        const row = await pointerRepo.getIuImagePointer(POINTER_RES);
+        expect(row, 'the pointer is published on the re-delivery').to.not.equal(null);
+        expect(row.publishFence).to.equal(fenceInt);
+        expect(row.path).to.equal(pointerRepo.versionedRelPath(BUILD, ASSET_ID, fenceInt));
+
+        // the crashed leftover survives this writer (its own temp is gone)
+        // and becomes the age-based GC's business — see the GC test below.
+        expect(stagingTmpsFor(fenceInt).length).to.equal(1);
+    });
+
+    // ── 9 — two parallel deliveries of one fence (Stage 143a fix 2) ──────
+    it('two parallel deliveries of the same fence leave the file intact and exactly one pointer', async () => {
+        await primeDelivery(redis);
+        const fenceInt = await reservedFence();
+
+        const results = await Promise.allSettled([
+            deliver(makeHandler(redis)),
+            deliver(makeHandler(redis)),
+        ]);
+        const rejected = results.filter((r) => r.status === 'rejected');
+        expect(rejected.map((r) => r.reason.code), 'neither delivery may lose bytes or report a conflict')
+            .to.deep.equal([]);
+
+        const finalRes = finalPathFor(fenceInt);
+        expect(fs.existsSync(finalRes.path), 'the final file is whole').to.equal(true);
+        expect(fs.readFileSync(finalRes.path, 'utf8')).to.equal(BYTES_V1);
+
+        const rows = await database.query(
+            `SELECT publish_fence FROM iu_image_pointers WHERE book_id = $1 AND build_id = $2`, [BOOK, BUILD]);
+        expect(rows.rows.length, 'exactly one pointer row').to.equal(1);
+        expect(Number(rows.rows[0].publish_fence)).to.equal(fenceInt);
+
+        expectNoTempLeft(fenceInt, 'both writers removed their own unique temp');
+    });
+
+    // ── 10 — the staging GC finds the NEW temp name (Stage 143a fix 2) ───
+    it('collectStaleStaging removes stale versioned temps (new and legacy names), keeps young ones and result-contour files', async () => {
+        const stagingDir = path.join(tmpRoot, BUILD, '.staging', ASSET_ID);
+        fs.mkdirSync(stagingDir, { recursive: true });
+
+        const staleNew = path.join(stagingDir, '7.1234.deadbeef.tmp');       // {fence}.{pid}.{rand}.tmp
+        const staleLegacy = path.join(stagingDir, '8.tmp');                   // the pre-fix name
+        const youngNew = path.join(stagingDir, '9.4321.cafebabe.tmp');        // in-flight attempt
+        for (const f of [staleNew, staleLegacy, youngNew]) fs.writeFileSync(f, 'leftover-temp');
+        const old = Date.now() - 25 * 3600 * 1000;
+        fs.utimesSync(staleNew, new Date(old), new Date(old));
+        fs.utimesSync(staleLegacy, new Date(old), new Date(old));
+
+        // the RESULT contour keeps its own staged files one level deeper —
+        // the versioned-temp branch must never reach them. The fence dir is
+        // the CURRENT intent's, so the directory GC keeps it as well.
+        const gcRedis = withPublish(createMockRedis());
+        await seedIntent(gcRedis, FENCE);
+        const resultFenceDir = path.join(tmpRoot, BUILD, '.staging', encodeURIComponent(JOB), FENCE);
+        fs.mkdirSync(resultFenceDir, { recursive: true });
+        fs.writeFileSync(path.join(resultFenceDir, 'artifact.tmp'), 'result-staging');
+        fs.utimesSync(resultFenceDir, new Date(old), new Date(old));
+
+        const gc = await resultPublication.collectStaleStaging({ OUTPUT_DIR: tmpRoot }, gcRedis, { now: Date.now() });
+
+        expect(fs.existsSync(staleNew), 'the new temp name is found by the GC').to.equal(false);
+        expect(fs.existsSync(staleLegacy), 'the legacy temp name is still found too').to.equal(false);
+        expect(fs.existsSync(youngNew), 'an in-flight temp is never touched').to.equal(true);
+        expect(fs.existsSync(path.join(resultFenceDir, 'artifact.tmp')), 'result-contour files stay the result GC\'s business')
+            .to.equal(true);
+        expect(gc.removed).to.equal(2);
+        expect(gc.aborted).to.equal(false);
+    });
+
     // ── 7 — source contract of the fixed writer ─────────────────────────
     it('the writer publishes via link() + verifies size/SHA-256 (source contract)', () => {
         const src = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'services', 'task-handler.cjs'), 'utf8');
@@ -360,6 +486,13 @@ describe('stage143a fix A1 — atomic, verifiable versioned publication (isolate
             .to.match(/verifyVersionedBytes\(absFinal\.path, buffer, shaExpected\)/);
         expect((src.match(/verifyVersionedBytes\(absFinal\.path, buffer, shaExpected\)/g) || []).length)
             .to.be.at.least(2);
-        expect(src, 'the temp file is removed on every path').to.match(/finally \{\s*\n\s*\/\/ 5 — THIS writer's temp file/);
+        expect(src, 'the temp is opened EXCLUSIVELY — a leftover (same inode as the published file) must never be reopened with `w`')
+            .to.match(/fs\.openSync\(absTemp\.path, 'wx'\)/);
+        expect(src, 'no truncating open of the staging temp anymore').to.not.match(/fs\.openSync\(absTemp\.path, 'w'\)/);
+        expect(src, 'the temp is removed on every path').to.match(/finally \{\s*\n\s*\/\/ 5 — THIS writer's temp file/);
+        // the temp NAME is unique per attempt (stagingRelPath in the pointer repo)
+        const repoSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'storage', 'postgres', 'repositories', 'iu-image-pointer-repo.js'), 'utf8');
+        expect(repoSrc, 'unique temp name: {fence}.{pid}.{rand}.tmp').to.match(/\$\{f\}\.\$\{attempt\}\.tmp/);
+        expect(repoSrc).to.match(/crypto\.randomBytes/);
     });
 });

@@ -397,11 +397,17 @@ describe('Phase 5 final audit: full runtime/** boundary', () => {
         expect(hosts, 'computed/template/concat require or import() is forbidden in the package runtime').to.deep.equal([]);
 
         // The one allowed host may only lazy-load runtime-internal './' modules.
-        // §32.30: the lazyRequire barrel stays HOST-side (backend/src/runtime/index.js).
-        const indexSrc = readSource(path.join(BACKEND_SRC, 'runtime', 'index.js'));
-        const nonInternal = requireSpecifiers(indexSrc).filter((s) => !s.startsWith('./'));
-        expect(nonInternal, 'lazyRequire targets must stay runtime-internal (./...)').to.deep.equal([]);
-        expect(indexSrc, 'lazyRequire must never reference orchestration').to.not.include('../orchestration');
+        // §32.30: the lazyRequire barrel was intentionally removed at 4c5699c
+        // (B-4: zero consumers — all actual imports use submodules directly or
+        // @animastor/orchestration). When present it must stay runtime-internal;
+        // when absent the invariant holds vacuously (no barrel = no leakage).
+        const barrelPath = path.join(BACKEND_SRC, 'runtime', 'index.js');
+        if (fs.existsSync(barrelPath)) {
+            const indexSrc = readSource(barrelPath);
+            const nonInternal = requireSpecifiers(indexSrc).filter((s) => !s.startsWith('./'));
+            expect(nonInternal, 'lazyRequire targets must stay runtime-internal (./...)').to.deep.equal([]);
+            expect(indexSrc, 'lazyRequire must never reference orchestration').to.not.include('../orchestration');
+        }
     });
 
     it('T10: runtime→services imports open no orchestration endpoint beyond the pinned direct edges', () => {

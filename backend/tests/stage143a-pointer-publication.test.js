@@ -194,7 +194,14 @@ describe('stage143a B2/B3 — versioned pointer publication + path safety (isola
         expect(pointerRepo.versionedRelPath(BUILD, 'a', 0)).to.equal(null);
         expect(pointerRepo.versionedRelPath(BUILD, 'a', 1.5)).to.equal(null);
         expect(pointerRepo.stagingRelPath(BUILD, '..', 1)).to.equal(null);
-        expect(pointerRepo.stagingRelPath(BUILD, 'a', 1)).to.equal(`${BUILD}/.staging/a/1.tmp`);
+        // Stage 143a fix 2: a UNIQUE temp name per attempt — the shared
+        // `{fence}.tmp` could be reopened with `w` by a second delivery and
+        // truncate the inode it shares with the published file.
+        const tmpA = pointerRepo.stagingRelPath(BUILD, 'a', 1);
+        const tmpB = pointerRepo.stagingRelPath(BUILD, 'a', 1);
+        expect(tmpA).to.match(new RegExp(`^${BUILD}/\\.staging/a/1\\.[0-9]+\\.[0-9a-f]+\\.tmp$`));
+        expect(tmpB, 'two attempts of one fence never share a temp name').to.not.equal(tmpA);
+        expect(pointerRepo.stagingRelPath(BUILD, 'a', 2)).to.not.equal(tmpA);
     });
 
     it('a pointer row with a traversal path is never served (resolver refuses it)', async () => {
