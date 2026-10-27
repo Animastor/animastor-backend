@@ -298,8 +298,20 @@ COMMIT;
 `chapters/ch-66e6f9a6.json` (md5 `f081d7b75f31e6f26652f77af15106a2`, 301 байт —
 PG = JSON = API).
 
-Не изменено: `text_length` остался 184 (сейчас `length(text)`=163) — правка
-ограничена полем `text`.
+Вторым шагом выровнен `text_length` (до этого правка затрагивала только `text`):
+
+```sql
+UPDATE image_units SET text_length = length(text) WHERE id = 187888;
+```
+
+Результат: **`UPDATE 1`, `COMMIT`**; `text_length` 184 → 163 (= `length(text)`).
+Строк с `text_length <> length(text)` во всей `image_units`: 0.
+
+Как суффикс оказался только в PG: PATCH из §7 (09:33:58Z) записал его в JSON;
+`image_units` обновился при regenerate (09:34:27Z, `IU metadata saved to PG`).
+В 11:55:13Z суффикс в JSON снял второй `PATCH` (curl с хоста, после
+`auth/login` в 11:53:46Z). PATCH не пишет `image_units.text`, а regenerate после
+него не запускали, поэтому в PG суффикс остался.
 
 Аудит `text` в PG `image_units` и JSON книги (только чтение): `build_ba_1788172242081` —
 32/32 юнита совпадают, расхождений 0. По всем книгам: 0 расхождений; 2 книги
