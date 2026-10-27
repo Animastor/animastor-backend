@@ -260,3 +260,48 @@ PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a
 ```
 
 Выполнено: **нет** (данные уже чистые, правка не適用ялась).
+
+### 10.1 Откат применён в PG `image_units` (2026-10-27)
+
+Вывод выше был неполным: `GET /api/v1/book/…` читает JSON книги, а суффикс
+остался в PG-таблице `image_units`, из которой `GET /api/v1/scene/…/storyboard`
+отдаёт текст в первую очередь (PG-first).
+
+Строка до правки (для отката):
+
+```json
+{"id":187888,"book_id":"ba_1788172242081","build_id":"build_ba_1788172242081",
+ "chapter_id":"ch-66e6f9a6","scene_id":"sc-1c3d246a","unit_id":"iu-bafebc8c",
+ "scene_order":0,"text":"Юра, инженер по искусственному интеллекту, всё чаще замечал странный парадокс: чем совершеннее становились технологии, тем реже человек пытался понять самого себя. (проверка Stage 149)",
+ "text_length":184,"text_proportion":1,"scene_duration_sec":6.36,"estimated_duration_sec":6.36,
+ "scene_audio_file":"ba_1788172242081_ch-66e6f9a6_sc-1c3d246a.mp3","created_at":1788232927,
+ "start_ms":0,"end_ms":6360}
+```
+
+Транзакция (с проверками до и после, `ON_ERROR_STOP`):
+
+```sql
+BEGIN;
+-- precheck: ровно 1 строка с суффиксом
+UPDATE image_units
+  SET text = left(text, length(text) - length(' (проверка Stage 149)'))
+  WHERE unit_id='iu-bafebc8c' AND build_id='build_ba_1788172242081'
+    AND text LIKE '% (проверка Stage 149)';
+-- postcheck: суффикса нет
+COMMIT;
+```
+
+Результат: **`UPDATE 1`, `COMMIT`**. `length(text)` 184 → 163.
+
+Проверка: `GET /api/v1/scene/ba_1788172242081/ch-66e6f9a6/sc-1c3d246a/storyboard`
+→ 200, суффикса нет; текст побайтно равен `text` юнита в
+`chapters/ch-66e6f9a6.json` (md5 `f081d7b75f31e6f26652f77af15106a2`, 301 байт —
+PG = JSON = API).
+
+Не изменено: `text_length` остался 184 (сейчас `length(text)`=163) — правка
+ограничена полем `text`.
+
+Аудит `text` в PG `image_units` и JSON книги (только чтение): `build_ba_1788172242081` —
+32/32 юнита совпадают, расхождений 0. По всем книгам: 0 расхождений; 2 книги
+сверены (`ba_1788172242081`, `import_1786345731767_1786345734345`), у остальных
+27 `book_id` в `image_units` (`ghost_*`/`mcorphan_*`, 35 строк) нет JSON на диске.
