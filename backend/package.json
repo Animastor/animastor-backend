@@ -7,10 +7,10 @@
     "type": "commonjs",
     "scripts": {
         "start": "node src/backend.cjs",
-        "test": "mocha --exit tests/**/*.test.js",
+        "test": "mocha --exit 'tests/**/*.test.js'",
         "test:arch": "mocha --exit tests/architecture/*.test.js",
         "test:connector-core": "npm test --prefix node_modules/animastor-comfyui-workflow-connector",
-        "test:coverage": "nyc --reporter=html --reporter=text mocha --exit tests/**/*.test.js",
+        "test:coverage": "nyc --reporter=html --reporter=text mocha --exit 'tests/**/*.test.js'",
         "test:syntax": "bash ../scripts/syntax-smoke.sh",
         "pretest": "bash ../scripts/syntax-smoke.sh"
     },
