@@ -245,21 +245,41 @@ workspace `3317e019-…`):
   `error=null`, `ready=true`.
 
 **Вывод:** тестовая правка §7 шаг 1 (`PATCH …fields.text …"(проверка Stage 149)"`)
-уже откатана (либо не попала в продакшн-БД). Повторный PATCH для среза суффикса
-**не требуется** — данные уже в исходном состоянии.
+**была выполнена** (09:33:58Z, HTTP 200) — утверждение «PATCH не выполнялся» неверно.
+Суффикс записался в JSON книги и в PG-таблицу `image_units` (при regenerate,
+09:34:27Z, `IU metadata saved to PG`). Второй `PATCH` в 11:55:13Z снял суффикс
+из JSON книги, но `image_units.text` в PG не перезаписывался (PATCH не пишет
+`image_units`, regenerate после второго PATCH не запускали), поэтому суффикс
+**оставался в PG** до прямого `UPDATE image_units` (см. §10.1).
 
-Запросы, которые были бы выполнены при наличии суффикса:
+Повторный PATCH для среза суффикса не требуется — данные в PG приведены к исходному
+состояни€ через SQL.
+
+Запросы, которые были выполнены:
 
 ```
 GET /api/v1/book/ba_1788172242081
-→ 200, unit iu-bafebc8c.text без суффикса " (проверка Stage 149)"
+→ 200, unit iu-bafebc8c.text без суффикса " (проверка Stage 149)" (после §10.1)
 
 PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a
 {"unit_id":"iu-bafebc8c","fields":{"text":"<текст без суффикса>"}}
-→ 200 {"saved":true,"dirty_scenes":1}
+→ 200 {"saved":true,"dirty_scenes":1} (09:33:58Z — с суффиксом; 11:55:13Z — без суффикса, JSON только)
 ```
 
-Выполнено: **нет** (данные уже чистые, правка не適用ялась).
+Выполнено: **да** (PATCH 09:33:58Z и 11:55:13Z, SQL UPDATE image_units в §10.1).
+
+### 10.2 Хронология ключевых событий Stage 149
+
+| Время (MSK/Z) | Событие | Источник |
+|---|---|---|
+| 09:33:58Z | `PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a` с суффиксом ` (проверка Stage 149)`, HTTP 200 | §7, opencode log run=7ebf0c22 |
+| 09:34:27Z | `regenerate` → `IU metadata saved to PG`, суффикс попал в `image_units.text` (unit `iu-bafebc8c`, build `build_ba_1788172242081`) | §7, §10.1 |
+| 11:53:46Z | `auth/login` как `sureg` (создана сессия в `sessions`) | opencode log run=7ebf0c22 |
+| 11:55:13Z | Второй `PATCH …sc-1c3d246a` без суффикса, HTTP 200 — суффикс снят из JSON, **не** из PG `image_units` | opencode log run=7ebf0c22 |
+| 11:59–12:00Z | `cancel-generation` для `ba_1788172242081` (HTTP 200, ok) и `import_1786345731767_1786345734345` (HTTP 200, ok); промежуточный `import_1786345731767` → HTTP 403 (не член workspace) | opencode log run=7ebf0c22, /tmp/opencode/cancel-*.json |
+| Сессия opencode `7ebf0c22` | Все операции авторизации, PATCH, regenerate, cancel-generation выполнялись в этой сессии (агент, ветка `hotfix/d1-d2-a1`) | ~/.local/share/opencode/log/opencode.log |
+
+Сессия sureg (`sid.MzcxZDY0YWYt…`, session_id `371d64af-…`) отозвана в `sessions` (revoked_at установлен) после завершения_stage; cookie более не проходит аутентификацию (`/api/v1/auth/me` → `authenticated: false`). Куки-файл `/tmp/opencode/recon/sureg_cookies.txt` удалён.
 
 ### 10.1 Откат применён в PG `image_units` (2026-10-27)
 
