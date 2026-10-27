@@ -279,7 +279,7 @@ PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a
 | 11:59–12:00Z | `cancel-generation` для `ba_1788172242081` (HTTP 200, ok) и `import_1786345731767_1786345734345` (HTTP 200, ok); промежуточный `import_1786345731767` → HTTP 403 (не член workspace) | opencode log run=7ebf0c22, /tmp/opencode/cancel-*.json |
 | Сессия opencode `7ebf0c22` | Все операции авторизации, PATCH, regenerate, cancel-generation выполнялись в этой сессии (агент, ветка `hotfix/d1-d2-a1`) | ~/.local/share/opencode/log/opencode.log |
 
-Сессия sureg (`sid.MzcxZDY0YWYt…`, session_id `371d64af-…`) отозвана в `sessions` (revoked_at установлен) после завершения_stage; cookie более не проходит аутентификацию (`/api/v1/auth/me` → `authenticated: false`). Куки-файл `/tmp/opencode/recon/sureg_cookies.txt` удалён.
+Сессия агента отозвана в `sessions` (revoked_at установлен) после завершения Stage 149; cookie более не проходит аутентификацию (`/api/v1/auth/me` → `authenticated: false`). Куки-файл удалён. См. внутренний отчёт о безопасности.
 
 ### 10.1 Откат применён в PG `image_units` (2026-10-27)
 
