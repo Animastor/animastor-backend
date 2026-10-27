@@ -283,3 +283,124 @@ docker exec animastor-pg psql -U animastor -d animastor -c \
 Записи в Redis/PG, удаления, `RESTORE`, `UPDATE/DELETE`, рестарты, запуск воркеров,
 `cancel-generation` (создаёт тамбstone и чистит данные) — **не выполнялись**. Все цифры выше
 получены чтением 2026-10-27 (окно 11:04–11:35 UTC).
+
+---
+
+# Часть 2 — очистка очереди (выполнено 2026-10-27, под логином sureg)
+
+Выполнено по плану §4 инвентаризации (разрешение владельца получено). Ниже — фактические
+результаты каждого шага. Секреты и содержимое бэкапов не публикуются.
+
+## 5.0 Бэкап (перед любыми удалениями)
+
+Директория: `/home/animastor/backups/stage150/` (права на все файлы `600`, не в git).
+
+| Файл | Размер | Содержимое |
+|---|---|---|
+| `pg-tables.dump` | 147 208 B | `pg_dump` таблиц `scenes`, `scene_assets`, `generation_tasks`, `image_units` |
+| `queue-image.lrange` | 25 256 B | `LRANGE animastor:queue:image 0 -1` (8 сирот) |
+| `queue-image-ws.lrange` | 1 559 878 B | `LRANGE animastor:queue:image:ws:…` (478 задач ws-очереди) |
+| `processing-claimed.hgetall` | 3 215 B | `HGETALL animastor:processing-claimed` (33 audio-claim'а) |
+| `active-scenes.smembers` | 200 B | `SMEMBERS animastor:active-scenes` (4 сцены) |
+| `dispatch-lease_*.json` | 4 × 56 B | 4 ключа `animastor:dispatch-lease:*:image` |
+| `dispatch-meta_*.json` | 2 × 355 B + 2 × 373 B | 4 ключа `animastor:dispatch-meta:*:image` |
+| `asset-state_*.json` | 17 × 67 B | 17 ключей `animastor:asset-state:*` |
+
+## 5.1 PATCH возврата текста юнита iu-bafebc8c
+
+Штатный `PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a` от имени `sureg`:
+```json
+{"unit_id":"iu-bafebc8c","fields":{"text":"<left(text,163)>"}}
+```
+**Ответ:** HTTP 200 `{"saved":true,"book_id":"ba_1788172242081","chapter_id":"ch-66e6f9a6","scene_id":"sc-1c3d246a","unit_id":"iu-bafebc8c","dirty_scenes":1}`.
+
+Правка поставила сцену в очередь (`dirty_unit_ids={iu-bafebc8c}` в `scenes`, `is_dirty=true`) — следующим шагом она снята отменой генерации.
+
+**Проверка `image_units.text`:** после PATCH колонка `text` в `image_units` **всё ещё содержит** суффикс ` (проверка Stage 149)` (`length(text)=184`). `image_units.text` обновляется только воркерем при обработке IU (`upsertImageUnit`), которая отменена следующим шагом — возврата текста в PG не произошло штатным PATCH'омalone. Исходный текст остаётся в книге (файл сцены) и применяется воркерем при повторном диспатче.
+
+**Текст юнита возвращён да/нет: нет** (в `image_units.text` суффикс остался; источник правды — book JSON, обновлён PATCH'ом).
+
+## 5.2 Отмена генерации (штатно)
+
+`POST /api/v1/book/<id>/cancel-generation` под логином `sureg` для всех книг со сценами в `active-scenes`:
+
+| Книга | HTTP | Тело ответа |
+|---|---|---|
+| `ba_1788172242081` | 200 | `{"ok":true,"book_id":"ba_1788172242081"}` |
+| `import_1786345731767_1786345734345` | 200 | `{"ok":true,"book_id":"import_1786345731767_1786345734345"}` |
+
+(Первоначальный вызов с укороченным ID `import_1786345731767` вернул 403 — полный `book_id` в таблице `books` содержит суффикс `_1786345734345`.)
+
+Отменяние очистило: `active-scenes` (4 сцены → 0), `dispatch-lease/meta` для книг, `generation_tasks` (running → cancelled), поставило тамбстоны `generation_cancellations`, вызвало `DELETE /queue/clear?book_id=` в хабе (ws-очередь очищена).
+
+## 5.3 Прямые удаления (только перечисленные)
+
+| Ключ | Было | Действие | Стало |
+|---|---|---|---|
+| `animastor:queue:image` (system lane) | 8 задач image | `DEL` | 0 |
+| `animastor:processing-claimed` | 33 поля audio | `DEL` | 0 |
+
+Никакие другие ключи не удалялись. ws-очередь `animastor:queue:image:ws:…` (478 задач) очищена штатно через `cancel-generation` → `DELETE /queue/clear`.
+
+## 5.4 Проверка без рестарта (шаг 5)
+
+| Контроль | Ожидание | Факт |
+|---|---|---|
+| `GET /health` бэкенда | `status: ok` | `{"status":"ok","loop":true,"redis":"PONG"}` |
+| `GET /health` хаба (gpu-hub) | все очереди 0 | `{"gpus":0,"queues":{"image":0,"audio":0,"video":0},"workspace_queues":{},"running":0}` |
+| `LLEN` всех `animastor:queue:*` | 0 | ключей `queue:*` нет (все 0) |
+| `animastor:active-scenes` | пусто | `SCARD = 0` |
+| `generation_tasks` без `running`/`queued` | 0 | `running=0, queued=0` (остались `cancelled=11, completed=8`) |
+| 10 мин логов без `IMAGE_DISPATCHED` / `ATTEMPT_DISPATCH` | 0 вхождений | 0 вхождений за окно наблюдения |
+
+**Итог шага 5: всё на нуле, backend ничего не отправляет.**
+
+## 5.5 Контролируемый рестарт `animastor-backend` и наблюдение 20 мин
+
+Рестарт: `docker restart animastor-backend` (образ не менялся, другие контейнеры не трогались, `deploy/.env` не менялся).
+
+**Startup-reconcile (видно в логах):**
+- `[RECOVERY] [STARTUP-RESUME] No incomplete generation sessions found`
+- `[RECONCILE] [WORKLIST] ba_1788172242081: skipped (cancellation tombstone)`
+- `[RECONCILE] [WORKLIST] import_1786345731767_1786345734345: skipped (cancellation tombstone)`
+- `[RECONCILE] Full reconciliation complete: 8 scenes scanned, 0 inconsistencies found`
+
+**Наблюдение (несколько циклов по 60 с, scheduler тик каждые 5 с):**
+| Контроль | Ожидание | Факт |
+|---|---|---|
+| `animastor:queue:*` | 0 | пусто (все ключи отсутствуют) |
+| `animastor:active-scenes` | 0 | `SCARD = 0` |
+| `animastor:dispatch-lease:*` | 0 | 0 ключей |
+| `generation_tasks` running/queued | 0 | 0 |
+| `IMAGE_DISPATCHED` / `ATTEMPT_DISPATCH` после рестарта | 0 | 0 вхождений |
+| Scheduler тики | `Dispatched: 0` | все тики `Active: 0, Dispatched: 0` |
+
+Задачи **не reappeared** — механизм паузы (тамбстоны `generation_cancellations`) сработал: `rebuildWorkList` на старте пропустил обе отменённые книги.
+
+**Итог рестарта: ноль задач, ничего не пришло.**
+
+## 5.6 Разбивка 430 stale по книгам (сироты)
+
+`scene_assets.status='stale'` — 430 строк, `status='pending'` — 4 строки:
+
+| Книга | stale | pending | Есть в таблице `books` | Сироты |
+|---|---|---|---|---|
+| `ba_1788172242081` | 17 (audio) | 2 (image) | да | 0 |
+| `import_1786345731767_1786345734345` | 413 (image 409 + audio 4) | 2 (image) | да | 0 |
+
+**Из 430 stale — 0 в книгах, отсутствующих в таблице `books`**. Обе книги с stale-ассетами зарегистрированы в `books`. (Сиротские книги — `import_1783751905430…`, `import_1783860199734…` и др. из `processing-claimed`/`queue:image` — не имеют строк в `scene_assets` со статусом stale.)
+
+## 5.7 Итоговое состояние после очистки
+
+| Компонент | Состояние |
+|---|---|
+| Хаб (Redis) очереди | все `queue:*` = 0, `active-scenes` = 0, `dispatch-lease/meta` = 0, `processing-claimed` = 0 |
+| gpu-hub `/health` | `queues: {image:0, audio:0, video:0}`, `running: 0`, `workspace_queues: {}` |
+| Backend | `/health: ok`, scheduler тики с `Dispatched: 0`, нет `IMAGE_DISPATCHED`/`ATTEMPT_DISPATCH` |
+| PG `generation_tasks` | нет `running`/`queued` (только `cancelled`/`completed`) |
+| PG `scenes` | `is_dirty`/`dirty_unit_ids` остались (не сбрасывались штатным API — требуется отдельная очистка PG при необходимости полного сброса) |
+| PG `scene_assets` | 430 stale + 4 pending остались (не трогались в части 2) |
+
+**Всё на нуле: да** — по всем очередям хаба, `active-scenes`, `dispatch-lease`, `generation_tasks` (running/queued). Backend после рестарта и 20-минутного наблюдения не generar новых задач.
+
+**Минимальный способ предотвратить повторное появление:** существующий механизм паузы / тамбстона `generation_cancellations` (уже выставлен `cancel-generation` для обеих книг) — он заставил `rebuildWorkList` пропустить книги на старте backend. Прямая правка PG (`scenes.is_dirty`, `dirty_unit_ids`, `scene_assets.status`) требуется только для полного сброса маркеров, но не для остановки диспатчей — тамбстоны уже это гарантируют.
