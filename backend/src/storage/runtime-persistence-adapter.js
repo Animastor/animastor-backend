@@ -26,6 +26,9 @@
 //     throw-through here keeps that caller-side catch semantics byte-equal.
 //   - sceneAssets.getAsset falls back to the latest row when buildId is
 //     null (repo-internal ORDER BY, unchanged).
+//   - sceneAssets.getAssetNullBuild (A1, stage147): same key with
+//     build_id IS NULL ONLY — the version-gate fallback read; it never
+//     returns another build's row (see scene-assets-repo).
 //
 // Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.9
 // ======================================================
@@ -53,6 +56,11 @@ async function hasActiveTaskForScene(bookId, sceneId, taskType) {
 // ── sceneAssets ───────────────────────────────────────
 async function getAsset(bookId, chapterId, sceneId, assetType, buildId) {
     return sceneAssetsRepo().getAsset(bookId, chapterId, sceneId, assetType, buildId);
+}
+
+// A1 (stage147): version-gate fallback — same key, build_id IS NULL row only.
+async function getAssetNullBuild(bookId, chapterId, sceneId, assetType) {
+    return sceneAssetsRepo().getAssetNullBuild(bookId, chapterId, sceneId, assetType);
 }
 
 async function markReady(bookId, chapterId, sceneId, assetType, path, extras) {
@@ -227,6 +235,7 @@ module.exports = {
     },
     sceneAssets: {
         getAsset,
+        getAssetNullBuild,
         markReady,
         stampSceneVersionsForDispatch,
         getDirtyUnitIds,
