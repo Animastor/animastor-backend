@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 (2026-10-27)
+
+Version-line split for `stage143a-foundation-phase1`: the branch line moves
+`0.1.6 → 0.2.0` so it can never collide with, or be shadowed by, the hotfix
+line. **No functional change** — the content is the `0.1.6` code below (D1 +
+A1 already in this branch).
+
+**The hotfix line is separate:** `0.1.7` (branch `hotfix/d1-d2-a1`) is cut
+from `0.1.4`, not from this line, and carries only D1 + the A1 version-gate
+fallback (D2 and the host side of A1 live in `backend`). `^0.1.x` therefore
+resolves within the `0.1.x` line, while this branch's backend depends on
+`^0.2.0`.
+
 ## 0.1.6 (2026-10-26)
 
 Stage 146 — D1 fix: `artifactNaming` hoisted to module scope.
