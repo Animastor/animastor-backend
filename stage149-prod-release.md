@@ -274,10 +274,12 @@ PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a
 |---|---|---|
 | 09:33:58Z | `PATCH /api/v1/book/ba_1788172242081/scene/ch-66e6f9a6/sc-1c3d246a` с суффиксом ` (проверка Stage 149)`, HTTP 200 | §7, opencode log run=7ebf0c22 |
 | 09:34:27Z | `regenerate` → `IU metadata saved to PG`, суффикс попал в `image_units.text` (unit `iu-bafebc8c`, build `build_ba_1788172242081`) | §7, §10.1 |
-| 11:53:46Z | `auth/login` как `sureg` (создана сессия в `sessions`) | opencode log run=7ebf0c22 |
-| 11:55:13Z | Второй `PATCH …sc-1c3d246a` без суффикса, HTTP 200 — суффикс снят из JSON, **не** из PG `image_units` | opencode log run=7ebf0c22 |
-| 11:59–12:00Z | `cancel-generation` для `ba_1788172242081` (HTTP 200, ok) и `import_1786345731767_1786345734345` (HTTP 200, ok); промежуточный `import_1786345731767` → HTTP 403 (не член workspace) | opencode log run=7ebf0c22, /tmp/opencode/cancel-*.json |
+| 11:53:46Z | `auth/login` как `sureg` (создана сессия в `sessions`) | **Stage 150** — см. `stage150-queue-inventory.md` (§1 инвентаризация чтением, сессия `7ebf0c22`) |
+| 11:55:13Z | Второй `PATCH …sc-1c3d246a` без суффикса, HTTP 200 — суффикс снят из JSON, **не** из PG `image_units` | **Stage 150** — см. `stage150-queue-inventory.md` (§3 тестовая правка юнита, сессия `7ebf0c22`) |
+| 11:59–12:00Z | `cancel-generation` для `ba_1788172242081` (HTTP 200, ok) и `import_1786345731767_1786345734345` (HTTP 200, ok); промежуточный `import_1786345731767` → HTTP 403 (не член workspace) | **Stage 150** — см. `stage150-queue-inventory.md` (§5.1–5.2 отмена очереди; тамбстоны `generation_cancellations` на обе книги) |
 | Сессия opencode `7ebf0c22` | Все операции авторизации, PATCH, regenerate, cancel-generation выполнялись в этой сессии (агент, ветка `hotfix/d1-d2-a1`) | ~/.local/share/opencode/log/opencode.log |
+
+> **Примечание к §10.2:** события 11:53–12:00Z (вход `sureg`, второй `PATCH` без суффикса, `cancel-generation` для обеих книг) относятся к **Stage 150** — инвентаризации и очистке очереди генерации — и описаны в `stage150-queue-inventory.md` (части 1–2), а не являются недокументированными действиями Stage 149.
 
 Сессия агента отозвана в `sessions` (revoked_at установлен) после завершения Stage 149; cookie более не проходит аутентификацию (`/api/v1/auth/me` → `authenticated: false`). Куки-файл удалён. См. внутренний отчёт о безопасности.
 
