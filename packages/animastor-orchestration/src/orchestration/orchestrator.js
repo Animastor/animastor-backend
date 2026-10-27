@@ -159,20 +159,37 @@ async function completeStage(redis, bookId, chapterId, sceneId, stage, buildId, 
 
                 if (sceneRows.length === 1) {
                     const sv = sceneRows[0];
-                    const asset = await persist('sceneAssets.getAsset')(bookId, chapterId, sceneId, stage, buildId);
-
-                    if (asset) {
+                    const versionsConfirm = (row) => {
                         const contentVersionConfirmed =
-                            asset.scene_content_version != null &&
+                            row.scene_content_version != null &&
                             sv.content_version != null &&
-                            asset.scene_content_version >= sv.content_version;
+                            row.scene_content_version >= sv.content_version;
                         const audioVersionConfirmed =
                             stage !== 'audio' || (
-                                asset.scene_audio_config_version != null &&
+                                row.scene_audio_config_version != null &&
                                 sv.audio_config_version != null &&
-                                asset.scene_audio_config_version >= sv.audio_config_version
+                                row.scene_audio_config_version >= sv.audio_config_version
                             );
-                        shouldWriteReady = contentVersionConfirmed && audioVersionConfirmed;
+                        return contentVersionConfirmed && audioVersionConfirmed;
+                    };
+
+                    let asset = await persist('sceneAssets.getAsset')(bookId, chapterId, sceneId, stage, buildId);
+
+                    if (!asset) {
+                        // A1 (stage147): единственная строка ключа может быть
+                        // легаси-строкой с build_id = NULL (Stage 73/76 семейство):
+                        // getAsset(buildId) её не видит, а markReady — единственный
+                        // писатель build_id — вызывается ПОСЛЕ gate (замкнутый цикл
+                        // DIRTY каждые 5 с, stage146 §5.4). РОВНО одно дополнительное
+                        // чтение строки того же ключа с build_id IS NULL — не строки
+                        // другого билда и не «последней любой». Версии проверяются
+                        // теми же правилами; после пропуска markReady проставит
+                        // build_id по существующей логике (buildIdFromArtifactPath).
+                        asset = await persist('sceneAssets.getAssetNullBuild')(bookId, chapterId, sceneId, stage);
+                    }
+
+                    if (asset) {
+                        shouldWriteReady = versionsConfirm(asset);
                     }
                 } else if (sceneRows.length === 0) {
                     // Legacy-книга без version-схемы — READY разрешён (сцена

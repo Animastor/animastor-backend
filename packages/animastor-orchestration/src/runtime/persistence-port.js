@@ -24,7 +24,8 @@
 //                      is a routes-side concern and stays there
 //   sceneAssets      — per-asset status truth + version gates + dirty
 //                      units (orchestrator completeStage version gate,
-//                      scene-orchestrator dirty reads, scene-window
+//                      incl. its A1 build_id IS NULL fallback read
+//                      getAssetNullBuild, scene-orchestrator dirty reads, scene-window
 //                      staleness, scene-callbacks markReady/dirty clears,
 //                      scene-restoration, reconciliation rebuildWorkList);
 //                      markStale is consumed by state/scene-state-ops
@@ -58,6 +59,9 @@ const OPS = [
     'tasks.hasActiveTaskForScene',
 
     'sceneAssets.getAsset',
+    // A1 (stage147): version-gate fallback read — same key with
+    // build_id IS NULL ONLY (never another build, never "latest any row").
+    'sceneAssets.getAssetNullBuild',
     'sceneAssets.markReady',
     'sceneAssets.stampSceneVersionsForDispatch',
     'sceneAssets.getDirtyUnitIds',

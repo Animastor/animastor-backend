@@ -430,6 +430,24 @@ async function getSceneAssets(bookId, chapterId, sceneId) {
     return result.rows.map(rowToAsset);
 }
 
+// A1 (stage147): fallback-чтение version-gate — РОВНО строка того же ключа
+// с build_id IS NULL (семейство Stage 73/76: в production 450/503 строк).
+// getAsset с truthy buildId фильтрует `build_id = $5` и такую строку не
+// видит, а markReady (единственный писатель build_id) вызывается ПОСЛЕ gate —
+// замкнутый цикл DIRTY каждые 5 с (stage146 §5.4). Сознательно НЕ «последняя
+// строка любого билда» (поведение getAsset при buildId=null): строка другого
+// билда никогда не доказывает версии этого ключа.
+async function getAssetNullBuild(bookId, chapterId, sceneId, assetType) {
+    const result = await query(`
+        SELECT * FROM scene_assets
+        WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3
+          AND asset_type = $4 AND build_id IS NULL
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+    `, [bookId, chapterId, sceneId, assetType]);
+    return rowToAsset(result.rows[0]);
+}
+
 async function getAssetsByType(bookId, assetType) {
     const result = await query(`
         SELECT * FROM scene_assets
@@ -818,6 +836,7 @@ module.exports = {
     stampSceneVersionsForDispatch,
     ensureSyntheticStaleAsset,
     getAsset,
+    getAssetNullBuild,
     getSceneAssets,
     getAssetsByType,
     getAssetsByBuild,
