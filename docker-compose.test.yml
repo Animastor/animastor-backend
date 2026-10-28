@@ -21,13 +21,15 @@
 #   scripts/test-backend.sh
 #   docker compose -f docker-compose.test.yml --env-file backend/.env.test down -v
 
+name: animastor-test
+
 networks:
   test-net:
     driver: bridge
 
 volumes:
-  pg-test-data:
-  redis-test-data:
+  animastor-test-pg-data:
+  animastor-test-redis-data:
 
 services:
 
@@ -44,7 +46,7 @@ services:
       POSTGRES_USER: animastor
       POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in backend/.env.test}
     volumes:
-      - pg-test-data:/var/lib/postgresql/data
+      - animastor-test-pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U animastor -d animastor_test"]
       interval: 5s
@@ -60,7 +62,7 @@ services:
     networks:
       - test-net
     volumes:
-      - redis-test-data:/data
+      - animastor-test-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
