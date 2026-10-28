@@ -646,6 +646,16 @@ function sanitizeTestError(err, httpStatus) {
  * POST a tiny chat completion to prove the provider works.
  * @returns {Promise<{ok:boolean, model?:string, status?:number, error?:string}>}
  */
+// Chat body extras builder — @animastor/assistant's buildChatRequestExtras,
+// bound by the composition root (backend.cjs is the package's only host
+// consumer). Unbound → no extras (plain probe).
+let buildChatRequestExtras = () => ({});
+function setChatRequestExtras(fn) { buildChatRequestExtras = typeof fn === 'function' ? fn : () => ({}); }
+
+// Placeholder tool: makes buildChatRequestExtras pick the tool-turn extras
+// (the superset the chat may send). The tool itself is not sent.
+const TEST_TOOL = { type: 'function', function: { name: 'noop', parameters: { type: 'object' } } };
+
 async function testConnection({ endpoint, apiKey, model }) {
     const base = normalizeEndpoint(endpoint) || process.env.AI_API_BASE_URL || 'https://api.aicredits.in/v1';
     const key = apiKey || process.env.OPENROUTER_API_KEY;
@@ -662,9 +672,14 @@ async function testConnection({ endpoint, apiKey, model }) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${key}`,
             },
+            // Same extras the chat sends on a tool-carrying turn (incl.
+            // enable_thinking where the assistant would send it), so a
+            // provider that rejects the chat body fails the test too.
+            // Only the token budget is cut to keep the probe cheap.
             body: JSON.stringify({
                 model: usedModel,
                 messages: [{ role: 'user', content: 'ok' }],
+                ...buildChatRequestExtras({ model: usedModel, baseUrl: base, tools: [TEST_TOOL] }),
                 max_tokens: 1,
                 temperature: 0,
             }),
@@ -744,6 +759,7 @@ module.exports = {
     resolveAIProvider,
     hasUsableApiKey,
     testConnection,
+    setChatRequestExtras,
     testConnectorConnection,
     invalidateCache,
     invalidateAllCache,

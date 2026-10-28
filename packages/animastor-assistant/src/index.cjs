@@ -57,10 +57,14 @@ const createChatEngine = require('./chat-engine.cjs');
 const createAssistantRoutes = require('./assistant-routes.cjs');
 const { assertAssistantPorts } = require('./assistant-ports-contract.cjs');
 const { assertSessionRepo } = require('./session-repo-contract.cjs');
+const { buildChatRequestExtras } = require('./request-extras.cjs');
 
 module.exports = {
     createChatEngine,
     createAssistantRoutes,
     assertAssistantPorts,
     assertSessionRepo,
+    // Chat body extras (token budget + provider-gated enable_thinking) —
+    // exported so the host provider connection test sends the chat's body.
+    buildChatRequestExtras,
 };

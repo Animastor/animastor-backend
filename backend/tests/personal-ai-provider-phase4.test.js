@@ -258,6 +258,31 @@ describe('Personal AI Provider (Phase 4)', () => {
             expect(r2.error).to.equal('Rate limited by provider');
         });
 
+        it('sends the chat body extras (same buildChatRequestExtras as the assistant)', async () => {
+            // Bound the way backend.cjs binds it at the composition root.
+            const { buildChatRequestExtras } = require('@animastor/assistant');
+            workspaceAi.setChatRequestExtras(buildChatRequestExtras);
+            const tools = [{ type: 'function', function: { name: 'edit_book' } }];
+
+            installFetchMock(() => okJson({ choices: [{ message: { content: 'ok' } }] }));
+            await workspaceAi.testConnection({ endpoint: 'https://api.example/v1', apiKey: 'k', model: 'qwen/qwen3-32b' });
+            const qwenExtras = buildChatRequestExtras({ model: 'qwen/qwen3-32b', baseUrl: 'https://api.example/v1', tools });
+            expect(qwenExtras).to.have.property('enable_thinking', true);
+            expect(fetchCalls[0].body).to.include({ enable_thinking: qwenExtras.enable_thinking, max_tokens: 1 });
+
+            installFetchMock(() => okJson({ choices: [{ message: { content: 'ok' } }] }));
+            await workspaceAi.testConnection({
+                endpoint: 'https://integrate.api.nvidia.com/v1', apiKey: 'k', model: 'nvidia/llama-3.3-nemotron-super-49b-v1',
+            });
+            expect(fetchCalls[0].body).to.not.have.property('enable_thinking');
+            workspaceAi.setChatRequestExtras(null);
+        });
+
+        it('backend.cjs binds the assistant extras builder into testConnection', () => {
+            const root = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'backend.cjs'), 'utf8');
+            expect(root).to.include("require('./services/workspace-ai-provider').setChatRequestExtras(buildChatRequestExtras)");
+        });
+
         it('timeout → "Provider timed out"; network DNS error → "hostname could not be resolved"', async () => {
             installFetchMock(() => { const e = new DOMException('aborted', 'AbortError'); throw e; });
             const r = await workspaceAi.testConnection({ endpoint: 'https://api.example/v1', apiKey: 'k', model: 'm' });
