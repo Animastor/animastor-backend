@@ -648,9 +648,25 @@ module.exports = function(app, redis, deps) {
             // as well (M2): the regeneration is an explicit intent.
             try {
                 const qidem = queueIdempotency;
+                if (!qidem) throw new Error('queue idempotency port not wired');
+                // The book sweep MUST complete before releasing claims.  The
+                // claims close the dispatch race while the hub lane is being
+                // purged; releasing first made a timeout leave an orphan lane
+                // entry with no idempotency protection (Stage 123 N1-B).
+                const hubPort = require('@animastor/orchestration').ports.hubCancel;
+                if (!hubPort || typeof hubPort.isHubCancelPortWired !== 'function' || !hubPort.isHubCancelPortWired()) {
+                    throw new Error('hub cancellation port not wired; claims retained');
+                }
+                const sweep = await hubPort.hubCancelOp('clearHubDispatches')([], {
+                    book_id: bookId,
+                    context: 'REGENERATE-PRE-RELEASE',
+                });
+                if (!sweep || sweep.requested !== 1 || sweep.cleared !== 1 || sweep.failed !== 0) {
+                    throw new Error(`post-reset lane sweep incomplete (requested=${sweep?.requested}, cleared=${sweep?.cleared}, failed=${sweep?.failed}); claims retained`);
+                }
+
                 let releasedClaims = 0;
                 let releasedDone = 0;
-                if (!qidem) throw new Error('queue idempotency port not wired');
                 for (const ds of filteredDirty) {
                     const released = await qidem.releaseClaimsForScene(
                         redis, bookId, ds.chapter_id, ds.scene_id
@@ -662,31 +678,9 @@ module.exports = function(app, redis, deps) {
                 if (releasedClaims > 0 || releasedDone > 0) {
                     log(`[REGENERATE] ${bookId}: released ${releasedClaims} idempotency claim(s) and ${releasedDone} completion marker(s) for the regenerated scenes`);
                 }
-                // Stage 120 (M-b): resetScenes cleared the hub lane BEFORE
-                // this release. A dispatch landing between that clear and the
-                // release above would leave an ORPHAN lane entry whose claim
-                // was just deleted (the next run would enqueue a second copy).
-                // Sweep the lane AGAIN for the regenerated scenes to remove it.
-                //
-                // Stage 122 (N1, audit 121): the previous call passed an EMPTY
-                // dispatch-id list with { book_id } but clearHubDispatches only
-                // honoured the per-id form — it issued ZERO hub requests (a
-                // silent no-op). clearHubDispatches now resolves the empty
-                // list + book_id into ONE book-scoped `?book_id=` sweep. A
-                // failed sweep only warns (the claims were already released,
-                // the orphan is bounded by claim TTL) — it is never reported
-                // as a success.
-                try {
-                    const hubPort = require('@animastor/orchestration').ports.hubCancel;
-                    if (hubPort && typeof hubPort.isHubCancelPortWired === 'function' && hubPort.isHubCancelPortWired()) {
-                        const sweep = await hubPort.hubCancelOp('clearHubDispatches')([], { book_id: bookId, context: 'REGENERATE' });
-                        if (sweep && sweep.failed > 0) {
-                            console.warn(`[REGENERATE] Post-release lane sweep for ${bookId} incomplete (requested=${sweep.requested}, cleared=${sweep.cleared}, failed=${sweep.failed}) — an orphan entry may survive (bounded by claim TTL)`);
-                        }
-                    }
-                } catch (sweepErr) {
-                    console.warn(`[REGENERATE] Post-release lane sweep failed for ${bookId}: ${sweepErr.message}`);
-                }
+                // No post-release hub operation is permitted here: a sender
+                // cannot enter between the successful sweep and release while
+                // its old claim exists, and a failed sweep leaves claims intact.
             } catch (claimErr) {
                 console.warn(`[REGENERATE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
             }

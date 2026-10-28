@@ -183,8 +183,32 @@ describe('LLM Sharing Phase 1 — Control Plane (SH-AI-1)', function () {
     const idB = () => ({ user: { userId: userB }, workspace: { id: wsB } });
     const idC = () => ({ user: { userId: userC }, workspace: { id: wsC } });
 
+    // Baseline of pre-existing ENABLED policies outside this suite's stamped
+    // workspaces (real users may legitimately have sharing enabled in a shared
+    // dev DB). Captured BEFORE runMigrations so the migration-safety regression
+    // below still catches a migration that would auto-enable anything: the
+    // suite asserts the set never GROWS outside its own workspaces — not that
+    // the DB is pristine. SELECT-only; fresh DB → empty baseline.
+    let baselineEnabledOutside = [];
+
     before(async function () {
         this.timeout(60000);
+        try {
+            const { rows: baseline } = await query(`
+                SELECT p.policy_id FROM ai_endpoint_share_policies p
+                JOIN ai_endpoints e ON e.endpoint_id = p.endpoint_id
+                JOIN ai_connectors c ON c.connector_id = e.connector_id
+                WHERE p.enabled = TRUE AND p.revoked_at IS NULL
+                  AND e.enabled = TRUE AND e.deleted_at IS NULL
+                  AND c.revoked_at IS NULL
+                  AND e.workspace_id NOT IN (
+                      SELECT id FROM workspaces WHERE name LIKE '%${stamp}%')
+            `);
+            baselineEnabledOutside = baseline.map((r) => r.policy_id);
+        } catch (_) {
+            // fresh DB — tables not created yet → empty baseline
+            baselineEnabledOutside = [];
+        }
         await runMigrations();
         await cleanup();
         userA = await createUser('shai1u_a');
@@ -673,8 +697,8 @@ describe('LLM Sharing Phase 1 — Control Plane (SH-AI-1)', function () {
             // Every enabled policy must belong to a live, enabled, non-deleted
             // endpoint (the exact condition listSharedEndpoints enforces) —
             // plus the pool must never see a policy whose endpoint is gone.
-            const { rows: orphanVisible } = await query(`
-                SELECT COUNT(*)::int AS n FROM ai_endpoint_share_policies p
+            const { rows: visibleNow } = await query(`
+                SELECT p.policy_id FROM ai_endpoint_share_policies p
                 JOIN ai_endpoints e ON e.endpoint_id = p.endpoint_id
                 JOIN ai_connectors c ON c.connector_id = e.connector_id
                 WHERE p.enabled = TRUE AND p.revoked_at IS NULL
@@ -683,9 +707,14 @@ describe('LLM Sharing Phase 1 — Control Plane (SH-AI-1)', function () {
                   AND e.workspace_id NOT IN (
                       SELECT id FROM workspaces WHERE name LIKE '%${stamp}%')
             `);
-            // Only THIS test suite's own workspaces may carry enabled
-            // policies — nothing else in the DB was auto-enabled.
-            expect(orphanVisible[0].n).to.equal(0);
+            // Nothing OUTSIDE this suite's own workspaces may become newly
+            // enabled — the suite/migration must never auto-enable a policy
+            // (pre-existing owner-enabled rows in a shared dev DB stay allowed).
+            const baseline = new Set(baselineEnabledOutside);
+            const newlyEnabled = visibleNow
+                .map((r) => r.policy_id)
+                .filter((id) => !baseline.has(id));
+            expect(newlyEnabled).to.deep.equal([]);
         });
 
         it('deleting the endpoint stops pool eligibility even if the policy row lingers (soft delete)', async () => {

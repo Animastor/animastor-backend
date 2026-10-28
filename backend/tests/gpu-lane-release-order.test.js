@@ -452,18 +452,19 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
         });
     });
 
-    // ── Stage 120 — regenerate path sweep (audit 119 · M-b) ───────────────
-    describe('/regenerate post-release sweep (audit 119 · M-b)', () => {
-        it('the regenerate path sweeps the hub lane again through the hubCancel port', () => {
+    // ── Stage 124 — regenerate sweep before release (audit 123 · N1-B) ───
+    describe('/regenerate fail-closed sweep (audit 123 · N1-B)', () => {
+        it('the regenerate path confirms the Hub sweep BEFORE claims are released', () => {
             const fs = require('fs');
             const path = require('path');
             const src = fs.readFileSync(path.join(__dirname, '../src/routes/book/generation-routes.cjs'), 'utf8');
             const releaseIdx = src.indexOf('releaseClaimsForScene(');
             const sweepIdx = src.indexOf("hubCancelOp('clearHubDispatches')");
             expect(releaseIdx).to.be.greaterThan(0);
-            // the sweep must come AFTER the per-scene claim release
-            expect(sweepIdx).to.be.greaterThan(releaseIdx);
-            expect(src).to.include('Stage 120 (M-b)');
+            // A failed sweep must leave the old claim in place; otherwise an
+            // orphan hub entry can execute without idempotency protection.
+            expect(sweepIdx).to.be.lessThan(releaseIdx);
+            expect(src).to.include('claims retained');
             // the port is consulted (never a blind call on an unwired port)
             expect(src).to.include('isHubCancelPortWired()');
         });
@@ -507,6 +508,16 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
             const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ ok: true, scope: { book_id: 'OTHER-book' }, removed: {} }) });
             const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
             expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
+        });
+
+        it('a malformed, absent or wrong-shaped scope is fail-closed', async () => {
+            const malformed = { ok: true, status: 200, json: async () => { throw new Error('bad json'); } };
+            const absent = { ok: true, status: 200, json: async () => ({ ok: true }) };
+            const wrongShape = { ok: true, status: 200, json: async () => ({ scope: { book_id: 7 } }) };
+            for (const response of [malformed, absent, wrongShape]) {
+                const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl: async () => response, warn: () => {} });
+                expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
+            }
         });
 
         it('empty ids and NO book_id issues NO request at all (no fake HTTP)', async () => {
