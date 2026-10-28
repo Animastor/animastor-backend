@@ -17,7 +17,7 @@
     "dependencies": {
         "@animastor/ai-agent": "^0.1.0",
         "@animastor/ai-analysis": "^0.1.0",
-        "@animastor/assistant": "^0.1.0",
+        "@animastor/assistant": "^0.1.1",
         "@animastor/auth": "^0.1.0",
         "@animastor/contracts": "^0.1.1",
         "@animastor/editor": "^0.1.2",

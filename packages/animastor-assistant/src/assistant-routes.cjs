@@ -20,6 +20,13 @@ module.exports = function(app, redis, deps) {
         utils,
     } = deps;
     const { log } = utils;
+    // Token budget, provider-gated enable_thinking, the one-shot
+    // "Unsupported parameter" retry and upstream error text — package
+    // logic (request-extras.cjs) carried by the engine.
+    const {
+        MAX_TOKENS_WITH_TOOLS, MAX_TOKENS_PLAIN,
+        buildChatRequestExtras, describeUpstreamError, fetchChatCompletion,
+    } = chatEngine.requestExtras;
     // The ports seam is the single host contract of the Assistant contour.
     const {
         loadBook, persistBook, resolveChatAI,
@@ -51,36 +58,17 @@ module.exports = function(app, redis, deps) {
 
     const AI_FETCH_TIMEOUT_MS = 180_000; // 3 minutes — AI providers need time for large book contexts
 
-    // ── Token budget & thinking policy ─────────────────
-    // Tool-carrying requests use a HIGH max_tokens: reasoning models
-    // (deepseek-v4-flash, qwen3) count reasoning tokens against max_tokens,
-    // so a 4096 cap can be fully consumed by reasoning before any
-    // content/tool_call is produced (observed: finish_reason=length,
-    // reasoning_tokens=4096, empty content → "Tool executed" ghost reply).
-    // Tool-less conversation gets a small budget and no thinking — faster,
-    // cheaper replies.
-    const MAX_TOKENS_WITH_TOOLS = 16384;
-
     // History entries with empty content (e.g. a UI-side "no result" turn
     // pushed as {assistant, ''}) fail the connector's strict non-empty
     // content validation — and would poison every later turn of the session.
     // Dropped at the seam by both chat routes via this filter.
     const hasNonEmptyContent = (m) => m && typeof m.content === 'string' && m.content.length > 0;
-    const MAX_TOKENS_PLAIN = 4096;
 
     // Local AI Connector per-message cap is 32 KB (lib/chat.cjs
     // maxMessageChars, mirrored by transport). The base system prompt plus
     // tool instructions must also fit, so the book context budget is kept
     // below it; anything larger rides as the compact structural summary.
     const CONNECTOR_BOOK_CONTEXT_BUDGET = 24 * 1024;
-
-    function aiRequestBodyExtras(tools) {
-        const hasTools = Array.isArray(tools) && tools.length > 0;
-        return {
-            max_tokens: hasTools ? MAX_TOKENS_WITH_TOOLS : MAX_TOKENS_PLAIN,
-            enable_thinking: hasTools, // reasoning only for tool/edit work
-        };
-    }
 
     // ── Hermesian tool call parser ──────────────────────
     // Qwen3-32B (reasoning model) sometimes outputs tool_call as text in content
@@ -494,25 +482,24 @@ module.exports = function(app, redis, deps) {
             } else {
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), AI_FETCH_TIMEOUT_MS);
-                const response = await safeFetch(`${ai.baseUrl}/chat/completions`, {
+                const { response, errText } = await fetchChatCompletion(safeFetch, `${ai.baseUrl}/chat/completions`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ai.apiKey}` },
-                    body: JSON.stringify({
-                        model: ai.model,
-                        messages: apiMessages,
-                        tools: tools.length > 0 ? tools : undefined,
-                        tool_choice: tools.length > 0 ? 'auto' : undefined,
-                        ...aiRequestBodyExtras(tools),
-                    }),
                     signal: controller.signal,
                     validatePublic: ai.validatePublic,
+                }, {
+                    model: ai.model,
+                    messages: apiMessages,
+                    tools: tools.length > 0 ? tools : undefined,
+                    tool_choice: tools.length > 0 ? 'auto' : undefined,
+                    ...buildChatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }),
                 });
                 clearTimeout(timeout);
 
                 if (!response.ok) {
-                    const errText = await response.text();
-                    console.error('[AI] API error:', response.status, errText);
-                    return res.status(502).json({ error: `AI API error: ${response.status}` });
+                    const upstreamError = describeUpstreamError(response.status, errText); // key-masked
+                    console.error('[AI]', upstreamError);
+                    return res.status(502).json({ error: upstreamError, code: 'upstream_error' });
                 }
 
                 aiResponse = await response.json();
@@ -1031,30 +1018,28 @@ module.exports = function(app, redis, deps) {
                     const onOuterAbort = () => controller.abort();
                     abort.signal.addEventListener('abort', onOuterAbort, { once: true });
                     const timeout = setTimeout(() => controller.abort(), clampStreamTimeoutMs(req.body?.timeout_ms));
-                    let response;
+                    let response, errText;
                     try {
-                        response = await safeFetch(`${ai.baseUrl}/chat/completions`, {
+                        ({ response, errText } = await fetchChatCompletion(safeFetch, `${ai.baseUrl}/chat/completions`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ai.apiKey}` },
-                            body: JSON.stringify({
-                                model: ai.model,
-                                messages: apiMessages,
-                                tools: tools.length > 0 ? tools : undefined,
-                                tool_choice: tools.length > 0 ? 'auto' : undefined,
-                                ...aiRequestBodyExtras(tools),
-                            }),
                             signal: controller.signal,
                             validatePublic: ai.validatePublic,
-                        });
+                        }, {
+                            model: ai.model,
+                            messages: apiMessages,
+                            tools: tools.length > 0 ? tools : undefined,
+                            tool_choice: tools.length > 0 ? 'auto' : undefined,
+                            ...buildChatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }),
+                        }));
                     } finally {
                         clearTimeout(timeout);
                         abort.signal.removeEventListener('abort', onOuterAbort);
                     }
 
                     if (!response.ok) {
-                        const errText = await response.text().catch(() => '');
-                        console.error('[AI STREAM] API error:', response.status, errText.substring(0, 200));
-                        const errorData = { error: `AI API error: ${response.status}`, code: 'upstream_error' };
+                        const errorData = { error: describeUpstreamError(response.status, errText), code: 'upstream_error' }; // key-masked
+                        console.error('[AI STREAM]', errorData.error);
                         if (!clientGone) sendTerminal('error', errorData);
                         await persistFailedTurn(`⚠️ ${errorData.error}`);
                         return;

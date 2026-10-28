@@ -1,6 +1,6 @@
 {
     "name": "@animastor/assistant",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Animastor Assistant — the AI assistant contour of the Animastor backend, physically extracted from the host: chat engine (persona/system prompts, book context, mode tools, JSON patch pipeline with bundle-contract validation), the /api/v1/ai/* HTTP contour (sessions CRUD, non-streaming chat, SSE streaming with meta/delta/done/error frames, tool-call orchestration) and the chat-session repository contract. The package reaches the host (book read/write, bundle validation, provider resolution, session persistence, shared-inference transport, logging) ONLY through the injected AssistantPorts seam — no PG, no Book internals, no filesystem, no provider gateway inside.",
     "keywords": [
         "animastor",
