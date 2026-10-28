@@ -5,7 +5,9 @@ const POOL_CONFIG = {
     port: parseInt(process.env.PG_PORT || '5432', 10),
     database: process.env.PG_DB || 'animastor',
     user: process.env.PG_USER || 'animastor',
-    password: process.env.PG_PASSWORD || 'animastor_secret_2026',
+    // No default: a missing PG_PASSWORD must fail loudly, not fall back to a
+    // well-known password (see assertPasswordConfigured below).
+    password: process.env.PG_PASSWORD,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
@@ -26,9 +28,23 @@ function assertNotProductionDbUnderTest() {
     }
 }
 
+// Outside NODE_ENV=test the password is mandatory. The test stack supplies
+// it via backend/.env.test; a bare test run may still rely on PGPASSWORD.
+function assertPasswordConfigured() {
+    if (process.env.NODE_ENV === 'test') return;
+    if (!POOL_CONFIG.password) {
+        throw new Error(
+            '[PG] PG_PASSWORD is not set: refusing to create the connection pool '
+            + `(user "${POOL_CONFIG.user}", db "${POOL_CONFIG.database}"). `
+            + 'Set PG_PASSWORD in the environment (.env / docker-compose).'
+        );
+    }
+}
+
 function getPool() {
     if (pool) return pool;
     assertNotProductionDbUnderTest();
+    assertPasswordConfigured();
     pool = new Pool(POOL_CONFIG);
     pool.on('error', (err) => {
         console.error('[PG] Unexpected pool error:', err.message);

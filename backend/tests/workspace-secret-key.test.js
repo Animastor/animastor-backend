@@ -7,7 +7,8 @@
 //   ✗ Production + empty key    → throws
 //   ✗ Production + whitespace   → throws
 //   ✓ Production + valid key    → returns derived key
-//   ✓ Development + missing key → dev fallback (legacy)
+//   ✗ Development / unset NODE_ENV + missing key → throws
+//   ✓ Test + missing key        → dev fallback (legacy)
 //   ✓ Development + valid key   → derived key
 //   ✓ Roundtrip encrypt/decrypt still works with valid key
 //   ✓ validateSecretKeyRaw rejects bad inputs
@@ -63,10 +64,24 @@ describe('WORKSPACE_SECRET_KEY — production fail-closed', () => {
         expect(key.length).to.equal(32);
     });
 
-    // ── development: legacy fallback preserved ───────────────────────
+    // ── non-test NODE_ENV (prod runs with NODE_ENV unset): fail closed ──
 
-    it('returns the dev fallback when NODE_ENV is NOT production and key is missing', () => {
+    it('throws when NODE_ENV=development and WORKSPACE_SECRET_KEY is missing', () => {
         process.env.NODE_ENV = 'development';
+        delete process.env.WORKSPACE_SECRET_KEY;
+        expect(() => ws.getSecretKey()).to.throw(/WORKSPACE_SECRET_KEY/);
+    });
+
+    it('throws when NODE_ENV is unset and WORKSPACE_SECRET_KEY is missing', () => {
+        delete process.env.NODE_ENV;
+        delete process.env.WORKSPACE_SECRET_KEY;
+        expect(() => ws.getSecretKey()).to.throw(/WORKSPACE_SECRET_KEY/);
+    });
+
+    // ── test: legacy fallback preserved ──────────────────────────────
+
+    it('returns the dev fallback when NODE_ENV=test and key is missing', () => {
+        process.env.NODE_ENV = 'test';
         delete process.env.WORKSPACE_SECRET_KEY;
         const key = ws.getSecretKey();
         expect(key).to.be.an.instanceOf(Buffer);
