@@ -20,8 +20,13 @@ services:
       POSTGRES_DB: animastor
       POSTGRES_USER: animastor
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Password of the backend's app role (animastor_app), created on a FRESH
+      # volume by docker/postgres/initdb/01-app-role.sh. Ignored afterwards.
+      PG_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
     volumes:
       - pg-data:/var/lib/postgresql/data
+      # Runs once, on an empty data volume only (never on an existing cluster).
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U animastor -d animastor"]
       interval: 10s
@@ -53,8 +58,10 @@ services:
       - PG_HOST=postgres
       - PG_PORT=5432
       - PG_DB=animastor
-      - PG_USER=animastor
-      - PG_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Non-superuser app role; the superuser password (POSTGRES_PASSWORD)
+      # is deliberately NOT passed to the backend.
+      - PG_USER=animastor_app
+      - PG_PASSWORD=${PG_PASSWORD:?set PG_PASSWORD in .env}
       - AI_API_BASE_URL=https://api.aicredits.in/v1
       # Global AI key is now OPTIONAL (Experimental Beta): each workspace may
       # carry its own provider stored in PG; global env config stays the

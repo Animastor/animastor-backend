@@ -80,24 +80,25 @@ function _validateSecretKeyRaw(value) {
 /**
  * Encryption key derivation: WORKSPACE_SECRET_KEY (any length) → 32 bytes.
  *
- * Production (NODE_ENV=production): the key is mandatory; a missing, empty,
- * or whitespace-only value throws immediately — no fallback.
+ * Any NODE_ENV other than "test": the key is mandatory; a missing, empty,
+ * or whitespace-only value throws immediately — no fallback. (Production
+ * does not set NODE_ENV, so gating on "production" left it unprotected.)
  *
- * Development / test: a deterministic dev-only fallback is used when the
+ * Test (NODE_ENV=test): a deterministic test-only fallback is used when the
  * env var is absent.  The fallback is clearly marked and MUST NOT be
  * deployed to a real environment.
  */
 function getSecretKey() {
     const raw = process.env.WORKSPACE_SECRET_KEY;
-    const isProduction = process.env.NODE_ENV === 'production';
+    const isTest = process.env.NODE_ENV === 'test';
 
-    // Production: fail closed — no fallback, no silent generation.
-    if (isProduction) {
+    // Everything but tests: fail closed — no fallback, no silent generation.
+    if (!isTest) {
         _validateSecretKeyRaw(raw);
         return crypto.createHash('sha256').update(raw.trim()).digest();
     }
 
-    // Development / test: allow the legacy dev fallback.
+    // Test: allow the legacy dev fallback.
     if (!raw || raw.trim().length === 0) {
         if (!_logEmitted) {
             _logEmitted = true;
