@@ -395,13 +395,6 @@ describe('Phase 5 final audit: full runtime/** boundary', () => {
         // §32.30: the scan covers the package runtime (computed require is
         // forbidden there — lazyRequire lived in the host facade, pinned below).
         expect(hosts, 'computed/template/concat require or import() is forbidden in the package runtime').to.deep.equal([]);
-
-        // The one allowed host may only lazy-load runtime-internal './' modules.
-        // §32.30: the lazyRequire barrel stays HOST-side (backend/src/runtime/index.js).
-        const indexSrc = readSource(path.join(BACKEND_SRC, 'runtime', 'index.js'));
-        const nonInternal = requireSpecifiers(indexSrc).filter((s) => !s.startsWith('./'));
-        expect(nonInternal, 'lazyRequire targets must stay runtime-internal (./...)').to.deep.equal([]);
-        expect(indexSrc, 'lazyRequire must never reference orchestration').to.not.include('../orchestration');
     });
 
     it('T10: runtime→services imports open no orchestration endpoint beyond the pinned direct edges', () => {

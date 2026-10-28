@@ -13,8 +13,22 @@ const POOL_CONFIG = {
 
 let pool = null;
 
+// Second line of defence behind tests/test-db-safety.cjs: under NODE_ENV=test
+// never open a pool to the production database (the default above).
+function assertNotProductionDbUnderTest() {
+    if (process.env.NODE_ENV !== 'test') return;
+    const db = process.env.PG_DB;
+    if (!db || db === 'animastor' || !db.endsWith('_test')) {
+        throw new Error(
+            `[PG] refusing to connect under NODE_ENV=test: PG_DB="${db || ''}" `
+            + '(must be set explicitly, end in "_test" and not be "animastor")'
+        );
+    }
+}
+
 function getPool() {
     if (pool) return pool;
+    assertNotProductionDbUnderTest();
     pool = new Pool(POOL_CONFIG);
     pool.on('error', (err) => {
         console.error('[PG] Unexpected pool error:', err.message);
