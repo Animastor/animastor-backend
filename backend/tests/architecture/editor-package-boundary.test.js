@@ -22,7 +22,7 @@
 //   PB3 — Public API surface: require('@animastor/editor') resolves and
 //         exposes EXACTLY the four public factories — createEditorModel,
 //         createEditorRoutes, createEntityCrudRoutes, createEditorPorts —
-//         nothing more. The frozen 7-port seam factory is public; internal
+//         nothing more. The frozen 8-port seam factory is public; internal
 //         helpers (scene-patch-utils, read-recovery, entity-id,
 //         cyr-latin-map) are NOT.
 //   PB4 — No reverse imports: no package source file requires the host

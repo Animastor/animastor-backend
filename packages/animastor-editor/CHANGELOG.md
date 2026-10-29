@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-29)
 
 `POST /api/v1/book/blank` — ownership is now mandatory and the scaffold is
 localized.

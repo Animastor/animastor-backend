@@ -115,7 +115,7 @@ Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github
   (`@animastor/editor/...`) throw `ERR_PACKAGE_PATH_NOT_EXPORTED` at runtime and are
   rejected by the PB1 architecture guard.
 - `createEditorPorts` is public through the root: it is the composition-root seam
-  the host fills before route registration (the frozen 7-port contract above).
+  the host fills before route registration (the frozen 8-port contract above).
 - The pure `cyr-latin-map` transliteration module is **internal**. Hosts that need
   Cyrillic→Latin normalization outside the Editor should keep their own copy (the
   Animastor backend carries a byte-parity twin guarded by the PB5 test) — the
@@ -123,9 +123,9 @@ Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github
 
 ## Versioning / release
 
-- Current version: `0.1.0` (first publishable release; `npm publish --dry-run` verified).
+- Current version: `0.2.0`.
 - SemVer: the frozen HTTP surface (26 endpoints), the four public factories and the
-  7-port `editorPorts` shape are the contract — breaking any of them requires a major
+  8-port `editorPorts` shape are the contract — breaking any of them requires a major
   bump. New optional ports or endpoints are minor; fixes are patch.
 - The package is published from `packages/animastor-editor` (`files` = `src/`,
   `README.md`, `LICENSE`; `publishConfig.access = public`). Publication is a manual,
