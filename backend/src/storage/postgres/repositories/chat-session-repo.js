@@ -9,6 +9,8 @@
 // no storage barrel, no postgres knowledge leaks into the Assistant
 // boundary (the package holds only the interface).
 // (docs/architecture/ai-assistant-extraction.md)
+//
+// timestamps — epoch ms (created_at / updated_at, incl. the table DEFAULT).
 
 const { query } = require('../database');
 

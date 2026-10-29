@@ -605,8 +605,8 @@ CREATE TABLE IF NOT EXISTS ai_chat_sessions (
     messages        JSONB NOT NULL DEFAULT '[]'::jsonb,
     context         JSONB DEFAULT '{}'::jsonb,
     locked          BOOLEAN NOT NULL DEFAULT false,
-    created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-    updated_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
+    created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint * 1000),
+    updated_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint * 1000)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_chat_sessions_book ON ai_chat_sessions(book_id);
@@ -891,6 +891,20 @@ async function runMigrations() {
         if (!err.message.includes('does not exist')) {
             console.error('[PG] Failed to alter ai_chat_sessions.context:', err.message);
         }
+    }
+
+    // ai_chat_sessions timestamps are epoch ms (every writer uses Date.now(),
+    // clients expect ms). The table DEFAULT used to be epoch seconds — switch
+    // it to ms and upscale rows that got the seconds default. Idempotent:
+    // ms values are already >= 1e11, so the UPDATE is a no-op on re-run.
+    try {
+        await query(`ALTER TABLE ai_chat_sessions ALTER COLUMN created_at SET DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint * 1000)`);
+        await query(`ALTER TABLE ai_chat_sessions ALTER COLUMN updated_at SET DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint * 1000)`);
+        const c = await query(`UPDATE ai_chat_sessions SET created_at = created_at * 1000 WHERE created_at < 100000000000`);
+        const u = await query(`UPDATE ai_chat_sessions SET updated_at = updated_at * 1000 WHERE updated_at < 100000000000`);
+        console.log(`[PG] ai_chat_sessions timestamps → epoch ms (fixed created_at=${c.rowCount}, updated_at=${u.rowCount})`);
+    } catch (err) {
+        console.error('[PG] Failed to migrate ai_chat_sessions timestamps to ms:', err.message);
     }
 
     // ======================================================
