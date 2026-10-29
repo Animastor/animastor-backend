@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+`POST /api/v1/book/blank` — ownership is now mandatory and the scaffold is
+localized.
+
+### Fixed
+
+- Ownership failure is no longer "non-fatal": when
+  `editorPorts.resolveOwnership` returns `null` or throws, the route answers
+  `503 { error: 'ownership_unavailable' }` and commits nothing (previously an
+  unowned book was written to disk).
+- A failed `editorModel.commit` after a successful ownership resolve rolls
+  the registry row back through the new `editorPorts.rollbackOwnership(bookId)`
+  port, then answers 500 — no `books` row without a book on disk.
+- Identified request (user or guest) without `req.workspace` → 401; it no
+  longer falls back to the default (developer) workspace. Pre-auth requests
+  (no identity) keep the default-workspace behaviour.
+
+### Added
+
+- Body field `language` (`'ru' | 'en'`, anything else → `'ru'` for backward
+  compatibility). Default book/chapter/scene labels follow it
+  (`Новая книга / Новая глава / Сцена 1` or `New book / New chapter / Scene 1`)
+  and `book.language` is set to it. An explicit `title` still wins.
+
+### API
+
+- `createEditorPorts` gains the `rollbackOwnership` port (8 ports). The
+  backend composition root wires it to `bookRepo.deleteBookSnapshots`.
+
 ## 0.1.2 (2026-10-17)
 
 BOOK-RECOVER registry gate (stage 59, released via stage 61): a deleted book

@@ -76,6 +76,7 @@ const editorPorts = createEditorPorts({
         promptLimit,              // IMAGE_PROMPT_MAX_CHARS
         purge,                    // entity-cleanup purgeScene/purgeUnit
         resolveOwnership,         // workspace-ownership attach (POST /book/blank)
+        rollbackOwnership,        // registry-row rollback on failed blank commit
         recoveryCtx,              // read-recovery ctx (redis chunk repair)
     },
 });

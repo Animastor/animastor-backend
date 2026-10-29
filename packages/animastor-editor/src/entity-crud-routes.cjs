@@ -667,11 +667,33 @@ module.exports = function (app, redis, deps) {
     //   chapters[0] → one scene → one module. The user then builds the book
     //   manually with the Editor's +/- controls (AI stays an optional assistant).
     // Reuses generateBookId (paths.js) for the book id — no new id mechanism.
+    //
+    // Ownership is mandatory: the registry row (books.workspace_id) is
+    // resolved BEFORE anything is written to disk. No owner → 503, nothing
+    // committed. A failed commit rolls the registry row back, so neither an
+    // unowned book on disk nor a registry row without a book survives.
     // ======================================================
+    const BLANK_LABELS = {
+        ru: { book: 'Новая книга', chapter: 'Новая глава', scene: 'Сцена 1' },
+        en: { book: 'New book', chapter: 'New chapter', scene: 'Scene 1' },
+    };
+
     app.post('/api/v1/book/blank', async (req, res) => {
         try {
-            const { title } = req.body || {};
-            const label = title && String(title).trim() ? String(title).trim() : 'Новая книга';
+            const { title, language: rawLanguage } = req.body || {};
+            // Unknown/missing language → 'ru' (historical default).
+            const language = Object.prototype.hasOwnProperty.call(BLANK_LABELS, rawLanguage) ? rawLanguage : 'ru';
+            const labels = BLANK_LABELS[language];
+
+            // Identified request (user or guest) must own the book through its
+            // own workspace — never fall back to the default (developer)
+            // workspace. Pre-auth (no identity) keeps the historical default.
+            const hasIdentity = !!(req.user || req.guest);
+            if (hasIdentity && !req.workspace?.id) {
+                return res.status(401).json({ error: 'Authentication required' });
+            }
+
+            const label = title && String(title).trim() ? String(title).trim() : labels.book;
             const bookId = generateBookId(label);
             if (editorModel.read(bookId)) {
                 // Extremely unlikely (timestamp-suffixed), but never clobber.
@@ -695,7 +717,7 @@ module.exports = function (app, redis, deps) {
                     version: '3.0',
                     title: label,
                     author: '',
-                    language: 'ru',
+                    language,
                     structure: { chapters_order: [chFile] },
                     defaults: { narration_voice: 'narrator' },
                 },
@@ -705,11 +727,11 @@ module.exports = function (app, redis, deps) {
                 locations: {},
                 chapters: [{
                     chapter_id: chFile.replace('.json', ''),
-                    chapter_title: 'Новая глава',
+                    chapter_title: labels.chapter,
                     type: 'chapter',
                     scenes: [{
                         scene_id: scId,
-                        scene_title: 'Сцена 1',
+                        scene_title: labels.scene,
                         type: 'narration',
                         participants: [],
                         audio: { voice: 'narrator', full_text: '' },
@@ -718,17 +740,32 @@ module.exports = function (app, redis, deps) {
                 }],
             };
 
+            let workspaceId = null;
             try {
-                await editorPorts.resolveOwnership(bookId, {
+                workspaceId = await editorPorts.resolveOwnership(bookId, {
                     bookTitle: label,
-                    preferredWorkspaceId: req.workspace?.id || null,
+                    preferredWorkspaceId: hasIdentity ? req.workspace.id : null,
                 });
             } catch (err) {
-                console.warn(`[CREATE BLANK BOOK] Ownership attach failed for ${bookId} (non-fatal): ${err.message}`);
+                console.error(`[CREATE BLANK BOOK] Ownership resolve failed for ${bookId}: ${err.message}`);
+            }
+            if (!workspaceId) {
+                console.error(`[CREATE BLANK BOOK] No owner for ${bookId} — not created`);
+                return res.status(503).json({ error: 'ownership_unavailable' });
             }
 
-            editorModel.commit(blankBook);
-            log(`[CREATE BLANK BOOK] ${bookId} (title=${label.slice(0, 40)})`);
+            try {
+                editorModel.commit(blankBook);
+            } catch (err) {
+                console.error(`[CREATE BLANK BOOK] Commit failed for ${bookId}: ${err.message} — rolling back registry row`);
+                try {
+                    await editorPorts.rollbackOwnership(bookId);
+                } catch (rbErr) {
+                    console.error(`[CREATE BLANK BOOK] Registry rollback failed for ${bookId}: ${rbErr.message}`);
+                }
+                return res.status(500).json({ error: err.message });
+            }
+            log(`[CREATE BLANK BOOK] ${bookId} (title=${label.slice(0, 40)}, language=${language})`);
             return res.json({ saved: true, book_id: bookId, title: label });
         } catch (err) {
             console.error('[CREATE BLANK BOOK] Error:', err.message);
