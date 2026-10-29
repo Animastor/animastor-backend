@@ -6,20 +6,22 @@
 
 | Роль | Атрибуты | Назначение |
 |------|----------|------------|
-| `animastor` | LOGIN, владелец БД `animastor`, всех 43 таблиц и 16 последовательностей | Рабочая роль бэкенда. После п.3: **NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS**. Бэкенд ходит в PG под ней (`PG_USER=animastor`). |
-| `animastor_admin` | SUPERUSER LOGIN | Административная роль кластера. Создана вместо `pg_admin` (имена ролей с префиксом `pg_` зарезервированы PostgreSQL). Используется только для администрирования (ALTER ROLE, pg_authid, ALTER SYSTEM). |
+| `animastor` | Superuser, LOGIN | Bootstrap-роль кластера (OID 10). Остаётся единственным админом (`animastor_admin` удалён). Пароль хранится только в `/home/animastor/.pg_admin` и в `POSTGRES_PASSWORD` контейнера PG. |
+| `animastor_app` | LOGIN, владелец БД `animastor`, схемы `public`, всех таблиц/последовательностей/представлений/функций в `public` | Рабочая роль бэкенда. `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`. Бэкенд ходит в PG под ней (`PG_USER=animastor_app`). |
 
-`pg_dumpall` перед изменениями: `/home/animastor/backups/pgrole-20261028/` (dir 700, файлы 600).
+`animastor_admin` (временная суперроль для проведения миграции прав) удалена (`DROP ROLE`). Вторая суперроль не нужна.
 
 ## Где хранятся пароли
 
-- Пароль `animastor_admin` — только в `/home/animastor/.pg_admin` (права 600, владелец animastor). Не печатать, не коммитить.
-- Пароль `animastor` — переменные окружения контейнера `animastor-backend` (`PG_USER`, `PG_PASSWORD`, `PG_HOST=postgres`, `PG_PORT=5432`, `PG_DB=animastor`) и том `animastor_pg-data` (инициализация кластера через `POSTGRES_USER`/`POSTGRES_PASSWORD`).
-- Файл `/home/animastor/.pg_admin` не входит в репозиторий (см. `.gitignore`).
+- Пароль `animastor_app` — переменные `PG_USER=animastor_app` / `PG_PASSWORD=<...>` в `.env` (права 600), не коммитится:
+  - `/home/animastor/animastor-backend/deploy/.env`
+  - `/home/animastor/animastor/.env` (также читается docker-compose)
+- Пароль bootstrap-роли `animastor` — только в `/home/animastor/.pg_admin` (600) и в `POSTGRES_PASSWORD` контейнера PG (`animastor/.env` → `docker-compose.yml`). Из окружения бэкенда удалён (в `.env` бэкенда нет `POSTGRES_PASSWORD`).
+- Никакие пароли не коммитится в git.
 
 ## Журнал подключений PG
 
-Настроено `ALTER SYSTEM` (запись в `postgresql.auto.conf`) + `pg_reload_conf()`; `logging_collector=on` вступил после рестарта только контейнера `animastor-pg`.
+Настроено `ALTER SYSTEM` (запись в `postgresql.auto.conf`) + `pg_reload_conf()`; `logging_collector=on` вступило после рестарта только контейнера `animastor-pg`.
 
 Параметры:
 - `log_connections=on`, `log_disconnections=on`
@@ -31,19 +33,18 @@
 ## Как читать логи PG
 
 ```bash
-# подключение к контейнере БД (только аутентифицированные роли)
 docker exec animastor-pg ls -la /var/lib/postgresql/data/log/
 docker exec animastor-pg cat /var/lib/postgresql/data/log/postgresql-$(date +%a).log
 ```
 
-Пример строки подключения (с IP-адресом клиента):
+Пример строки подключения бэкенда (с IP-адресом контейнера):
 
 ```
-2026-10-28 04:28:19.811 UTC [90] animastor_admin@animastor 127.0.0.1 LOG:  connection authorized: user=animastor_admin database=animastor application_name=psql
+2026-10-28 04:36:14.423 UTC [41] animastor_app@animastor 172.18.0.4 LOG:  statement: ALTER TABLE workspace_ai_providers
 ```
 
 Поля префикса: `%m` время с мс, `[%p]` PID, `%u@%d` пользователь@БД, `%h` удалённый хост/IP.
 
 ## Откат
 
-Если после п.3 появились ошибки `permission denied` / `must be superuser` — вернуть `animastor` атрибут `SUPERUSER` от имени `animastor_admin` и пересоздать `animastor-backend`.
+Если после перехода на `animastor_app` появятся ошибки `permission denied` — вернуть бэкенду `PG_USER=animastor` + старый `PG_PASSWORD` (из бэкапа `.env` до 2026-10-28) и пересоздать `animastor-backend`. Роль `animastor_app` и владельцы объектов при этом остаются.

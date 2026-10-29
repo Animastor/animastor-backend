@@ -61,6 +61,7 @@ const FROZEN_PORTS = [
     'promptLimit',       // IMAGE_PROMPT_MAX_CHARS (agent-domain constant)
     'purge',             // entity-cleanup purgeScene / purgeUnit
     'resolveOwnership',  // workspace-ownership.resolveWorkspaceForBook
+    'rollbackOwnership', // book-repo registry-row rollback (failed blank commit)
     'recoveryCtx',       // read-recovery ctx (redis chunk repair)
 ];
 
@@ -96,6 +97,7 @@ describe('E4: dependency matrix — contour deps legs stay frozen', () => {
             'editorModel.read',
             'editorPorts.purge',            // structure-delete deep cleanup
             'editorPorts.resolveOwnership', // POST /book/blank ownership attach
+            'editorPorts.rollbackOwnership', // POST /book/blank failed-commit rollback
             'utils.log',                     // destructured: const { log } = utils
         ],
     };
@@ -149,12 +151,12 @@ describe('E4: dependency matrix — contour deps legs stay frozen', () => {
 
 // ── E5 — editorPorts contract freeze (functional) ─────────────────────────
 describe('E5: createEditorPorts — the frozen port object contract', () => {
-    it('exports exactly the seven frozen port names', () => {
+    it('exports exactly the eight frozen port names', () => {
         const createEditorPorts = require(EDITOR_PORTS);
         const ports = createEditorPorts({
             deps: {
                 sceneAssetsRepo: {}, placeholderAudio: {}, auditCoverage: {},
-                promptLimit: 2000, purge: {}, resolveOwnership: {}, recoveryCtx: {},
+                promptLimit: 2000, purge: {}, resolveOwnership: {}, rollbackOwnership: {}, recoveryCtx: {},
             },
         });
         expect(Object.keys(ports).sort()).to.deep.equal([...FROZEN_PORTS].sort());
@@ -169,6 +171,7 @@ describe('E5: createEditorPorts — the frozen port object contract', () => {
             promptLimit: 2000,
             purge: { leg: 4 },
             resolveOwnership: { leg: 5 },
+            rollbackOwnership: { leg: 7 },
             recoveryCtx: { leg: 6 },
         };
         const ports = createEditorPorts({ deps: legs });
@@ -183,7 +186,7 @@ describe('E5: createEditorPorts — the frozen port object contract', () => {
         expect(() => createEditorPorts({ deps: { sceneAssetsRepo: {} } })).to.throw(/placeholderAudio/);
     });
 
-    it('backend.cjs wires all seven ports at the composition root', () => {
+    it('backend.cjs wires all eight ports at the composition root', () => {
         const src = readSource(BACKEND_ROOT);
         // Phase 4.1: the port factory comes through the package ROOT
         // (createEditorPorts from require('@animastor/editor')) — no deep

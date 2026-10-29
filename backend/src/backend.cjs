@@ -266,7 +266,10 @@ const { createAssistantPorts } = require('./services/assistant-ports.cjs');
 // (chat engine + /api/v1/ai/* HTTP routes + contracts). Consumed ONLY
 // through the package root; every host dependency arrives through the
 // assistantPorts seam below (docs/architecture/ai-assistant-extraction.md).
-const { createChatEngine, createAssistantRoutes } = require('@animastor/assistant');
+const { createChatEngine, createAssistantRoutes, buildChatRequestExtras } = require('@animastor/assistant');
+// The provider connection test sends the chat's own body extras (incl.
+// provider-gated enable_thinking) — bound here, the only package consumer.
+require('./services/workspace-ai-provider').setChatRequestExtras(buildChatRequestExtras);
 const placeholderAudio = require('./services/placeholder-audio');
 const utils = require('./helpers/utils.cjs');
 
@@ -632,6 +635,7 @@ const routeDeps = {
     //   promptLimit       — IMAGE_PROMPT_MAX_CHARS (agent-domain constant)
     //   purge             — entity-cleanup purgeScene/purgeUnit (structure deletes)
     //   resolveOwnership  — workspace-ownership attach (POST /book/blank)
+    //   rollbackOwnership — registry-row rollback on failed blank commit
     //   recoveryCtx       — read-recovery dependencies (redis chunk repair)
     //   The four host legs that were previously required inside
     //   editor-ports.cjs (entity-cleanup, source-coverage-audit,
@@ -651,6 +655,9 @@ const routeDeps = {
                 const workspaceOwnership = require('./middleware/workspace-ownership');
                 return workspaceOwnership.resolveWorkspaceForBook(bookId, meta);
             },
+            // Blank book never got a snapshot — deleteBookSnapshots drops
+            // just the fresh books row.
+            rollbackOwnership: (bookId) => bookRepo.deleteBookSnapshots(bookId),
             recoveryCtx: {
                 redis, book, state, activeScenes, config, getAllChunks, saveChunk,
                 isBookRegistered,

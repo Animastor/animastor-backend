@@ -78,6 +78,18 @@ async function getImageUnit(buildId, bookId, chapterId, sceneId, unitId) {
     return result.rows[0] || null;
 }
 
+// Editor text edit: refresh text/text_length on the EXISTING rows of a unit
+// (every build_id keeps its row; nothing is inserted when no row exists).
+async function updateImageUnitText(bookId, chapterId, sceneId, unitId, text) {
+    const t = text == null ? '' : String(text);
+    const result = await query(`
+        UPDATE image_units SET text = $5, text_length = $6
+        WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND unit_id = $4
+          AND text IS DISTINCT FROM $5
+    `, [bookId, chapterId, sceneId, unitId, t, t.length]);
+    return result.rowCount || 0;
+}
+
 async function deleteImageUnitsForBuild(buildId) {
     await query('DELETE FROM image_units WHERE build_id = $1', [buildId]);
 }
@@ -107,6 +119,7 @@ module.exports = {
     upsertIuTiming,
     getImageUnitsForScene,
     getImageUnit,
+    updateImageUnitText,
     deleteImageUnitsForBuild,
     deleteImageUnitsForScene,
     countImageUnits,

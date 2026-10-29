@@ -18,6 +18,8 @@
 // The package holds no host imports, no fs and no ambient env reads —
 // pure Assistant logic only.
 
+const requestExtras = require('./request-extras.cjs');
+
 module.exports = function(config, deps = {}) {
     const { validateBundleObject } = deps;
     if (typeof validateBundleObject !== 'function') {
@@ -561,5 +563,9 @@ module.exports = function(config, deps = {}) {
         toolDefinitions: {
             EDIT_BOOK_TOOL,
         },
+        // Chat body extras + compatibility retry (request-extras.cjs) —
+        // handed to the routes through the engine (the route file holds no
+        // require() calls).
+        requestExtras,
     };
 };

@@ -114,6 +114,7 @@ function buildComposition({ sessionRepo, order }) {
 
     const fakeRedis = {
         sadd: async (key) => { order.push(`sadd:${key}`); return 1; },
+        expire: async (key) => { order.push(`expire:${key}`); return 1; },
         del: async (...keys) => { order.push(`del:${keys.join(',')}`); return keys.length; },
     };
 

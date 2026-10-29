@@ -29,6 +29,7 @@ const { readSource, rel, REPO_ROOT, BACKEND_SRC, listSourceFiles, requireSpecifi
 const config = require('../../src/config/runtime-config');
 const bookModel = require('../../src/book/book-model.cjs');
 const { createBookDeletion } = require('../../src/services/book-deletion.cjs');
+const { createMockRedis } = require('../mocks/redis-mock');
 
 const bookModelPath = path.join(REPO_ROOT, 'packages', 'animastor-vbook-runtime', 'src', 'book-model.cjs');
 const bookDeletionPath = path.join(BACKEND_SRC, 'services', 'book-deletion.cjs');
@@ -288,6 +289,7 @@ describe('T6: route/controller does not implement the book deletion cascade', ()
         const bookId = 'book-deletion-order';
         const fakeRedis = {
             sadd: async (key) => { order.push(`sadd:${key}`); return 1; },
+            expire: async (key) => { order.push(`expire:${key}`); return 1; },
             del: async (...keys) => { order.push(`del:${keys.join(',')}`); return keys.length; },
         };
         const fakeStorage = {
@@ -338,6 +340,41 @@ describe('T6: route/controller does not implement the book deletion cascade', ()
                 .to.be.below(resetIdx);
             expect(pgCancelIdx, 'agent-session cancel must precede book.resetBook()')
                 .to.be.below(resetIdx);
+        } finally {
+            config.OUTPUT_DIR = originalOutputDir;
+        }
+    });
+
+    it('cancelled-workers signal gets a TTL in (0, 3600] — survives the agent, then expires', async () => {
+        // cleanBookRedisKeys does not remove animastor:cancelled-workers:{bookId}
+        // (the signal must outlive the cascade for the running agent), so
+        // without EXPIRE the key of a deleted book would stay in Redis forever.
+        const redis = createMockRedis();
+        const bookId = 'book-deletion-ttl';
+        const originalOutputDir = config.OUTPUT_DIR;
+        config.OUTPUT_DIR = path.join(tmpDir, 'deletion-output-nonexistent');
+        try {
+            const { deleteBook } = createBookDeletion({
+                book: { resetBook: async () => {} },
+                redis,
+                storage: { postgres: { query: async () => {} } },
+                config,
+                getAllChunks: async () => [],
+                getChunk: async () => null,
+                cleanBookRedisKeys: async () => {},
+                log: () => {},
+                setCancelFlag: async () => {},
+                agentSessionControl: { cancelSessions: async () => ({ cancelled: true }) },
+                purgeAssistantForBook: async () => {},
+            });
+
+            await deleteBook(bookId);
+
+            const key = `animastor:cancelled-workers:${bookId}`;
+            expect(await redis.smembers(key)).to.deep.equal(['vbook']);
+            const ttl = await redis.ttl(key);
+            expect(ttl, 'cancelled-workers key must expire').to.be.greaterThan(0);
+            expect(ttl).to.be.at.most(3600);
         } finally {
             config.OUTPUT_DIR = originalOutputDir;
         }

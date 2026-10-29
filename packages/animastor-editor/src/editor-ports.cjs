@@ -26,6 +26,8 @@
 //                       in-flight cancellation stays host-side)
 //   resolveOwnership  — workspace-ownership.resolveWorkspaceForBook
 //                       (POST /book/blank ownership attach)
+//   rollbackOwnership — drop the registry row resolveOwnership created when
+//                       the blank-book commit fails (POST /book/blank)
 //   recoverChunks     — read-time Redis chunk repair (read-recovery ctx)
 //   placeholderAudio — recoverMissingPlaceholders (read-repair leg)
 //
@@ -54,7 +56,7 @@ module.exports = function createEditorPorts({ deps }) {
         // and the contour registrars — the host services stay host-side.
         sceneAssetsRepo, placeholderAudio,
         auditCoverage, promptLimit,
-        purge, resolveOwnership, recoveryCtx,
+        purge, resolveOwnership, rollbackOwnership, recoveryCtx,
     } = deps;
 
     // ── PG scene-assets port ────────────────────────────
@@ -79,6 +81,7 @@ module.exports = function createEditorPorts({ deps }) {
         promptLimit,
         purge,
         resolveOwnership,
+        rollbackOwnership,
         recoveryCtx,
     };
 };

@@ -21,9 +21,9 @@ const { createChatEngine, createAssistantRoutes, assertAssistantPorts, assertSes
 
 // ── PT1 — public API ─────────────────────────────────────────────────────
 describe('PT1: package public API', () => {
-    it('exposes exactly the four public factories', () => {
+    it('exposes exactly the four public factories + buildChatRequestExtras', () => {
         expect(Object.keys(assistant).sort()).to.deep.equal([
-            'assertAssistantPorts', 'assertSessionRepo', 'createAssistantRoutes', 'createChatEngine',
+            'assertAssistantPorts', 'assertSessionRepo', 'buildChatRequestExtras', 'createAssistantRoutes', 'createChatEngine',
         ]);
     });
 

@@ -1,0 +1,70 @@
+# ============================================================
+# TEST INFRASTRUCTURE — isolated Postgres + Redis for the suite
+# ============================================================
+# Nothing here touches production. The production stack lives in
+# docker-compose.yml (animastor-pg on 127.0.0.1:5432, animastor-redis on
+# 6379, database "animastor"). This file provisions a SEPARATE pair of
+# containers with their own volumes and their own database name
+# ("animastor_test") on loopback-only ports, so even a mis-scoped DELETE in
+# a test can only ever reach test data.
+#
+# The ports must be loopback-only (127.0.0.1) — never 0.0.0.0.
+#
+# Credentials come from backend/.env.test (generated, chmod 600, gitignored).
+# scripts/test-backend.sh loads that file, checks these containers are up and
+# then runs the suite with the matching env. The test-db-safety.cjs guard
+# (loaded first via backend/.mocharc.json) refuses to run the suite against
+# any database whose name does not end in "_test".
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml --env-file backend/.env.test up -d
+#   scripts/test-backend.sh
+#   docker compose -f docker-compose.test.yml --env-file backend/.env.test down -v
+
+name: animastor-test
+
+networks:
+  test-net:
+    driver: bridge
+
+volumes:
+  animastor-test-pg-data:
+  animastor-test-redis-data:
+
+services:
+
+  postgres-test:
+    image: postgres:16                 # same major version as production
+    container_name: animastor-pg-test
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:55434:5432"         # loopback ONLY
+    networks:
+      - test-net
+    environment:
+      POSTGRES_DB: animastor_test
+      POSTGRES_USER: animastor
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in backend/.env.test}
+    volumes:
+      - animastor-test-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U animastor -d animastor_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-test:
+    image: redis:7                     # same major version as production
+    container_name: animastor-redis-test
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:56381:6379"         # loopback ONLY, non-default port
+    networks:
+      - test-net
+    volumes:
+      - animastor-test-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

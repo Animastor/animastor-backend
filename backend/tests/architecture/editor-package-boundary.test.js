@@ -22,7 +22,7 @@
 //   PB3 — Public API surface: require('@animastor/editor') resolves and
 //         exposes EXACTLY the four public factories — createEditorModel,
 //         createEditorRoutes, createEntityCrudRoutes, createEditorPorts —
-//         nothing more. The frozen 7-port seam factory is public; internal
+//         nothing more. The frozen 8-port seam factory is public; internal
 //         helpers (scene-patch-utils, read-recovery, entity-id,
 //         cyr-latin-map) are NOT.
 //   PB4 — No reverse imports: no package source file requires the host
@@ -141,16 +141,16 @@ describe('PB3: the package root exposes exactly the public API', () => {
         }
     });
 
-    it('the ports factory is the frozen 7-port seam (no expansion)', () => {
+    it('the ports factory is the frozen 8-port seam (no expansion)', () => {
         const ports = api.createEditorPorts({
             deps: {
                 sceneAssetsRepo: {}, placeholderAudio: {}, auditCoverage: {},
-                promptLimit: 2000, purge: {}, resolveOwnership: {}, recoveryCtx: {},
+                promptLimit: 2000, purge: {}, resolveOwnership: {}, rollbackOwnership: {}, recoveryCtx: {},
             },
         });
         expect(Object.keys(ports).sort()).to.deep.equal([
             'sceneAssetsRepo', 'placeholderAudio', 'auditCoverage', 'promptLimit',
-            'purge', 'resolveOwnership', 'recoveryCtx',
+            'purge', 'resolveOwnership', 'rollbackOwnership', 'recoveryCtx',
         ].sort());
     });
 });

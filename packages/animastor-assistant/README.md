@@ -44,6 +44,7 @@ const {
     createAssistantRoutes,
     assertAssistantPorts,
     assertSessionRepo,
+    buildChatRequestExtras, // chat body extras (max_tokens + provider-gated enable_thinking)
 } = require('@animastor/assistant');
 ```
 
@@ -141,8 +142,8 @@ keeps storage, filesystem, provider and transport concerns on the host side.
 
 ## Versioning / release
 
-- Current version: `0.1.0` (first publishable release; `npm pack` verified).
-- SemVer: the four public factories, the root-only export map, the
+- Current version: `0.1.1` (see CHANGELOG.md).
+- SemVer: the four public factories + `buildChatRequestExtras`, the root-only export map, the
   `AssistantPorts` shape and the `/api/v1/ai/*` HTTP/SSE contract are the
   public contract — breaking any of them requires a major bump.
 - Publication is a manual, explicit step and is **not** automated in CI.

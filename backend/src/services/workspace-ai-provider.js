@@ -80,24 +80,25 @@ function _validateSecretKeyRaw(value) {
 /**
  * Encryption key derivation: WORKSPACE_SECRET_KEY (any length) → 32 bytes.
  *
- * Production (NODE_ENV=production): the key is mandatory; a missing, empty,
- * or whitespace-only value throws immediately — no fallback.
+ * Any NODE_ENV other than "test": the key is mandatory; a missing, empty,
+ * or whitespace-only value throws immediately — no fallback. (Production
+ * does not set NODE_ENV, so gating on "production" left it unprotected.)
  *
- * Development / test: a deterministic dev-only fallback is used when the
+ * Test (NODE_ENV=test): a deterministic test-only fallback is used when the
  * env var is absent.  The fallback is clearly marked and MUST NOT be
  * deployed to a real environment.
  */
 function getSecretKey() {
     const raw = process.env.WORKSPACE_SECRET_KEY;
-    const isProduction = process.env.NODE_ENV === 'production';
+    const isTest = process.env.NODE_ENV === 'test';
 
-    // Production: fail closed — no fallback, no silent generation.
-    if (isProduction) {
+    // Everything but tests: fail closed — no fallback, no silent generation.
+    if (!isTest) {
         _validateSecretKeyRaw(raw);
         return crypto.createHash('sha256').update(raw.trim()).digest();
     }
 
-    // Development / test: allow the legacy dev fallback.
+    // Test: allow the legacy dev fallback.
     if (!raw || raw.trim().length === 0) {
         if (!_logEmitted) {
             _logEmitted = true;
@@ -645,6 +646,16 @@ function sanitizeTestError(err, httpStatus) {
  * POST a tiny chat completion to prove the provider works.
  * @returns {Promise<{ok:boolean, model?:string, status?:number, error?:string}>}
  */
+// Chat body extras builder — @animastor/assistant's buildChatRequestExtras,
+// bound by the composition root (backend.cjs is the package's only host
+// consumer). Unbound → no extras (plain probe).
+let buildChatRequestExtras = () => ({});
+function setChatRequestExtras(fn) { buildChatRequestExtras = typeof fn === 'function' ? fn : () => ({}); }
+
+// Placeholder tool: makes buildChatRequestExtras pick the tool-turn extras
+// (the superset the chat may send). The tool itself is not sent.
+const TEST_TOOL = { type: 'function', function: { name: 'noop', parameters: { type: 'object' } } };
+
 async function testConnection({ endpoint, apiKey, model }) {
     const base = normalizeEndpoint(endpoint) || process.env.AI_API_BASE_URL || 'https://api.aicredits.in/v1';
     const key = apiKey || process.env.OPENROUTER_API_KEY;
@@ -661,9 +672,14 @@ async function testConnection({ endpoint, apiKey, model }) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${key}`,
             },
+            // Same extras the chat sends on a tool-carrying turn (incl.
+            // enable_thinking where the assistant would send it), so a
+            // provider that rejects the chat body fails the test too.
+            // Only the token budget is cut to keep the probe cheap.
             body: JSON.stringify({
                 model: usedModel,
                 messages: [{ role: 'user', content: 'ok' }],
+                ...buildChatRequestExtras({ model: usedModel, baseUrl: base, tools: [TEST_TOOL] }),
                 max_tokens: 1,
                 temperature: 0,
             }),
@@ -743,6 +759,7 @@ module.exports = {
     resolveAIProvider,
     hasUsableApiKey,
     testConnection,
+    setChatRequestExtras,
     testConnectorConnection,
     invalidateCache,
     invalidateAllCache,

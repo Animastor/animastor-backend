@@ -26,6 +26,7 @@ const { listMediaTypes: _mediaTypes, isValidWorkerType: _isMediaType } = require
 // scene-hash: adopted into @animastor/generation (dirty-grammar) — host copy deleted
 const { computeSceneHash } = require('@animastor/generation').dirtyGrammar;
 const { getOutdatedByVersions, ensureSyntheticStaleAsset } = require('../storage/postgres/repositories/scene-assets-repo');
+const iuRepo = require('../storage/postgres/repositories/iu-repo');
 
 const logPrefix = '[BOOK-SYNC]';
 function log(msg) { console.log(`${logPrefix} ${msg}`); }
@@ -63,6 +64,7 @@ async function reconcileFromDiff(bookId, dirtyScenes, loadedBook) {
     let scenesUpdated = 0;
     let assetsStale = 0;
     let tasksCancelled = 0;
+    let unitTextsSynced = 0;
     let purged = {};
 
     // ── Update PG scene hashes for changed/added scenes ──
@@ -87,6 +89,10 @@ async function reconcileFromDiff(bookId, dirtyScenes, loadedBook) {
 
         // Cancel only task types invalidated by the content diff.
         tasksCancelled = await markGenerationTasksStale(bookId, changed);
+
+        // The player reads unit text PG-first (image_units) — keep it in step
+        // with edited unit text so it does not wait for the next generation.
+        unitTextsSynced = await syncImageUnitTexts(bookId, changed, loadedBook);
     }
 
     // ── Purge DB rows for removed scenes ──
@@ -141,6 +147,7 @@ async function reconcileFromDiff(bookId, dirtyScenes, loadedBook) {
         scene_hashes_updated: scenesUpdated,
         assets_marked_stale: assetsStale,
         generation_tasks_cancelled: tasksCancelled,
+        image_unit_texts_synced: unitTextsSynced,
         purged,
         version_outdated: versionOutdatedCount,
     };
@@ -274,6 +281,29 @@ async function markGenerationTasksStale(bookId, dirtyScenes) {
               AND status IN ('queued', 'running')
         `, [bookId, chapterId, sceneId, dirtyLayers]);
         total += r.rowCount || 0;
+    }
+    return total;
+}
+
+/**
+ * Update image_units.text/text_length for diff-changed units whose text
+ * differs from PG. Existing rows only — no inserts, build_id untouched.
+ */
+async function syncImageUnitTexts(bookId, dirtyScenes, loadedBook) {
+    let total = 0;
+    for (const d of dirtyScenes) {
+        const unitIds = d.changes?.units?.unit_ids;
+        if (!Array.isArray(unitIds) || unitIds.length === 0) continue;
+        const scene = findSceneData(loadedBook, d.chapter_id, d.scene_id);
+        if (!scene) continue;
+        const units = (scene.units || []).concat(
+            (scene.dialogue_blocks || []).flatMap(db => db.units || [])
+        );
+        for (const unitId of unitIds) {
+            const unit = units.find(u => u && u.id != null && String(u.id) === String(unitId));
+            if (!unit || unit.text === undefined) continue;
+            total += await iuRepo.updateImageUnitText(bookId, d.chapter_id, d.scene_id, String(unit.id), unit.text);
+        }
     }
     return total;
 }

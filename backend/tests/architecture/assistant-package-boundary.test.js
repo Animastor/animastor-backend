@@ -132,11 +132,12 @@ describe('PB3: the package root exposes exactly the public API', () => {
     const PUBLIC_API = [
         'assertAssistantPorts',
         'assertSessionRepo',
+        'buildChatRequestExtras',
         'createAssistantRoutes',
         'createChatEngine',
     ].sort();
 
-    it('exports exactly the four public factories (nothing more)', () => {
+    it('exports exactly the four public factories + buildChatRequestExtras (nothing more)', () => {
         expect(Object.keys(api).sort()).to.deep.equal(PUBLIC_API);
     });
 
@@ -316,6 +317,7 @@ describe('PB8: npm pack surface and clean-consumer load', function () {
         'src/assistant-routes.cjs',
         'src/chat-engine.cjs',
         'src/index.cjs',
+        'src/request-extras.cjs',
         'src/session-repo-contract.cjs',
     ].sort();
 
@@ -371,7 +373,7 @@ describe('PB8: npm pack surface and clean-consumer load', function () {
         const pkgRoot = path.join(extractDir, 'package');
         const api = require(path.join(pkgRoot, 'src', 'index.cjs'));
         expect(Object.keys(api).sort()).to.deep.equal([
-            'assertAssistantPorts', 'assertSessionRepo', 'createAssistantRoutes', 'createChatEngine',
+            'assertAssistantPorts', 'assertSessionRepo', 'buildChatRequestExtras', 'createAssistantRoutes', 'createChatEngine',
         ]);
 
         // createChatEngine via injected dependencies — no host files, no fs.
@@ -488,6 +490,6 @@ describe('PB6: dependency direction — the composition root is the only host co
         const m = root.match(/const \{ ([^}]+) \} = require\('@animastor\/assistant'\);/);
         expect(m).to.not.equal(null);
         const names = m[1].split(/[,\s]+/).filter(Boolean);
-        expect(names.every((n) => ['createChatEngine', 'createAssistantRoutes', 'assertAssistantPorts', 'assertSessionRepo'].includes(n))).to.equal(true);
+        expect(names.every((n) => ['createChatEngine', 'createAssistantRoutes', 'assertAssistantPorts', 'assertSessionRepo', 'buildChatRequestExtras'].includes(n))).to.equal(true);
     });
 });

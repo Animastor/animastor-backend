@@ -28,6 +28,12 @@
 const fs = require('fs');
 const path = require('path');
 
+// TTL сигнала animastor:cancelled-workers:{bookId}. Сигнал должен пережить
+// работающий агент (он увидит его на следующем checkCancelled() LEVEL 3),
+// а затем исчезнуть — иначе ключ удалённой книги остаётся в Redis навсегда.
+// Совпадает с TTL, который ставит cancel-worker (generation-routes).
+const CANCELLED_WORKERS_TTL_SEC = 3600;
+
 /**
  * @param {Object} deps - injected adapters:
  *   book            - canonical book module (resetBook)
@@ -75,10 +81,12 @@ function createBookDeletion(deps) {
         //    state is deleted. КРИТИЧЕСКИ важно: сначала ОТМЕНИТЬ активные
         //    agent-сессии, потом чистить. Если сначала почистить Redis, PG
         //    или canonical bundle, running agent никогда не узнает об отмене:
-        //      - cleanBookRedisKeys удалит animastor:cancelled-workers:{bookId}
         //      - DELETE agent_sessions удалит все сессии
         //      - resetBook удалит саму книгу
         //    Агент продолжит работу — он не может обнаружить отмену.
+        //    Ключ animastor:cancelled-workers:{bookId} cleanBookRedisKeys НЕ
+        //    удаляет (его нет в списке паттернов) — сигнал намеренно
+        //    переживает шаг 4 и истекает сам по CANCELLED_WORKERS_TTL_SEC.
         //    Поэтому сигнализируем агенту через cancelled-workers (Redis) и
         //    статус сессий (PG) ДО удаления любого book state: агент увидит
         //    отмену на следующем checkCancelled(). Даже если последующие шаги
@@ -86,6 +94,7 @@ function createBookDeletion(deps) {
         //    уже отправлен.
         try {
             await redis.sadd(`animastor:cancelled-workers:${bookId}`, 'vbook');
+            await redis.expire(`animastor:cancelled-workers:${bookId}`, CANCELLED_WORKERS_TTL_SEC);
             log(`[DELETE-BOOK] Set cancelled-workers for ${bookId} — VBook agent will be stopped`);
         } catch (redisErr) {
             console.warn(`[DELETE-BOOK] Failed to set cancelled-workers: ${redisErr.message}`);
