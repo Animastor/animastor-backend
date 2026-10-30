@@ -367,7 +367,7 @@ describe('windows worker flow (mocked platform commands)', () => {
 // ---------------------------------------------------------------------------
 
 describe('bootstrap platform selection', () => {
-    const { buildBootstrapScript, buildWindowsBootstrapScript } = require('../../animastor-gpu-hub/bootstrap');
+    const { buildBootstrapScript, buildWindowsBootstrapScript } = require(path.join(REPO_ROOT, 'backend', 'node_modules', '@animastor', 'gpu-hub', 'bootstrap'));
 
     it('the bash launcher keeps its credential rejection and checksum gates', () => {
         const s = buildBootstrapScript({ hubUrl: 'https://hub.example/gpu', profile: 'image/qwen-image', mode: 'managed' });
@@ -414,17 +414,21 @@ describe('bootstrap platform selection', () => {
 
 describe('hub GET /installer platform selection', () => {
     const { createMockRedis } = require('../../../backend/tests/mocks/redis-mock');
-    const { buildHubApp } = require('../../animastor-gpu-hub/gpu-hub');
+    const { buildHubApp } = require(path.join(REPO_ROOT, 'backend', 'node_modules', '@animastor', 'gpu-hub', 'gpu-hub'));
 
     async function startHub() {
         const stubSrc = fs.mkdtempSync(path.join(os.tmpdir(), 'plat-hub-'));
         fs.writeFileSync(path.join(stubSrc, 'cli.js'), 'process.exit(0);\n');
         fs.writeFileSync(path.join(stubSrc, 'package.json'), JSON.stringify({ name: 'animastor-installer', version: '9.9.9' }));
+        // Post-split the worker bundle lives in the worker repo; serve a synthetic
+        // bundle dir (fixture) so the hub can resolve a worker package version.
+        const synthBundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plat-bundle-'));
+        fs.writeFileSync(path.join(synthBundleDir, 'package.json'), JSON.stringify({ name: 'animastor-worker', version: '9.9.9' }));
         const app = buildHubApp({
             redis: createMockRedis(),
             config: {
                 INSTALLER_SRC_DIR: stubSrc,
-                WORKER_BUNDLE_DIR: path.join(REPO_ROOT, 'packages', 'animastor-worker', 'worker'),
+                WORKER_BUNDLE_DIR: synthBundleDir,
                 WORKFLOW_DIR: path.join(REPO_ROOT, 'backend', 'ai', 'workflows'),
                 INSTALLER_MANIFESTS_DIR: path.join(REPO_ROOT, 'packages', 'animastor-installer', 'ai', 'install-manifests'),
             },
@@ -434,7 +438,7 @@ describe('hub GET /installer platform selection', () => {
         const server = await new Promise((resolve) => {
             const s = app.listen(0, () => resolve(s));
         });
-        return { server, base: `http://127.0.0.1:${server.address().port}`, stubSrc };
+        return { server, base: `http://127.0.0.1:${server.address().port}`, stubSrc, synthBundleDir };
     }
 
     it('?platform=windows serves the PowerShell launcher', async () => {
@@ -448,6 +452,7 @@ describe('hub GET /installer platform selection', () => {
         } finally {
             await new Promise((r) => hub.server.close(r));
             fs.rmSync(hub.stubSrc, { recursive: true, force: true });
+            fs.rmSync(hub.synthBundleDir, { recursive: true, force: true });
         }
     });
 
@@ -466,6 +471,7 @@ describe('hub GET /installer platform selection', () => {
         } finally {
             await new Promise((r) => hub.server.close(r));
             fs.rmSync(hub.stubSrc, { recursive: true, force: true });
+            fs.rmSync(hub.synthBundleDir, { recursive: true, force: true });
         }
     });
 
@@ -479,6 +485,7 @@ describe('hub GET /installer platform selection', () => {
         } finally {
             await new Promise((r) => hub.server.close(r));
             fs.rmSync(hub.stubSrc, { recursive: true, force: true });
+            fs.rmSync(hub.synthBundleDir, { recursive: true, force: true });
         }
     });
 });
