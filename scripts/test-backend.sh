@@ -58,7 +58,15 @@ fi
 # --- 4. temp data roots -----------------------------------------------------
 mkdir -p "${BOOKS_DIR:-/tmp/animastor-test/books}" "${OUTPUT_DIR:-/tmp/animastor-test/output}"
 
-# --- 5. run the suite -------------------------------------------------------
+# --- 5. deps guard -----------------------------------------------------------
+# node_modules должен совпадать с package-lock.json; иначе npm test может
+# падать на битые/отсутствующие пакеты @animastor/*.
+deps="$(cd backend && npm ls --depth=0 2>&1 || true)"
+if printf '%s\n' "$deps" | grep -E '@animastor/' | grep -Eqi 'invalid|missing'; then
+    err "node_modules не совпадает с package-lock.json: cd backend && npm ci"
+fi
+
+# --- 6. run the suite -------------------------------------------------------
 log "PG_DB=$PG_DB  PG_PORT=$PG_PORT  REDIS_PORT=$REDIS_PORT  NODE_ENV=$NODE_ENV"
 cd "$BACKEND_DIR"
 # NB: we do not forward "$@" — the only accepted flag (--no-deps) is ours.
