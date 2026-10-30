@@ -16,12 +16,10 @@
 
 const { expect } = require('chai');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const sc = require('../src/installer/setup-contract');
-const { resolveRepoBundleDir } = require('../src/installer/worker-bundle-source');
-
-const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 
 const REAL_PROFILE_IDS = ['audio/qwen-tts', 'image/qwen-image', 'video/ltx-2.3'];
 
@@ -299,13 +297,25 @@ describe('Setup contract — projections (unit)', () => {
             expect(sc.getInstallerVersion()).to.match(/^\d+\.\d+\.\d+$/);
         });
 
-        it('worker bundle version is read from the canonical worker bundle dir', function () {
-            // resolved via resolveRepoBundleDir — canonical packages/animastor-worker/worker;
-            // post-split the bundle lives in the worker repo, skip when absent here
-            const bundleDir = resolveRepoBundleDir(fs, REPO_ROOT);
-            if (!bundleDir) this.skip();
-            const canonical = require(path.join(bundleDir, 'package.json'));
-            expect(sc.getWorkerBundleVersion()).to.equal(canonical.version);
+        it('worker bundle version is read from the synthetic bundle fixture', () => {
+            // post-split the canonical bundle lives in the worker repo, so this
+            // test drives getWorkerBundleVersion against a synthetic bundle
+            // fixture (same approach as installer-platform.test.js) instead of
+            // depending on packages/animastor-worker being present here.
+            const synthBundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wc-bundle-'));
+            fs.writeFileSync(
+                path.join(synthBundleDir, 'package.json'),
+                JSON.stringify({ name: 'animastor-worker', version: '9.9.9' }),
+            );
+            try {
+                expect(sc.getWorkerBundleVersion(synthBundleDir)).to.equal('9.9.9');
+            } finally {
+                fs.rmSync(synthBundleDir, { recursive: true, force: true });
+            }
+        });
+
+        it('worker bundle version falls back to null when no bundle is available', () => {
+            expect(sc.getWorkerBundleVersion('/nonexistent/bundle')).to.equal(null);
         });
 
         it('probe-provided versions take precedence (the hub is the artifact authority)', () => {
