@@ -835,7 +835,14 @@ async function runInstallation(args) {
             && io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) {
             const srcDir = repoBundleSource.resolveRepoBundleDir(io.fs, repoRoot);
             const have = worker.readPkgVersion(io, workerDir);
-            const want = srcDir ? worker.readPkgVersion(io, srcDir) : null;
+            let want = srcDir ? worker.readPkgVersion(io, srcDir) : null;
+            if (!want && hubUrl && io.http && io.http.fetchJson) {
+                // no bundled copy: the hub's published bundle version decides
+                try {
+                    const meta = await io.http.fetchJson(`${hubUrl.replace(/\/$/, '')}/worker-bundle/sha256`);
+                    if (meta && meta.status === 200 && meta.json && typeof meta.json.version === 'string') want = meta.json.version;
+                } catch (_) { /* hub unreachable — keep the installed bundle */ }
+            }
             if (have && want && have !== want) {
                 bundleTargets = [{ id: `worker:${manifests[0].profile.id}`, worker_type: (manifests[0].worker_bundle || {}).worker_type }];
             }

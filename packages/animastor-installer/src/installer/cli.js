@@ -147,8 +147,17 @@ function resolveHubUrl(flags) {
     return flags['hub-url'] || DEFAULT_HUB_URL;
 }
 
+/**
+ * Root that holds the bundled worker files and workflows. In the hub
+ * installer tarball that is the unpacked `animastor-installer/` itself
+ * (worker/worker/, backend/ai/workflows/ next to src/); in a repo checkout
+ * it is the repository root. (The tarball case used to resolve OUTSIDE the
+ * unpacked bundle, so the bundled worker could never be found.)
+ */
 function resolveRepoRoot(flags) {
-    return flags['repo-root'] || REPO_ROOT;
+    if (flags['repo-root']) return flags['repo-root'];
+    if (resolveRepoBundleDir(fs, CLI_ROOT)) return CLI_ROOT;
+    return REPO_ROOT;
 }
 
 function resolveStatePath(flags) {
@@ -512,7 +521,11 @@ async function cmdInstall(flags, { doctor = false } = {}) {
             hubUrl,
             hubUrlExplicit: !!flags['hub-url'],
         });
-        const fixPlan = fixes.planFixes(realIo, { workerDir, sourceBundleDir: resolveRepoBundleDir(fs, repoRoot), desired });
+        const fixPlan = fixes.planFixes(realIo, {
+            workerDir, desired,
+            sourceBundleDir: resolveRepoBundleDir(fs, repoRoot),
+            sourceVersion: process.env.ANIMASTOR_WORKER_BUNDLE_VERSION || null, // served by the hub (bootstrap)
+        });
         let applyFixes = true;
         if (fixPlan.additions.length > 0) {
             console.log(`\nWorker settings to add: ${fixPlan.additions.join(', ')}`);

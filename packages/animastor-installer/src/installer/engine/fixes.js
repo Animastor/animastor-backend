@@ -53,13 +53,13 @@ function planEnvFixes(current, desired) {
  * @param {object} opts { workerDir, sourceBundleDir, desired: {KEY: value} }
  * @returns {{ items: Array<{ id, title }>, additions: string[] }}
  */
-function planFixes(io, { workerDir, sourceBundleDir = null, desired = {} }) {
+function planFixes(io, { workerDir, sourceBundleDir = null, sourceVersion = null, desired = {} }) {
     const items = [];
     const additions = [];
     if (!workerDir || !io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) return { items, additions };
 
     const installed = workerMod.readPkgVersion(io, workerDir);
-    const source = sourceBundleDir ? workerMod.readPkgVersion(io, sourceBundleDir) : null;
+    const source = (sourceBundleDir ? workerMod.readPkgVersion(io, sourceBundleDir) : null) || sourceVersion;
     if (installed && source && installed !== source) {
         items.push({ id: 'bundle', title: `worker bundle ${installed} → ${source} (worker files only; .env is kept)` });
     }
