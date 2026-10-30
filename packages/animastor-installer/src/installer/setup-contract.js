@@ -56,24 +56,23 @@ function getInstallerVersion() {
  * package.json. Checks baked-in artifacts first (container), then
  * repo checkout (development), then hub probe (network).
  */
-function getWorkerBundleVersion() {
-    // Priority: baked-in > repo checkout > null (hub probe is primary source)
+function getWorkerBundleVersion(bundleDir) {
+    // Priority: baked-in > explicit bundleDir (test fixture) > repo checkout > null
+    // (hub probe is primary source). bundleDir lets tests inject a synthetic
+    // worker bundle instead of depending on packages/animastor-worker, which
+    // lives in the worker repo post-split.
     const bakedIn = path.join('/app', 'artifacts', 'worker-bundle', 'package.json');
     try {
         const pkg = JSON.parse(fs.readFileSync(bakedIn, 'utf8'));
         if (typeof pkg.version === 'string' && pkg.version) return pkg.version;
     } catch (_) { /* not in container */ }
     try {
-        // Canonical repo location (packages/animastor-worker/worker) with the
-        // legacy worker/worker fallback for pre-relocation checkouts — see
-        // installer/worker-bundle-source.js. Resolved against THIS module dir
-        // (packages/animastor-installer/src/installer → repo root): inside the
-        // monorepo that is the repo root; inside a distributed installer package
-        // it is the extraction parent, mirroring the repo layout.
-        const candidates = [
-            path.join(__dirname, '..', '..', '..', '..', 'packages', 'animastor-worker', 'worker', 'package.json'),
-            path.join(__dirname, '..', '..', '..', '..', 'worker', 'worker', 'package.json'),
-        ];
+        const candidates = bundleDir
+            ? [path.join(bundleDir, 'package.json')]
+            : [
+                path.join(__dirname, '..', '..', '..', '..', 'packages', 'animastor-worker', 'worker', 'package.json'),
+                path.join(__dirname, '..', '..', '..', '..', 'worker', 'worker', 'package.json'),
+            ];
         for (const file of candidates) {
             try {
                 const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
