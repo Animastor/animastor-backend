@@ -208,13 +208,17 @@ function configureEnv(io, { workerDir, manifest, values = {}, overrides = {}, se
         }).join('\n');
     }
 
-    const preserved = [];
+    // Merge semantics: EVERY key of the existing .env that this run did not
+    // change is preserved — the log line must show the real numbers (a re-run
+    // over a configured worker used to report "0 key(s) preserved" because
+    // only manifest-required keys were counted).
+    const preserved = existingKeys.filter((k) => !changed.includes(k));
     const additions = [];
     const added = new Set();
     const add = (key, val) => { if (!added.has(key)) { additions.push(`${key}=${val}`); added.add(key); } };
     for (const key of required) {
         if (existingKeys.includes(key)) {
-            if (!changed.includes(key)) preserved.push(key); // merge semantics: never overwrite
+            // already preserved above (merge semantics: never overwrite)
         } else if (replace[key] !== undefined) {
             add(key, replace[key]);
         } else if (values[key] !== undefined) {
@@ -240,6 +244,25 @@ function configureEnv(io, { workerDir, manifest, values = {}, overrides = {}, se
 
     if (log) log.info(`.env configured: ${preserved.length} key(s) preserved, ${additions.length} added, ${changed.length} updated${changed.length ? ` (${changed.join(', ')})` : ''}, ${missingAfter.length} still missing`);
     return { status: missingAfter.length === 0 ? 'configured' : 'incomplete', missing_after: missingAfter, preserved, changed, added: Array.from(added), created: envCreated };
+}
+
+/**
+ * True when the worker .env already holds a NON-EMPTY value for `key`.
+ * Only a boolean is returned — the value itself is never read out of .env,
+ * so a Worker Key can never leak through this check (re-installs therefore
+ * never ask for a key that is already there).
+ */
+function hasEnvKey(io, workerDir, key) {
+    try {
+        const text = String(io.fs.readFileSync(path.join(workerDir, '.env'), 'utf8'));
+        for (const raw of text.split('\n')) {
+            const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(raw);
+            if (!m || m[1] !== key) continue;
+            const value = m[2].trim().replace(/^["']|[\"']$/g, '');
+            if (value) return true;
+        }
+    } catch (_) { /* no .env */ }
+    return false;
 }
 
 /** Read non-secret KEY=value pairs from the worker .env (secret keys skipped). */
@@ -703,6 +726,7 @@ module.exports = {
     declaredDependencies,
     readPkgVersion,
     readEnvValues,
+    hasEnvKey,
     resolveWorkerNode,
     workerLogPath,
     workerSpawnEnv,

@@ -751,8 +751,22 @@ function checkWorker(manifest, env) {
     }
     const probes = Array.isArray(env.worker) ? env.worker : [env.worker];
     const probe = probes.find((p) => p && (p.worker_type === workerType || workerType === null));
+    const requiredEnvAll = (wb.env && wb.env.required) || [];
+    // The .env is independent of the BUNDLE files: a missing/incomplete bundle
+    // on a re-install must not report the existing Worker Key as missing (the
+    // installer would ask for it again). Report what the probe actually saw.
+    const envState = (p) => {
+        const present = !!(p && p.env && p.env.present !== false);
+        const setKeys = (p && p.env && p.env.set_keys) || [];
+        return {
+            present,
+            missing_required: present
+                ? requiredEnvAll.filter((k) => !setKeys.includes(k))
+                : requiredEnvAll.slice(),
+        };
+    };
     if (!probe || !probe.bundle || probe.bundle.present === false) {
-        return { ...base, status: 'missing', action: 'install', expected: { files: wb.files || [] }, notes: [] };
+        return { ...base, status: 'missing', action: 'install', expected: { files: wb.files || [] }, env: envState(probe), notes: [] };
     }
     const haveFiles = probe.bundle.files || [];
     const filesMissing = (wb.files || []).filter((f) => !haveFiles.includes(f));
@@ -764,6 +778,7 @@ function checkWorker(manifest, env) {
             action: 'install',
             expected: { files: wb.files },
             found: { files: haveFiles },
+            env: envState(probe),
             notes: [`bundle incomplete; missing files: ${filesMissing.join(', ')}`],
         };
     }

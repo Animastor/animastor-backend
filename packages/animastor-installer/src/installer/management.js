@@ -472,12 +472,56 @@ function renderToolScript({ command, nodePath, cliPath, statePath, root, workerD
 }
 
 /**
- * Where the `animastor` command is linked: /usr/local/bin for root,
- * ~/.local/bin otherwise (XDG user bin; created when missing).
+ * Where the `animastor` command is linked: ALWAYS ~/.local/bin (XDG user
+ * bin, created when missing) — root included. E2E nodes only keep /home
+ * across a reboot, so a /usr/local/bin link would vanish while the
+ * installation in $HOME survived; the command must survive with it.
+ * `uid` stays in the signature because callers/tests pass it.
  */
 function defaultLinkDir({ uid = prereq.currentUid(), home = prereq.currentHome() } = {}) {
-    if (uid === 0) return '/usr/local/bin';
-    return home ? path.join(home, '.local', 'bin') : null;
+    if (!home) return null;
+    return path.join(home, '.local', 'bin');
+}
+
+// ---------------------------------------------------------------------------
+// PATH persistence
+// ---------------------------------------------------------------------------
+
+/** Marker line of the PATH block this installer appends to shell rc files. */
+const PATH_MARKER = '# animastor: PATH for the `animastor` command (added by animastor-installer)';
+
+/**
+ * Make `dir` reachable in EVERY future login shell: append an idempotent
+ * PATH block to ~/.bashrc and ~/.profile when the directory is not there
+ * yet. The block keeps the current PATH intact and is added once — re-runs
+ * of the installer never duplicate it. Necessary because the link dir is
+ * ~/.local/bin (also for root) and many non-login shells skip it.
+ * @returns {{ dir: string|null, updated: string[], already: string[] }}
+ */
+function ensurePathEntry(io, { dir, home = null, files = ['.bashrc', '.profile'] } = {}) {
+    if (!dir || !home) return { dir: dir || null, updated: [], already: [] };
+    const block = [
+        PATH_MARKER,
+        `case ":$PATH:" in *":${dir}:"*) ;; *) export PATH="${dir}:$PATH" ;; esac`,
+        '',
+    ].join('\n');
+    const updated = [];
+    const already = [];
+    for (const name of files) {
+        const file = path.join(home, name);
+        let text = '';
+        try { text = io.fs.existsSync(file) ? String(io.fs.readFileSync(file, 'utf8')) : ''; } catch (_) { text = ''; }
+        const present = text.includes(PATH_MARKER)
+            || text.split('\n').some((line) => line.includes(dir) && /\bPATH\b/.test(line));
+        if (present) { already.push(file); continue; }
+        try {
+            io.fs.mkdirSync(path.dirname(file), { recursive: true });
+            const prefix = text && !text.endsWith('\n') ? '\n' : '';
+            io.fs.writeFileSync(file, `${text}${prefix}${block}`);
+            updated.push(file);
+        } catch (_) { /* best effort — the hint below still tells the user */ }
+    }
+    return { dir, updated, already };
 }
 
 function shQuote(v) {
@@ -580,7 +624,7 @@ function linkAnimastorCommand(io, { target, linkDir }) {
 
 function pathHint(linkDir) {
     if (inPath(linkDir)) return null;
-    return `${linkDir} is not in PATH — open a new login shell, or run: export PATH="${linkDir}:$PATH"`;
+    return `${linkDir} is not in PATH yet for this shell — open a new login shell, or run: export PATH="${linkDir}:$PATH"`;
 }
 
 /**
@@ -591,7 +635,7 @@ function pathHint(linkDir) {
  * (start|stop|status|logs|doctor) is generated too and linked into PATH.
  * @returns {{ toolsDir, files: string[], command: string, link: string|null, installerDir: string|null, path_hint: string|null }}
  */
-function installManagementTools(io, { toolsDir, nodePath, cliPath, statePath, root, workerDir, hubUrl = null, installerSrcRoot = null, installerDestRoot = null, linkDir = null, log = null, platformAdapter = null }) {
+function installManagementTools(io, { toolsDir, nodePath, cliPath, statePath, root, workerDir, hubUrl = null, installerSrcRoot = null, installerDestRoot = null, linkDir = null, home = null, log = null, platformAdapter = null }) {
     const adapter = adapterOf({ platformAdapter });
     io.fs.mkdirSync(toolsDir, { recursive: true });
     let cli = cliPath;
@@ -613,6 +657,7 @@ function installManagementTools(io, { toolsDir, nodePath, cliPath, statePath, ro
     let command = null;
     let link = null;
     let hint = null;
+    let pathEntry = null;
     if (adapter.name === 'linux') {
         const p = path.join(toolsDir, 'animastor');
         io.fs.writeFileSync(p, renderAnimastorCommand({ nodePath, cliPath: cli, statePath, root, workerDir, hubUrl }));
@@ -623,9 +668,19 @@ function installManagementTools(io, { toolsDir, nodePath, cliPath, statePath, ro
         link = linked.link;
         hint = linked.path_hint;
         if (linked.reason && log && log.warn) log.warn(`animastor command not linked into PATH: ${linked.reason} — use ${p}`);
+        if (link) {
+            // The command lives in ~/.local/bin (also for root) — persist the
+            // PATH entry so `animastor doctor` works after a node restart in a
+            // fresh shell, without re-installing anything.
+            const rcHome = home || (linkDir ? path.resolve(linkDir, '..', '..') : null);
+            pathEntry = ensurePathEntry(io, { dir: linkDir, home: rcHome });
+            if (log && log.info && pathEntry.updated.length > 0) {
+                log.info(`PATH updated for future shells: ${pathEntry.updated.join(', ')}`);
+            }
+        }
     }
     if (log && log.info) log.info(`management tools installed at ${toolsDir} (${files.length} commands${link ? `; ${link}` : ''})`);
-    return { toolsDir, files, command: command || null, link, installerDir, path_hint: hint };
+    return { toolsDir, files, command: command || null, link, installerDir, path_hint: hint, path_entry: pathEntry };
 }
 
 module.exports = {
@@ -646,5 +701,7 @@ module.exports = {
     persistInstaller,
     linkAnimastorCommand,
     defaultLinkDir,
+    ensurePathEntry,
+    PATH_MARKER,
     installManagementTools,
 };

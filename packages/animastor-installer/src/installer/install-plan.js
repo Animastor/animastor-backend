@@ -413,15 +413,21 @@ function buildWorkerSteps({ report, manifests, decisions }) {
         const manifest = manifests.find((m) => `worker:${m.profile.id}` === e.id);
         const wbEnv = (manifest && manifest.worker_bundle && manifest.worker_bundle.env) || {};
         const secrets = wbEnv.secrets || ['ANIMASTOR_WORKER_TOKEN'];
-        // for a missing bundle the whole .env is absent → every secret is missing
-        const missingHere = e.action === 'configure' && e.env ? e.env.missing_required : (wbEnv.required || secrets);
+        // The worker entry carries the REAL .env state (present / which keys
+        // are set) — "bundle missing" no longer implies ".env missing", which
+        // is what made a re-install ask for the Worker Key again.
+        const missingHere = e.env ? e.env.missing_required : (wbEnv.required || secrets);
         for (const k of missingHere) {
             if (secrets.includes(k) && !secretMissing.includes(k)) secretMissing.push(k);
         }
     }
 
+    // A Worker Key is asked for ONLY when it is genuinely missing from .env.
+    // A .env that merely needs extra (non-secret) keys is updated by
+    // configureEnv — a re-install over an already configured worker must
+    // never ask for the key again (E2E regression of 2026-10-30).
     let key = null;
-    if (secretMissing.length > 0 || toConfigure.length > 0) {
+    if (secretMissing.length > 0) {
         key = {
             id: 'worker-key',
             title: 'Enter Worker Key securely',
@@ -781,9 +787,39 @@ function renderPlanText(plan, report, { questions = true, header = true } = {}) 
     return lines.join('\n').trim();
 }
 
+/**
+ * Does this plan ACTUALLY use the Python runtime (i.e. create/install into
+ * the ComfyUI venv)? Host prerequisites must only be checked — and missing
+ * apt packages only be required — when the plan needs them:
+ *
+ *   - ComfyUI install/update/downgrade           → venv + pip;
+ *   - custom-node install                         → pip into the venv;
+ *   - runtime:python / runtime:torch missing or
+ *     incompatible (the engine prepares a venv)   → venv + pip;
+ *
+ * In `existing` mode with the user's ComfyUI already working and every model
+ * and node present, no step touches Python — so a missing python3.X-venv
+ * must neither block nor be installed for nothing.
+ *
+ * Unknown shape (no plan) returns true: the historical, safe behaviour.
+ */
+function planNeedsPythonRuntime({ plan, report = null } = {}) {
+    if (!plan || !Array.isArray(plan.steps)) return true;
+    const ops = new Set(plan.steps.map((s) => (s && s.action && s.action.op) || null).filter(Boolean));
+    if (ops.has('install_comfyui') || ops.has('update_comfyui') || ops.has('downgrade_comfyui')) return true;
+    if (ops.has('install_custom-nodes')) return true; // pip into the venv
+    if (report && Array.isArray(report.entries)) {
+        const runtime = ['runtime:python', 'runtime:torch']
+            .map((id) => report.entries.find((e) => e && e.id === id));
+        if (runtime.some((e) => e && (e.status === 'missing' || e.status === 'incompatible'))) return true;
+    }
+    return false;
+}
+
 module.exports = {
     FLOW_STEPS,
     buildInstallPlan,
     renderPlanText,
+    planNeedsPythonRuntime,
     entryLabel,
 };

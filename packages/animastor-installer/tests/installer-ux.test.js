@@ -507,8 +507,8 @@ describe('UX: the animastor command', () => {
         assert.ok(sh.includes('cmd="${1:-status}"'));
     });
 
-    it('A2: link dir — /usr/local/bin for root, ~/.local/bin otherwise', () => {
-        assert.strictEqual(management.defaultLinkDir({ uid: 0, home: '/root' }), '/usr/local/bin');
+    it('A2: link dir — always ~/.local/bin (root included: only /home survives a node restart)', () => {
+        assert.strictEqual(management.defaultLinkDir({ uid: 0, home: '/root' }), '/root/.local/bin');
         assert.strictEqual(management.defaultLinkDir({ uid: 1000, home: '/home/u' }), '/home/u/.local/bin');
     });
 

@@ -250,6 +250,126 @@ function checkPythonPrerequisites(io, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Host package installation (apt on Debian/Ubuntu) — with consent
+// ---------------------------------------------------------------------------
+
+/** dpkg/apt lock held by another process — a wait-and-retry situation, not a bug. */
+const DPKG_LOCK_PATTERN = /Could not get lock|Unable to acquire the dpkg frontend lock|dpkg frontend lock|is another process using it|Could not open lock file/i;
+/** apt's package index is stale — one `apt-get update` fixes it. */
+const APT_STALE_INDEX_PATTERN = /Unable to locate package|has no installation candidate/i;
+
+/** Normalize a package spec (string or array) into a list of names. */
+function hostPackageList(packages) {
+    const list = Array.isArray(packages) ? packages : String(packages || '').split(/\s+/);
+    return list.map((p) => String(p).trim()).filter(Boolean);
+}
+
+/**
+ * Can this process install a host package WITHOUT an interactive password?
+ *   root                     → yes (runs apt-get directly);
+ *   user + `sudo -n true` ok → yes (runs `sudo -n apt-get …`);
+ *   otherwise                → no: the caller prints the remediation command.
+ * Platforms without a host package manager answer no (adapter flag).
+ * @returns {{ ok: boolean, via: 'root'|'sudo'|null, command_prefix: string[] }}
+ */
+function canElevate(io, { platformAdapter = null, uid = currentUid() } = {}) {
+    const adapter = adapterOf({ platformAdapter });
+    if (adapter.supportsHostInstall !== true) return { ok: false, via: null, command_prefix: [] };
+    if (uid === 0) return { ok: true, via: 'root', command_prefix: [] };
+    if (uid === null || uid === undefined) return { ok: false, via: null, command_prefix: [] };
+    const probe = io.exec('sudo', ['-n', 'true']);
+    if (probe && probe.code === 0) return { ok: true, via: 'sudo', command_prefix: ['sudo', '-n'] };
+    return { ok: false, via: null, command_prefix: [] };
+}
+
+/**
+ * Install host packages (the missing `python3.X-venv` and friends) without a
+ * second installer run: runs `apt-get update` ONCE when apt reports a stale
+ * index, `apt-get install -y`, and turns a held dpkg lock into a clear
+ * message instead of an opaque exit code.
+ * @returns {{ ok, packages, updated, command, code, output, message }}
+ */
+function installHostPackages(io, { packages, platformAdapter = null, elevated = null, log = null, timeoutMs = 10 * 60 * 1000 } = {}) {
+    const adapter = adapterOf({ platformAdapter });
+    const pkgs = hostPackageList(packages);
+    if (pkgs.length === 0) return { ok: true, packages: [], skipped: true, message: null };
+    if (adapter.supportsHostInstall !== true) {
+        return {
+            ok: false,
+            packages: pkgs,
+            reason: 'no-host-package-manager',
+            message: `The installer cannot install ${pkgs.join(', ')} automatically on this platform — install it with the system package manager and re-run.`,
+        };
+    }
+    const elev = elevated || canElevate(io, { platformAdapter: adapter });
+    if (!elev.ok) {
+        return {
+            ok: false,
+            packages: pkgs,
+            reason: 'no-privileges',
+            message: `Cannot install ${pkgs.join(', ')}: root or passwordless sudo is required.`,
+        };
+    }
+    const run = (update) => {
+        const c = adapter.hostInstallCommand({ packages: pkgs, update });
+        const res = elev.via === 'sudo'
+            ? io.exec('sudo', ['-n', c.cmd, ...c.args], { timeout: timeoutMs })
+            : io.exec(c.cmd, c.args, { timeout: timeoutMs });
+        return { res, command: `${elev.via === 'sudo' ? 'sudo -n ' : ''}${c.cmd} ${c.args.join(' ')}` };
+    };
+    const outputOf = (r) => String((r && (r.stderr || r.stdout || r.error)) || '');
+
+    let attempt = run(false);
+    let updated = false;
+    if (attempt.res.code !== 0 && APT_STALE_INDEX_PATTERN.test(outputOf(attempt.res))) {
+        const up = run(true);
+        updated = true;
+        // retry the install once, after the index refresh
+        attempt = up.res.code === 0 ? run(false) : up;
+    }
+    const text = outputOf(attempt.res);
+    const ok = attempt.res.code === 0;
+    let message = null;
+    if (!ok) {
+        message = DPKG_LOCK_PATTERN.test(text)
+            ? 'apt/dpkg is busy (another package manager process holds the lock) — wait for it to finish, then re-run the installer.'
+            : `Installing ${pkgs.join(', ')} failed (exit ${attempt.res.code}): ${text.trim().split('\n').filter(Boolean).slice(-3).join(' ')}`;
+    }
+    if (log) {
+        if (ok && log.info) log.info(`host package(s) installed: ${pkgs.join(', ')}${updated ? ' (apt-get update ran once)' : ''}`);
+        else if (!ok && log.warn) log.warn(message);
+    }
+    return { ok, packages: pkgs, updated, command: attempt.command, code: attempt.res.code, output: text, message };
+}
+
+/**
+ * Turn a failed prerequisite into a working one IN THE SAME RUN:
+ * ask "Install <pkg> now? [Y/n]" (or skip the question with --yes), install
+ * the host package, re-check the prerequisite and continue — no installer
+ * restart. Without root/passwordless sudo (or without a terminal and without
+ * --yes) nothing is installed and the caller prints the exact command.
+ * @returns {{ ok, failure, installed?, install?, elevatable?, declined?, reason? }}
+ */
+async function resolveHostPrerequisite(io, { failure, opts = {}, prompt = null, yes = false, log = null, platformAdapter = null } = {}) {
+    const pkg = (failure && ((failure.remediation && failure.remediation.package) || failure.hostPackage)) || null;
+    if (!pkg) return { ok: false, failure, reason: 'no-host-package' };
+    const adapter = adapterOf({ platformAdapter });
+    const elev = canElevate(io, { platformAdapter: adapter });
+    if (!elev.ok) return { ok: false, failure, elevatable: false, reason: 'no-privileges' };
+    if (!yes) {
+        if (!prompt || !prompt.available) return { ok: false, failure, elevatable: true, reason: 'no-tty' };
+        const accepted = await prompt.confirm(`Install ${pkg} now?`, { defaultYes: true });
+        if (!accepted) return { ok: false, failure, elevatable: true, declined: true, reason: 'declined' };
+    }
+    if (log && log.info) log.info(`installing host package ${pkg} (${elev.via})`);
+    const install = installHostPackages(io, { packages: pkg, platformAdapter: adapter, elevated: elev, log });
+    if (!install.ok) return { ok: false, failure, install, elevatable: true, reason: 'install-failed' };
+    const again = checkPythonPrerequisites(io, opts);
+    if (again.ok) return { ok: true, failure, installed: install };
+    return { ok: false, failure: again.failure, install, reason: 'still-missing' };
+}
+
+// ---------------------------------------------------------------------------
 // Ownership guard — sudo vs. normal user mixing
 // ---------------------------------------------------------------------------
 
@@ -387,6 +507,11 @@ function checkBuildPrerequisites(io, { python = 'python3', log = null, platformA
 module.exports = {
     PrerequisiteError,
     debianVenvPackage,
+    canElevate,
+    installHostPackages,
+    resolveHostPrerequisite,
+    hostPackageList,
+    DPKG_LOCK_PATTERN,
     classifyVenvCreateFailure,
     classifyVenvDir,
     remediationPayload,

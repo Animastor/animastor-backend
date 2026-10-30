@@ -182,6 +182,21 @@ function hostPackagesCommand(pkgs) {
     return `sudo apt-get install -y ${pkgs}`;
 }
 
+/** apt-get is the host package manager here — automatic installs are supported. */
+const HOST_INSTALL_SUPPORTED = true;
+
+/**
+ * The command that installs host packages (`apt-get install -y …`, or
+ * `apt-get update` when the index is stale). Elevation (root vs. `sudo -n`)
+ * is applied by the caller (engine/prereq.js), never hard-coded here.
+ * @returns {{ cmd: string, args: string[] }}
+ */
+function hostInstallCommand({ packages = [], update = false } = {}) {
+    const pkgs = (Array.isArray(packages) ? packages : String(packages || '').split(/\s+/)).filter(Boolean);
+    if (update) return { cmd: 'apt-get', args: ['update'] };
+    return { cmd: 'apt-get', args: ['install', '-y', ...pkgs] };
+}
+
 /**
  * C build-tool prerequisites (native Python extensions). Debian/Ubuntu
  * package names — a Linux-specific concern, so it lives in this adapter.
@@ -332,6 +347,8 @@ module.exports = {
 
     hostPackageCommand,
     hostPackagesCommand,
+    hostInstallCommand,
+    supportsHostInstall: HOST_INSTALL_SUPPORTED,
     checkBuildPrerequisites,
 
     toolScriptName,

@@ -67,16 +67,21 @@ curl -fsSL "https://animastor.org/gpu/installer?profile=…&mode=…&platform=li
 - the run ends with a RESULT block: ComfyUI API → worker "ComfyUI ready" →
   hub heartbeat; every ✗ is one cause line plus one fix command.
 
-The installer also links the `animastor` command (`~/.local/bin`, or
-`/usr/local/bin` for root) to a persistent copy of itself
-(`~/animastor/installer`):
+The installer also links the `animastor` command into `~/.local/bin` (root
+included — E2E nodes keep only `/home` across a reboot) and adds that directory
+to PATH in `~/.bashrc` / `~/.profile` once; the command points at a persistent
+copy of itself (`~/animastor/installer`):
 
 ```
 animastor start | stop | status | logs [-f] | doctor [--new-key]
 ```
 
 `doctor` re-runs the installation idempotently for the recorded profile(s):
-nothing that is present is downloaded again.
+nothing that is present is downloaded again, the worker is started again (also
+after a node reboot), and a missing system prerequisite (`python3.X-venv`, …)
+is installed on a single `Install <pkg> now? [Y/n]` question when the host
+allows it (root or passwordless `sudo -n`). The Worker Key in `.env` is never
+asked for again on a re-run.
 
 ## Manifest resolution (MANIFEST_ROOT contract)
 

@@ -44,7 +44,7 @@ const prereq = require('./engine/prereq');
 const stateStore = require('./engine/state');
 const management = require('./management');
 const resolver = require('./compatibility-resolver');
-const { buildInstallPlan, renderPlanText } = require('./install-plan');
+const { buildInstallPlan, renderPlanText, planNeedsPythonRuntime } = require('./install-plan');
 const manifest = require('./install-manifest');
 const uninstaller = require('./uninstaller');
 const { createPrompt, NoTerminalError } = require('./engine/tty');
@@ -232,7 +232,7 @@ function priorToolsDecision(io, statePath) {
  * mixing (sudo vs. normal user). On failure prints the exact remediation
  * and exits — the installer never ploughs on into an unrecoverable state.
  */
-function runHostGates(realIo, { paths, dryRun = false, stateUid = null, deep = true, venvDir = null }) {
+async function runHostGates(realIo, { paths, dryRun = false, stateUid = null, venvDir = null, needVenv = true, prompt = null, yes = false, log = null }) {
     const uid = prereq.currentUid();
     const ownership = prereq.checkOwnership(realIo, {
         paths,
@@ -247,12 +247,27 @@ function runHostGates(realIo, { paths, dryRun = false, stateUid = null, deep = t
         process.exit(1);
     }
     if (dryRun) return;
-    const gate = prereq.checkPythonPrerequisites(realIo, { python: 'python3', deep, existingVenvDir: venvDir });
-    if (!gate.ok) {
-        console.error('');
-        for (const line of prereq.renderRemediation(gate.failure)) console.error(line);
-        process.exit(1);
+    // Only what the plan will ACTUALLY use is checked: a working `existing`
+    // ComfyUI with every model/node present never touches a venv, so a
+    // missing python3.X-venv must not block (or be installed for) nothing.
+    if (!needVenv) return;
+    const gateOpts = { python: 'python3', deep: true, existingVenvDir: venvDir };
+    const gate = prereq.checkPythonPrerequisites(realIo, gateOpts);
+    if (gate.ok) return;
+    // root / passwordless sudo: install the package on consent and CONTINUE
+    // in this same run ("Install python3.12-venv now? [Y/n]"); --yes installs
+    // without asking. Without the privileges the exact command is printed.
+    const resolved = await prereq.resolveHostPrerequisite(realIo, {
+        failure: gate.failure, opts: gateOpts, prompt, yes, log,
+    });
+    if (resolved.ok) {
+        console.log(`✓ ${resolved.installed.packages.join(' ')} installed — continuing`);
+        return;
     }
+    console.error('');
+    for (const line of prereq.renderRemediation(resolved.failure)) console.error(line);
+    if (resolved.install && resolved.install.message) console.error(resolved.install.message);
+    process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -436,30 +451,37 @@ async function cmdInstall(flags, { doctor = false } = {}) {
         console.log(`Mode: managed — no ComfyUI found at ${root}; the installer sets one up (override with --mode existing --root PATH)`);
     }
 
-    // Prerequisites & ownership BEFORE the plan/confirmation flow: a missing
-    // python3.X-venv must be reported up front, with the exact apt command,
-    // not after the user has answered every prompt.
-    runHostGates(realIo, {
-        paths: [root, workerDir, statePath, resolveToolsDir(flags)].filter(Boolean),
-        dryRun,
-        deep: true,
-        venvDir: path.join(root, 'venv'),
-    });
-
     // The dry-run guard wraps everything handed to the engine so any
     // accidental mutation throws "dry-run violation" instead of executing.
     const io = dryRun ? createDryRunIo(realIo) : realIo;
 
+    // The plan comes FIRST: the prerequisite check must know whether the
+    // Python runtime/venv is used at all (a working `existing` ComfyUI with
+    // its models already in place needs none).
     const { plan, report: planReport } = await resolveAndPlanWithSizes({ io: realIo, manifests: loadedManifests, env, mode, decisions: {} });
+
+    // ONE prompt object for the whole run; every question reads /dev/tty
+    // when stdin is the `curl | bash` pipe.
+    const prompt = createPrompt();
+
+    // Prerequisites & ownership BEFORE any prompt/change: a missing
+    // python3.X-venv is reported/installed up front (when the plan uses the
+    // runtime), not after the user has answered every question.
+    await runHostGates(realIo, {
+        paths: [root, workerDir, statePath, resolveToolsDir(flags)].filter(Boolean),
+        dryRun,
+        venvDir: path.join(root, 'venv'),
+        needVenv: planNeedsPythonRuntime({ plan, report: planReport, mode }),
+        prompt,
+        yes,
+        log: logger,
+    });
 
     // Mode was printed above with its reason; the questions are asked below
     // one by one — neither is repeated in the plan text.
     console.log(`Profile: ${plan.profiles.join(' + ')}\n`);
     console.log(renderPlanText(plan, planReport, { questions: false, header: false }));
 
-    // ONE prompt object for the whole run; every question reads /dev/tty
-    // when stdin is the `curl | bash` pipe.
-    const prompt = createPrompt();
     const needPrompt = () => {
         if (!prompt.available) {
             console.error('');
@@ -562,6 +584,15 @@ async function cmdInstall(flags, { doctor = false } = {}) {
                     continue;
                 }
                 if (step.kind === 'secret-prompt') {
+                    // Re-install over an already configured worker: the key is
+                    // in .env — never ask for it again (a key that the hub
+                    // REJECTED is replaced via --new-key, not by re-asking).
+                    if (stepId === 'worker-key' && !flags['new-key']
+                        && workerMod.hasEnvKey(realIo, workerDir, 'ANIMASTOR_WORKER_TOKEN')) {
+                        console.log(`Worker Key: kept from ${path.join(workerDir, '.env')} (already configured — not asked again; use --new-key to replace it)`);
+                        decisions.worker_key_provided = true;
+                        continue;
+                    }
                     // Worker Key step: real hidden input (never a Yes/No confirm —
                     // a typed token must not be misread as an answer). Only the
                     // boolean fact "provided" enters the decisions; the value
@@ -630,7 +661,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
             decisions, secretProvider: makeSecretProvider(secrets),
             logger, crypto, env, dryRun,
             options: {
-                ...installOptions(flags), term: screen,
+                ...installOptions(flags, { doctor }), term: screen,
                 runningComfy: mode !== 'managed' ? runningComfy : null,
                 hubUrlExplicit: !!flags['hub-url'],
                 nodeBinary: nodePick,
@@ -650,7 +681,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     }
 }
 
-function installOptions(flags) {
+function installOptions(flags, { doctor = false } = {}) {
     return {
         // Managed mode starts services by default (engine); these flags only
         // carry an explicit ON (--start-comfy) or OFF (--no-start-comfy).
@@ -660,8 +691,11 @@ function installOptions(flags) {
         // --start-worker: launch the installed worker (node worker.cjs) as a
         // detached daemon after the bundle+.env steps and check it is alive
         // during verification. Without it the worker stays stopped (the
-        // installer never starts background services unprompted).
-        startWorker: flags['start-worker'] === true ? true : flags['no-start-worker'] === true ? false : undefined,
+        // installer never starts background services unprompted) — EXCEPT in
+        // `doctor`, whose job after a node reboot is to bring the worker back.
+        startWorker: flags['start-worker'] === true ? true
+            : flags['no-start-worker'] === true ? false
+                : (doctor ? true : undefined),
     };
 }
 
@@ -697,11 +731,13 @@ async function cmdResume(flags) {
     // Resume/state semantics after a UID change: an installation created by
     // another user must never be continued under the current one (that is
     // how root-owned files end up inside a user's home).
-    runHostGates(io, {
+    await runHostGates(io, {
         paths: [root, statePath, workerDir, resolveToolsDir(flags)].filter(Boolean),
         dryRun: false,
-        deep: true,
         venvDir: path.join(root, 'venv'),
+        needVenv: true,
+        prompt: createPrompt(),
+        yes: !!flags.yes,
         stateUid: st.owner_uid != null ? st.owner_uid : null,
     });
 
@@ -1307,4 +1343,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { stepQuestion, parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor, printResult, cmdVerify, cmdValidateManifests, cmdResume, cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan, makeSecretProvider, resolveToolsDecision, resolveToolsDir, PLATFORM_RUNTIME, printPlatformNotices, homeDir };
+module.exports = { stepQuestion, parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor, printResult, cmdVerify, cmdValidateManifests, cmdResume, cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan, makeSecretProvider, resolveToolsDecision, resolveToolsDir, installOptions, runHostGates, PLATFORM_RUNTIME, printPlatformNotices, homeDir };

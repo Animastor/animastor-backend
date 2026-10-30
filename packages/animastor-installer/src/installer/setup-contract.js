@@ -925,8 +925,9 @@ function buildInstructions({
         status: artifacts.installer.status || 'available',
         download_url: bootstrapUrl,
     };
-    // The installer links the `animastor` command into PATH (~/.local/bin,
-    // /usr/local/bin for root); the tools-dir path works without PATH too.
+    // The installer links the `animastor` command into ~/.local/bin (root
+    // included) and persists that directory in ~/.bashrc / ~/.profile; the
+    // tools-dir path works without PATH too.
     response.verify_command = 'animastor status   # or: $HOME/animastor/tools/animastor status';
 
     if (target.deployment === 'docker') {

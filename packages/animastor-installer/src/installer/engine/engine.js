@@ -988,6 +988,7 @@ async function runInstallation(args) {
                     installerSrcRoot: options.persistInstaller === false ? null : path.resolve(__dirname, '..', '..', '..'),
                     installerDestRoot: path.join(path.dirname(toolsDir), 'installer'),
                     linkDir: options.linkDir !== undefined ? options.linkDir : management.defaultLinkDir({ uid: currentUid, home }),
+                    home,
                     statePath,
                     root: comfyuiRoot,
                     workerDir,
