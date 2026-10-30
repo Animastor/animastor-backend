@@ -350,6 +350,55 @@ function installHostPackages(io, { packages, platformAdapter = null, elevated = 
  * --yes) nothing is installed and the caller prints the exact command.
  * @returns {{ ok, failure, installed?, install?, elevatable?, declined?, reason? }}
  */
+/**
+ * True when a Debian/Ubuntu package is installed (dpkg-query status).
+ * Used by the boot path: `animastor doctor --yes` installs the packages that
+ * DISAPPEARED with the image restart instead of asking.
+ */
+function hostPackageInstalled(io, pkg) {
+    const r = io.exec('dpkg-query', ['-W', '-f=${Status}', pkg]);
+    return !!(r && r.code === 0 && /install ok installed/.test(String(r.stdout || '')));
+}
+
+/**
+ * Install the host packages that are actually MISSING (one apt-get run),
+ * without asking when `yes` is set (boot script: no TTY). Without root or
+ * passwordless sudo nothing is installed and the exact command is returned.
+ * @returns {Promise<{ ok: boolean, installed: string[], missing: string[], message?: string, updated?: boolean }>}
+ */
+async function installMissingHostPackages(io, { packages = [], prompt = null, yes = false, log = null, platformAdapter = null } = {}) {
+    const adapter = adapterOf({ platformAdapter });
+    if (!adapter || adapter.name !== 'linux' || adapter.HOST_INSTALL_SUPPORTED === false) {
+        return { ok: true, installed: [], missing: [], message: 'automatic host package installation is not supported on this platform' };
+    }
+    const wanted = [...new Set((packages || []).filter(Boolean))];
+    const missing = wanted.filter((pkg) => !hostPackageInstalled(io, pkg));
+    if (missing.length === 0) return { ok: true, installed: [], missing: [] };
+    const elevated = canElevate(io, { platformAdapter: adapter });
+    if (!elevated.ok) {
+        return {
+            ok: false, installed: [], missing,
+            message: `missing host package(s) ${missing.join(', ')} — install with: ${missing.map((p) => aptCommand(p, adapter.name)).join(' && ')}`,
+        };
+    }
+    if (!yes) {
+        if (!prompt || !prompt.available) {
+            return { ok: false, installed: [], missing, message: `missing host package(s) ${missing.join(', ')} (non-interactive — re-run with --yes)` };
+        }
+        const answer = await prompt.confirm(`Install ${missing.join(' ')} now?`, { defaultYes: true });
+        if (!answer) return { ok: false, installed: [], missing, message: `skipped by the user: ${missing.join(', ')}` };
+    }
+    if (log) log.info(`installing missing host package(s): ${missing.join(', ')}`);
+    const r = installHostPackages(io, { packages: missing, elevated, log });
+    return {
+        ok: r.ok,
+        installed: r.ok ? missing : [],
+        missing: r.ok ? [] : missing,
+        updated: r.updated,
+        message: r.message,
+    };
+}
+
 async function resolveHostPrerequisite(io, { failure, opts = {}, prompt = null, yes = false, log = null, platformAdapter = null } = {}) {
     const pkg = (failure && ((failure.remediation && failure.remediation.package) || failure.hostPackage)) || null;
     if (!pkg) return { ok: false, failure, reason: 'no-host-package' };
@@ -511,6 +560,8 @@ module.exports = {
     installHostPackages,
     resolveHostPrerequisite,
     hostPackageList,
+    hostPackageInstalled,
+    installMissingHostPackages,
     DPKG_LOCK_PATTERN,
     classifyVenvCreateFailure,
     classifyVenvDir,

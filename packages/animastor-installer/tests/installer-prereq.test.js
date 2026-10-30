@@ -200,6 +200,12 @@ function baseMockOpts(overrides = {}) {
     const { execResults, files, ...rest } = overrides;
     return {
         execResults: { ...base, ...(execResults || {}) },
+        // A real ComfyUI /system_stats answer (installer 0.2.2 requires the
+        // `system` block, not any 200 JSON).
+        httpResults: {
+            'http://127.0.0.1:8188/system_stats': { status: 200, json: () => ({ system: { os: 'linux' }, devices: [] }) },
+            ...(overrides.httpResults || {}),
+        },
         files: {
             '/tmp/repo/packages/animastor-worker/worker/worker.cjs': '// worker',
             '/tmp/repo/packages/animastor-worker/worker/package.json': '{"name":"animastor-worker"}',

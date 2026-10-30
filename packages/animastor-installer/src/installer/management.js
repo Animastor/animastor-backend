@@ -628,6 +628,82 @@ function pathHint(linkDir) {
 }
 
 /**
+ * Re-apply the PATH block on every run (installer, doctor AND `animastor
+ * start`): E2E nodes reset ~/.bashrc and ~/.profile on every boot, so the
+ * block added at install time disappears while the installation in $HOME
+ * survives. Idempotent — no duplicate blocks.
+ * @returns {{ dir, updated: string[], already: string[] }}
+ */
+function restoreCommandPath(io, { linkDir = null, home = null } = {}) {
+    if (!linkDir) return { dir: null, updated: [], already: [] };
+    return ensurePathEntry(io, { dir: linkDir, home: home || (linkDir ? path.resolve(linkDir, '..', '..') : null) });
+}
+
+// ---------------------------------------------------------------------------
+// Autostart wrapper (~/animastor/start-worker.sh)
+// ---------------------------------------------------------------------------
+
+/** Marker of the generated autostart wrapper (never re-backed-up). */
+const WRAPPER_MARKER = '# animastor: generated autostart wrapper';
+
+/** ~/animastor/start-worker.sh for <workerDir> = ~/animastor/worker. */
+function startWorkerScriptPath(workerDir) {
+    if (!workerDir) return null;
+    return path.join(path.dirname(path.resolve(workerDir)), 'start-worker.sh');
+}
+
+/**
+ * The autostart wrapper. It delegates to the persistent `animastor` command:
+ * after a reboot the old script apt-installed Node 18 on every boot, waited
+ * for port 8188 and knew nothing about the platform's ComfyUI — the command
+ * handles PATH, the probed ComfyUI address, missing apt packages and the
+ * worker in one place (installer 0.2.2).
+ */
+function renderStartWorkerWrapper(animastorPath) {
+    return [
+        '#!/bin/sh',
+        `${WRAPPER_MARKER} (installer 0.2.2) — do not edit; re-run: animastor doctor`,
+        '# The previous launcher is kept next to this file as start-worker.sh.bak.',
+        '# All logic (PATH block, ComfyUI address, apt prerequisites, worker) lives',
+        '# in the installer: `animastor start` (and `animastor doctor`).',
+        `exec ${shQuote(animastorPath)} start "$@"`,
+        '',
+    ].join('\n');
+}
+
+/**
+ * Replace <base>/start-worker.sh with the wrapper (the old script is backed
+ * up once). Idempotent: a second run rewrites the same bytes and creates no
+ * second backup. Never touches a foreign file without keeping a copy.
+ * @returns {{ path: string|null, status: 'created'|'replaced'|'unchanged'|'failed'|'skipped', backup: string|null, reason?: string }}
+ */
+function ensureStartWorkerWrapper(io, { workerDir, animastorPath = null, backupSuffix = '.bak' } = {}) {
+    const file = startWorkerScriptPath(workerDir);
+    if (!file || !animastorPath) return { path: file, status: 'skipped', backup: null };
+    const wanted = renderStartWorkerWrapper(animastorPath);
+    let current = '';
+    try { current = io.fs.existsSync(file) ? String(io.fs.readFileSync(file, 'utf8')) : ''; } catch (_) { current = ''; }
+    if (current === wanted) return { path: file, status: 'unchanged', backup: null };
+    let backup = null;
+    if (current && !current.includes(WRAPPER_MARKER)) {
+        backup = `${file}${backupSuffix}`;
+        try {
+            // Keep the FIRST original: a second run must not overwrite the
+            // user's only copy with the already-generated wrapper.
+            if (!io.fs.existsSync(backup)) io.fs.copyFileSync(file, backup);
+        } catch (_) { backup = null; }
+    }
+    try {
+        io.fs.mkdirSync(path.dirname(file), { recursive: true });
+        io.fs.writeFileSync(file, wanted);
+        io.fs.chmodSync(file, 0o755);
+    } catch (err) {
+        return { path: file, status: 'failed', backup, reason: err.message };
+    }
+    return { path: file, status: current ? 'replaced' : 'created', backup };
+}
+
+/**
  * Install (or idempotently refresh) the command-line management tools next
  * to the worker. Re-running the installer overwrites the same files —
  * no duplicates, no broken state. Script filenames/extensions and content
@@ -702,6 +778,11 @@ module.exports = {
     linkAnimastorCommand,
     defaultLinkDir,
     ensurePathEntry,
+    restoreCommandPath,
+    ensureStartWorkerWrapper,
+    startWorkerScriptPath,
+    renderStartWorkerWrapper,
     PATH_MARKER,
+    WRAPPER_MARKER,
     installManagementTools,
 };

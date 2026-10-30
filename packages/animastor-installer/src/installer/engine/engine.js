@@ -37,6 +37,7 @@ const worker = require('./worker');
 const repoBundleSource = require('../worker-bundle-source');
 const prereq = require('./prereq');
 const management = require('../management');
+const comfyOwnerMod = require('./comfy-owner');
 const { createProgressReporter } = require('./progress');
 const { buildVerificationReport } = require('../verification-report');
 
@@ -323,15 +324,41 @@ async function runInstallation(args) {
     // user's own ComfyUI alone but still runs OUR worker. The flags are also
     // remembered across re-runs — a bare re-run keeps the same wiring instead
     // of silently reverting to defaults. Explicit CLI flags always win.
+    // ComfyUI ownership, resolved BY FACT by the caller (engine/comfy-owner.js
+    // reads the running processes). The recorded settings are only reused
+    // when they do not contradict the machine: an install-state that says
+    // "managed / startComfyui=true" while the PLATFORM runs its own ComfyUI
+    // must never make the installer start a second one on 8188.
+    const comfyOwner = options.comfyOwner || null;
+    const foreignComfy = comfyOwner && comfyOwner.owner === 'foreign' ? comfyOwner : null;
+    if (!dryRun && comfyOwner) {
+        for (const c of comfyOwner.conflicts || []) log.info(`install state corrected — ${c.message}`);
+        if (st.mode !== mode) {
+            log.info(`install state corrected: mode ${st.mode || '(unset)'} → ${mode}`);
+            st.mode = mode;
+        }
+    }
     if (!dryRun) {
         const saved = st.installer_options || {};
-        for (const k of ['comfyPort', 'startComfyui', 'startWorker']) {
+        const requestedStartComfy = options.startComfyui;
+        for (const k of ['comfyPort', 'startWorker']) {
             if (options[k] === undefined && saved[k] !== undefined) {
                 options[k] = saved[k];
                 log.info(`reusing remembered setting: ${k}=${saved[k]}`);
             }
         }
-        if (options.startComfyui === undefined) options.startComfyui = (mode === 'managed');
+        // ComfyUI start: the ownership FACT beats both the flag and the
+        // remembered setting — a foreign instance means "never start a second
+        // ComfyUI", full stop.
+        const startDecision = comfyOwnerMod.decideStartComfy({
+            owner: comfyOwner ? comfyOwner.owner : 'none',
+            requested: requestedStartComfy,
+            remembered: saved.startComfyui,
+            mode,
+        });
+        options.startComfyui = startDecision.startComfyui;
+        if (startDecision.ignored_request) log.warn(`--start-comfy ignored: ${startDecision.reason}`);
+        else if (startDecision.reason === 'remembered setting') log.info(`reusing remembered setting: startComfyui=${!!startDecision.startComfyui}`);
         // The worker is OURS in every mode (existing mode only leaves the
         // user's ComfyUI alone) — an installed-but-stopped worker is exactly
         // the "installed, never online" failure.
@@ -344,6 +371,11 @@ async function runInstallation(args) {
                 log.info(`remembered port ${options.comfyPort} is now used by another service — picking a new one`);
                 options.comfyPort = undefined;
             }
+        }
+        if (foreignComfy && foreignComfy.port) {
+            // The platform's ComfyUI IS the target: its --port (re-read from
+            // the cmdline on every run — it changes between boots).
+            options.comfyPort = foreignComfy.port;
         }
         if (options.comfyPort === undefined && mode !== 'managed' && options.runningComfy && options.runningComfy.port) {
             // existing/shared: the user's running ComfyUI IS the target — use
@@ -358,6 +390,10 @@ async function runInstallation(args) {
             startComfyui: !!options.startComfyui,
             startWorker: !!options.startWorker,
         };
+        // Hub version seen by this run (bootstrap env) — `animastor doctor`
+        // prints it instead of "hub unknown" on later runs.
+        if (options.hubVersion) st.hub_version = String(options.hubVersion);
+        else if (process.env.ANIMASTOR_HUB_VERSION) st.hub_version = process.env.ANIMASTOR_HUB_VERSION;
     }
     const save = () => state.saveState(io, statePath, st, io.now);
     if (initialState) {
@@ -804,7 +840,19 @@ async function runInstallation(args) {
         // URL does not answer. Existing mode never starts the user's ComfyUI.
         const comfyPort = options.comfyPort || 8188;
         let comfyUrl = null;
-        if (!runtimeFatal && !dryRun) {
+        // A foreign (platform) ComfyUI is addressed EXACTLY as its cmdline says
+        // (--port plus --baseurl), re-verified on every run: the port and the
+        // prefix change between node boots, so nothing is remembered.
+        if (!runtimeFatal && !dryRun && foreignComfy && foreignComfy.url) {
+            const stats = await comfyui.systemStats(io, foreignComfy.url);
+            if (stats) {
+                comfyUrl = foreignComfy.url;
+                log.info(`ComfyUI API: ${comfyUrl} (started outside the installer — pid ${foreignComfy.pid}, left running)`);
+            } else {
+                log.warn(`the ComfyUI process (pid ${foreignComfy.pid}) does not answer GET /system_stats at ${foreignComfy.url} yet`);
+            }
+        }
+        if (!runtimeFatal && !dryRun && !comfyUrl) {
             const plainUp = await comfyui.systemStats(io, `http://127.0.0.1:${comfyPort}`);
             if (!plainUp && options.startComfyui && io.fs.existsSync(comfyuiRoot)) {
                 const started = await log.step('start ComfyUI', () => withBusy('Starting ComfyUI', async () => {
@@ -818,6 +866,7 @@ async function runInstallation(args) {
             const prefixes = [];
             if (workerDir) prefixes.push(worker.readEnvValues(io, workerDir).NOTEBOOK_PATH);
             if (options.runningComfy && options.runningComfy.baseurl) prefixes.push(options.runningComfy.baseurl);
+            if (foreignComfy && foreignComfy.baseurl) prefixes.push(foreignComfy.baseurl);
             const pr = await probe.probeComfyUrl(io, { port: comfyPort, prefixes: prefixes.filter(Boolean) });
             comfyUrl = pr.url;
             result.results.comfy_url = { url: pr.url, tried: pr.tried, prefixed: !!pr.prefixed };
@@ -1008,6 +1057,22 @@ async function runInstallation(args) {
                     if (r.value.installerDir) state.addOwnedComponent(st, 'services', { id: 'installer-copy', path: r.value.installerDir });
                     if (r.value.path_hint) result.warnings.push(r.value.path_hint);
                     state.setArtifact(st, 'management-tools', 'installed', { dir: r.value.toolsDir });
+                    // Autostart: ~/animastor/start-worker.sh becomes a thin
+                    // wrapper around `animastor start` (the old script is kept
+                    // as .bak). Installed next to the worker, re-applied on
+                    // every run so a reboot that wipes the file is repaired.
+                    const wrap = management.ensureStartWorkerWrapper(io, {
+                        workerDir,
+                        animastorPath: r.value.link || r.value.command || null,
+                    });
+                    result.results.start_worker_wrapper = wrap;
+                    if (wrap.status === 'replaced') {
+                        log.info(`autostart: start-worker.sh replaced by the animastor wrapper${wrap.backup ? ` (old script: ${wrap.backup})` : ''}`);
+                    } else if (wrap.status === 'created') {
+                        log.info(`autostart: start-worker.sh created → ${wrap.path}`);
+                    } else if (wrap.status === 'failed') {
+                        result.warnings.push(`autostart wrapper could not be written: ${wrap.reason}`);
+                    }
                 } else {
                     const reason = r.error && r.error.message ? r.error.message : 'unknown failure';
                     result.warnings.push(`management tools could not be installed: ${reason}`);
@@ -1102,6 +1167,13 @@ async function runInstallation(args) {
         }
 
         // 4.11 End-to-end: ComfyUI API → worker "ComfyUI ready" → hub heartbeat.
+        result.results.comfy_owner = {
+            owner: comfyOwner ? comfyOwner.owner : null,
+            mode,
+            pid: comfyOwner ? comfyOwner.pid : null,
+            url: comfyUrl,
+            baseurl: comfyOwner ? comfyOwner.baseurl : null,
+        };
         result.e2e = await endToEndChecks(io, {
             mode, comfyUrl, comfyPort, hubUrl,
             workerWanted: !!(options.startWorker && workerDir && !runtimeFatal),

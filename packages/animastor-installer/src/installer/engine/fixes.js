@@ -75,11 +75,22 @@ function planFixes(io, { workerDir, sourceBundleDir = null, sourceVersion = null
         for (const key of FIXABLE_ENV_KEYS) {
             if (desired[key] !== undefined && desired[key] !== '' && current[key] === undefined) additions.push(`${key}=${desired[key]}`);
         }
-        if (current.NODE_BIN && probe.nodeMajor(probe.nodeBinaryVersion(io, current.NODE_BIN)) < 20 && !items.some((i) => i.key === 'NODE_BIN')) {
+        if (current.NODE_BIN && probe.nodeMajor(probe.nodeBinaryVersion(io, current.NODE_BIN)) < 20 && !items.some((i) => i.key === 'NODE_BIN') && desired.NODE_BIN) {
             items.push({ id: 'env:NODE_BIN', key: 'NODE_BIN', from: current.NODE_BIN, to: desired.NODE_BIN, title: `NODE_BIN: ${current.NODE_BIN} is missing or older than Node.js 20 → ${desired.NODE_BIN}` });
         }
     }
-    return { items, additions };
+    // ONE entry per fix: two rules can describe the same key (a stale
+    // NODE_BIN and the generic env diff) — the list the user confirms and the
+    // list the engine applies must be the same, and neither may show a
+    // change that is not going to happen.
+    const seen = new Set();
+    const unique = items.filter((i) => {
+        const id = i.id || i.key;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+    });
+    return { items: unique, additions };
 }
 
 module.exports = { FIXABLE_ENV_KEYS, planEnvFixes, planFixes };

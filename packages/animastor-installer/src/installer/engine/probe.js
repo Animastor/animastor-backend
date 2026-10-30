@@ -186,11 +186,26 @@ function nodeBinaryVersion(io, bin) {
  * elsewhere or when none runs.
  */
 function detectRunningComfyUI(io, { uid = (typeof process.getuid === 'function' ? process.getuid() : null) } = {}) {
-    if (uid == null) return null;
+    const all = listRunningComfyUI(io, { uid });
+    if (all.length === 0) return null;
+    const { pid, root, port, baseurl } = all[0];
+    return { pid, root, port, baseurl };
+}
+
+/**
+ * Every ComfyUI process of the account: pid, cwd (the ComfyUI root) and the
+ * --listen / --port / --baseurl values from its own command line. Linux only
+ * (/proc); [] elsewhere or when none runs. Order = pgrep order (newest
+ * processes are not guaranteed first — callers must not rely on it).
+ */
+function listRunningComfyUI(io, { uid = (typeof process.getuid === 'function' ? process.getuid() : null) } = {}) {
+    if (uid == null) return [];
     const r = io.exec('pgrep', ['-u', String(uid), '-f', 'main\\.py']);
-    if (r.code !== 0) return null;
+    if (!r || r.code !== 0) return [];
+    const out = [];
     for (const pidStr of String(r.stdout || '').split(/\s+/).filter(Boolean)) {
         const pid = Number(pidStr);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
         let cwd = null;
         let argv = [];
         try { cwd = io.fs.readlinkSync(`/proc/${pid}/cwd`); } catch (_) { cwd = null; }
@@ -203,14 +218,16 @@ function detectRunningComfyUI(io, { uid = (typeof process.getuid === 'function' 
             return eq ? eq.slice(name.length + 1) : null;
         };
         const port = flag('--port');
-        return {
+        out.push({
             pid,
             root: cwd && io.fs.existsSync(path.join(cwd, 'main.py')) ? cwd : null,
-            port: port ? Number(port) : null,
+            // ComfyUI defaults to 8188 when --port is absent
+            port: port ? Number(port) : 8188,
+            listen: flag('--listen'),
             baseurl: flag('--baseurl'),
-        };
+        });
     }
-    return null;
+    return out;
 }
 
 /**
@@ -228,12 +245,16 @@ function resolveComfyRoot(io, { explicit = null, defaultRoot, running = undefine
 }
 
 /**
- * True for a /system_stats answer: a JSON object (the same acceptance rule as
- * comfyui.systemStats). A wrong reverse-proxy prefix answers 404/HTML, never
- * a 200 JSON object, so this is enough to tell the right URL apart.
+ * True for a REAL ComfyUI /system_stats answer (installer 0.2.2): the payload
+ * carries a `system` object (ComfyUI always sends `system` + `devices`; the
+ * system block alone is its signature). A wrong reverse-proxy prefix answers
+ * 404/HTML, another service answers its own JSON — a bare 200 JSON object is
+ * NOT proof (a notebook proxy or a coworker's app would otherwise be
+ * accepted as "our" ComfyUI and wired into COMFY_URL).
  */
 function isSystemStats(json) {
-    return !!(json && typeof json === 'object' && !Array.isArray(json));
+    return !!(json && typeof json === 'object' && !Array.isArray(json)
+        && json.system && typeof json.system === 'object' && !Array.isArray(json.system));
 }
 
 /**
@@ -558,6 +579,8 @@ function renderDetection(env) {
 }
 
 module.exports = {
+    detectRunningComfyUI,
+    resolveComfyRoot,
     MODEL_DIRS,
     parseExtraModelPaths,
     probeModels,
@@ -567,6 +590,7 @@ module.exports = {
     detectRunningComfyUI,
     resolveComfyRoot,
     probeComfyUrl,
+    listRunningComfyUI,
     isSystemStats,
     DEVICE_KINDS,
     probeEnvironment,

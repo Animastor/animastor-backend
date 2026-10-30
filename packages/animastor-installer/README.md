@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.2.0, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.2, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -59,8 +59,17 @@ curl -fsSL "https://animastor.org/gpu/installer?profile=…&mode=…&platform=li
 - every question and the hidden Worker Key are read from `/dev/tty` (stdin is
   the piped script); without a terminal the installer stops with a clear
   message (exit 3) unless `--yes` is given;
-- no `--mode` → `existing` when a ComfyUI is found (`~/ComfyUI` or the root
-  of the user's running ComfyUI process), else `managed`;
+- the mode follows the MACHINE, not the recorded state (`engine/comfy-owner.js`):
+  a ComfyUI process the installer did not start (a platform/notebook instance
+  with `--listen 0.0.0.0 --port 8888 --baseurl /notebook/…`) means `existing`,
+  and its address is taken from its own cmdline and confirmed by a ComfyUI
+  `/system_stats` payload; the installer never starts a second ComfyUI next to
+  it. `managed` only when the installer created the ComfyUI and nobody else
+  runs it. A recorded `managed/startComfyui=true` that contradicts the machine
+  is shown and corrected; an extra installer-owned instance is offered for
+  stop;
+- no `--mode` → as above (never "managed" just because the state says so), and
+  an explicit `--mode` that contradicts the machine is reported, not applied;
 - problems of an existing installation (worker type, Node.js, ComfyUI URL /
   notebook prefix, outdated worker bundle, missing worker dependencies) are
   listed once and fixed after ONE question (`--yes` = fix, `--no-fix` = keep);
@@ -82,6 +91,22 @@ after a node reboot), and a missing system prerequisite (`python3.X-venv`, …)
 is installed on a single `Install <pkg> now? [Y/n]` question when the host
 allows it (root or passwordless `sudo -n`). The Worker Key in `.env` is never
 asked for again on a re-run.
+
+`doctor --yes` is the boot path: no TTY, no questions, ONE line of output and
+an exit code. It waits up to `--comfy-wait-ms` (default 180000) for the
+platform's ComfyUI, installs missing apt packages, starts the worker (and its
+own ComfyUI in `managed` mode), and re-applies the PATH block — E2E nodes
+reset `~/.bashrc`/`~/.profile` on every boot. `~/animastor/start-worker.sh` is
+replaced by a wrapper (`exec ~/.local/bin/animastor start "$@"`, old script
+kept as `start-worker.sh.bak`); ready-to-use boot scripts for both node types
+are in `animastor-docs/04-planning/INSTALLER_BOOT_STARTUP.md`.
+
+The fix list is APPLIED: `COMFY_URL`, `COMFY_PORT` and `NOTEBOOK_PATH` are
+rewritten in `.env` (only real differences are listed, one entry per key), and
+a second run over the fixed `.env` prints no fix list. The address is
+recomputed on every run because the platform's port and notebook prefix change
+between boots. Answers already given (a declined optional workflow, a declined
+model download) are remembered and not asked again, also under `--yes`.
 
 ## Manifest resolution (MANIFEST_ROOT contract)
 

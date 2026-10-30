@@ -52,6 +52,7 @@ const { renderBanner, renderFinalSummary } = require('./engine/summary');
 const fixes = require('./engine/fixes');
 const workerMod = require('./engine/worker');
 const comfyuiMod = require('./engine/comfyui');
+const comfyOwner = require('./engine/comfy-owner');
 const downloader = require('./engine/downloader');
 const { resolveRepoBundleDir } = require('./worker-bundle-source');
 const engineMod = require('./engine/engine');
@@ -317,7 +318,7 @@ function stepQuestion(step) {
 }
 
 /** Versions shown in the banner. Hub/bootstrap versions come from the bootstrap env. */
-function bannerVersions(manifests, flags) {
+function bannerVersions(manifests, flags, { hub = null } = {}) {
     const pkg = require('../../package.json');
     let worker = process.env.ANIMASTOR_WORKER_BUNDLE_VERSION || null;
     if (!worker) {
@@ -329,10 +330,92 @@ function bannerVersions(manifests, flags) {
         worker,
         profile: manifests.map((m) => m.profile.id).join(' + '),
         profileRevision: manifests.length === 1 ? manifests[0].revision : null,
-        hub: process.env.ANIMASTOR_HUB_VERSION || null,
+        hub: process.env.ANIMASTOR_HUB_VERSION || hub || null,
         bootstrap: process.env.ANIMASTOR_BOOTSTRAP_VERSION || null,
         platform: `${PLATFORM_RUNTIME.platform}/${PLATFORM_RUNTIME.deployment}`,
     };
+}
+
+/** Absolute path of the `animastor` command of this installation. */
+function toolCommandPath(flags) {
+    const linkDir = management.defaultLinkDir();
+    if (linkDir) {
+        const link = path.join(linkDir, 'animastor');
+        if (fs.existsSync(link)) return link;
+    }
+    return path.join(resolveToolsDir(flags), 'animastor');
+}
+
+/**
+ * Hub version for the banner. The bootstrap exports ANIMASTOR_HUB_VERSION;
+ * the install state remembers it; otherwise the hub is asked: GET
+ * <hub>/health (when it publishes a version) or the served installer script,
+ * whose `export ANIMASTOR_HUB_VERSION="…"` line is exactly what a fresh
+ * install receives. Never "hub unknown" while the hub is reachable.
+ */
+async function detectHubVersion(io, hubUrl, { known = null } = {}) {
+    if (known) return String(known);
+    const base = String(hubUrl || '').replace(/\/$/, '');
+    if (!base || !io.http) return null;
+    try {
+        const health = await io.http.fetchJson(`${base}/health`);
+        if (health && health.status === 200 && health.json && health.json.version) return String(health.json.version);
+    } catch (_) { /* older hub without a version field */ }
+    try {
+        const res = await io.http.fetchText(`${base}/installer`);
+        const text = res && res.status === 200 ? String(res.text || res.body || '') : '';
+        const m = /ANIMASTOR_HUB_VERSION="?([0-9][^"\n]*)"?/.exec(text);
+        if (m) return m[1].trim();
+    } catch (_) { /* offline — the banner falls back to "unknown" */ }
+    return null;
+}
+
+/**
+ * Decisions of a previous run that are reused as the STARTING point of this
+ * one: a re-run does not ask again about steps the user already answered
+ * (optional workflows declined once stay declined — also for `doctor --yes`
+ * on every boot). Secret-related facts are never stored, so nothing leaked
+ * can be reused here.
+ */
+const REUSED_DECISION_KEYS = ['comfyui_update', 'install_custom_nodes', 'install_models', 'workflows', 'worker_setup', 'accept_reference_runtime', 'accept_runtime_change'];
+function priorReusableDecisions(state) {
+    const out = {};
+    const d = state && state.decisions;
+    if (!d) return out;
+    for (const k of REUSED_DECISION_KEYS) if (d[k] !== undefined) out[k] = d[k];
+    return out;
+}
+
+/**
+ * The boot script (`animastor doctor --yes`, no TTY): one line of output and
+ * an exit code, nothing else. `ANIMASTOR_BOOT=1` forces it on a TTY too.
+ */
+function isBootRun(flags, doctor) {
+    if (!doctor || flags.yes !== true) return false;
+    if (process.env.ANIMASTOR_BOOT === '1') return true;
+    return !process.stdout.isTTY;
+}
+
+/** Host packages the boot path must restore when the image dropped them. */
+function missingRequiredHostPackages(io) {
+    const out = [];
+    if (!probeMod.pickNodeBinary(io)) out.push('nodejs');
+    return out;
+}
+
+/**
+ * Wait for the platform's ComfyUI (boot: it starts after the installer).
+ * Re-resolves the ownership facts on every poll — the port and the notebook
+ * prefix are read from the process each time, never remembered.
+ */
+async function waitForPlatformComfy(io, { state = null, timeoutMs = 180000, intervalMs = 3000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let inst = await comfyOwner.resolveComfyOwner(io, { state });
+    while (inst.owner === 'none' && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+        inst = await comfyOwner.resolveComfyOwner(io, { state });
+    }
+    return inst;
 }
 
 /** The `animastor` command recorded for this installation (fix lines). */
@@ -395,21 +478,27 @@ function createScreen() {
 async function cmdInstall(flags, { doctor = false } = {}) {
     const realIo = createRealIo();
     // doctor = the same idempotent install for the RECORDED installation:
-    // profiles/mode come from install-state.json unless given explicitly.
+    // profiles come from install-state.json unless given explicitly. The
+    // recorded MODE is not applied: the mode follows the machine (see
+    // engine/comfy-owner.js) — a contradiction is shown and corrected.
+    const statePathEarly = resolveStatePath(flags);
     let recorded = null;
     if (doctor) {
-        recorded = stateStore.loadState(realIo, resolveStatePath(flags));
+        recorded = stateStore.loadState(realIo, statePathEarly);
         if (!recorded || !Array.isArray(recorded.profiles) || recorded.profiles.length === 0) {
-            console.error(`No Animastor installation found (state: ${resolveStatePath(flags)}). Run the install command from the Animastor setup page first.`);
+            console.error(`No Animastor installation found (state: ${statePathEarly}). Run the install command from the Animastor setup page first.`);
             process.exit(2);
         }
         if (flags.profiles.length === 0) flags.profiles = recorded.profiles.slice();
-        if (!flags.mode && recorded.mode) flags.mode = recorded.mode;
     }
     if (flags.profiles.length === 0) {
         console.error('error: --profile is required');
         process.exit(1);
     }
+    // Recorded facts reused as the starting point: previous non-secret
+    // decisions (no repeated questions) and the hub version for the banner.
+    const priorState = recorded || stateStore.loadState(realIo, statePathEarly);
+    const boot = isBootRun(flags, doctor);
     // ComfyUI root: --root > ~/ComfyUI (when it holds a ComfyUI) > the root
     // of the user's running ComfyUI process > ~/ComfyUI (managed creates it).
     const runningComfy = probeMod.detectRunningComfyUI(realIo);
@@ -419,7 +508,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     const workerDir = resolveWorkerDir(flags);
     const hubUrl = resolveHubUrl(flags);
     const repoRoot = resolveRepoRoot(flags);
-    const statePath = resolveStatePath(flags);
+    const statePath = statePathEarly;
     const dryRun = flags['dry-run'] || false;
     const yes = flags.yes || false;
     const crypto = require('crypto');
@@ -430,26 +519,81 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     const screen = createScreen();
     const logger = createLogger({ io: realIo, sink: (line) => screen.print(line) });
     const loadedManifests = flags.profiles.map((p) => manifest.loadManifest(p));
+    const hubVersion = doctor
+        ? await detectHubVersion(realIo, hubUrl, { known: process.env.ANIMASTOR_HUB_VERSION || (priorState && priorState.hub_version) || null })
+        : (process.env.ANIMASTOR_HUB_VERSION || null);
 
-    console.log(renderBanner(bannerVersions(loadedManifests, flags)));
-    if (doctor) console.log('animastor doctor — re-checking the installation and fixing what can be fixed\n');
+    if (!boot) {
+        console.log(renderBanner(bannerVersions(loadedManifests, flags, { hub: hubVersion })));
+        if (doctor) console.log('animastor doctor — re-checking the installation and fixing what can be fixed\n');
+    }
+
+    // ONE prompt object for the whole run; every question reads /dev/tty
+    // when stdin is the `curl | bash` pipe. Created BEFORE the ownership
+    // questions below.
+    const prompt = createPrompt();
+
+    // Restore the PATH block before anything else: the dotfiles are reset on
+    // every node boot while ~/.local/bin/animastor survives.
+    const pathEntry = management.restoreCommandPath(realIo, { linkDir: management.defaultLinkDir(), home: homeDir() });
+    if (!boot && pathEntry.updated.length > 0) console.log(`PATH block restored: ${pathEntry.updated.join(', ')}`);
+
+    // Host packages that disappeared with the image restart (boot path).
+    if (doctor) {
+        const missingPkgs = missingRequiredHostPackages(realIo);
+        if (missingPkgs.length > 0) {
+            const r = await prereq.installMissingHostPackages(realIo, {
+                packages: missingPkgs, prompt: boot ? null : prompt, yes, log: logger,
+            });
+            if (r.installed.length > 0 && !boot) console.log(`✓ installed ${r.installed.join(' ')}`);
+            else if (!r.ok && !boot) console.log(`! ${r.message}`);
+        }
+    }
+
+    // ComfyUI ownership BY FACT: a verified ComfyUI process the installer did
+    // not start decides the mode (existing) and the worker address; the
+    // installer never starts a second one next to it.
+    let instance = await comfyOwner.resolveComfyOwner(realIo, { state: priorState });
+    const comfyWaitMs = flags['comfy-wait-ms'] ? Number(flags['comfy-wait-ms'])
+        : (Number(process.env.ANIMASTOR_COMFY_WAIT_MS) || (boot ? 180000 : 0));
+    if (comfyWaitMs > 0 && instance.owner === 'none') {
+        if (!boot) console.log(`Waiting up to ${Math.round(comfyWaitMs / 1000)} s for the platform's ComfyUI…`);
+        instance = await waitForPlatformComfy(realIo, { state: priorState, timeoutMs: comfyWaitMs });
+    }
+
+    // The machine decides the mode. An explicit --mode that contradicts it is
+    // reported, never silently applied: starting a second ComfyUI next to the
+    // platform's is exactly the failure this release fixes.
+    const mode = instance.mode;
+    if (!boot) {
+        if (flags.mode && flags.mode !== instance.mode) {
+            console.log(`Mode: ${instance.mode} — ${instance.reason}; --mode ${flags.mode} ignored (the machine decides)`);
+        } else {
+            console.log(`Mode: ${instance.mode} — ${instance.reason}`);
+        }
+    }
+    if (instance.conflicts.length > 0 && !boot) {
+        console.log('\nThe recorded installation disagrees with this machine:');
+        for (const c of instance.conflicts) console.log(`  ! ${c.message}`);
+        console.log('  → corrected for this run and stored in install-state.json');
+    }
+    if (instance.stop_offer) {
+        const pid = instance.stop_offer.pid;
+        const question = `Stop the installer's own ComfyUI (pid ${pid})? The platform instance ${instance.foreign.url} is the real one.`;
+        let stopIt = false;
+        if (yes) stopIt = true;
+        else if (prompt.available) stopIt = await prompt.confirm(question, { defaultYes: true });
+        else if (!boot) console.log(`  · ${question} (non-interactive — left running; --yes stops it)`);
+        if (stopIt) {
+            const stopRes = comfyOwner.stopInstallerInstance(realIo, instance.ours);
+            if (!boot) console.log(stopRes.stopped ? `✓ installer ComfyUI stopped (pid ${pid})` : `! ${stopRes.reason}`);
+        }
+    }
 
     const env = probeEnvironment(realIo, {
         root, workerDir, crypto,
         workerType: loadedManifests.length === 1 ? (loadedManifests[0].worker_bundle || {}).worker_type : null,
     });
-
-    // Mode: an explicit --mode wins; otherwise a found ComfyUI means
-    // "existing" (never silently "managed" next to the user's ComfyUI).
-    const comfyFound = !!(env.comfyui && env.comfyui.present);
-    const mode = flags.mode || (comfyFound ? 'existing' : 'managed');
-    if (flags.mode) {
-        console.log(`Mode: ${mode} (${doctor && recorded && recorded.mode === mode ? 'recorded installation' : 'requested'})`);
-    } else if (comfyFound) {
-        console.log(`Mode: existing — ComfyUI found at ${root}${rootPick.source === 'running-process' ? ' (running process)' : ''}; override with --mode managed`);
-    } else {
-        console.log(`Mode: managed — no ComfyUI found at ${root}; the installer sets one up (override with --mode existing --root PATH)`);
-    }
 
     // The dry-run guard wraps everything handed to the engine so any
     // accidental mutation throws "dry-run violation" instead of executing.
@@ -457,12 +601,11 @@ async function cmdInstall(flags, { doctor = false } = {}) {
 
     // The plan comes FIRST: the prerequisite check must know whether the
     // Python runtime/venv is used at all (a working `existing` ComfyUI with
-    // its models already in place needs none).
-    const { plan, report: planReport } = await resolveAndPlanWithSizes({ io: realIo, manifests: loadedManifests, env, mode, decisions: {} });
-
-    // ONE prompt object for the whole run; every question reads /dev/tty
-    // when stdin is the `curl | bash` pipe.
-    const prompt = createPrompt();
+    // its models already in place needs none). Previously answered steps
+    // (a declined optional workflow, a declined model download) are not
+    // asked again.
+    const priorDecisions = priorReusableDecisions(priorState);
+    const { plan, report: planReport } = await resolveAndPlanWithSizes({ io: realIo, manifests: loadedManifests, env, mode, decisions: priorDecisions });
 
     // Prerequisites & ownership BEFORE any prompt/change: a missing
     // python3.X-venv is reported/installed up front (when the plan uses the
@@ -479,8 +622,10 @@ async function cmdInstall(flags, { doctor = false } = {}) {
 
     // Mode was printed above with its reason; the questions are asked below
     // one by one — neither is repeated in the plan text.
-    console.log(`Profile: ${plan.profiles.join(' + ')}\n`);
-    console.log(renderPlanText(plan, planReport, { questions: false, header: false }));
+    if (!boot) {
+        console.log(`Profile: ${plan.profiles.join(' + ')}\n`);
+        console.log(renderPlanText(plan, planReport, { questions: false, header: false }));
+    }
 
     const needPrompt = () => {
         if (!prompt.available) {
@@ -522,12 +667,14 @@ async function cmdInstall(flags, { doctor = false } = {}) {
             return;
         }
 
-        // Auto-fix: one list, one question — instead of warnings.
+        // Auto-fix: one list, one question — instead of warnings. The ComfyUI
+        // address comes from the running process (comfy-owner), verified by
+        // GET /system_stats, and is recomputed on EVERY run: port and notebook
+        // prefix change between boots, so the remembered .env is not trusted.
         const nodePick = probeMod.pickNodeBinary(realIo);
-        const port = flags['comfy-port'] ? Number(flags['comfy-port'])
-            : (mode !== 'managed' && runningComfy && runningComfy.port) ? runningComfy.port : null;
-        let probedUrl = null;
-        if (port || mode !== 'managed') {
+        const port = flags['comfy-port'] ? Number(flags['comfy-port']) : (instance.port || null);
+        let probedUrl = instance.url || null;
+        if (!probedUrl && (port || mode !== 'managed')) {
             const envNow = workerMod.readEnvValues(realIo, workerDir);
             const pr = await probeMod.probeComfyUrl(realIo, {
                 port: port || Number(envNow.COMFY_PORT) || 8188,
@@ -549,18 +696,20 @@ async function cmdInstall(flags, { doctor = false } = {}) {
             sourceVersion: process.env.ANIMASTOR_WORKER_BUNDLE_VERSION || null, // served by the hub (bootstrap)
         });
         let applyFixes = true;
-        if (fixPlan.additions.length > 0) {
+        if (fixPlan.additions.length > 0 && !boot) {
             console.log(`\nWorker settings to add: ${fixPlan.additions.join(', ')}`);
         }
         if (fixPlan.items.length > 0) {
-            console.log('\nThe installer will fix:');
-            fixPlan.items.forEach((f, i) => console.log(`  ${i + 1}. ${f.title}`));
+            if (!boot) {
+                console.log('\nThe installer will fix:');
+                fixPlan.items.forEach((f, i) => console.log(`  ${i + 1}. ${f.title}`));
+            }
             if (flags['no-fix']) applyFixes = false;
             else if (!yes) applyFixes = await needPrompt().confirm(`Fix ${fixPlan.items.length === 1 ? 'it' : `all ${fixPlan.items.length}`}?`, { defaultYes: true });
-            if (!applyFixes) console.log('Not fixing — the remaining problems are listed in the result.');
+            if (!applyFixes && !boot) console.log('Not fixing — the remaining problems are listed in the result.');
         }
 
-        const decisions = { apply_fixes: applyFixes };
+        const decisions = { ...priorDecisions, apply_fixes: applyFixes };
         // Management tools (the `animastor` command): part of a normal
         // installation; --no-tools opts out, a recorded decision is kept.
         decisions.install_management_tools = await resolveToolsDecision({
@@ -573,7 +722,15 @@ async function cmdInstall(flags, { doctor = false } = {}) {
         const secrets = {};
 
         if (yes) {
-            Object.assign(decisions, yesDecisions());
+            // --yes answers everything EXCEPT steps the user already declined:
+            // a "no" to the optional workflows (and to model/node downloads)
+            // is remembered, so a boot-time `doctor --yes` never installs them
+            // behind the user's back.
+            const yd = yesDecisions();
+            for (const k of ['workflows', 'install_models', 'install_custom_nodes']) {
+                if (priorDecisions[k] !== undefined) yd[k] = priorDecisions[k];
+            }
+            Object.assign(decisions, yd);
         } else if (plan.awaiting_decisions.length > 0) {
             for (const stepId of plan.awaiting_decisions) {
                 const step = plan.steps.find((s) => s.id === stepId);
@@ -666,9 +823,11 @@ async function cmdInstall(flags, { doctor = false } = {}) {
                 hubUrlExplicit: !!flags['hub-url'],
                 nodeBinary: nodePick,
                 replaceWorkerKey,
+                comfyOwner: instance,
+                hubVersion,
             },
         });
-        printResult(result, { flags, mode });
+        printResult(result, { flags, mode, boot, hubVersion });
     } catch (err) {
         if (err instanceof NoTerminalError) {
             console.error('');
@@ -921,12 +1080,8 @@ async function cmdVerify(flags) {
  * either every check ✓ and "Done", or one line of cause + one exact fix
  * command per ✗ (no "scroll up").
  */
-function printResult(result, { flags = {}, mode = null } = {}) {
-    if (result.warnings.length > 0) {
-        console.log('\nWarnings:');
-        for (const w of result.warnings) console.log(`  ! ${w}`);
-    }
-    const tool = (result.results && result.results.management_tools && result.results.management_tools.command) || toolCommand(flags);
+/** Blocked steps + host remediation as summary items (shared by both outputs). */
+function resultExtras(result, tool) {
     const extra = [];
     for (const b of result.blocked || []) {
         let fix = result.remediation && result.remediation.command ? `${result.remediation.command} && ${tool} doctor` : `${tool} doctor`;
@@ -942,8 +1097,52 @@ function printResult(result, { flags = {}, mode = null } = {}) {
             fix: result.remediation.command ? `${result.remediation.command} && ${tool} doctor` : `${tool} doctor`,
         });
     }
+    return extra;
+}
+
+/**
+ * Boot script output: EXACTLY one line plus the exit code — a node that
+ * reboots must not need a human to read a 200-line plan, and the one line
+ * must say whether the worker is back. `--yes` means zero questions.
+ */
+function printOneLineSummary(result, { flags = {}, mode = null } = {}) {
+    const tool = toolCommandPath(flags);
+    const summary = renderFinalSummary({
+        verification: result.verification, e2e: result.e2e || [],
+        extra: resultExtras(result, tool), tool, mode: mode || result.mode,
+    });
+    const owner = result.results && result.results.comfy_owner;
+    const worker = ((result.results && result.results.worker) || []).find((w) => w.id === 'worker-process');
+    const what = [
+        `mode ${mode || result.mode}`,
+        owner && owner.url ? `ComfyUI ${owner.url}` : 'ComfyUI not reachable',
+        worker && worker.started ? `worker pid ${worker.pid}` : 'worker not started',
+    ].join(', ');
+    const head = summary.ok ? 'OK' : `FAILED — ${summary.failures.length} problem(s)`;
+    console.log(`animastor doctor: ${head} — ${what} (${tool})`);
+    if (!summary.ok) {
+        for (const f of summary.failures) console.log(`  ✗ ${f.label}: ${f.detail || ''}${f.fix ? ` — fix: ${f.fix}` : ''}`);
+        process.exitCode = 1;
+    }
+}
+
+function printResult(result, { flags = {}, mode = null, boot = false } = {}) {
+    if (boot) {
+        printOneLineSummary(result, { flags, mode });
+        return;
+    }
+    if (result.warnings.length > 0) {
+        console.log('\nWarnings:');
+        for (const w of result.warnings) console.log(`  ! ${w}`);
+    }
+    const tool = (result.results && result.results.management_tools && result.results.management_tools.command) || toolCommand(flags);
+    const extra = resultExtras(result, tool);
     const summary = renderFinalSummary({ verification: result.verification, e2e: result.e2e || [], extra, tool, mode: mode || result.mode });
     console.log(summary.text);
+    // The full path is printed even when ~/.local/bin is already in PATH:
+    // after a node reboot the PATH block is gone, and a copy-pasted relative
+    // `animastor` must not be the only way to run the command.
+    console.log(`\nAnimastor command: ${toolCommandPath(flags)}`);
     // A failed/blocked installation must be visible in the exit code so
     // scripts (and the E2E smoke test) can react.
     if (!summary.ok || result.status === 'failed' || result.status === 'blocked') process.exitCode = 1;
@@ -1177,11 +1376,18 @@ async function cmdStart(flags) {
     if (!targets) return;
     if (!guardManagementAccess(io, targets)) return;
     const screen = createScreen();
+    // PATH is re-applied on EVERY start: E2E nodes reset ~/.bashrc and
+    // ~/.profile on boot while ~/.local/bin/animastor survives.
+    const pathEntry = management.restoreCommandPath(io, { linkDir: management.defaultLinkDir(), home: homeDir() });
+    if (pathEntry.updated.length > 0) screen.print(`PATH block restored: ${pathEntry.updated.join(', ')}`);
     const envVals = workerMod.readEnvValues(io, targets.workerDir);
-    const port = targets.port || Number(envVals.COMFY_PORT) || 8188;
-    let comfyUrl = envVals.COMFY_URL || `http://127.0.0.1:${port}`;
-    const managed = ownsComfyUI(targets);
-    let stats = await comfyuiMod.systemStats(io, comfyUrl);
+    // ComfyUI: mode and address come from the MACHINE (comfy-owner), not from
+    // the remembered .env — the platform's port/prefix change between boots.
+    const instance = await comfyOwner.resolveComfyOwner(io, { state: targets.state });
+    const managed = instance.mode === 'managed';
+    const port = instance.port || targets.port || Number(envVals.COMFY_PORT) || 8188;
+    let comfyUrl = instance.url || envVals.COMFY_URL || `http://127.0.0.1:${port}`;
+    let stats = instance.present ? await comfyuiMod.systemStats(io, comfyUrl) : null;
     if (!stats && managed && targets.comfyuiRoot && io.fs.existsSync(targets.comfyuiRoot)) {
         await screen.withBusy('Starting ComfyUI', async () => {
             comfyuiMod.startComfyUI(io, { root: targets.comfyuiRoot, port, device: targets.device });
@@ -1189,6 +1395,14 @@ async function cmdStart(flags) {
             if (up.ok) comfyUrl = `http://127.0.0.1:${port}`;
         });
         stats = await comfyuiMod.systemStats(io, comfyUrl);
+    }
+    if (!stats && instance.owner === 'foreign') {
+        screen.print(`! the platform's ComfyUI (pid ${instance.pid}) does not answer at ${comfyUrl} yet`);
+    }
+    // Autostart entry kept in sync with the current command (old script → .bak).
+    const wrap = management.ensureStartWorkerWrapper(io, { workerDir: targets.workerDir, animastorPath: toolCommandPath(flags) });
+    if (wrap.status === 'replaced' || wrap.status === 'created') {
+        screen.print(`autostart: ${wrap.path} → animastor start${wrap.backup ? ` (old script: ${wrap.backup})` : ''}`);
     }
     let start = null;
     let ready = null;
@@ -1208,6 +1422,7 @@ async function cmdStart(flags) {
     });
     const summary = renderFinalSummary({ e2e: checks, tool: toolCommand(flags), mode: managed ? 'managed' : 'existing' });
     for (const line of summary.text.split('\n')) screen.print(line);
+    screen.print(`\nAnimastor command: ${toolCommandPath(flags)}`);
     process.exitCode = summary.ok ? 0 : 1;
 }
 
@@ -1343,4 +1558,12 @@ if (require.main === module) {
     });
 }
 
-module.exports = { stepQuestion, parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor, printResult, cmdVerify, cmdValidateManifests, cmdResume, cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan, makeSecretProvider, resolveToolsDecision, resolveToolsDir, installOptions, runHostGates, PLATFORM_RUNTIME, printPlatformNotices, homeDir };
+module.exports = {
+    stepQuestion, parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor,
+    printResult, printOneLineSummary, resultExtras, cmdVerify, cmdValidateManifests, cmdResume,
+    cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan,
+    makeSecretProvider, resolveToolsDecision, resolveToolsDir, installOptions, runHostGates,
+    PLATFORM_RUNTIME, printPlatformNotices, homeDir,
+    toolCommand, toolCommandPath, detectHubVersion, priorReusableDecisions, isBootRun,
+    missingRequiredHostPackages, waitForPlatformComfy,
+};
