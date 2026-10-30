@@ -191,15 +191,25 @@ describe('0.2.2 ownership by fact', () => {
         assert.deepStrictEqual(r.conflicts, []);
     });
 
-    it('O3b: nothing running — managed only when the installer created the ComfyUI', async () => {
-        const empty = makeIo({ procs: [] });
-        const notOwned = await owner.resolveComfyOwner(empty.io, { state: { mode: 'managed', components: { comfyui: { owned: false } } } });
+    it('O3b: nothing running — disk truth decides (owned → managed, existing down → existing, clean → managed)', async () => {
+        const empty = makeIo({ procs: [], files: { [`${TIR_ROOT}/main.py`]: '# comfy' } });
+        const notOwned = await owner.resolveComfyOwner(empty.io, {
+            state: { mode: 'managed', components: { comfyui: { owned: false } } },
+            root: TIR_ROOT,
+        });
         assert.strictEqual(notOwned.mode, 'existing', 'a down user ComfyUI is never silently taken over');
         assert.strictEqual(notOwned.owner, 'none');
 
         const owned = await owner.resolveComfyOwner(empty.io, { state: { mode: 'existing', components: { comfyui: { owned: true } } } });
         assert.strictEqual(owned.mode, 'managed');
         assert.strictEqual(owned.present, false);
+    });
+
+    it('O3c: a clean Ubuntu (no state, no ~/ComfyUI) is a MANAGED first install', async () => {
+        const empty = makeIo({ procs: [] });
+        const r = await owner.resolveComfyOwner(empty.io, { root: '/home/u/ComfyUI' });
+        assert.strictEqual(r.mode, 'managed');
+        assert.strictEqual(owner.decideStartComfy({ owner: r.owner, mode: r.mode }).startComfyui, true);
     });
 
     it('O4: two instances — the platform one wins, the installer\'s own is offered for stop (only it)', async () => {

@@ -408,12 +408,12 @@ function missingRequiredHostPackages(io) {
  * Re-resolves the ownership facts on every poll — the port and the notebook
  * prefix are read from the process each time, never remembered.
  */
-async function waitForPlatformComfy(io, { state = null, timeoutMs = 180000, intervalMs = 3000 } = {}) {
+async function waitForPlatformComfy(io, { state = null, root = null, timeoutMs = 180000, intervalMs = 3000 } = {}) {
     const deadline = Date.now() + timeoutMs;
-    let inst = await comfyOwner.resolveComfyOwner(io, { state });
+    let inst = await comfyOwner.resolveComfyOwner(io, { state, root });
     while (inst.owner === 'none' && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, intervalMs));
-        inst = await comfyOwner.resolveComfyOwner(io, { state });
+        inst = await comfyOwner.resolveComfyOwner(io, { state, root });
     }
     return inst;
 }
@@ -553,12 +553,12 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     // ComfyUI ownership BY FACT: a verified ComfyUI process the installer did
     // not start decides the mode (existing) and the worker address; the
     // installer never starts a second one next to it.
-    let instance = await comfyOwner.resolveComfyOwner(realIo, { state: priorState });
+    let instance = await comfyOwner.resolveComfyOwner(realIo, { state: priorState, root });
     const comfyWaitMs = flags['comfy-wait-ms'] ? Number(flags['comfy-wait-ms'])
         : (Number(process.env.ANIMASTOR_COMFY_WAIT_MS) || (boot ? 180000 : 0));
     if (comfyWaitMs > 0 && instance.owner === 'none') {
         if (!boot) console.log(`Waiting up to ${Math.round(comfyWaitMs / 1000)} s for the platform's ComfyUI…`);
-        instance = await waitForPlatformComfy(realIo, { state: priorState, timeoutMs: comfyWaitMs });
+        instance = await waitForPlatformComfy(realIo, { state: priorState, root, timeoutMs: comfyWaitMs });
     }
 
     // The machine decides the mode. An explicit --mode that contradicts it is
@@ -1383,7 +1383,7 @@ async function cmdStart(flags) {
     const envVals = workerMod.readEnvValues(io, targets.workerDir);
     // ComfyUI: mode and address come from the MACHINE (comfy-owner), not from
     // the remembered .env — the platform's port/prefix change between boots.
-    const instance = await comfyOwner.resolveComfyOwner(io, { state: targets.state });
+    const instance = await comfyOwner.resolveComfyOwner(io, { state: targets.state, root: targets.comfyuiRoot });
     const managed = instance.mode === 'managed';
     const port = instance.port || targets.port || Number(envVals.COMFY_PORT) || 8188;
     let comfyUrl = instance.url || envVals.COMFY_URL || `http://127.0.0.1:${port}`;

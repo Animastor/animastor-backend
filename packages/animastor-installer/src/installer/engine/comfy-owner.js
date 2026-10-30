@@ -182,7 +182,7 @@ function stateConflicts(state, resolved) {
  *   stop_offer: { pid: number, port: number }|null
  * }>}
  */
-async function resolveComfyOwner(io, { state = null, timeoutMs = 3000 } = {}) {
+async function resolveComfyOwner(io, { state = null, root = null, timeoutMs = 3000 } = {}) {
     const instances = await inspectComfyInstances(io, { state });
     const verified = instances.filter((i) => i.verified);
     const foreign = verified.find((i) => !i.ours) || null;
@@ -203,12 +203,24 @@ async function resolveComfyOwner(io, { state = null, timeoutMs = 3000 } = {}) {
         chosen = ours;
         reason = `the installer's own ComfyUI is running — ${describeInstance(ours)}`;
     } else {
+        // Nothing runs. Disk truth decides:
+        //   - the installer created this ComfyUI → managed (start it);
+        //   - a ComfyUI exists at the root but is down → existing (the user's
+        //     instance is never taken over by starting our own);
+        //   - no ComfyUI at the root → managed (a first install clones one).
         const owned = !!(state && state.components && state.components.comfyui && state.components.comfyui.owned);
+        const onDisk = !!(root && io.fs.existsSync(path.join(root, 'main.py')));
         owner = 'none';
-        mode = owned ? 'managed' : 'existing';
-        reason = owned
-            ? 'no ComfyUI process is running; the installer created this ComfyUI (managed)'
-            : 'no ComfyUI process is running and the installer did not create this root (existing: the user starts it)';
+        if (owned) {
+            mode = 'managed';
+            reason = `no ComfyUI process is running; the installer created this ComfyUI (managed${root ? `: ${root}` : ''})`;
+        } else if (onDisk) {
+            mode = 'existing';
+            reason = `a ComfyUI exists at ${root} but does not run — the user starts it (existing)`;
+        } else {
+            mode = 'managed';
+            reason = `no ComfyUI ${root ? `at ${root} ` : ''}and none running — the installer sets one up (managed)`;
+        }
     }
 
     const resolved = {
