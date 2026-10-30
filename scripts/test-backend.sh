@@ -61,7 +61,9 @@ mkdir -p "${BOOKS_DIR:-/tmp/animastor-test/books}" "${OUTPUT_DIR:-/tmp/animastor
 # --- 5. deps guard -----------------------------------------------------------
 # node_modules должен совпадать с package-lock.json; иначе npm test может
 # падать на битые/отсутствующие пакеты @animastor/*.
-deps="$(cd backend && npm ls --depth=0 2>&1 || true)"
+deps="$(cd "$BACKEND_DIR" && npm ls --depth=0 2>&1)" || true
+printf '%s\n' "$deps" | grep -q '@animastor/' \
+    || err "deps guard: не удалось прочитать npm ls в $BACKEND_DIR"
 if printf '%s\n' "$deps" | grep -E '@animastor/' | grep -Eqi 'invalid|missing'; then
     err "node_modules не совпадает с package-lock.json: cd backend && npm ci"
 fi
