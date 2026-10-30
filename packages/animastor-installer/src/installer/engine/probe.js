@@ -145,6 +145,127 @@ function probeNodejs(io) {
     return v ? { version: v } : null;
 }
 
+function nodeMajor(version) {
+    const m = /^v?(\d+)/.exec(String(version || ''));
+    return m ? Number(m[1]) : 0;
+}
+
+/**
+ * The Node.js binary the worker must run with: the one running this
+ * installer when it is >= 20 (the bootstrap verified or provisioned it),
+ * otherwise the first `node`/`node22`/`node20` on PATH that is >= 20.
+ * Written to .env as NODE_BIN so start-worker.sh, the `animastor` tool and
+ * the installer start the SAME binary (no silent fallback to an old system
+ * Node 18).
+ * @returns {{ bin: string, version: string } | null}
+ */
+function pickNodeBinary(io, { execPath = process.execPath, execVersion = process.versions.node } = {}) {
+    if (execPath && nodeMajor(execVersion) >= 20) return { bin: execPath, version: execVersion };
+    for (const cand of ['node', 'node22', 'node20']) {
+        const r = io.exec(cand, ['-p', 'process.execPath + " " + process.versions.node']);
+        if (r.code !== 0) continue;
+        const [bin, version] = firstLine(r.stdout).split(' ');
+        if (bin && nodeMajor(version) >= 20) return { bin, version };
+    }
+    return null;
+}
+
+/** Version of a node binary (e.g. NODE_BIN from .env) or null. */
+function nodeBinaryVersion(io, bin) {
+    if (!bin) return null;
+    const r = io.exec(bin, ['--version']);
+    if (r.code !== 0) return null;
+    return firstLine(r.stdout).replace(/^v/, '') || null;
+}
+
+/**
+ * A ComfyUI process of the current user (python ... main.py): pid, cwd
+ * (the ComfyUI root), --port and --baseurl from its command line. Used to
+ * find the user's existing ComfyUI when it does not live in ~/ComfyUI and to
+ * learn the port/prefix instead of guessing. Linux only (/proc); null
+ * elsewhere or when none runs.
+ */
+function detectRunningComfyUI(io, { uid = (typeof process.getuid === 'function' ? process.getuid() : null) } = {}) {
+    if (uid == null) return null;
+    const r = io.exec('pgrep', ['-u', String(uid), '-f', 'main\\.py']);
+    if (r.code !== 0) return null;
+    for (const pidStr of String(r.stdout || '').split(/\s+/).filter(Boolean)) {
+        const pid = Number(pidStr);
+        let cwd = null;
+        let argv = [];
+        try { cwd = io.fs.readlinkSync(`/proc/${pid}/cwd`); } catch (_) { cwd = null; }
+        try { argv = String(io.fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')).split('\0').filter(Boolean); } catch (_) { argv = []; }
+        if (!argv.some((a) => /(^|\/)main\.py$/.test(a))) continue;
+        const flag = (name) => {
+            const i = argv.indexOf(name);
+            if (i !== -1 && argv[i + 1]) return argv[i + 1];
+            const eq = argv.find((a) => a.startsWith(`${name}=`));
+            return eq ? eq.slice(name.length + 1) : null;
+        };
+        const port = flag('--port');
+        return {
+            pid,
+            root: cwd && io.fs.existsSync(path.join(cwd, 'main.py')) ? cwd : null,
+            port: port ? Number(port) : null,
+            baseurl: flag('--baseurl'),
+        };
+    }
+    return null;
+}
+
+/**
+ * Resolve the ComfyUI root: an explicit --root wins; then the default
+ * (~/ComfyUI) when it holds a ComfyUI; then the root of the user's running
+ * ComfyUI process; finally the default (a managed install creates it).
+ * @returns {{ root: string, source: 'flag'|'default'|'running-process' }}
+ */
+function resolveComfyRoot(io, { explicit = null, defaultRoot, running = undefined } = {}) {
+    if (explicit) return { root: explicit, source: 'flag' };
+    if (defaultRoot && io.fs.existsSync(path.join(defaultRoot, 'main.py'))) return { root: defaultRoot, source: 'default' };
+    const proc = running === undefined ? detectRunningComfyUI(io) : running;
+    if (proc && proc.root) return { root: proc.root, source: 'running-process' };
+    return { root: defaultRoot, source: 'default' };
+}
+
+/**
+ * True for a /system_stats answer: a JSON object (the same acceptance rule as
+ * comfyui.systemStats). A wrong reverse-proxy prefix answers 404/HTML, never
+ * a 200 JSON object, so this is enough to tell the right URL apart.
+ */
+function isSystemStats(json) {
+    return !!(json && typeof json === 'object' && !Array.isArray(json));
+}
+
+/**
+ * Probe the ComfyUI API base the worker must use (COMFY_URL). The plain
+ * http://127.0.0.1:<port> is tried FIRST; a reverse-proxy prefix (notebook
+ * deployments) only when the plain URL does not answer. Never guessed: the
+ * returned URL answered GET /system_stats with a ComfyUI payload.
+ * @param {object} opts { port, prefixes: string[] (e.g. NOTEBOOK_PATH, --baseurl), timeoutMs }
+ * @returns {Promise<{ url: string, prefixed: boolean, tried: string[] } | { url: null, tried: string[] }>}
+ */
+async function probeComfyUrl(io, { port, prefixes = [], timeoutMs = 3000 } = {}) {
+    const base = `http://127.0.0.1:${port}`;
+    const candidates = [base];
+    for (const p of prefixes) {
+        if (!p) continue;
+        const norm = `/${String(p).replace(/^\/+|\/+$/g, '')}`;
+        if (norm === '/') continue;
+        const url = `${base}${norm}`;
+        if (!candidates.includes(url)) candidates.push(url);
+    }
+    for (const url of candidates) {
+        try {
+            const opts = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(timeoutMs) } : {};
+            const res = await io.http.fetchJson(`${url}/system_stats`, opts);
+            if (res && res.status === 200 && isSystemStats(res.json)) {
+                return { url, prefixed: url !== base, tried: candidates };
+            }
+        } catch (_) { /* next candidate */ }
+    }
+    return { url: null, tried: candidates };
+}
+
 function probeCustomNodes(io, root) {
     const dir = path.join(root, 'custom_nodes');
     if (!io.fs.isDirectory(dir)) return [];
@@ -162,23 +283,118 @@ function probeCustomNodes(io, root) {
     return out;
 }
 
-function walkModels(io, root, relDir, out, depth = 0) {
-    const abs = path.join(root, relDir);
-    if (!io.fs.isDirectory(abs)) return;
-    for (const name of io.fs.readdirSync(abs)) {
+/**
+ * Walk one model folder. `relDir` is the CANONICAL ComfyUI-relative path the
+ * files are reported under (models/<folder>/...), `absDir` where they really
+ * live — the same for the default layout, different for a folder declared in
+ * extra_model_paths.yaml. `location` (absolute folder base) is attached to
+ * files found outside the default layout so the engine downloads missing
+ * pieces next to them, never into a second copy.
+ */
+function walkModelDir(io, absDir, relDir, out, { depth = 0, location = null } = {}) {
+    if (!io.fs.isDirectory(absDir)) return;
+    let names = [];
+    try { names = io.fs.readdirSync(absDir); } catch (_) { return; }
+    for (const name of names) {
         const rel = `${relDir}/${name}`;
-        const st = io.fs.statSync(path.join(abs, name));
+        let st;
+        try { st = io.fs.statSync(path.join(absDir, name)); } catch (_) { continue; }
         if (st.isDirectory) {
-            if (depth < 3) walkModels(io, root, rel, out, depth + 1);
+            if (depth < 4) walkModelDir(io, path.join(absDir, name), rel, out, { depth: depth + 1, location });
         } else if (st.isFile) {
-            out.push({ path: rel, size_bytes: st.size });
+            out.push(location ? { path: rel, size_bytes: st.size, location } : { path: rel, size_bytes: st.size });
         }
+    }
+}
+
+/**
+ * Minimal extra_model_paths.yaml reader (ComfyUI's own format):
+ *
+ *   comfyui:
+ *       base_path: /data/ComfyUI/
+ *       checkpoints: models/checkpoints/
+ *       TTS: models/TTS/
+ *       loras: |
+ *            models/loras/
+ *            more_loras/
+ *
+ * Returns [{ folder, path }] with absolute paths (relative entries resolve
+ * against the section's base_path, else against the ComfyUI root). Unknown
+ * syntax is skipped — never guessed.
+ */
+function parseExtraModelPaths(text, root) {
+    const out = [];
+    const sections = [];
+    let cur = null;
+    let blockKey = null;
+    let blockIndent = 0;
+    for (const raw of String(text || '').split(/\r?\n/)) {
+        const noComment = raw.replace(/\s+#.*$/, '');
+        if (!noComment.trim() || noComment.trim().startsWith('#')) continue;
+        const indent = noComment.length - noComment.trimStart().length;
+        const line = noComment.trim();
+        if (blockKey && indent > blockIndent) {
+            cur.entries.push({ folder: blockKey, value: line });
+            continue;
+        }
+        blockKey = null;
+        if (indent === 0) {
+            const m = /^([^:]+):\s*$/.exec(line);
+            cur = m ? { name: m[1].trim(), base: null, entries: [] } : null;
+            if (cur) sections.push(cur);
+            continue;
+        }
+        if (!cur) continue;
+        const kv = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
+        if (!kv) continue;
+        const key = kv[1];
+        const value = kv[2].replace(/^['"]|['"]$/g, '').trim();
+        if (key === 'base_path') { cur.base = value; continue; }
+        if (key === 'is_default' || key === 'download_model_base') continue;
+        if (value === '|' || value === '>' || value === '|-' || value === '') {
+            blockKey = key;
+            blockIndent = indent;
+            continue;
+        }
+        cur.entries.push({ folder: key, value });
+    }
+    for (const sec of sections) {
+        const base = sec.base ? (path.isAbsolute(sec.base) ? sec.base : path.join(root, sec.base)) : root;
+        for (const e of sec.entries) {
+            const v = e.value.replace(/^['"]|['"]$/g, '');
+            if (!v) continue;
+            out.push({ folder: e.folder, path: path.normalize(path.isAbsolute(v) ? v : path.join(base, v)) });
+        }
+    }
+    return out;
+}
+
+/**
+ * Additional model folders: extra_model_paths.yaml next to the ComfyUI root
+ * (the file ComfyUI itself reads). Each entry maps a folder name (e.g. TTS,
+ * the folder the ComfyUI-Qwen3-TTS loader resolves via
+ * folder_paths.get_folder_paths("TTS")) to an absolute directory.
+ */
+function extraModelFolders(io, root) {
+    const yamlPath = path.join(root, 'extra_model_paths.yaml');
+    if (!io.fs.existsSync(yamlPath)) return [];
+    try {
+        return parseExtraModelPaths(io.fs.readFileSync(yamlPath, 'utf8'), root);
+    } catch (_) {
+        return [];
     }
 }
 
 function probeModels(io, root) {
     const out = [];
-    for (const dir of MODEL_DIRS) walkModels(io, root, dir, out);
+    for (const dir of MODEL_DIRS) walkModelDir(io, path.join(root, dir), dir, out);
+    const seen = new Set(MODEL_DIRS.map((d) => path.normalize(path.join(root, d))));
+    for (const extra of extraModelFolders(io, root)) {
+        const abs = extra.path.replace(/[\\/]+$/, '');
+        if (seen.has(path.normalize(abs))) continue; // same as the default layout
+        seen.add(path.normalize(abs));
+        walkModelDir(io, abs, `models/${extra.folder}`, out, { location: abs });
+    }
     return out;
 }
 
@@ -265,6 +481,13 @@ function probeEnvironment(io, { root = null, workerDir = null, crypto = null, wo
     env.cuda = probeCuda(io);
     env.device = env.gpu && env.gpu.vendor === 'nvidia' ? 'cuda' : 'cpu';
     env.nodejs = probeNodejs(io);
+    // The worker runs with NODE_BIN (the installer's own Node >= 20), not with
+    // whatever `node` is first in PATH — judge the runtime by that binary and
+    // keep the PATH version for information only.
+    if (!env.nodejs || nodeMajor(env.nodejs.version) < 20) {
+        const pick = pickNodeBinary(io);
+        if (pick) env.nodejs = { version: pick.version, binary: pick.bin, path_version: env.nodejs ? env.nodejs.version : null };
+    }
     env.comfyui = probeComfyui(io, root);
     env.python = probePython(io, root);
     env.torch = probeTorch(io, root);
@@ -336,6 +559,15 @@ function renderDetection(env) {
 
 module.exports = {
     MODEL_DIRS,
+    parseExtraModelPaths,
+    probeModels,
+    pickNodeBinary,
+    nodeBinaryVersion,
+    nodeMajor,
+    detectRunningComfyUI,
+    resolveComfyRoot,
+    probeComfyUrl,
+    isSystemStats,
     DEVICE_KINDS,
     probeEnvironment,
     probeGpu,

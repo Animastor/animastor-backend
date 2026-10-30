@@ -492,7 +492,11 @@ function checkModel(dep, env, profiles) {
     const expectedPath = `${normPath(dep.target_dir)}/${dep.filename}`;
     const found = (env.models || []).find((m) => normPath(m.path) === expectedPath);
     if (!found) {
-        return { ...base, status: 'missing', action: missingAction(dep), expected: { path: expectedPath }, notes: [] };
+        return {
+            ...base, status: 'missing', action: missingAction(dep), expected: { path: expectedPath },
+            missing_bytes_approx: typeof dep.size_bytes_approx === 'number' ? dep.size_bytes_approx : null,
+            notes: [],
+        };
     }
     const checksum = dep.checksum || {};
     if (checksum.value && found.sha256) {
@@ -540,6 +544,14 @@ function checkModel(dep, env, profiles) {
     return { ...base, status: 'installed', grade: 'presence', action: 'skip', found: { path: found.path }, notes: ['presence only — no checksum/size evidence available'] };
 }
 
+/**
+ * Files of a model repo that the loader never reads (repository metadata).
+ * Their absence must never make a present model "incomplete" — that is what
+ * made the installer offer to re-download complete, working models. The
+ * manifest may extend the list per dependency (`optional_files`).
+ */
+const MODEL_REPO_METADATA_FILES = Object.freeze(['.gitattributes', 'README.md', 'configuration.json', 'LICENSE', 'LICENSE.txt']);
+
 function checkModelRepo(dep, env, profiles) {
     const base = { id: dep.id, kind: 'model_repo', name: dep.name, requirement: dep.requirement, basis: dep.basis, profiles };
     if (env.models === undefined) {
@@ -553,32 +565,51 @@ function checkModelRepo(dep, env, profiles) {
             status: 'missing',
             action: missingAction(dep),
             expected: { target_dir: prefix, repo: dep.repo },
+            missing_bytes_approx: typeof dep.size_bytes_approx === 'number' ? dep.size_bytes_approx : null,
             notes: dep.delivery && dep.delivery.mechanism === 'node_auto_download'
                 ? ['the custom node can auto-download this repo on first run (decision D2: preinstall vs auto_download)']
                 : [],
         };
     }
+    // Where the repo really lives: the default layout, or a folder declared
+    // in extra_model_paths.yaml (probe attaches `location`). Downloads of
+    // missing pieces go next to the found files — never into a second copy.
+    const location = matches.find((m) => m.location) ? matches.find((m) => m.location).location : null;
+    const found = location
+        ? { files: matches.map((m) => normPath(m.path)), location: { base: location, target_dir: prefix.split('/').slice(2).join('/') } }
+        : { files: matches.map((m) => normPath(m.path)) };
     if (Array.isArray(dep.expected_files) && dep.expected_files.length > 0) {
         const have = new Set(matches.map((m) => normPath(m.path)));
-        const missingFiles = dep.expected_files.filter((f) => !have.has(`${prefix}/${normPath(f)}`));
+        // Metadata files are matched by NAME at any depth (ModelScope puts a
+        // configuration.json into sub-folders too); manifest optional_files
+        // by exact path.
+        const metadataNames = new Set(MODEL_REPO_METADATA_FILES);
+        const optional = new Set((Array.isArray(dep.optional_files) ? dep.optional_files : []).map(normPath));
+        const required = dep.expected_files.map(normPath).filter((f) => !optional.has(f) && !metadataNames.has(f.split('/').pop()));
+        const missingFiles = required.filter((f) => !have.has(`${prefix}/${f}`));
         if (missingFiles.length > 0) {
             // Partially present: status stays 'missing' (with reason
-            // 'incomplete') so plan/engine treat it as installable — the
-            // downloader is idempotent and resumes .part files, it never
-            // re-downloads a verified file. 'incompatible' would park it as a
-            // review item and an interrupted download could never resume.
+            // 'incomplete') so plan/engine treat it as installable — only the
+            // listed files are downloaded, files already on disk are never
+            // re-downloaded. 'incompatible' would park it as a review item and
+            // an interrupted download could never resume.
+            const interrupted = missingFiles.filter((f) => have.has(`${prefix}/${f}.part`));
+            const why = interrupted.length > 0
+                ? `download interrupted (${interrupted.join(', ')}: .part on disk)`
+                : `missing files: ${missingFiles.join(', ')}`;
             return {
                 ...base,
                 status: 'missing',
                 reason: 'incomplete',
                 action: 'install',
-                found: { files: Array.from(have) },
-                notes: [`present but incomplete; missing: ${missingFiles.join(', ')}`],
+                missing_files: missingFiles,
+                found,
+                notes: [`present but incomplete — ${why}`],
             };
         }
-        return { ...base, status: 'installed', grade: 'files-verified', action: 'skip', found: { files: dep.expected_files }, notes: [] };
+        return { ...base, status: 'installed', grade: 'files-verified', action: 'skip', found: { ...found, files: required }, notes: [] };
     }
-    return { ...base, status: 'installed', grade: 'presence', action: 'skip', found: { files: matches.map((m) => normPath(m.path)) }, notes: [] };
+    return { ...base, status: 'installed', grade: 'presence', action: 'skip', found, notes: [] };
 }
 
 function checkPythonPackage(dep, env, profiles) {
@@ -1264,6 +1295,7 @@ function planIsolatedEnvironments(assignments) {
 }
 
 module.exports = {
+    MODEL_REPO_METADATA_FILES,
     RUNTIME_MODES,
     ENTRY_STATUSES,
     ACTIONS,

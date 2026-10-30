@@ -926,7 +926,9 @@ function buildInstructions({
         status: artifacts.installer.status || 'available',
         download_url: bootstrapUrl,
     };
-    response.verify_command = '$HOME/animastor/tools/status.sh';
+    // The installer links the `animastor` command into PATH (~/.local/bin,
+    // /usr/local/bin for root); the tools-dir path works without PATH too.
+    response.verify_command = 'animastor status   # or: $HOME/animastor/tools/animastor status';
 
     if (target.deployment === 'docker') {
         // Docker deployment (linux platform) — the canonical container flow
@@ -1028,18 +1030,16 @@ function buildInstructions({
             code: 'powershell -ExecutionPolicy Bypass -File .\\animastor-installer.ps1',
         });
     } else {
-        steps.push({
-            id: 'download-bootstrap',
-            title: 'Download the installer',
-            body: `Download the bootstrap installer (installer version ${artifacts.installer.version}). The profile and connection mode you selected here are already embedded — nothing needs to be typed.`,
-            code: `curl -fsSL -o animastor-installer.sh ${bootstrapUrl}`,
-        });
-
+        // ONE command. The URL is quoted: unquoted, the shell treats every
+        // `&` in the query as "run in background" and the profile/mode/
+        // platform parameters are silently lost. The installer reads its
+        // questions (and the hidden Worker Key) from /dev/tty, so piping the
+        // script into bash is the supported way to run it.
         steps.push({
             id: 'run-bootstrap',
             title: 'Run the installer',
-            body: 'The installer itself downloads and verifies all components (ComfyUI, models, worker), then asks for the Worker Key (hidden input) — paste the key saved above.',
-            code: 'bash animastor-installer.sh',
+            body: `Run this one command in a terminal on the GPU machine (installer version ${artifacts.installer.version}). The profile and connection mode you selected here are already embedded. The installer checks the machine, installs only what is missing, asks for the Worker Key (hidden input — paste the key saved above) and finishes with a ✓/✗ summary.`,
+            code: bootstrapOneLiner(bootstrapUrl),
         });
     }
 
@@ -1050,6 +1050,17 @@ function buildInstructions({
     });
 
     return response;
+}
+
+/**
+ * The Linux install command: `curl -fsSL "<url>" | bash`. The URL is always
+ * double-quoted (it carries `&`-separated query parameters); a URL that
+ * could break out of the quotes is refused rather than emitted.
+ */
+function bootstrapOneLiner(url) {
+    const u = String(url || '');
+    if (!u || /["`$\\\s]/.test(u)) throw new Error('bootstrap URL contains characters that cannot be quoted safely');
+    return `curl -fsSL "${u}" | bash`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1382,7 @@ function buildSetupPlan({ profileIds, mode, platform = 'linux', deployment = 'na
 }
 
 module.exports = {
+    bootstrapOneLiner,
     PLATFORMS,
     OS_PLATFORMS,
     DEPLOYMENTS,

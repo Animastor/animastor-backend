@@ -434,7 +434,7 @@ describe('management tools (shared runtime logic)', () => {
     });
 
     // ── MT16–MT18: tools installation ──────────────────────────────────────
-    it('MT16: tools install writes 4 executable wrappers with the right commands', () => {
+    it('MT16: tools install writes 4 executable wrappers + the animastor command', () => {
         const io = makeMockIo({});
         const res = management.installManagementTools(io, {
             toolsDir: '/home/u/animastor/tools',
@@ -444,9 +444,9 @@ describe('management tools (shared runtime logic)', () => {
             root: '/home/u/ComfyUI',
             workerDir: '/home/u/animastor/worker',
         });
-        assert.strictEqual(res.files.length, 4);
-        assert.deepStrictEqual(res.files.map((f) => path.basename(f)), ['status.sh', 'reboot-worker.sh', 'reboot-comfyui.sh', 'comfyui-monitor.sh']);
-        for (const f of res.files) {
+        assert.strictEqual(res.files.length, 5);
+        assert.deepStrictEqual(res.files.map((f) => path.basename(f)), ['status.sh', 'reboot-worker.sh', 'reboot-comfyui.sh', 'comfyui-monitor.sh', 'animastor']);
+        for (const f of res.files.filter((x) => x.endsWith('.sh'))) {
             const body = io.fs.readFileSync(f);
             assert.ok(body.startsWith('#!/bin/sh'), `${f} has a shebang`);
             assert.strictEqual(io.fs.readFileSync(`${f}::mode`), 0o755, `${f} is executable`);
@@ -476,7 +476,7 @@ describe('management tools (shared runtime logic)', () => {
         management.installManagementTools(io, { ...args, cliPath: '/opt/animastor/packages/animastor-installer/src/installer/cli.js' });
         assert.strictEqual(io._spawned.length, 0);
         const second = management.installManagementTools(io, args);
-        assert.strictEqual(second.files.length, 4);
+        assert.strictEqual(second.files.length, 5);
         assert.ok(/cli\.js' status/.test(io.fs.readFileSync('/home/u/animastor/tools/status.sh')));
     });
 
@@ -513,7 +513,7 @@ describe('management tools (shared runtime logic)', () => {
         const services = plan.groups.find((g) => g.key === 'services');
         assert.ok(services, 'services group present');
         const toolItems = services.items.filter((i) => i.path.includes('/tools/'));
-        assert.strictEqual(toolItems.length, 4);
+        assert.strictEqual(toolItems.length, 5);
         assert.ok(toolItems.every((i) => i.removable));
     });
 

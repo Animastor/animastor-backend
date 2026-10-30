@@ -13,10 +13,13 @@
  *   animastor-installer verify     [--profile P[,P2]] [--root PATH] [--worker-dir PATH] [--hub-url URL]
  *   animastor-installer resume
  *   animastor-installer uninstall  [--all] [--yes] [--dry-run] [--state PATH] [--home PATH]
+ *   animastor-installer start | stop | status | logs [-f] [--lines N] | doctor [--new-key]
+ *                                  (what the `animastor` command in PATH runs)
  *
  * Flags:
  *   --profile P        Generation profile id (repeatable or comma-separated)
- *   --mode MODE        managed | existing | shared (default: infer from detection)
+ *   --mode MODE        managed | existing | shared (default: existing when a ComfyUI
+ *                      is found — in ~/ComfyUI or as a running process — else managed)
  *   --root PATH        ComfyUI root directory (default: ~/ComfyUI)
  *   --worker-dir PATH  Worker bundle directory (default: ~/animastor/worker)
  *   --hub-url URL      GPU Hub base URL (default: https://animastor.org/gpu)
@@ -29,13 +32,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
 
 const { createRealIo, createDryRunIo } = require('./engine/io');
 const { createLogger } = require('./engine/logger');
 const { createTermRenderer } = require('./engine/term');
 const platforms = require('./platform');
-const { probeEnvironment, renderDetection } = require('./engine/probe');
+const probeMod = require('./engine/probe');
+const { probeEnvironment, renderDetection } = probeMod;
 const { runInstallation, loadResumableState, renderResumeSummary } = require('./engine/engine');
 const prereq = require('./engine/prereq');
 const stateStore = require('./engine/state');
@@ -44,6 +47,14 @@ const resolver = require('./compatibility-resolver');
 const { buildInstallPlan, renderPlanText } = require('./install-plan');
 const manifest = require('./install-manifest');
 const uninstaller = require('./uninstaller');
+const { createPrompt, NoTerminalError } = require('./engine/tty');
+const { renderBanner, renderFinalSummary } = require('./engine/summary');
+const fixes = require('./engine/fixes');
+const workerMod = require('./engine/worker');
+const comfyuiMod = require('./engine/comfyui');
+const downloader = require('./engine/downloader');
+const { resolveRepoBundleDir } = require('./worker-bundle-source');
+const engineMod = require('./engine/engine');
 
 // ---------------------------------------------------------------------------
 // Paths (platform-specific defaults; the platform adapter owns them)
@@ -100,12 +111,16 @@ function parseArgs(argv) {
         const a = args[i];
         if (a.startsWith('--')) {
             const key = a.slice(2);
-            if (['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools'].includes(key)) {
+            if (['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix'].includes(key)) {
                 parsed.flags[key] = true;
             } else {
                 const val = args[++i];
                 parsed.flags[key] = val || '';
             }
+        } else if (a === '-f') {
+            parsed.flags.follow = true;
+        } else if (a === '-y') {
+            parsed.flags.yes = true;
         } else {
             positional.push(a);
         }
@@ -232,70 +247,6 @@ function runHostGates(realIo, { paths, dryRun = false, stateUid = null, deep = t
 }
 
 // ---------------------------------------------------------------------------
-// Interactive prompts
-// ---------------------------------------------------------------------------
-
-function createPrompt() {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    return {
-        async confirm(question) {
-            return new Promise((resolve) => {
-                rl.question(`${question} [Yes/No] `, (answer) => {
-                    resolve(/^(y|yes)$/i.test(answer.trim()));
-                });
-            });
-        },
-        async select(question, options) {
-            return new Promise((resolve) => {
-                const text = `${question}\n${options.map((o, i) => `  [${i + 1}] ${o}`).join('\n')}\n> `;
-                rl.question(text, (answer) => {
-                    const n = parseInt(answer, 10);
-                    resolve(options[(n - 1) || 0] || options[0]);
-                });
-            });
-        },
-        async secret(question) {
-            // TTY: hidden raw-mode input (no echo). Non-TTY (piped input /
-            // automation): plain line input. In BOTH cases the value is never
-            // echoed to the output stream, never logged, never stored in
-            // state, never passed via argv.
-            if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
-                return new Promise((resolve) => {
-                    process.stdout.write(`${question}: `);
-                    let value = '';
-                    process.stdin.setRawMode(true);
-                    process.stdin.resume();
-                    const onData = (ch) => {
-                        const c = ch.toString();
-                        if (c === '\n' || c === '\r') {
-                            process.stdin.setRawMode(false);
-                            process.stdin.pause();
-                            process.stdin.removeListener('data', onData);
-                            process.stdout.write('\n');
-                            resolve(value || null);
-                        } else if (c === '\u0003') { // Ctrl+C
-                            process.stdin.setRawMode(false);
-                            process.stdin.pause();
-                            process.stdin.removeListener('data', onData);
-                            resolve(null);
-                        } else if (c === '\u007F' || c === '\b') {
-                            if (value.length > 0) value = value.slice(0, -1);
-                        } else {
-                            value += c;
-                        }
-                    };
-                    process.stdin.on('data', onData);
-                });
-            }
-            return new Promise((resolve) => {
-                rl.question(`${question}: `, (answer) => resolve(answer ? String(answer) : null));
-            });
-        },
-        close() { rl.close(); },
-    };
-}
-
-// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
@@ -311,6 +262,62 @@ function resolveAndPlan({ manifests, env, mode, decisions }) {
     const report = resolver.resolveInstallation({ manifests, environment: env, mode });
     const plan = buildInstallPlan({ report, manifests, decisions });
     return { report, plan };
+}
+
+/**
+ * Same as resolveAndPlan, plus the real download size of incomplete model
+ * repos (ModelScope listing) so the plan shows exactly what will be
+ * downloaded. Network failures leave the size unknown.
+ */
+async function resolveAndPlanWithSizes({ io, manifests, env, mode, decisions }) {
+    const report = resolver.resolveInstallation({ manifests, environment: env, mode });
+    try { await downloader.annotateMissingModelSizes(io, report, manifests); } catch (_) { /* size unknown */ }
+    const plan = buildInstallPlan({ report, manifests, decisions });
+    return { report, plan };
+}
+
+/**
+ * The question asked for a plan step. Component lists are already printed
+ * in the plan (Missing/Actions) — list-type questions get one short line
+ * instead of a second copy of the menu; context questions (ComfyUI version
+ * decisions) are shown in full because the plan does not contain them.
+ */
+function stepQuestion(step) {
+    switch (step.id) {
+        case 'custom-nodes': return 'Install the missing custom node(s) listed above?';
+        case 'models': return 'Download the missing model file(s) listed above?';
+        case 'workflows': return 'Install the optional profile workflows (not required for Animastor)?';
+        case 'worker-setup': return 'Install and configure the Animastor worker (listed above)?';
+        default: return String(step.prompt.question).replace(/\n\n+/g, '\n');
+    }
+}
+
+/** Versions shown in the banner. Hub/bootstrap versions come from the bootstrap env. */
+function bannerVersions(manifests, flags) {
+    const pkg = require('../../package.json');
+    let worker = process.env.ANIMASTOR_WORKER_BUNDLE_VERSION || null;
+    if (!worker) {
+        const dir = resolveRepoBundleDir(fs, resolveRepoRoot(flags));
+        if (dir) worker = workerMod.readPkgVersion({ fs: { readFileSync: fs.readFileSync } }, dir);
+    }
+    return {
+        installer: pkg.version,
+        worker,
+        profile: manifests.map((m) => m.profile.id).join(' + '),
+        profileRevision: manifests.length === 1 ? manifests[0].revision : null,
+        hub: process.env.ANIMASTOR_HUB_VERSION || null,
+        bootstrap: process.env.ANIMASTOR_BOOTSTRAP_VERSION || null,
+        platform: `${PLATFORM_RUNTIME.platform}/${PLATFORM_RUNTIME.deployment}`,
+    };
+}
+
+/** The `animastor` command recorded for this installation (fix lines). */
+function toolCommand(flags) {
+    const tool = path.join(resolveToolsDir(flags), 'animastor');
+    const linked = path.join(management.defaultLinkDir() || '', 'animastor');
+    if (fs.existsSync(linked) && String(process.env.PATH || '').split(path.delimiter).includes(path.dirname(linked))) return 'animastor';
+    if (fs.existsSync(tool)) return tool;
+    return 'animastor';
 }
 
 /** Secret values collected interactively — memory-only, never persisted. */
@@ -361,12 +368,30 @@ function createScreen() {
     });
 }
 
-async function cmdInstall(flags) {
+async function cmdInstall(flags, { doctor = false } = {}) {
+    const realIo = createRealIo();
+    // doctor = the same idempotent install for the RECORDED installation:
+    // profiles/mode come from install-state.json unless given explicitly.
+    let recorded = null;
+    if (doctor) {
+        recorded = stateStore.loadState(realIo, resolveStatePath(flags));
+        if (!recorded || !Array.isArray(recorded.profiles) || recorded.profiles.length === 0) {
+            console.error(`No Animastor installation found (state: ${resolveStatePath(flags)}). Run the install command from the Animastor setup page first.`);
+            process.exit(2);
+        }
+        if (flags.profiles.length === 0) flags.profiles = recorded.profiles.slice();
+        if (!flags.mode && recorded.mode) flags.mode = recorded.mode;
+    }
     if (flags.profiles.length === 0) {
         console.error('error: --profile is required');
         process.exit(1);
     }
-    const root = resolveRoot(flags);
+    // ComfyUI root: --root > ~/ComfyUI (when it holds a ComfyUI) > the root
+    // of the user's running ComfyUI process > ~/ComfyUI (managed creates it).
+    const runningComfy = probeMod.detectRunningComfyUI(realIo);
+    const rootPick = probeMod.resolveComfyRoot(realIo, { explicit: flags.root || null, defaultRoot: DEFAULT_ROOT, running: runningComfy });
+    flags.root = rootPick.root;
+    const root = rootPick.root;
     const workerDir = resolveWorkerDir(flags);
     const hubUrl = resolveHubUrl(flags);
     const repoRoot = resolveRepoRoot(flags);
@@ -378,16 +403,29 @@ async function cmdInstall(flags) {
     // Probing is read-only and always runs against the REAL io. In dry-run
     // mode the guarded io is used ONLY inside the engine, where every
     // mutating operation would throw a "dry-run violation".
-    const realIo = createRealIo();
     const screen = createScreen();
     const logger = createLogger({ io: realIo, sink: (line) => screen.print(line) });
     const loadedManifests = flags.profiles.map((p) => manifest.loadManifest(p));
-    const mode = flags.mode || 'managed';
+
+    console.log(renderBanner(bannerVersions(loadedManifests, flags)));
+    if (doctor) console.log('animastor doctor — re-checking the installation and fixing what can be fixed\n');
 
     const env = probeEnvironment(realIo, {
         root, workerDir, crypto,
         workerType: loadedManifests.length === 1 ? (loadedManifests[0].worker_bundle || {}).worker_type : null,
     });
+
+    // Mode: an explicit --mode wins; otherwise a found ComfyUI means
+    // "existing" (never silently "managed" next to the user's ComfyUI).
+    const comfyFound = !!(env.comfyui && env.comfyui.present);
+    const mode = flags.mode || (comfyFound ? 'existing' : 'managed');
+    if (flags.mode) {
+        console.log(`Mode: ${mode} (${doctor && recorded && recorded.mode === mode ? 'recorded installation' : 'requested'})`);
+    } else if (comfyFound) {
+        console.log(`Mode: existing — ComfyUI found at ${root}${rootPick.source === 'running-process' ? ' (running process)' : ''}; override with --mode managed`);
+    } else {
+        console.log(`Mode: managed — no ComfyUI found at ${root}; the installer sets one up (override with --mode existing --root PATH)`);
+    }
 
     // Prerequisites & ownership BEFORE the plan/confirmation flow: a missing
     // python3.X-venv must be reported up front, with the exact apt command,
@@ -403,138 +441,199 @@ async function cmdInstall(flags) {
     // accidental mutation throws "dry-run violation" instead of executing.
     const io = dryRun ? createDryRunIo(realIo) : realIo;
 
-    const { plan } = resolveAndPlan({ manifests: loadedManifests, env, mode, decisions: {} });
+    const { plan, report: planReport } = await resolveAndPlanWithSizes({ io: realIo, manifests: loadedManifests, env, mode, decisions: {} });
 
-    console.log(plan.plan_text);
+    // Mode was printed above with its reason; the questions are asked below
+    // one by one — neither is repeated in the plan text.
+    console.log(`Profile: ${plan.profiles.join(' + ')}\n`);
+    console.log(renderPlanText(plan, planReport, { questions: false, header: false }));
 
-    // CPU-only mode is always announced explicitly and confirmed before any
-    // change: the user must see that performance will be significantly lower.
-    const device = env.device || (env.gpu ? 'cuda' : 'cpu');
-    if (device === 'cpu' && !dryRun) {
-        console.log('\n=========================================================================');
-        console.log('  CPU-ONLY MODE: no supported GPU was detected.');
-        console.log('  A CPU build of PyTorch will be installed and ComfyUI will run');
-        console.log('  with --cpu. Performance will be SIGNIFICANTLY lower.');
-        console.log('  This mode is intended for the TTS/audio profile test scenario.');
-        console.log('=========================================================================');
-        if (!yes) {
-            const prompt = createPrompt();
-            const proceed = await prompt.confirm('Continue with the CPU-only installation?');
-            prompt.close();
-            if (!proceed) {
-                console.log('Aborted — nothing was changed.');
-                process.exit(0);
+    // ONE prompt object for the whole run; every question reads /dev/tty
+    // when stdin is the `curl | bash` pipe.
+    const prompt = createPrompt();
+    const needPrompt = () => {
+        if (!prompt.available) {
+            console.error('');
+            console.error(require('./engine/tty').NO_TTY_MESSAGE);
+            process.exit(3);
+        }
+        return prompt;
+    };
+
+    try {
+        // CPU-only mode is always announced explicitly and confirmed before any
+        // change: the user must see that performance will be significantly lower.
+        const device = env.device || (env.gpu ? 'cuda' : 'cpu');
+        if (device === 'cpu' && !dryRun) {
+            console.log('\n=========================================================================');
+            console.log('  CPU-ONLY MODE: no supported GPU was detected.');
+            console.log('  A CPU build of PyTorch will be installed and ComfyUI will run');
+            console.log('  with --cpu. Performance will be SIGNIFICANTLY lower.');
+            console.log('  This mode is intended for the TTS/audio profile test scenario.');
+            console.log('=========================================================================');
+            if (!yes) {
+                const proceed = await needPrompt().confirm('Continue with the CPU-only installation?');
+                if (!proceed) {
+                    console.log('Aborted — nothing was changed.');
+                    process.exit(0);
+                }
             }
         }
-    }
 
-    if (dryRun) {
-        console.log('\n[dry-run] zero mutations performed');
-        return;
-    }
+        if (dryRun) {
+            console.log('\n[dry-run] zero mutations performed');
+            return;
+        }
 
-    if (plan.blocked.length > 0) {
-        console.error('\nInstallation blocked — see above for details');
-        process.exit(1);
-    }
+        if (plan.blocked.length > 0) {
+            printFinal({ blocked: plan.blocked, tool: toolCommand(flags), mode });
+            process.exitCode = 1;
+            return;
+        }
 
-    if (plan.awaiting_decisions.length > 0 && !yes) {
-        const prompt = createPrompt();
-        const decisions = {};
-        // Management tools: a decision from a previous run is kept; otherwise
-        // ask (explicit flags still win).
-        decisions.install_management_tools = await resolveToolsDecision({
-            flags, prompt, prior: priorToolsDecision(realIo, statePath),
+        // Auto-fix: one list, one question — instead of warnings.
+        const nodePick = probeMod.pickNodeBinary(realIo);
+        const port = flags['comfy-port'] ? Number(flags['comfy-port'])
+            : (mode !== 'managed' && runningComfy && runningComfy.port) ? runningComfy.port : null;
+        let probedUrl = null;
+        if (port || mode !== 'managed') {
+            const envNow = workerMod.readEnvValues(realIo, workerDir);
+            const pr = await probeMod.probeComfyUrl(realIo, {
+                port: port || Number(envNow.COMFY_PORT) || 8188,
+                prefixes: [envNow.NOTEBOOK_PATH, runningComfy && runningComfy.baseurl].filter(Boolean),
+            });
+            probedUrl = pr.url;
+        }
+        const desired = engineMod.desiredEnvWiring({
+            manifests: loadedManifests,
+            nodeBin: nodePick ? nodePick.bin : null,
+            comfyUrl: probedUrl,
+            comfyPort: port,
+            hubUrl,
+            hubUrlExplicit: !!flags['hub-url'],
         });
-        // Explicit consent flags apply to interactive runs exactly as they do
-        // to --yes runs (parity): without them a reference-grade ComfyUI
-        // source (manifest basis=unknown, D1) can never be accepted here.
+        const fixPlan = fixes.planFixes(realIo, { workerDir, sourceBundleDir: resolveRepoBundleDir(fs, repoRoot), desired });
+        let applyFixes = true;
+        if (fixPlan.additions.length > 0) {
+            console.log(`\nWorker settings to add: ${fixPlan.additions.join(', ')}`);
+        }
+        if (fixPlan.items.length > 0) {
+            console.log('\nThe installer will fix:');
+            fixPlan.items.forEach((f, i) => console.log(`  ${i + 1}. ${f.title}`));
+            if (flags['no-fix']) applyFixes = false;
+            else if (!yes) applyFixes = await needPrompt().confirm(`Fix ${fixPlan.items.length === 1 ? 'it' : `all ${fixPlan.items.length}`}?`, { defaultYes: true });
+            if (!applyFixes) console.log('Not fixing — the remaining problems are listed in the result.');
+        }
+
+        const decisions = { apply_fixes: applyFixes };
+        // Management tools (the `animastor` command): part of a normal
+        // installation; --no-tools opts out, a recorded decision is kept.
+        decisions.install_management_tools = await resolveToolsDecision({
+            flags, prompt: null, prior: priorToolsDecision(realIo, statePath),
+        });
         if (flags['accept-reference-runtime']) decisions.accept_reference_runtime = true;
         if (flags['accept-runtime-change']) decisions.accept_runtime_change = true;
         // Secret VALUES live only in this closure — never in decisions, logs,
         // state, or argv. The engine receives them via secretProvider.
         const secrets = {};
-        for (const stepId of plan.awaiting_decisions) {
-            const step = plan.steps.find((s) => s.id === stepId);
-            if (!step || !step.prompt) continue;
-            if (stepId === 'worker-key' && decisions.worker_setup === false) {
-                // worker setup was declined — the key prompt is skipped too
-                decisions.worker_key_provided = false;
-                continue;
-            }
-            if (step.kind === 'secret-prompt') {
-                // Worker Key step: real hidden input (never a Yes/No confirm —
-                // a typed token must not be misread as an answer). Only the
-                // boolean fact "provided" enters the decisions; the value
-                // itself is handed to the engine through secretProvider.
-                let provided = false;
-                for (const key of step.secret_keys || []) {
-                    const value = await prompt.secret(`Enter ${key} (hidden input)`);
-                    if (value) {
-                        secrets[key] = value;
-                        logger.registerSecret(value); // redact from ALL further output
-                        provided = true;
-                    }
+
+        if (yes) {
+            Object.assign(decisions, yesDecisions());
+        } else if (plan.awaiting_decisions.length > 0) {
+            for (const stepId of plan.awaiting_decisions) {
+                const step = plan.steps.find((s) => s.id === stepId);
+                if (!step || !step.prompt) continue;
+                if (stepId === 'worker-key' && decisions.worker_setup === false) {
+                    // worker setup was declined — the key prompt is skipped too
+                    decisions.worker_key_provided = false;
+                    continue;
                 }
-                decisions.worker_key_provided = provided;
-                continue;
+                if (step.kind === 'secret-prompt') {
+                    // Worker Key step: real hidden input (never a Yes/No confirm —
+                    // a typed token must not be misread as an answer). Only the
+                    // boolean fact "provided" enters the decisions; the value
+                    // itself is handed to the engine through secretProvider.
+                    let provided = false;
+                    for (const key of step.secret_keys || []) {
+                        const value = await needPrompt().secret(`Paste the Worker Key from the Animastor page (${key}, hidden input)`);
+                        if (value) {
+                            secrets[key] = value;
+                            logger.registerSecret(value); // redact from ALL further output
+                            provided = true;
+                        }
+                    }
+                    decisions.worker_key_provided = provided;
+                    continue;
+                }
+                // "Cannot be determined automatically — review": there is
+                // nothing to choose; continue with the user's ComfyUI as is.
+                if (stepId === 'comfyui-update' && (step.prompt.options || [])[0] === 'Review') {
+                    console.log(`${String(step.prompt.question).split('\n')[0]} — continuing with the installed ComfyUI as is.`);
+                    decisions.comfyui_update = 'yes';
+                    continue;
+                }
+                const answer = await needPrompt().confirm(stepQuestion(step), { defaultYes: true });
+                if (step.consent === 'accept_reference_runtime') {
+                    decisions.accept_reference_runtime = answer;
+                    continue;
+                }
+                if (stepId === 'comfyui-update') decisions.comfyui_update = answer ? 'yes' : 'no';
+                else if (stepId === 'custom-nodes') decisions.install_custom_nodes = answer;
+                else if (stepId === 'models') decisions.install_models = answer;
+                else if (stepId === 'workflows') decisions.workflows = answer ? 'all' : 'none';
+                else if (stepId === 'worker-setup') decisions.worker_setup = answer;
+                else if (stepId === 'worker-key') decisions.worker_key_provided = answer;
             }
-            const answer = await prompt.confirm(step.prompt.question);
-            if (step.consent === 'accept_reference_runtime') {
-                decisions.accept_reference_runtime = answer;
-                continue;
-            }
-            if (stepId === 'comfyui-update') decisions.comfyui_update = answer ? 'yes' : 'no';
-            else if (stepId === 'custom-nodes') decisions.install_custom_nodes = answer;
-            else if (stepId === 'models') decisions.install_models = answer;
-            else if (stepId === 'workflows') decisions.workflows = answer ? 'all' : 'none';
-            else if (stepId === 'worker-setup') decisions.worker_setup = answer;
-            else if (stepId === 'worker-key') decisions.worker_key_provided = answer;
         }
-        prompt.close();
+        if (decisions.worker_setup === undefined) decisions.worker_setup = true;
+
+        // doctor --new-key: the current key was rejected — ask for the new one.
+        let replaceWorkerKey = false;
+        if (flags['new-key']) {
+            const value = await needPrompt().secret('Paste the NEW Worker Key from Animastor → Settings → Workers (hidden input)');
+            if (value) {
+                secrets.ANIMASTOR_WORKER_TOKEN = value;
+                logger.registerSecret(value);
+                replaceWorkerKey = true;
+            }
+        }
 
         // Re-resolve and rebuild the plan with the recorded decisions — one
         // call shape, so the rebuilt plan always has a resolution report.
         const { plan: plan2 } = resolveAndPlan({ manifests: loadedManifests, env, mode, decisions });
-
         if (plan2.awaiting_decisions.length > 0) {
-            console.error('\nStill awaiting decisions after prompts — cannot proceed');
+            console.error(`\nStill awaiting decisions after prompts (${plan2.awaiting_decisions.join(', ')}) — cannot proceed`);
             process.exit(1);
         }
         if (plan2.blocked.length > 0) {
-            console.error('\nInstallation blocked after decisions — see above');
-            process.exit(1);
+            printFinal({ blocked: plan2.blocked, tool: toolCommand(flags), mode });
+            process.exitCode = 1;
+            return;
         }
 
         const result = await runInstallation({
             manifests: loadedManifests, mode, io,
             roots: { comfyuiRoot: root, workerDir, statePath, repoRoot, hubUrl, toolsDir: resolveToolsDir(flags) },
             decisions, secretProvider: makeSecretProvider(secrets),
-            logger, crypto, env, dryRun, options: { ...installOptions(flags), term: screen },
+            logger, crypto, env, dryRun,
+            options: {
+                ...installOptions(flags), term: screen,
+                runningComfy: mode !== 'managed' ? runningComfy : null,
+                hubUrlExplicit: !!flags['hub-url'],
+                nodeBinary: nodePick,
+                replaceWorkerKey,
+            },
         });
-        printResult(result);
-    } else {
-        // All decisions pre-set or no decisions needed
-        const decisions = {};
-        if (yes) {
-            decisions.comfyui_update = 'yes';
-            decisions.install_custom_nodes = true;
-            decisions.install_models = true;
-            decisions.workflows = 'all';
-            decisions.worker_setup = true;
-            decisions.worker_key_provided = true;
-            if (flags['accept-reference-runtime']) decisions.accept_reference_runtime = true;
-            if (flags['accept-runtime-change']) decisions.accept_runtime_change = true;
+        printResult(result, { flags, mode });
+    } catch (err) {
+        if (err instanceof NoTerminalError) {
+            console.error('');
+            console.error(err.message);
+            process.exit(3);
         }
-        decisions.install_management_tools = await resolveToolsDecision({
-            flags, prompt: null, prior: priorToolsDecision(realIo, statePath),
-        });
-        const result = await runInstallation({
-            manifests: loadedManifests, mode, io,
-            roots: { comfyuiRoot: root, workerDir, statePath, repoRoot, hubUrl, toolsDir: resolveToolsDir(flags) },
-            decisions, logger, crypto, env, dryRun, options: { ...installOptions(flags), term: screen },
-        });
-        printResult(result);
+        throw err;
+    } finally {
+        prompt.close();
     }
 }
 
@@ -768,26 +867,43 @@ async function cmdVerify(flags) {
     console.log(ver.text);
 }
 
-function printResult(result) {
-    if (result.verification) {
-        console.log(`\nRESULT: ${result.verification.status}`);
-    } else {
-        console.log(`\nRESULT: ${result.status.toUpperCase()}`);
-    }
+/**
+ * Final block of an install/doctor run: warnings, then ONE result section —
+ * either every check ✓ and "Done", or one line of cause + one exact fix
+ * command per ✗ (no "scroll up").
+ */
+function printResult(result, { flags = {}, mode = null } = {}) {
     if (result.warnings.length > 0) {
         console.log('\nWarnings:');
         for (const w of result.warnings) console.log(`  ! ${w}`);
     }
+    const tool = (result.results && result.results.management_tools && result.results.management_tools.command) || toolCommand(flags);
+    const extra = [];
+    for (const b of result.blocked || []) {
+        let fix = result.remediation && result.remediation.command ? `${result.remediation.command} && ${tool} doctor` : `${tool} doctor`;
+        if (/accept_runtime_change/.test(b.reason || '')) fix = `if ComfyUI already works, this can be ignored; to let the installer replace the runtime run: ${tool} doctor --accept-runtime-change`;
+        else if (/accept_reference_runtime/.test(b.reason || '')) fix = `${tool} doctor --accept-reference-runtime`;
+        extra.push({ ok: false, label: `Step "${b.step}"`, detail: b.reason, fix });
+    }
+    if (result.remediation && (result.blocked || []).length === 0) {
+        extra.push({
+            ok: false,
+            label: 'Host prerequisite',
+            detail: `${result.remediation.summary || result.remediation.code}${result.remediation.package ? ` (package ${result.remediation.package})` : ''}`,
+            fix: result.remediation.command ? `${result.remediation.command} && ${tool} doctor` : `${tool} doctor`,
+        });
+    }
+    const summary = renderFinalSummary({ verification: result.verification, e2e: result.e2e || [], extra, tool, mode: mode || result.mode });
+    console.log(summary.text);
     // A failed/blocked installation must be visible in the exit code so
     // scripts (and the E2E smoke test) can react.
-    if (result.status === 'failed' || result.status === 'blocked') process.exitCode = 1;
-    if (result.remediation) {
-        console.log('\nRemediation:');
-        if (result.remediation.summary) console.log(`  ${result.remediation.summary}`);
-        if (result.remediation.package) console.log(`  Required host package: ${result.remediation.package}`);
-        if (result.remediation.command) console.log(`  Install it with: ${result.remediation.command}`);
-        console.log('  Then re-run the installer.');
-    }
+    if (!summary.ok || result.status === 'failed' || result.status === 'blocked') process.exitCode = 1;
+}
+
+/** Result block for a plan that is blocked before anything ran. */
+function printFinal({ blocked = [], tool = 'animastor', mode = null }) {
+    const extra = blocked.map((b) => ({ ok: false, label: `Step "${b.step || b.id || 'plan'}"`, detail: b.reason, fix: `${tool} doctor` }));
+    console.log(renderFinalSummary({ extra, tool, mode }).text);
 }
 
 /**
@@ -992,15 +1108,128 @@ async function cmdRebootComfyUI(flags) {
 }
 
 // ---------------------------------------------------------------------------
+// animastor start | stop | logs | doctor
+// ---------------------------------------------------------------------------
+
+/** True when this installation owns its ComfyUI (managed mode). */
+function ownsComfyUI(targets) {
+    const st = targets.state;
+    return !!(st && ((st.components && st.components.comfyui && st.components.comfyui.owned) || st.mode === 'managed'));
+}
+
+/**
+ * animastor start — bring the installation up and PROVE it: the managed
+ * ComfyUI (never the user's own), then the worker; READY only after the
+ * worker logged "ComfyUI ready" and the hub confirmed the heartbeat.
+ */
+async function cmdStart(flags) {
+    const io = createRealIo();
+    const targets = managementTargetsOrExit(io, flags, 'Animastor start');
+    if (!targets) return;
+    if (!guardManagementAccess(io, targets)) return;
+    const screen = createScreen();
+    const envVals = workerMod.readEnvValues(io, targets.workerDir);
+    const port = targets.port || Number(envVals.COMFY_PORT) || 8188;
+    let comfyUrl = envVals.COMFY_URL || `http://127.0.0.1:${port}`;
+    const managed = ownsComfyUI(targets);
+    let stats = await comfyuiMod.systemStats(io, comfyUrl);
+    if (!stats && managed && targets.comfyuiRoot && io.fs.existsSync(targets.comfyuiRoot)) {
+        await screen.withBusy('Starting ComfyUI', async () => {
+            comfyuiMod.startComfyUI(io, { root: targets.comfyuiRoot, port, device: targets.device });
+            const up = await comfyuiMod.waitForApi(io, `http://127.0.0.1:${port}`, { timeoutMs: flags['verify-timeout-ms'] ? Number(flags['verify-timeout-ms']) : 120000 });
+            if (up.ok) comfyUrl = `http://127.0.0.1:${port}`;
+        });
+        stats = await comfyuiMod.systemStats(io, comfyUrl);
+    }
+    let start = null;
+    let ready = null;
+    if (stats) {
+        start = workerMod.startWorker(io, { workerDir: targets.workerDir });
+        if (start.started && start.alive) {
+            if (start.already_running) screen.print(`worker already running (pid ${start.pid})`);
+            ready = await screen.withBusy('Waiting for the worker (ComfyUI ready → hub heartbeat)', () => workerMod.waitForWorkerReady(io, {
+                workerDir: targets.workerDir, pid: start.pid, logFile: start.logFile, logOffset: start.logOffset || 0,
+            }));
+        }
+    }
+    const checks = await engineMod.endToEndChecks(io, {
+        mode: managed ? 'managed' : 'existing', comfyUrl: stats ? comfyUrl : null, comfyPort: port,
+        hubUrl: envVals.HUB_URL || resolveHubUrl(flags), workerWanted: !!stats, workerStart: start, workerReady: ready,
+        tool: toolCommand(flags),
+    });
+    const summary = renderFinalSummary({ e2e: checks, tool: toolCommand(flags), mode: managed ? 'managed' : 'existing' });
+    for (const line of summary.text.split('\n')) screen.print(line);
+    process.exitCode = summary.ok ? 0 : 1;
+}
+
+/** animastor stop — stop this installation's worker (and its managed ComfyUI; never the user's own). */
+async function cmdStop(flags) {
+    const io = createRealIo();
+    const targets = managementTargetsOrExit(io, flags, 'Animastor stop');
+    if (!targets) return;
+    if (!guardManagementAccess(io, targets)) return;
+    const w = await workerMod.stopManagedWorker(io, { workerDir: targets.workerDir });
+    console.log(w.stopped ? `✓ worker stopped (pid ${w.pid})` : `· worker: ${w.reason}`);
+    if (ownsComfyUI(targets) && targets.comfyuiRoot) {
+        const pids = comfyuiMod.findManagedComfyUIPids(io, { root: targets.comfyuiRoot });
+        for (const pid of pids) {
+            try { process.kill(pid, 'SIGTERM'); console.log(`✓ ComfyUI stopped (pid ${pid})`); } catch (_) { /* gone */ }
+        }
+        if (pids.length === 0) console.log('· ComfyUI: not running');
+    } else {
+        console.log('· ComfyUI: not managed by Animastor — left running');
+    }
+}
+
+/** animastor logs [-f] [--lines N] — the worker log of this installation. */
+async function cmdLogs(flags) {
+    const io = createRealIo();
+    const targets = managementTargetsOrExit(io, flags, 'Animastor logs');
+    if (!targets) return;
+    const file = workerMod.workerLogPath(targets.workerDir);
+    if (!fs.existsSync(file)) {
+        console.log(`no worker log yet (${file}) — start the worker: ${toolCommand(flags)} start`);
+        process.exitCode = 1;
+        return;
+    }
+    const n = String(Number(flags.lines) > 0 ? Number(flags.lines) : 100);
+    console.error(`==> ${file}`);
+    const { spawn } = require('child_process');
+    await new Promise((resolve) => {
+        const child = spawn('tail', flags.follow ? ['-n', n, '-F', file] : ['-n', n, file], { stdio: 'inherit' });
+        child.on('close', (code) => { process.exitCode = code || 0; resolve(); });
+    });
+}
+
+async function cmdDoctor(flags) {
+    return cmdInstall(flags, { doctor: true });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
     const args = parseArgs(process.argv);
     const pkg = require('../../package.json');
-    console.log(`animastor-installer v${pkg.version} (platform: ${PLATFORM_RUNTIME.platform}, deployment: ${PLATFORM_RUNTIME.deployment})`);
+    // install/doctor print the full banner; the everyday tool commands stay quiet.
+    if (!['install', 'doctor', 'start', 'stop', 'logs', 'status'].includes(args.command)) {
+        console.log(`animastor-installer v${pkg.version} (platform: ${PLATFORM_RUNTIME.platform}, deployment: ${PLATFORM_RUNTIME.deployment})`);
+    }
     printPlatformNotices();
     switch (args.command) {
+        case 'start':
+            await cmdStart(args.flags);
+            break;
+        case 'stop':
+            await cmdStop(args.flags);
+            break;
+        case 'logs':
+            await cmdLogs(args.flags);
+            break;
+        case 'doctor':
+            await cmdDoctor(args.flags);
+            break;
         case 'detect':
             await cmdDetect(args.flags);
             break;
@@ -1035,7 +1264,7 @@ async function main() {
             await cmdRebootComfyUI(args.flags);
             break;
         default:
-            console.error('Usage: animastor-installer <detect|plan|install|verify|validate|resume|uninstall|status|monitor|reboot-worker|reboot-comfyui> [options]');
+            console.error('Usage: animastor-installer <detect|plan|install|verify|validate|resume|uninstall|start|stop|status|logs|doctor|monitor|reboot-worker|reboot-comfyui> [options]');
             console.error('  --profile P[,P2]   Generation profile id');
             console.error('  --mode MODE        managed | existing | shared');
             console.error('  --root PATH        ComfyUI root (default: ~/ComfyUI)');
@@ -1046,8 +1275,9 @@ async function main() {
             console.error('  managed mode starts ComfyUI + worker automatically and picks');
             console.error('  a free port when 8188 is taken; opt out:');
             console.error('    --no-start-comfy  --no-start-worker  --comfy-port N');
-            console.error('  management tools (installed next to the worker, ~/animastor/tools):');
-            console.error('    status | monitor | reboot-worker | reboot-comfyui');
+            console.error('  management (the `animastor` command in PATH):');
+            console.error('    animastor start | stop | status | logs [-f] | doctor [--new-key]');
+            console.error('    (also: monitor | reboot-worker | reboot-comfyui)');
             console.error('    (--state/--root/--worker-dir/--port override discovery)');
             console.error('    installer flags: --install-tools / --no-tools / --tools-dir PATH');
             console.error('  uninstall flags:');
@@ -1064,4 +1294,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdVerify, cmdValidateManifests, cmdResume, cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan, makeSecretProvider, resolveToolsDecision, resolveToolsDir, PLATFORM_RUNTIME, printPlatformNotices, homeDir };
+module.exports = { stepQuestion, parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor, printResult, cmdVerify, cmdValidateManifests, cmdResume, cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan, makeSecretProvider, resolveToolsDecision, resolveToolsDir, PLATFORM_RUNTIME, printPlatformNotices, homeDir };

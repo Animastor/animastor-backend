@@ -77,11 +77,40 @@ function entryLabel(e) {
     }
 }
 
+/** Human size (GiB/MiB) or null. */
+function fmtBytes(n) {
+    if (typeof n !== 'number' || !(n > 0)) return null;
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GiB`;
+    return `${Math.max(1, Math.round(n / 1024 ** 2))} MiB`;
+}
+
+/**
+ * Why a model is listed as missing and how much will be downloaded — the
+ * plan shows ONLY what is really absent (an incomplete repo names its
+ * missing files; files on disk are never re-downloaded).
+ */
+function modelMissingDetail(e) {
+    const size = fmtBytes(e.missing_bytes_approx);
+    if (e.reason === 'incomplete' && Array.isArray(e.missing_files)) {
+        const files = e.missing_files.length > 3
+            ? `${e.missing_files.slice(0, 3).join(', ')} +${e.missing_files.length - 3} more`
+            : e.missing_files.join(', ');
+        return `incomplete — missing ${files}${size ? ` (≈ ${size})` : ' (size unknown)'}`;
+    }
+    return `not found${size ? ` (≈ ${size} download)` : ''}`;
+}
+
 function actionLine(e) {
     switch (e.kind) {
         case 'custom_node': return `Install custom node ${e.name || e.id}`;
         case 'model':
-        case 'model_repo': return `Download model ${e.name || e.id}`;
+        case 'model_repo': {
+            const size = fmtBytes(e.missing_bytes_approx);
+            if (e.reason === 'incomplete' && Array.isArray(e.missing_files)) {
+                return `Download ${e.missing_files.length} missing file(s) of ${e.name || e.id}${size ? ` (≈ ${size})` : ''}`;
+            }
+            return `Download model ${e.name || e.id}${size ? ` (≈ ${size})` : ''}`;
+        }
         case 'workflow': return `Download optional profile workflow ${e.name || e.id}`;
         case 'worker': return `Install Animastor worker bundle (${e.worker_type})`;
         case 'runtime': return `Install ${RUNTIME_LABELS[e.component] || e.component}`;
@@ -603,11 +632,20 @@ function buildInstallPlan({ report, manifests = [], decisions = {} }) {
 // Rendering
 // ---------------------------------------------------------------------------
 
-function renderPlanText(plan, report) {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.questions=true] render the pending questions at the
+ *   end (the non-interactive `plan` command). The interactive installer asks
+ *   them itself — printing them here too was the "double menu".
+ * @param {boolean} [opts.header=true] Profile/Mode header lines.
+ */
+function renderPlanText(plan, report, { questions = true, header = true } = {}) {
     const lines = [];
-    lines.push(`Profile: ${plan.profiles.join(' + ')}`);
-    lines.push(`Mode: ${plan.mode}`);
-    lines.push('');
+    if (header) {
+        lines.push(`Profile: ${plan.profiles.join(' + ')}`);
+        lines.push(`Mode: ${plan.mode}`);
+        lines.push('');
+    }
 
     const hw = report.hardware || {};
     if (hw.device === 'cpu') {
@@ -639,7 +677,8 @@ function renderPlanText(plan, report) {
         } else if (e.kind === 'worker') {
             detected.push(`\u2713 ${entryLabel(e)}`);
         } else if (e.kind === 'model' || e.kind === 'model_repo') {
-            detected.push(`\u2713 ${entryLabel(e)}`);
+            const loc = e.found && e.found.location ? ` (${e.found.location.base}, extra_model_paths.yaml)` : '';
+            detected.push(`\u2713 ${entryLabel(e)}${loc}`);
         }
     }
     if (detected.length > 0) {
@@ -654,7 +693,10 @@ function renderPlanText(plan, report) {
     const missing = report.entries.filter((e) => e.status === 'missing' && e.kind !== 'workflow');
     if (missing.length > 0) {
         lines.push('Missing:');
-        for (const e of missing) lines.push(`\u2717 ${entryLabel(e)}`);
+        for (const e of missing) {
+            const detail = (e.kind === 'model' || e.kind === 'model_repo') ? ` — ${modelMissingDetail(e)}` : '';
+            lines.push(`\u2717 ${entryLabel(e)}${detail}`);
+        }
         lines.push('');
     }
 
@@ -684,10 +726,14 @@ function renderPlanText(plan, report) {
         lines.push('');
     }
 
-    // Download size summary
-    const modelsStep = plan.steps.find((s) => s.id === 'models');
-    if (modelsStep && modelsStep.estimated_bytes) {
-        const est = modelsStep.estimated_bytes;
+    // Download size summary — what will REALLY be downloaded: the missing
+    // files of incomplete repos, the full size only for absent models.
+    const toDownload = report.entries.filter((e) => (e.kind === 'model' || e.kind === 'model_repo') && e.status === 'missing' && e.action === 'install');
+    if (toDownload.length > 0) {
+        const est = {
+            total_bytes: toDownload.reduce((a, e) => a + (typeof e.missing_bytes_approx === 'number' ? e.missing_bytes_approx : 0), 0),
+            unknown_count: toDownload.filter((e) => typeof e.missing_bytes_approx !== 'number').length,
+        };
         if (est.total_bytes > 0 || est.unknown_count > 0) {
             lines.push('Download size:');
             if (est.total_bytes > 0) lines.push(`  ${formatBytes(est.total_bytes)}`);
@@ -719,7 +765,9 @@ function renderPlanText(plan, report) {
     }
 
     const prompts = plan.steps.filter((s) => s.prompt && s.awaiting_decision);
-    if (prompts.length > 0) {
+    if (!questions) {
+        // the caller asks the questions interactively
+    } else if (prompts.length > 0) {
         for (const p of prompts) {
             lines.push(p.prompt.question);
             lines.push(`[${p.prompt.options.join('] [')}]`);

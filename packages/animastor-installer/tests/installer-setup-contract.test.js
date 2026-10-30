@@ -589,19 +589,18 @@ describe('Setup contract — projections (unit)', () => {
                 origin: 'https://app.animastor.org', probe: PROBE_OK,
             });
             expect(i.steps.map((s) => s.id)).to.deep.equal([
-                'download-bootstrap', 'run-bootstrap', 'verify',
+                'run-bootstrap', 'verify',
             ]);
-            const download = i.steps.find((s) => s.id === 'download-bootstrap');
-            // profile/mode are embedded in the download URL — nothing to type
-            expect(download.code).to.contain('https://app.animastor.org/gpu/installer?profile=image%2Fqwen-image&mode=managed');
             const run = i.steps.find((s) => s.id === 'run-bootstrap');
-            expect(run.code).to.equal('bash animastor-installer.sh');
+            // ONE command; the URL is double-quoted so the shell never treats
+            // `&` as "background" (profile/mode/platform would be lost)
+            expect(run.code).to.equal('curl -fsSL "https://app.animastor.org/gpu/installer?profile=image%2Fqwen-image&mode=managed&platform=linux" | bash');
             // the run body points at the interactive Worker Key prompt
             expect(run.body).to.match(/Worker Key/i);
             // verify is a simple last step: page heartbeat, CLI is optional
             const verify = i.steps.find((s) => s.id === 'verify');
             expect(verify.code).to.equal(undefined);
-            expect(i.verify_command).to.contain('status.sh');
+            expect(i.verify_command).to.contain('animastor status');
             // installer metadata for the UI (version primary, sha secondary)
             expect(i.installer.version).to.equal(sc.getInstallerVersion());
             expect(i.installer.sha256).to.equal('c'.repeat(64));
@@ -617,8 +616,17 @@ describe('Setup contract — projections (unit)', () => {
             expect(prereq.requirements.comfyui).to.be.a('string');
             expect(prereq.requirements.python).to.contain('3.10');
             expect(prereq.requirements.torch).to.contain('CUDA');
-            const download = i.steps.find((s) => s.id === 'download-bootstrap');
-            expect(download.code).to.contain('mode=existing');
+            const run = i.steps.find((s) => s.id === 'run-bootstrap');
+            expect(run.code).to.contain('mode=existing');
+            expect(run.code).to.match(/^curl -fsSL "[^"]+" \| bash$/);
+        });
+
+        it('bootstrapOneLiner quotes the URL and refuses characters that would break the quoting', () => {
+            expect(sc.bootstrapOneLiner('https://h/gpu/installer?profile=a%2Fb&mode=existing&platform=linux'))
+                .to.equal('curl -fsSL "https://h/gpu/installer?profile=a%2Fb&mode=existing&platform=linux" | bash');
+            for (const bad of ['https://h/x"; rm -rf ~', 'https://h/$(id)', 'https://h/`id`', 'https://h/a b', '']) {
+                expect(() => sc.bootstrapOneLiner(bad)).to.throw();
+            }
         });
 
         it('windows native (Preview) → PowerShell bootstrap, never Linux commands', () => {
@@ -645,7 +653,7 @@ describe('Setup contract — projections (unit)', () => {
             expect(json).to.not.contain('ANIMASTOR_WORKER_TOKEN=wrk');
         });
 
-        it('linux native keeps the stable flow unchanged (curl + bash, explicit platform param)', () => {
+        it('linux native: one quoted curl | bash command with the explicit platform param', () => {
             const i = sc.buildInstructions({
                 profileIds: ['image/qwen-image'], platform: 'linux', deployment: 'native', mode: 'managed',
                 origin: 'https://app.animastor.org', probe: PROBE_OK,
@@ -654,11 +662,12 @@ describe('Setup contract — projections (unit)', () => {
             expect(i.deployment).to.equal('native');
             expect(i.availability).to.equal('stable');
             expect(i.notice).to.equal(null);
-            const download = i.steps.find((s) => s.id === 'download-bootstrap');
-            expect(download.code).to.contain('curl -fsSL -o animastor-installer.sh');
-            expect(download.code).to.contain('platform=linux');
-            expect(i.steps.find((s) => s.id === 'run-bootstrap').code).to.equal('bash animastor-installer.sh');
-            expect(i.verify_command).to.contain('status.sh');
+            expect(i.steps.find((s) => s.id === 'download-bootstrap')).to.equal(undefined);
+            const code = i.steps.find((s) => s.id === 'run-bootstrap').code;
+            expect(code.startsWith('curl -fsSL "')).to.equal(true);
+            expect(code).to.contain('platform=linux"');
+            expect(code.endsWith('" | bash')).to.equal(true);
+            expect(i.verify_command).to.contain('animastor status');
         });
 
         it('docker deployment (Experimental) → container flow; profile/mode separate; key never in commands', () => {
@@ -795,9 +804,9 @@ describe('Setup contract — projections (unit)', () => {
             const i = sc.buildInstructions({
                 profileIds: ['audio/qwen-tts', 'image/qwen-image'], platform: 'linux', mode: 'shared', probe: PROBE_OK,
             });
-            const download = i.steps.find((s) => s.id === 'download-bootstrap');
-            expect(download.code).to.contain('profile=audio%2Fqwen-tts%2Cimage%2Fqwen-image');
-            expect(download.code).to.contain('mode=shared');
+            const run = i.steps.find((s) => s.id === 'run-bootstrap');
+            expect(run.code).to.contain('profile=audio%2Fqwen-tts%2Cimage%2Fqwen-image');
+            expect(run.code).to.contain('mode=shared');
         });
 
         it('isolated mode keeps the explicit bundle flow (one run per profile, distinct roots)', () => {

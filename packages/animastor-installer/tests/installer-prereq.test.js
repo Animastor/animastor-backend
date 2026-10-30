@@ -229,7 +229,10 @@ function runEngine(io, log, { decisions = null, options = {}, manifests = null }
         secretProvider: async (name) => (name === 'ANIMASTOR_WORKER_TOKEN' ? 'wrk.test-token' : null),
         logger: log,
         crypto: require('crypto'),
-        options: { interruptGuard: false, ...options },
+        // The mock io cannot run a worker process (no log, no pid) — these
+        // suites cover runtime/ownership; worker start + readiness has its
+        // own suite (installer-worker-ready.test.js).
+        options: { interruptGuard: false, startWorker: false, ...options },
     });
 }
 

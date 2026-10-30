@@ -331,6 +331,31 @@ async function listModelScopeFiles(io, repository, revision = 'master', token = 
  * @param {object} opts { root, getHeader, retries, retryDelayMs, log, expectedFiles, checksums }
  * @returns {{ status, files?, reason?, attempts }}
  */
+/**
+ * Fill `missing_bytes_approx` of incomplete ModelScope repos in a resolver
+ * report from the registry listing (real sizes of exactly the missing files)
+ * so the plan shows what will really be downloaded. Best effort: a failed
+ * listing leaves the size unknown — never invented.
+ */
+async function annotateMissingModelSizes(io, report, manifests) {
+    const deps = new Map();
+    for (const m of manifests) for (const d of m.dependencies || []) deps.set(d.id, d);
+    for (const e of report.entries || []) {
+        if (e.kind !== 'model_repo' || e.reason !== 'incomplete' || !Array.isArray(e.missing_files)) continue;
+        const dep = deps.get(e.id);
+        const src = (dep && dep.source) || {};
+        if (src.kind !== 'modelscope' || !src.repository) continue;
+        try {
+            const listing = await listModelScopeFiles(io, src.repository, src.revision || 'master', process.env.MODELSCOPE_API_TOKEN || null);
+            if (!listing.ok) continue;
+            const want = new Set(e.missing_files.map(normPath));
+            const total = listing.files.filter((f) => want.has(normPath(f.Path))).reduce((a, f) => a + (f.Size > 0 ? f.Size : 0), 0);
+            if (total > 0) e.missing_bytes_approx = total;
+        } catch (_) { /* size stays unknown */ }
+    }
+    return report;
+}
+
 async function downloadModelScopeRepo(io, spec, opts = {}) {
     const {
         root = '',
@@ -502,6 +527,7 @@ async function downloadModelScopeRepo(io, spec, opts = {}) {
 }
 
 module.exports = {
+    annotateMissingModelSizes,
     SIZE_TOLERANCE,
     verifyFile,
     downloadArtifact,

@@ -38,10 +38,20 @@ function createRealIo() {
             chmodSync: (p, mode) => fs.chmodSync(p, mode),
             statSync: (p) => {
                 const s = fs.statSync(p);
-                return { size: s.size, isFile: s.isFile(), isDirectory: s.isDirectory(), uid: s.uid, gid: s.gid };
+                return { size: s.size, isFile: s.isFile(), isDirectory: s.isDirectory(), uid: s.uid, gid: s.gid, mtimeMs: s.mtimeMs };
             },
             readdirSync: (p) => fs.readdirSync(p),
             readlinkSync: (p) => fs.readlinkSync(p),
+            symlinkSync: (target, p) => fs.symlinkSync(target, p),
+            /** lstat without following links; null when the path does not exist. */
+            lstatSync: (p) => {
+                try {
+                    const s = fs.lstatSync(p);
+                    return { isSymbolicLink: s.isSymbolicLink(), isFile: s.isFile(), isDirectory: s.isDirectory() };
+                } catch (_) {
+                    return null;
+                }
+            },
         },
         /** Synchronous command execution (git, pip, npm, nvidia-smi…). */
         exec(command, args = [], opts = {}) {
@@ -243,6 +253,7 @@ function createRealIo() {
 function createMemoryFs(initial = {}) {
     const files = new Map(); // path -> { data: Buffer|string, mode }
     const dirs = new Set(['/']);
+    const links = new Map(); // path -> target (symlinks)
     for (const [p, data] of Object.entries(initial)) {
         files.set(norm(p), { data, mode: 0o644 });
         let d = path.dirname(norm(p));
@@ -288,7 +299,8 @@ function createMemoryFs(initial = {}) {
             if (opts && opts.recursive) {
                 let d = target;
                 const stack = [];
-                while (d && d !== '/' && !dirs.has(d)) { stack.push(d); d = path.dirname(d); }
+                // guard: dirname('.') === '.' — the loop must always make progress
+                while (d && d !== '/' && !dirs.has(d) && d !== path.dirname(d)) { stack.push(d); d = path.dirname(d); }
                 for (const dd of stack.reverse()) dirs.add(dd);
                 return;
             }
@@ -327,6 +339,7 @@ function createMemoryFs(initial = {}) {
             throw Object.assign(new Error(`ENOENT: ${a}`), { code: 'ENOENT' });
         },
         unlinkSync: (p) => {
+            if (links.has(norm(p))) { links.delete(norm(p)); return; }
             if (!files.has(norm(p))) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
             files.delete(norm(p));
         },
@@ -387,6 +400,21 @@ function createMemoryFs(initial = {}) {
             }
             return Array.from(out).sort();
         },
+        symlinkSync: (target, p) => {
+            assertParent(p);
+            if (files.has(norm(p)) || links.has(norm(p))) throw Object.assign(new Error(`EEXIST: ${p}`), { code: 'EEXIST' });
+            links.set(norm(p), String(target));
+        },
+        readlinkSync: (p) => {
+            if (!links.has(norm(p))) throw Object.assign(new Error(`EINVAL: ${p}`), { code: 'EINVAL' });
+            return links.get(norm(p));
+        },
+        lstatSync: (p) => {
+            if (links.has(norm(p))) return { isSymbolicLink: true, isFile: false, isDirectory: false };
+            if (files.has(norm(p))) return { isSymbolicLink: false, isFile: true, isDirectory: false };
+            if (dirs.has(norm(p))) return { isSymbolicLink: false, isFile: false, isDirectory: true };
+            return null;
+        },
     };
 }
 
@@ -415,6 +443,9 @@ function createDryRunIo(io) {
             rmdirSync: guard('fs.rmdirSync'),
             copyFileSync: guard('fs.copyFileSync'),
             chmodSync: guard('fs.chmodSync'),
+            symlinkSync: guard('fs.symlinkSync'),
+            readlinkSync: io.fs.readlinkSync,
+            lstatSync: io.fs.lstatSync,
         },
         exec: guard('exec'),
         spawnDaemon: guard('spawnDaemon'),

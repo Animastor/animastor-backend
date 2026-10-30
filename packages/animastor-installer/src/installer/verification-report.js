@@ -84,11 +84,13 @@ function buildVerificationReport({ report, live = {} }) {
         throw new Error('buildVerificationReport requires a resolution report');
     }
     const lines = [];
+    const checks = [];
     let fails = 0;
     let warns = 0;
 
     const push = (verdict, label, detail) => {
         lines.push(line(verdict, label, detail));
+        checks.push({ verdict, label, detail: detail || null });
         if (verdict === false) fails += 1;
         else if (verdict === null) warns += 1;
     };
@@ -212,7 +214,7 @@ function buildVerificationReport({ report, live = {} }) {
             : 'INSTALLATION INCOMPLETE';
 
     const text = [header, '', ...lines].join('\n');
-    return { status, fails, warns, lines, text };
+    return { status, fails, warns, lines, checks, text };
 }
 
 module.exports = {

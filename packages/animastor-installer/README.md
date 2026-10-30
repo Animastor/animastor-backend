@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.1.1, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.0, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -49,6 +49,34 @@ candidates (repo root + tarball prefix), never package-locally.
 ## CLI
 
 `animastor-installer` (package `bin` → `src/installer/cli.js`).
+
+Normal use is the hub bootstrap — one command from the Animastor setup page:
+
+```
+curl -fsSL "https://animastor.org/gpu/installer?profile=…&mode=…&platform=linux" | bash
+```
+
+- every question and the hidden Worker Key are read from `/dev/tty` (stdin is
+  the piped script); without a terminal the installer stops with a clear
+  message (exit 3) unless `--yes` is given;
+- no `--mode` → `existing` when a ComfyUI is found (`~/ComfyUI` or the root
+  of the user's running ComfyUI process), else `managed`;
+- problems of an existing installation (worker type, Node.js, ComfyUI URL /
+  notebook prefix, outdated worker bundle, missing worker dependencies) are
+  listed once and fixed after ONE question (`--yes` = fix, `--no-fix` = keep);
+- the run ends with a RESULT block: ComfyUI API → worker "ComfyUI ready" →
+  hub heartbeat; every ✗ is one cause line plus one fix command.
+
+The installer also links the `animastor` command (`~/.local/bin`, or
+`/usr/local/bin` for root) to a persistent copy of itself
+(`~/animastor/installer`):
+
+```
+animastor start | stop | status | logs [-f] | doctor [--new-key]
+```
+
+`doctor` re-runs the installation idempotently for the recorded profile(s):
+nothing that is present is downloaded again.
 
 ## Manifest resolution (MANIFEST_ROOT contract)
 

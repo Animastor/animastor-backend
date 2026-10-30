@@ -332,7 +332,10 @@ async function runInstallation(args) {
             }
         }
         if (options.startComfyui === undefined) options.startComfyui = (mode === 'managed');
-        if (options.startWorker === undefined) options.startWorker = (mode !== 'existing') && (decisions.worker_setup !== false);
+        // The worker is OURS in every mode (existing mode only leaves the
+        // user's ComfyUI alone) — an installed-but-stopped worker is exactly
+        // the "installed, never online" failure.
+        if (options.startWorker === undefined) options.startWorker = decisions.worker_setup !== false;
         // Never wire this install to a FOREIGN service on the default port.
         if (options.comfyPort !== undefined) {
             const ours = st.comfyui_runtime && st.comfyui_runtime.port === options.comfyPort;
@@ -341,6 +344,11 @@ async function runInstallation(args) {
                 log.info(`remembered port ${options.comfyPort} is now used by another service — picking a new one`);
                 options.comfyPort = undefined;
             }
+        }
+        if (options.comfyPort === undefined && mode !== 'managed' && options.runningComfy && options.runningComfy.port) {
+            // existing/shared: the user's running ComfyUI IS the target — use
+            // its real --port instead of assuming 8188.
+            options.comfyPort = options.runningComfy.port;
         }
         if (options.comfyPort === undefined) {
             options.comfyPort = await autoPickComfyPort(io, { st, mode, log });
@@ -689,10 +697,21 @@ async function runInstallation(args) {
                     } else if (strategy.mechanism === 'installer_preload') {
                         // D2 closed: installer pre-downloads ModelScope repos
                         // Use dedicated ModelScope snapshot download (not single-file downloadArtifact)
-                        const expectedFiles = dep.expected_files || null;
+                        // An incomplete repo downloads ONLY its missing files —
+                        // files already on disk are never re-hashed or
+                        // re-downloaded (a different-but-working revision must
+                        // not trigger a multi-GB re-download) — and next to the
+                        // found files when they live in an extra_model_paths
+                        // folder.
+                        const entry = report.entries.find((e) => e.id === spec.id) || {};
+                        const expectedFiles = (entry.reason === 'incomplete' && Array.isArray(entry.missing_files) && entry.missing_files.length > 0)
+                            ? entry.missing_files
+                            : (dep.expected_files || null);
+                        const loc = entry.found && entry.found.location ? entry.found.location : null;
+                        const dlSpec = loc ? { ...spec, target_path: loc.target_dir } : spec;
                         const checksums = null; // ModelScope checksums not yet in manifest; verified by size
-                        const r = await log.step(`download model ${spec.id} (ModelScope)`, async () => downloader.downloadModelScopeRepo(io, spec, {
-                            root: comfyuiRoot,
+                        const r = await log.step(`download model ${spec.id} (ModelScope)`, async () => downloader.downloadModelScopeRepo(io, dlSpec, {
+                            root: loc ? loc.base : comfyuiRoot,
                             getHeader,
                             retries: options.downloadRetries || 3,
                             retryDelayMs: options.retryDelayMs || 500,
@@ -773,10 +792,56 @@ async function runInstallation(args) {
             save();
         }
 
+        // Node.js for the worker: the SAME binary everywhere (installer start,
+        // start-worker.sh, `animastor` tool) — recorded as NODE_BIN in .env.
+        const nodePick = options.nodeBinary !== undefined ? options.nodeBinary : probe.pickNodeBinary(io);
+        const nodeBin = nodePick ? nodePick.bin : process.execPath;
+
+        // 4.55 ComfyUI up + API base probe ------------------------------------------
+        // Managed mode starts its ComfyUI BEFORE the worker is wired, so the
+        // worker's COMFY_URL comes from a real probe: plain
+        // http://127.0.0.1:<port> first, a notebook prefix only when the plain
+        // URL does not answer. Existing mode never starts the user's ComfyUI.
+        const comfyPort = options.comfyPort || 8188;
+        let comfyUrl = null;
+        if (!runtimeFatal && !dryRun) {
+            const plainUp = await comfyui.systemStats(io, `http://127.0.0.1:${comfyPort}`);
+            if (!plainUp && options.startComfyui && io.fs.existsSync(comfyuiRoot)) {
+                const started = await log.step('start ComfyUI', () => withBusy('Starting ComfyUI', async () => {
+                    const { pid } = comfyui.startComfyUI(io, { root: comfyuiRoot, port: comfyPort, device });
+                    const up = await comfyui.waitForApi(io, `http://127.0.0.1:${comfyPort}`, { timeoutMs: options.verifyTimeoutMs || 120000, intervalMs: options.pollIntervalMs || 2000 });
+                    if (!up.ok) throw new Error(up.reason);
+                    return { pid, up };
+                }));
+                if (started.ok) result.results.comfyui_started = { pid: started.value.pid, port: comfyPort };
+            }
+            const prefixes = [];
+            if (workerDir) prefixes.push(worker.readEnvValues(io, workerDir).NOTEBOOK_PATH);
+            if (options.runningComfy && options.runningComfy.baseurl) prefixes.push(options.runningComfy.baseurl);
+            const pr = await probe.probeComfyUrl(io, { port: comfyPort, prefixes: prefixes.filter(Boolean) });
+            comfyUrl = pr.url;
+            result.results.comfy_url = { url: pr.url, tried: pr.tried, prefixed: !!pr.prefixed };
+            if (pr.url) log.info(`ComfyUI API: ${pr.url}${pr.prefixed ? ' (reverse-proxy prefix — the plain URL did not answer)' : ''}`);
+            else log.warn(`ComfyUI API not reachable (tried: ${pr.tried.join(', ')})`);
+        }
+
         // 4.6 Worker bundle + .env --------------------------------------------------
         const workerStep = stepById(plan, 'worker-setup');
-        if (workerStep && workerStep.action && workerStep.decision === 'yes') {
-            for (const w of workerStep.workers || []) {
+        // An installed-but-OUTDATED bundle (e.g. 2.1.1 without COMFY_URL
+        // support) is refreshed even when the plan has nothing to install —
+        // only with the user's consent to the fixes.
+        let bundleTargets = workerStep && workerStep.action && workerStep.decision === 'yes' ? (workerStep.workers || []) : [];
+        if (bundleTargets.length === 0 && decisions.apply_fixes !== false && decisions.worker_setup !== false && workerDir
+            && io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) {
+            const srcDir = repoBundleSource.resolveRepoBundleDir(io.fs, repoRoot);
+            const have = worker.readPkgVersion(io, workerDir);
+            const want = srcDir ? worker.readPkgVersion(io, srcDir) : null;
+            if (have && want && have !== want) {
+                bundleTargets = [{ id: `worker:${manifests[0].profile.id}`, worker_type: (manifests[0].worker_bundle || {}).worker_type }];
+            }
+        }
+        if (bundleTargets.length > 0) {
+            for (const w of bundleTargets) {
                 const manifest = manifests.find((m) => `worker:${m.profile.id}` === w.id) || manifests[0];
                 const bundleRes = await log.step(`install worker bundle (${w.worker_type})`, async () => {
                     // The distributed installer package may not carry the
@@ -802,6 +867,8 @@ async function runInstallation(args) {
                         return withBusySync('Installing worker bundle', () => worker.installWorkerBundle(io, {
                             workerDir, manifest, repoRoot, bundleDir, hubUrl,
                             httpFetchText: null, log,
+                            update: decisions.apply_fixes !== false,
+                            nodeBin,
                         }));
                     } finally {
                         if (bundleTmp) {
@@ -836,6 +903,7 @@ async function runInstallation(args) {
         const workerWanted = decisions.worker_setup === true || decisions.worker_setup === 'yes'
             || (keyStep && (keyStep.provided || decisions.worker_key_provided === true));
         let tokenValue = null; // held in memory only; never stored on result/state
+        let workerConfigChanged = false; // .env or bundle changed in THIS run → restart a running worker
         if (workerWanted) {
             const manifest = manifests[0];
             const required = ((manifest.worker_bundle || {}).env || {}).required || [];
@@ -855,12 +923,31 @@ async function runInstallation(args) {
                     values[key] = defaultEnvValue(key, { hubUrl, manifests });
                 }
             }
-            // Point the worker at the ComfyUI port chosen for this install
-            // (--comfy-port). Shared hosts often run several ComfyUI
-            // instances; the default 8188 may belong to a different one.
-            if (options.comfyPort) values.COMFY_PORT = String(options.comfyPort);
-            const cfg = await log.step('configure worker .env', async () => worker.configureEnv(io, { workerDir, manifest, values, log }));
+            // Installer-owned wiring: worker type from the PROFILE, the node
+            // binary, the probed ComfyUI API base and port (shared hosts often
+            // run several ComfyUI instances; the default 8188 may belong to a
+            // different one). Written for missing keys always; existing values
+            // are replaced only when the user accepted the fixes
+            // (decisions.apply_fixes — one "Fix?" question in the CLI).
+            const desired = desiredEnvWiring({ manifests, nodeBin, comfyUrl, comfyPort: options.comfyPort, hubUrl, hubUrlExplicit: !!options.hubUrlExplicit });
+            Object.assign(values, desired);
+            const secretOverrides = {};
+            if (options.replaceWorkerKey && secretProvider) {
+                const fresh = await secretProvider('ANIMASTOR_WORKER_TOKEN');
+                if (fresh) {
+                    log.registerSecret(fresh);
+                    secretOverrides.ANIMASTOR_WORKER_TOKEN = fresh;
+                    tokenValue = fresh;
+                }
+            }
+            const cfg = await log.step('configure worker .env', async () => worker.configureEnv(io, {
+                workerDir, manifest, values,
+                overrides: decisions.apply_fixes !== false ? desired : {},
+                secretOverrides,
+                log,
+            }));
             result.results.worker.push({ id: 'env', config: cfg.ok ? cfg.value : { status: 'failed', reason: String(cfg.error && cfg.error.message) } });
+            if (cfg.ok && (cfg.value.created || (cfg.value.changed || []).length > 0 || (cfg.value.added || []).length > 0)) workerConfigChanged = true;
             if (cfg.ok && st.components.worker) {
                 st.components.worker.env_created = cfg.value.created === true;
             } else if (cfg.ok) {
@@ -873,24 +960,115 @@ async function runInstallation(args) {
             save();
         }
 
-        // 4.8 Worker start (managed-mode default / --start-worker) --------
+        // 4.75 Management tools (before the worker start: the final summary names
+        // the `animastor` command in its fix lines) ---------------------------------------------------
+        // Optional component (install decision install_management_tools). The
+        // tools are thin wrappers around this CLI's management commands — the
+        // runtime logic is shared (management.js), never duplicated. Installing
+        // is idempotent: a re-run overwrites the same files (no duplicates) and
+        // the files are registered as owned so the uninstaller removes them
+        // precisely. A tools failure must never fail the installation itself.
+        if (decisions.install_management_tools === true && toolsDir && !dryRun) {
+            try {
+                // The bootstrap runs this CLI from a temp dir wiped on exit —
+                // the tools must point at a PERSISTENT copy of the installer
+                // (<base>/installer), refreshed on every run.
+                const r = await log.step('install management tools', async () => withBusySync('Installing management tools', () => management.installManagementTools(io, {
+                    toolsDir,
+                    nodePath: nodeBin,
+                    cliPath: path.join(__dirname, '..', 'cli.js'),
+                    // engine/ → installer/ → src/ → package root (src/, ai/, package.json)
+                    installerSrcRoot: options.persistInstaller === false ? null : path.resolve(__dirname, '..', '..', '..'),
+                    installerDestRoot: path.join(path.dirname(toolsDir), 'installer'),
+                    linkDir: options.linkDir !== undefined ? options.linkDir : management.defaultLinkDir({ uid: currentUid, home }),
+                    statePath,
+                    root: comfyuiRoot,
+                    workerDir,
+                    hubUrl,
+                    log,
+                    platformAdapter,
+                })));
+                // log.step wraps the callback result in { ok, value, error } —
+                // the tools result itself is r.value (an unwrapped r.files here
+                // was a latent bug: tools were never installed by real runs).
+                if (r.ok && r.value) {
+                    result.results.management_tools = r.value;
+                    for (const f of r.value.files) {
+                        state.addOwnedComponent(st, 'services', { id: 'management-tools', path: f });
+                    }
+                    if (r.value.link) state.addOwnedComponent(st, 'services', { id: 'animastor-command', path: r.value.link });
+                    if (r.value.installerDir) state.addOwnedComponent(st, 'services', { id: 'installer-copy', path: r.value.installerDir });
+                    if (r.value.path_hint) result.warnings.push(r.value.path_hint);
+                    state.setArtifact(st, 'management-tools', 'installed', { dir: r.value.toolsDir });
+                } else {
+                    const reason = r.error && r.error.message ? r.error.message : 'unknown failure';
+                    result.warnings.push(`management tools could not be installed: ${reason}`);
+                    state.setArtifact(st, 'management-tools', 'failed', { reason });
+                }
+                save();
+            } catch (err) {
+                result.warnings.push(`management tools could not be installed: ${err.message}`);
+                state.setArtifact(st, 'management-tools', 'failed', { reason: err.message });
+                save();
+            }
+        }
+
+        // 4.8 Worker start (default in every mode; --no-start-worker opts out) ---
+        // "done" ONLY after the worker itself logged "ComfyUI ready": a
+        // spawned-but-stuck process is a FAILED step, never a silent pass.
         // A fatal runtime failure leaves the install unrecoverable — every
-        // dependent step (including daemon starts) is SKIPPED, never ploughed
-        // through behind a broken ComfyUI.
+        // dependent step (including daemon starts) is SKIPPED.
         let startedWorkerPid = null;
+        let workerReady = null;
+        let workerStart = null;
         if (options.startWorker && workerDir && !runtimeFatal) {
-            const r = await log.step('start worker', async () => worker.startWorker(io, { workerDir }));
-            const res = r.ok ? r.value : { started: false, alive: false, reason: String(r.error && r.error.message) };
-            result.results.worker.push({ id: 'worker-process', ...res });
-            if (res.started && res.alive) {
-                startedWorkerPid = res.pid;
+            const r = await log.step('start worker', async () => {
+                const bundleChanged = result.results.worker.some((x) => x.bundle && (x.bundle.files_installed || []).length > 0);
+                const res = worker.startWorker(io, { workerDir, nodeBin, graceMs: options.workerGraceMs || 3000, forceRestart: workerConfigChanged || bundleChanged });
+                workerStart = res;
+                if (!res.started || !res.alive) {
+                    // An immediate exit is usually the fail-closed credential
+                    // gate — say so (the fix is a new key, not a re-run).
+                    if (res.logFile) {
+                        const scan = worker.scanWorkerLog(worker.readLogFrom(io, res.logFile, res.logOffset || 0));
+                        if (scan.auth_failed) {
+                            workerReady = { comfy_ready: false, heartbeat: false, auth_failed: true, reason: `the Worker Key was rejected (Worker authentication failed) — see ${res.logFile}` };
+                            throw new Error(workerReady.reason);
+                        }
+                    }
+                    throw new Error(res.reason || 'worker did not start');
+                }
                 if (res.already_running) log.info(`worker already running (pid ${res.pid}) — not spawning a second instance`);
+                const ready = await withBusy('Waiting for the worker to reach ComfyUI', () => worker.waitForWorkerReady(io, {
+                    workerDir, pid: res.pid, logFile: res.logFile, logOffset: res.logOffset || 0,
+                    comfyTimeoutMs: options.workerReadyTimeoutMs || 90000,
+                    pollMs: options.pollIntervalMs || 1000,
+                    requireHeartbeat: false,
+                }));
+                workerReady = ready;
+                if (!ready.comfy_ready) throw new Error(ready.reason);
+                return { ...res, ...ready };
+            });
+            const res = r.ok ? r.value : { ...(workerStart || {}), started: !!(workerStart && workerStart.started), alive: false, reason: String(r.error && r.error.message) };
+            result.results.worker.push({ id: 'worker-process', pid: res.pid || null, started: !!res.started, comfy_ready: !!(workerReady && workerReady.comfy_ready), reason: r.ok ? null : res.reason, log_file: res.logFile || null });
+            if (r.ok) {
+                startedWorkerPid = res.pid;
                 state.setArtifact(st, 'worker-process', 'installed', { pid: res.pid });
             } else {
+                if (workerStart && workerStart.pid) startedWorkerPid = workerStart.pid;
                 state.setArtifact(st, 'worker-process', 'failed', { reason: res.reason || null });
-                result.warnings.push(`worker did not start: ${res.reason || 'unknown reason'}`);
             }
             save();
+            // Hub heartbeat (Animastor shows ONLINE) — only meaningful once the
+            // worker reached ComfyUI (heartbeats start after that).
+            if (r.ok) {
+                const hb = await withBusy('Waiting for the hub to confirm the heartbeat', () => worker.waitForWorkerReady(io, {
+                    workerDir, pid: res.pid, logFile: res.logFile, logOffset: res.logOffset || 0,
+                    comfyTimeoutMs: 1000, heartbeatTimeoutMs: options.heartbeatTimeoutMs || 45000,
+                    pollMs: options.pollIntervalMs || 1000,
+                }));
+                workerReady = hb;
+            }
         }
 
         // 4.9 Verification --------------------------------------------------------------
@@ -898,7 +1076,7 @@ async function runInstallation(args) {
         // start step entirely (it would only spawn a doomed process).
         const ver = await runVerification({
             io, manifests, roots: { comfyuiRoot, workerDir, hubUrl },
-            options: { ...options, startComfyui: runtimeFatal ? false : options.startComfyui },
+            options: { ...options, comfyUrl, startComfyui: runtimeFatal ? false : options.startComfyui },
             log, crypto,
             tokenValue,
             device,
@@ -915,49 +1093,19 @@ async function runInstallation(args) {
             save();
         }
 
-        // 4.10 Management tools ---------------------------------------------------
-        // Optional component (install decision install_management_tools). The
-        // tools are thin wrappers around this CLI's management commands — the
-        // runtime logic is shared (management.js), never duplicated. Installing
-        // is idempotent: a re-run overwrites the same files (no duplicates) and
-        // the files are registered as owned so the uninstaller removes them
-        // precisely. A tools failure must never fail the installation itself.
-        if (decisions.install_management_tools === true && toolsDir && !dryRun) {
-            try {
-                const r = await log.step('install management tools', async () => withBusySync('Installing management tools', () => management.installManagementTools(io, {
-                    toolsDir,
-                    nodePath: process.execPath,
-                    cliPath: path.join(__dirname, '..', 'cli.js'),
-                    statePath,
-                    root: comfyuiRoot,
-                    workerDir,
-                    log,
-                    platformAdapter,
-                })));
-                // log.step wraps the callback result in { ok, value, error } —
-                // the tools result itself is r.value (an unwrapped r.files here
-                // was a latent bug: tools were never installed by real runs).
-                if (r.ok && r.value) {
-                    result.results.management_tools = r.value;
-                    for (const f of r.value.files) {
-                        state.addOwnedComponent(st, 'services', { id: 'management-tools', path: f });
-                    }
-                    state.setArtifact(st, 'management-tools', 'installed', { dir: r.value.toolsDir });
-                } else {
-                    const reason = r.error && r.error.message ? r.error.message : 'unknown failure';
-                    result.warnings.push(`management tools could not be installed: ${reason}`);
-                    state.setArtifact(st, 'management-tools', 'failed', { reason });
-                }
-                save();
-            } catch (err) {
-                result.warnings.push(`management tools could not be installed: ${err.message}`);
-                state.setArtifact(st, 'management-tools', 'failed', { reason: err.message });
-                save();
-            }
-        }
+        // 4.11 End-to-end: ComfyUI API → worker "ComfyUI ready" → hub heartbeat.
+        result.e2e = await endToEndChecks(io, {
+            mode, comfyUrl, comfyPort, hubUrl,
+            workerWanted: !!(options.startWorker && workerDir && !runtimeFatal),
+            workerStart, workerReady,
+            tool: options.toolCommand || toolCommandFrom(result.results.management_tools),
+        });
 
         if (runtimeFatal) {
             result.status = 'failed';
+        } else if (result.e2e.some((c) => c.ok === false)) {
+            const blockedCount = result.blocked.length + result.results.models.filter((m) => m.status === 'blocked').length;
+            result.status = blockedCount > 0 ? 'blocked' : 'failed';
         } else {
             const blockedCount = result.blocked.length + result.results.models.filter((m) => m.status === 'blocked').length;
             if (result.blocked.length > 0 || blockedCount > 0) result.status = 'blocked';
@@ -989,6 +1137,83 @@ function findModelDep(manifests, id) {
     return null;
 }
 
+/**
+ * Installer-owned .env wiring for this run (non-secret): WORKER_TYPE from the
+ * profile manifest (never a hard-coded default), NODE_BIN, COMFY_URL when a
+ * probe proved it, COMFY_PORT, HUB_URL when the hub was given explicitly.
+ */
+function desiredEnvWiring({ manifests, nodeBin = null, comfyUrl = null, comfyPort = null, hubUrl = null, hubUrlExplicit = false }) {
+    const out = {};
+    const type = (manifests[0] && manifests[0].worker_bundle && manifests[0].worker_bundle.worker_type) || null;
+    if (type) out.WORKER_TYPE = type;
+    if (nodeBin) out.NODE_BIN = nodeBin;
+    if (comfyUrl) {
+        out.COMFY_URL = comfyUrl;
+        // NOTEBOOK_PATH follows the probe too (older workers ignore COMFY_URL
+        // and build the URL from COMFY_PORT + NOTEBOOK_PATH): empty when the
+        // plain URL answered, the prefix only when the probe needed it.
+        const m = /^https?:\/\/[^/]+(\/.*)?$/.exec(comfyUrl);
+        out.NOTEBOOK_PATH = m && m[1] ? m[1] : '';
+    }
+    if (comfyPort) out.COMFY_PORT = String(comfyPort);
+    if (hubUrlExplicit && hubUrl) out.HUB_URL = hubUrl;
+    return out;
+}
+
+/** The command users type for fixes: `animastor` when linked into PATH, else the absolute tool path. */
+function toolCommandFrom(tools) {
+    if (tools && tools.command) return tools.command;
+    return 'animastor';
+}
+
+/**
+ * The three end-to-end checks the installer result is judged by. Each ✗
+ * carries ONE line of cause and ONE exact fix command — the final summary
+ * prints exactly these (no "scroll up").
+ * @returns {Promise<Array<{ id, ok: boolean|null, label, detail, fix }>>}
+ */
+async function endToEndChecks(io, { mode, comfyUrl, comfyPort, hubUrl, workerWanted, workerStart, workerReady, tool = 'animastor' }) {
+    const checks = [];
+    const stats = comfyUrl ? await comfyui.systemStats(io, comfyUrl) : null;
+    checks.push(stats
+        ? { id: 'comfyui', ok: true, label: 'ComfyUI API', detail: comfyUrl, fix: null }
+        : {
+            id: 'comfyui', ok: false, label: 'ComfyUI API',
+            detail: `not reachable at http://127.0.0.1:${comfyPort || 8188} (GET /system_stats)`,
+            fix: mode === 'managed'
+                ? `${tool} start`
+                : `start your ComfyUI on port ${comfyPort || 8188}, then run: ${tool} doctor`,
+        });
+    if (!workerWanted) {
+        checks.push({ id: 'worker', ok: null, label: 'Worker → ComfyUI', detail: 'worker start skipped (--no-start-worker)', fix: `${tool} start` });
+        checks.push({ id: 'heartbeat', ok: null, label: 'Hub heartbeat (Online)', detail: 'not checked — worker not started', fix: `${tool} start` });
+        return checks;
+    }
+    const newKeyFix = `create a new Worker Key in Animastor → Settings → Workers, then run: ${tool} doctor --new-key`;
+    const r = workerReady || {};
+    if (r.comfy_ready) {
+        checks.push({ id: 'worker', ok: true, label: 'Worker → ComfyUI', detail: '"ComfyUI ready" in the worker log', fix: null });
+    } else {
+        const reason = (r.reason || (workerStart && workerStart.reason) || 'worker did not start').replace(/\s+/g, ' ');
+        checks.push({
+            id: 'worker', ok: false, label: 'Worker → ComfyUI', detail: reason,
+            fix: r.auth_failed ? newKeyFix : `${tool} doctor`,
+        });
+    }
+    if (r.heartbeat) {
+        checks.push({ id: 'heartbeat', ok: true, label: 'Hub heartbeat (Online)', detail: hubUrl || null, fix: null });
+    } else if (!r.comfy_ready) {
+        checks.push({ id: 'heartbeat', ok: false, label: 'Hub heartbeat (Online)', detail: 'not reached — the worker sends heartbeats only after it reached ComfyUI', fix: r.auth_failed ? newKeyFix : `${tool} doctor` });
+    } else {
+        checks.push({
+            id: 'heartbeat', ok: false, label: 'Hub heartbeat (Online)',
+            detail: (r.reason || 'no heartbeat confirmed').replace(/\s+/g, ' '),
+            fix: r.auth_failed ? newKeyFix : `check that this machine reaches ${hubUrl} (curl -fsS ${hubUrl}/health), then run: ${tool} doctor`,
+        });
+    }
+    return checks;
+}
+
 function defaultEnvValue(key, { hubUrl, manifests }) {
     if (key === 'HUB_URL') return hubUrl || 'https://animastor.org/gpu';
     if (key === 'WORKER_TYPE') return (manifests[0].worker_bundle || {}).worker_type || 'image';
@@ -1008,7 +1233,7 @@ async function runVerification({ io, manifests, roots, options, log, crypto, tok
     // ComfyUI live check: use an already-running instance, or start one in
     // managed mode (files on disk are NOT sufficient verification).
     const port = options.comfyPort || 8188;
-    const baseUrl = `http://127.0.0.1:${port}`;
+    const baseUrl = options.comfyUrl || `http://127.0.0.1:${port}`;
     const withBusy = (label, fn, o) => (options.term ? options.term.withBusy(label, fn, o) : fn());
     let stats = await comfyui.systemStats(io, baseUrl);
     if (!stats && options.startComfyui && io.fs.existsSync(comfyuiRoot)) {
@@ -1176,5 +1401,7 @@ module.exports = {
     createInterruptGuard,
     comfyPortState,
     autoPickComfyPort,
+    desiredEnvWiring,
+    endToEndChecks,
     CPU_MODE_WARNING,
 };

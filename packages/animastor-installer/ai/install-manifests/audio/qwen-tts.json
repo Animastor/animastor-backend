@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "revision": "2026.08.27-r1",
+  "revision": "2026.10.30-r1",
   "status": "ready",
   "profile": {
     "id": "audio/qwen-tts",
@@ -23,10 +23,10 @@
     "note": "Workflows are the single source of truth for 'required'. Connectors are backend-only execution metadata and are NOT installed. Runtime audits are reference only, never the source of truth."
   },
   "hardware": {
-    "gpu_min_vram_gb": null,
-    "basis": "unknown",
+    "gpu_min_vram_gb": 12,
+    "basis": "minimum_supported",
     "reference_gpu": "NVIDIA L40S (46068 MiB)",
-    "todo": "Open question 12: minimum VRAM is not documented anywhere; needs measurement."
+    "derivation": "Estimate, not a measured floor: tts-qwen-dialogue loads both 1.7B repos at once (VoiceDesign + Base: 2 x (3.57 GiB weights + 0.65 GiB speech tokenizer) = ~8.4 GiB) plus activations; 12 GB leaves headroom. Known to run on L40S 46 GB; installed on Tesla V100 (E2E, 2026-10-30). Lower it only after a measured run on a smaller card."
   },
   "runtime_requirements": {
     "comfyui": {
@@ -381,7 +381,7 @@
     },
     "provenance": {
       "evidence": [
-        "packages/animastor-worker/worker/worker.cjs:1-4 (v2.1.1, Node 18+)",
+        "packages/animastor-worker/worker/worker.cjs:1-4 (v2.2.0, Node 20+)",
         "packages/animastor-worker/worker/.env.example",
         "gpu-hub/gpu-hub.js GET /worker-bundle"
       ]
@@ -439,7 +439,6 @@
     "D1: canonical torch/CUDA tier — cu128 reference vs cu124",
     "Open question 5: confirm SaveAudioMP3 belongs to ComfyUI-Qwen3-TTS via /object_info",
     "Open question 8: ComfyUI-Manager inclusion (D7)",
-    "Open question 11: Node.js 18 (start-worker.sh) vs 20 (worker.cjs)",
-    "Open question 12: minimum VRAM undocumented"
+    "Open question 12: minimum VRAM is an estimate (12 GB, hardware.derivation) — measure on a smaller card"
   ]
 }
