@@ -5,6 +5,14 @@ const path = require('path');
 const fs = require('fs');
 const Module = require('module');
 
+// The suite overrides OUTPUT_DIR per test and purges src/config/runtime-config
+// from the require cache, so the env var MUST be restored (not deleted) in
+// afterEach: modules loaded earlier in the run (e.g. scene-assets-repo) keep
+// the config instance created before the purge, and a deleted OUTPUT_DIR makes
+// every later fresh instance resolve /data/output instead — build_id
+// derivation then silently yields null for later suites (Stage 76).
+const ORIGINAL_OUTPUT_DIR = process.env.OUTPUT_DIR;
+
 class FakeRedis {
     // Declared test double — see queue-idempotency.ensureIntentAndReceipt.
     constructor() { this.store = new Map(); this.sets = new Map(); this.__allowNonLuaFallback = true; }
@@ -576,7 +584,8 @@ describe('scene cache-skip (content on disk)', () => {
 
     afterEach(() => {
         try { fs.rmSync(buildDir, { recursive: true }); } catch {}
-        delete process.env.OUTPUT_DIR;
+        if (ORIGINAL_OUTPUT_DIR === undefined) delete process.env.OUTPUT_DIR;
+        else process.env.OUTPUT_DIR = ORIGINAL_OUTPUT_DIR;
         const cwd = path.resolve(__dirname, '..');
         for (const p of [
             path.join(cwd, 'src/book/index.js'),
