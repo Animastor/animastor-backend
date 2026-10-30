@@ -15,9 +15,13 @@
 //   Checksums     — hub-resolved sha256; hub outage degrades to null
 
 const { expect } = require('chai');
+const fs = require('fs');
 const path = require('path');
 
 const sc = require('../src/installer/setup-contract');
+const { resolveRepoBundleDir } = require('../src/installer/worker-bundle-source');
+
+const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 
 const REAL_PROFILE_IDS = ['audio/qwen-tts', 'image/qwen-image', 'video/ltx-2.3'];
 
@@ -295,11 +299,12 @@ describe('Setup contract — projections (unit)', () => {
             expect(sc.getInstallerVersion()).to.match(/^\d+\.\d+\.\d+$/);
         });
 
-        it('worker bundle version is read from the canonical worker package.json', () => {
-            // resolved via helpers — canonical packages/animastor-worker/worker
-            const canonical = require(path.join(
-                path.join(__dirname, '..', '..', '..', 'packages', 'animastor-worker', 'worker', 'package.json')
-            ));
+        it('worker bundle version is read from the canonical worker bundle dir', function () {
+            // resolved via resolveRepoBundleDir — canonical packages/animastor-worker/worker;
+            // post-split the bundle lives in the worker repo, skip when absent here
+            const bundleDir = resolveRepoBundleDir(fs, REPO_ROOT);
+            if (!bundleDir) this.skip();
+            const canonical = require(path.join(bundleDir, 'package.json'));
             expect(sc.getWorkerBundleVersion()).to.equal(canonical.version);
         });
 
