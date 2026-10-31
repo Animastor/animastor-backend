@@ -21,6 +21,9 @@ const progressEventsOp = require('./progress-events-port').progressEventsOp;
 // storage/runtime-persistence-adapter) — no PG repository or database
 // handles in the runtime tier.
 const persist = require('./persistence-port').persist;
+// Generation only by explicit command: the single authority for "which
+// scene×stage may be scheduled" (task registry ∧ layer enabled ∧ not cancelled).
+const commandGate = require('./command-gate');
 
 const logPrefix = '[SCHEDULER]';
 
@@ -41,18 +44,10 @@ function error(msg) {
 // ======================================================
 
 /**
- * Read layer config for a book.
+ * Read layer config for a book (owned by ./command-gate, re-exported here).
  */
 async function getLayerConfig(redis, bookId) {
-    const layerKey = `animastor:layer-config:${bookId}`;
-    const layerRaw = await redis.get(layerKey);
-    if (layerRaw) {
-        try { return JSON.parse(layerRaw); } catch (_) {}
-    }
-    // S-2: default layer config derived from registry
-    const defaults = {};
-    for (const t of mediaRegistry.listMediaTypes()) { defaults[`${t}_enabled`] = true; }
-    return defaults;
+    return commandGate.getLayerConfig(redis, bookId);
 }
 
 /**
@@ -100,7 +95,8 @@ const activeScenes = require('./active-scenes-index');
 const ACTIVE_SCENES_KEY = activeScenes.ACTIVE_SCENES_KEY;
 
 /**
- * Add scene to active index. T8: делегирует в active-scenes-index.js.
+ * Add scene to active index. T8: делегирует в active-scenes-index.js, which
+ * is command-gated: without an authorized stage the scene is NOT added.
  */
 async function addSceneToActiveIndex(redis, bookId, chapterId, sceneId) {
     const result = await activeScenes.addActiveScene(redis, bookId, chapterId, sceneId);
@@ -262,57 +258,50 @@ async function detectVersionStale(redis, bookId, chapterId, sceneId) {
  * state-writers map). Returns the number of assets reset.
  */
 async function markVersionStaleDirty(redis, bookId, chapterId, sceneId) {
+    // Command-only generation: this pass only MARKS stale assets (READY →
+    // DIRTY + PG stale via markDirtyScene). It never queues work and never
+    // touches the active index — whether a DIRTY stage is dispatched is
+    // decided solely by the command gate in shouldScheduleAssets. Disabled
+    // layers are left untouched.
     const layerCfg = await getLayerConfig(redis, bookId);
-    const taskState = await progressEventsOp('getSceneTaskState')(redis, bookId, chapterId, sceneId);
     const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);
-    const audioEnabled = taskState.managed
-        ? taskState.activeTypes.has('audio')
-        : layerCfg.audio_enabled !== false;
-    const imageEnabled = taskState.managed
-        ? taskState.activeTypes.has('image')
-        : layerCfg.image_enabled !== false;
-    const videoEnabled = taskState.managed
-        ? taskState.activeTypes.has('video')
-        : layerCfg.video_enabled !== false;
 
-    log(`[VERSION-DIRTY] ${bookId}/${chapterId}/${sceneId}: PG version mismatch — resetting per-asset states for dispatch`);
+    log(`[VERSION-DIRTY] ${bookId}/${chapterId}/${sceneId}: PG version mismatch — marking READY assets stale (no scheduling)`);
     // T8: через фасад — единый владелец DIRTY
     // S-5: asset-state writer via the injected orchestration seam
     const markDirtyScene = orchestrationSeams.getOrchestrationSeam('markDirtyScene');
-    const dirtyAssets = [];
-    if (audioEnabled && assetStates.audio === state.AssetState.READY) dirtyAssets.push('audio');
-    if (imageEnabled && assetStates.image === state.AssetState.READY) dirtyAssets.push('image');
-    if (videoEnabled && assetStates.video === state.AssetState.READY) dirtyAssets.push('video');
+    const dirtyAssets = mediaRegistry.listMediaTypes().filter(stage =>
+        commandGate.isLayerEnabled(layerCfg, stage) &&
+        assetStates[stage] === state.AssetState.READY
+    );
     if (dirtyAssets.length > 0) {
         await markDirtyScene(redis, bookId, chapterId, sceneId, dirtyAssets);
     }
     return dirtyAssets.length;
 }
 
-async function shouldScheduleAssets(redis, bookId, chapterId, sceneId) {
+async function shouldScheduleAssets(redis, bookId, chapterId, sceneId, gateCache = null) {
     // Д.2: This function is now PURE — it only reads per-asset states and layer
     // config and computes { stages, allDone }. It performs NO writes. The former
     // version-stale READY→DIRTY reset is an explicit pre-pass in attemptDispatch
     // (detectVersionStale + markVersionStaleDirty), so the decision is separated
     // from the mutation (single arbiter — see docs/STATE_WRITERS_MAP.md P3).
     const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);
-    const layerCfg = await getLayerConfig(redis, bookId);
-    const taskState = await progressEventsOp('getSceneTaskState')(redis, bookId, chapterId, sceneId);
 
-    // Selective generation tasks are authoritative for their target scenes.
-    // Book-wide layer preferences are only a fallback for the initial/legacy
-    // generation flow, where no explicit task registry exists.
-    const isInFlight = status =>
-        status === state.AssetState.PENDING || status === state.AssetState.GENERATING;
-    const audioEnabled = taskState.managed
-        ? taskState.activeTypes.has('audio')
-        : layerCfg.audio_enabled !== false || isInFlight(assetStates.audio);
-    const imageEnabled = taskState.managed
-        ? taskState.activeTypes.has('image')
-        : layerCfg.image_enabled !== false || isInFlight(assetStates.image);
-    const videoEnabled = taskState.managed
-        ? taskState.activeTypes.has('video')
-        : layerCfg.video_enabled !== false || isInFlight(assetStates.video);
+    // Generation only by explicit command (command-gate): a stage is
+    // schedulable ONLY when an active task-registry task of that stage targets
+    // this scene, its layer is enabled and the book is not cancelled. There is
+    // NO fallback to book-wide layer preferences and NO in-flight override
+    // (formerly PENDING/GENERATING kept a disabled layer dispatching —
+    // incident 2026-10-30 BA). A scene without any authorized stage reports
+    // allDone and leaves the active index.
+    const auth = await commandGate.getAuthorizedStages(redis, bookId, chapterId, sceneId, gateCache);
+    const audioEnabled = auth.stages.has('audio');
+    const imageEnabled = auth.stages.has('image');
+    const videoEnabled = auth.stages.has('video');
+    if (auth.stages.size === 0) {
+        log(`GATE: ${bookId}:${chapterId}:${sceneId} has no command-authorized stage (${commandGate.describeDenied(auth.denied)})`);
+    }
 
     // Check if all enabled assets are in terminal states
     // (after potential version-stale reset above)
@@ -412,8 +401,11 @@ async function tick(redis, loadedBooks = {}) {
             }
         }
 
-        // Cache force-dispatch flags per book to avoid redundant Redis calls
+        // Force set per book: ONLY the scene×stage pairs reset by an explicit
+        // regeneration (command-gate force set) — never the whole book.
         const forceCache = new Map();
+        // One command-gate memo per tick (layer config / cancellation per book).
+        const gateCache = commandGate.createGateCache();
         // Cache loaded books per tick to avoid redundant disk reads
         const bookCache = new Map();
 
@@ -426,15 +418,13 @@ async function tick(redis, loadedBooks = {}) {
 
             const { bookId, chapterId, sceneId } = parsed;
 
-            // Check force-dispatch flag for recently regenerated books (cached per book)
-            let force = false;
-            if (forceCache.has(bookId)) {
-                force = forceCache.get(bookId);
-            } else {
-                const forceFlag = await redis.get(`animastor:force-dispatch:${bookId}`);
-                force = forceFlag === '1';
-                forceCache.set(bookId, force);
+            // Force applies only to the scene×stage pairs of the command.
+            let bookForce = forceCache.get(bookId);
+            if (!bookForce) {
+                bookForce = await commandGate.getForceStages(redis, bookId);
+                forceCache.set(bookId, bookForce);
             }
+            const force = commandGate.forcedStagesForScene(bookForce, chapterId, sceneId);
 
             // Resolve loaded book from cache or load it
             let sceneLoadedBook = loadedBooks[bookId];
@@ -455,7 +445,7 @@ async function tick(redis, loadedBooks = {}) {
             }
 
             try {
-                const result = await attemptDispatch(redis, bookId, chapterId, sceneId, sceneLoadedBook, force);
+                const result = await attemptDispatch(redis, bookId, chapterId, sceneId, sceneLoadedBook, force, gateCache);
                 summary.processed++;
 
                 if (result.completed) {
@@ -541,10 +531,19 @@ async function getMetrics(redis) {
 /**
  * Attempt to dispatch scene stages using per-asset states.
  * Supports independent workers: dispatches ALL eligible stages in one tick.
- * When force=true, any existing lease is cleared before dispatch.
+ *
+ * `force` — the stages of THIS scene whose existing lease is cleared before
+ * dispatch: a Set/Array of stage names (the scheduler passes the command's
+ * force set for the scene) or a boolean (true = every scheduled stage of this
+ * one scene). Force never widens to other scenes or stages.
+ *
+ * A stage that reports `no_worker_available` is BLOCKED (command-gate
+ * blockStageNoWorker): its task is marked blocked with «нет воркера <type>»
+ * and it is never retried automatically.
+ *
  * Returns { dispatched: number, completed: boolean, reason: string }
  */
-async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, force = false) {
+async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, force = false, gateCache = null) {
     const sceneKey = `${bookId}:${chapterId}:${sceneId}`;
 
     // Resolve build_id from manifest (passed from tick with book cache) or null
@@ -558,7 +557,7 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
     }
 
     // Determine which asset stages need scheduling (from per-asset states)
-    const { stages, allDone } = await shouldScheduleAssets(redis, bookId, chapterId, sceneId);
+    const { stages, allDone } = await shouldScheduleAssets(redis, bookId, chapterId, sceneId, gateCache);
 
     if (allDone) {
         await removeSceneFromActiveIndex(redis, bookId, chapterId, sceneId);
@@ -572,7 +571,11 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
         return { success: true, skip: true, reason: 'no_dispatchable_stages' };
     }
 
-    log(`ATTEMPT_DISPATCH: ${sceneKey} -> stages=[${stages.join(', ')}]${force ? ' (force=true)' : ''}`);
+    const forcedStages = force === true
+        ? new Set(stages)
+        : new Set(force instanceof Set ? force : (Array.isArray(force) ? force : []));
+    const forcedList = stages.filter(s => forcedStages.has(s));
+    log(`ATTEMPT_DISPATCH: ${sceneKey} -> stages=[${stages.join(', ')}]${forcedList.length ? ` (force=[${forcedList.join(', ')}])` : ''}`);
 
     let dispatched = 0;
     let throttled = 0;
@@ -593,8 +596,15 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
             stage,
             loadedBook,
             buildId,
-            { force }
+            { force: forcedStages.has(stage) }
         );
+        if (!result.dispatched && result.reason === 'no_worker_available') {
+            // No live worker of this type: the command is blocked, the stage
+            // loses its authorization — no retry on the next tick.
+            await commandGate.blockStageNoWorker(redis, bookId, chapterId, sceneId, stage);
+            failures.push(`${stage}:blocked_no_worker`);
+            continue;
+        }
         if (result.dispatched) {
             dispatched++;
         } else if (result.reason === 'backpressure' || result.reason === 'throttled') {

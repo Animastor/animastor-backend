@@ -350,9 +350,9 @@ describe('dispatch metadata/lease lifecycle — getDispatchEvidence premise (172
             await redis.del(metaKeyOf('image'));
 
             // 6. Next reconciliation: no lease, no meta, no marker, no PG task
-            //    → proven dead → FSM-safe repair GENERATING → DIRTY → PENDING
+            //    → proven dead → no command → GENERATING → DIRTY (not re-queued)
             await runCycles(1);
-            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('pending');
+            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('dirty'); // command-only: released, not re-queued
             expect(await allKeysByPattern(`animastor:dispatch-meta:${B}:*`)).to.have.length(0);
             expect(await allKeysByPattern(`animastor:dispatch-lease:${B}:*`)).to.have.length(0);
         });
@@ -370,7 +370,7 @@ describe('dispatch metadata/lease lifecycle — getDispatchEvidence premise (172
             // Both keys expire (equal TTLs, no renewal after crash)
             await redis.del(leaseKeyOf('image'), metaKeyOf('image'));
             await runCycles(1);
-            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('pending');
+            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('dirty'); // command-only: released, not re-queued
         });
     });
 
@@ -419,7 +419,7 @@ describe('dispatch metadata/lease lifecycle — getDispatchEvidence premise (172
             expect(await allKeysByPattern(`animastor:dispatch-lease:${B}:*`)).to.have.length(0);
             expect(await allKeysByPattern(`animastor:dispatch-meta:${B}:*`)).to.have.length(0);
             // Lease-backed GENERATING was rolled back (cancel → evidence gone → sweep)
-            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('pending');
+            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('dirty'); // command-only: released, not re-queued
             // Tombstone + cancel flag recorded
             expect(pgState.cancelledBooks.has(B)).to.equal(true);
             expect(await redis.get(`animastor:generation:cancel:${B}`)).to.equal('true');
@@ -427,7 +427,7 @@ describe('dispatch metadata/lease lifecycle — getDispatchEvidence premise (172
             // Reconciliation after Stop All: no resurrection, no new dispatch keys
             await runCycles(2);
             expect(await redis.smembers(ACTIVE_SCENES_KEY)).to.have.length(0);
-            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('pending');
+            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('dirty'); // command-only: released, not re-queued
             expect(await allKeysByPattern(`animastor:dispatch-lease:${B}:*`)).to.have.length(0);
             expect(await allKeysByPattern(`animastor:dispatch-meta:${B}:*`)).to.have.length(0);
         });

@@ -160,8 +160,11 @@ describe('§32.7 O-5 guards: progress events arrive only via the ProgressEventsP
         // live tier consumer (no CRUD "for later").
         const unused = [...declaredOps].filter((op) => !usedOps.has(op)).sort();
         expect(unused, 'every declared op must have a live tier consumer').to.deep.equal([]);
-        // The measured O-5 operation set is exactly four ops (§32.7 O-P4).
+        // The measured O-5 operation set (§32.7 O-P4) + blockSceneStage
+        // (command-only generation 2026-10-31: no live worker → the command
+        // is blocked host-side; animastor-docs COMMAND_ONLY_GENERATION.md).
         expect([...declaredOps].sort(), 'the frozen O-5 contract').to.deep.equal([
+            'blockSceneStage',
             'getSceneTaskState',
             'hasActiveTasks',
             'publishProgress',
@@ -184,6 +187,7 @@ describe('§32.7 O-5 guards: progress events arrive only via the ProgressEventsP
         const exportedOps = (exportBlock[1].match(/[a-zA-Z_]\w*(?=,|\s*$)/gm) || [])
             .map((s) => s.trim()).filter(Boolean);
         expect(exportedOps.sort()).to.deep.equal([
+            'blockSceneStage',
             'getSceneTaskState',
             'hasActiveTasks',
             'publishProgress',

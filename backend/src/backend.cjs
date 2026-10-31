@@ -134,7 +134,7 @@ const video = require('./video');
 // S-7: the default registrations live in the package (bootstrap() is the
 // eager startup entry; the registry also self-bootstraps lazily on first access).
 require('@animastor/generation').bootstrap();
-const { resumeIncompleteSessions } = require('./startup-resume');
+const { interruptIncompleteSessions, interruptActiveGenerationTasks } = require('./startup-resume');
 // §32.30: orchestration contour physically extracted to @animastor/orchestration
 // (packages/animastor-orchestration). The host consumes ONLY the package root.
 const orchestrationPkg = require('@animastor/orchestration');
@@ -550,6 +550,10 @@ const routeDeps = {
     queueIdempotency,
     // Stage 118 (B4/M2): capacity-deferral port (same injection discipline).
     clearDeferrals,
+    // Command-only generation: the shared "stop this stage" routine
+    // (cancel-worker, PUT layer-config) — injected, the contour-route
+    // require sets are frozen.
+    stageCancellation: require('./services/stage-cancellation.cjs'),
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
@@ -905,13 +909,23 @@ async function startServer() {
         log(`[STARTUP] GPU HUB URL: ${HUB_URL}`);
         log(`[STARTUP] Output directory: ${OUTPUT_DIR}`);
 
-        // Post-listen initialization
-        try {
-            runtime.loop.start(redis);
-            log('[STARTUP] Runtime loop started');
-        } catch (loopErr) {
-            console.warn('[STARTUP] Runtime loop start failed:', loopErr.message);
-        }
+        // Post-listen initialization.
+        // Command-only generation: interrupt every command that was in flight
+        // BEFORE the scheduler loop starts — a backend start creates no work;
+        // interrupted tasks are resumed only by a button.
+        (async () => {
+            try {
+                await interruptActiveGenerationTasks(redis, { log });
+            } catch (intErr) {
+                console.warn('[STARTUP] Interrupting in-flight generation failed:', intErr.message);
+            }
+            try {
+                runtime.loop.start(redis);
+                log('[STARTUP] Runtime loop started');
+            } catch (loopErr) {
+                console.warn('[STARTUP] Runtime loop start failed:', loopErr.message);
+            }
+        })();
 
         // T6: Единый reconciliation-цикл (заменяет startup-recovery, audio-recovery, cleanup-service)
         setImmediate(async () => {
@@ -924,8 +938,9 @@ async function startServer() {
                     taskHandler,
                     state,
                     recoverAllBooksFromDisk,
-                    resumeIncompleteSessions,
-                    runBackgroundWindowGeneration: windowGenerator.runBackgroundWindowGeneration,
+                    // Command-only generation: C5 marks window sessions
+                    // interrupted — nothing is resumed in the background.
+                    interruptIncompleteSessions,
                     entityCleanup,
                 };
 

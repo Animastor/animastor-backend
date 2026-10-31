@@ -40,6 +40,10 @@ const runtimeScheduler = require('./runtime-scheduler');
 const counterReconciliation = require('./counter-reconciliation');
 const dispatchEngine = require('./dispatch-engine');
 const leaseManager = require('./lease-manager');
+// Generation only by explicit command: every fix that used to (re)queue work
+// is gated per scene×stage by the command gate (active task-registry task ∧
+// layer enabled ∧ not cancelled). Without authorization a fix is diagnostics.
+const commandGate = require('./command-gate');
 // S-5: orchestration-owned behavior (FSM-safe facade writers, rollbacks)
 // reaches runtime ONLY through the composition-root-injected seam registry.
 // No orchestration module is imported from this file (S-5).
@@ -335,15 +339,7 @@ async function checkOrphanAssets(redis, bookId, chapterId, sceneId) {
  * Reconciliation must never resurrect a cancelled book.
  */
 async function isBookGenerationCancelled(redis, bookId) {
-    try {
-        const sceneWindow = require('./scene-window');
-        if (await sceneWindow.isCancelled(redis, bookId)) return true;
-    } catch (_) { /* flag unreadable — fall through to tombstone */ }
-    try {
-        return await persist('cancel.isCancelled')(bookId);
-    } catch (_) {
-        return false;
-    }
+    return commandGate.isBookCancelled(redis, bookId);
 }
 
 /**
@@ -397,8 +393,14 @@ async function checkOrphanGeneratingState(redis, bookId, chapterId, sceneId) {
 // ======================================================
 
 /**
- * Check for partially built scenes.
+ * Check for partially built scenes — DIAGNOSTICS ONLY.
  * T8: использует per-asset state вместо линейного.
+ *
+ * Command-only generation (2026-10-31): a partial build is NOT an
+ * inconsistency and never produces a fix. The former PROGRESS_TO_IMAGE /
+ * PROGRESS_TO_VIDEO auto-progression (incident 2026-10-30 BA: reconcile
+ * started image after audio READY while image was disabled) is removed —
+ * the next stage starts only by an explicit command.
  *
  * Stage 50: генерация в полёте — не «partial build». Раньше registry мог
  * ещё не содержать image (registerSceneImage пишется по завершении), а
@@ -992,9 +994,7 @@ async function reconcileScene(redis, bookId, chapterId, sceneId) {
             }
         }
 
-        // Check orphan GENERATING states (audit d9d67a3). Pushed BEFORE the
-        // partial-build checks: those de-duplicate by sceneId, and the orphan
-        // repair must win over a PROGRESS_TO_* resurrection attempt.
+        // Check orphan GENERATING states (audit d9d67a3).
         const orphanGenerating = await checkOrphanGeneratingState(redis, bookId, chapterId, sceneId);
         if (orphanGenerating) {
             report.orphanStates.push(...orphanGenerating);
@@ -1007,16 +1007,11 @@ async function reconcileScene(redis, bookId, chapterId, sceneId) {
             }
         }
 
-        // Check partial builds
+        // Partial builds — diagnostics only (command-only generation): kept in
+        // the report, NEVER turned into an inconsistency/fix.
         const partial = await checkPartialBuilds(redis, bookId, chapterId, sceneId);
         if (partial) {
             report.partialBuilds.push(partial);
-            if (!report.inconsistentScenes.find(s => s.scene.sceneId === sceneId)) {
-                report.inconsistentScenes.push({
-                    scene: { bookId, chapterId, sceneId },
-                    issue: partial.type
-                });
-            }
         }
 
         // Check stale locks
@@ -1109,20 +1104,6 @@ function getFixRecommendations(inconsistentScenes) {
                     reason: 'AUDIO_READY but no audio file',
                     safeToExecute: true
                 };
-            case 'partial_audio_only':
-                return {
-                    scene,
-                    action: 'PROGRESS_TO_IMAGE',
-                    reason: 'Audio ready but image not started',
-                    safeToExecute: true
-                };
-            case 'partial_image_video_missing':
-                return {
-                    scene,
-                    action: 'PROGRESS_TO_VIDEO',
-                    reason: 'Image ready but video not started',
-                    safeToExecute: true
-                };
             case 'stale_locks':
                 return {
                     scene,
@@ -1207,11 +1188,14 @@ function getFixRecommendations(inconsistentScenes) {
  */
 const RESURRECTION_ACTIONS = new Set([
     'REGENERATE_MISSING_ASSET',
-    'PROGRESS_TO_IMAGE',
-    'PROGRESS_TO_VIDEO',
     'RECOVER_ORPHAN_ASSETS',
     'RELEASE_STALE_LEASE',
 ]);
+
+function diagnosticOnly(action, scene, what) {
+    log(`[DIAGNOSTIC] ${action} ${scene.bookId}/${scene.chapterId}/${scene.sceneId}: ${what} — no command authorizes it, nothing queued`);
+    return { success: false, action, scene, diagnostic: true, details: `diagnostic only: ${what} (no command-authorized stage)` };
+}
 
 /**
  * Apply a fix recommendation.
@@ -1264,6 +1248,23 @@ async function applyFix(redis, fix) {
                         };
                     }
 
+                    // Command-only generation: without an active command for
+                    // this stage the dead generation is released to DIRTY
+                    // (ghost removed) but NOT re-queued — no PENDING, no index.
+                    if (!(await commandGate.isStageAuthorized(
+                        redis, scene.bookId, scene.chapterId, scene.sceneId, fix.stage))) {
+                        const released = await commandGate.rollbackGeneratingToDirty(
+                            redis, scene.bookId, scene.chapterId, scene.sceneId,
+                            fix.stage, 'orphan_generating_no_command');
+                        log(`[DIAGNOSTIC] orphan GENERATING ${scene.bookId}/${scene.chapterId}/${scene.sceneId} ${fix.stage}: no command — released to DIRTY, not re-queued`);
+                        return {
+                            success: released.changed, action, scene, diagnostic: true,
+                            details: released.changed
+                                ? `${fix.stage}: GENERATING → DIRTY (orphan, no command — not re-queued)`
+                                : `orphan release skipped: ${released.reason}`
+                        };
+                    }
+
                     // FSM-safe path GENERATING → DIRTY → PENDING (a direct
                     // GENERATING → PENDING is forbidden). Errors are NOT
                     // swallowed (rollbackStageToPending logs + journals +
@@ -1280,13 +1281,11 @@ async function applyFix(redis, fix) {
                         { stage: fix.stage, fromState: 'generating', recoveredBy: 'reconciliation-engine' }
                     ).catch(() => {});
 
-                    // Make the repaired stage dispatchable again — but never
-                    // for a cancelled book (tombstone/cancel flag precedence:
-                    // only an explicit new generation clears them).
-                    if (!(await isBookGenerationCancelled(redis, scene.bookId))) {
-                        await runtimeScheduler.addSceneToActiveIndex(
-                            redis, scene.bookId, scene.chapterId, scene.sceneId);
-                    }
+                    // Make the repaired stage dispatchable again — the active
+                    // command authorizes it (the index write is command-gated:
+                    // cancellation / missing task / disabled layer deny it).
+                    await runtimeScheduler.addSceneToActiveIndex(
+                        redis, scene.bookId, scene.chapterId, scene.sceneId);
 
                     return {
                         success: true, action, scene,
@@ -1295,6 +1294,14 @@ async function applyFix(redis, fix) {
                 }
 
                 // ── Legacy stuck_state path: whole-scene DIRTY ──
+                // Command-only generation: only under an active command.
+                {
+                    const auth = await commandGate.getAuthorizedStages(
+                        redis, scene.bookId, scene.chapterId, scene.sceneId);
+                    if (auth.stages.size === 0) {
+                        return diagnosticOnly(action, scene, 'stuck scene');
+                    }
+                }
                 // Mark all per-asset states as DIRTY for redispatch
                 // M5: Route through orchestrator.markDirtyScene instead of direct state.setAssetState
                 // S-5: asset-state writer via the injected orchestration seam
@@ -1331,12 +1338,22 @@ async function applyFix(redis, fix) {
                 let removedCount = 0;
                 const clearedDispatchIds = [];
 
+                // Command-only generation: the lease release + re-queue runs
+                // only for stages under an active command; otherwise the stale
+                // lease is reported (diagnostics) and expires on its own TTL.
+                const auth = await commandGate.getAuthorizedStages(
+                    redis, scene.bookId, scene.chapterId, scene.sceneId);
+                if (auth.stages.size === 0) {
+                    return diagnosticOnly(action, scene, 'stale dispatch lease');
+                }
+
                 // Release all dispatch leases for this scene through the
                 // canonical cancellation path (lease + owned quota + renewal
                 // timer + completion marker). A bare `del` would leak the
                 // quota slot and the in-memory renewal timer, and could race a
                 // concurrent re-acquire (no token check).
                 for (const stage of mediaRegistry.listMediaTypes()) {
+                    if (!auth.stages.has(stage)) continue;
                     const result = await dispatchEngine.cancelActiveDispatch(
                         redis, scene.bookId, scene.chapterId, scene.sceneId, stage,
                         'stale_lease_recovery'
@@ -1363,14 +1380,21 @@ async function applyFix(redis, fix) {
                     }
                 }
 
-                // Mark per-asset states as DIRTY for redispatch
+                // Mark the in-flight states of the AUTHORIZED stages DIRTY for
+                // redispatch (never a finished READY stage, never a stage
+                // without a command).
                 // M5: Route through orchestrator.markDirtyScene instead of direct state.setAssetState
-                // M5 Шаг 3: syncLinearState уже внутри markDirtyScene
                 // S-5: asset-state writer via the injected orchestration seam
                 const markDirtyScene = orchestrationSeams.getOrchestrationSeam('markDirtyScene');
-                await markDirtyScene(redis, scene.bookId, scene.chapterId, scene.sceneId);
+                const currentStates = await state.getAssetStates(redis, scene.bookId, scene.chapterId, scene.sceneId);
+                const redo = [...auth.stages].filter(stage =>
+                    currentStates[stage] === state.AssetState.GENERATING ||
+                    currentStates[stage] === state.AssetState.PENDING);
+                if (redo.length > 0) {
+                    await markDirtyScene(redis, scene.bookId, scene.chapterId, scene.sceneId, redo);
+                }
 
-                // Add back to active index
+                // Add back to active index (command-gated write)
                 await runtimeScheduler.addSceneToActiveIndex(redis, scene.bookId, scene.chapterId, scene.sceneId);
 
                 return { success: removedCount > 0, action, scene, details: `released ${removedCount} stale leases` };
@@ -1390,6 +1414,13 @@ async function applyFix(redis, fix) {
 
                 if (!pendingState) {
                     return { success: false, action, scene, details: `unknown asset type (reason: ${fix.reason})` };
+                }
+                {
+                    const missingType = pendingState.replace(/_pending$/, '');
+                    if (!(await commandGate.isStageAuthorized(
+                        redis, scene.bookId, scene.chapterId, scene.sceneId, missingType))) {
+                        return diagnosticOnly(action, scene, `${missingType} READY but file missing`);
+                    }
                 }
 
                 // M5 Шаг 4: Route through orchestrator.setScenePending (which includes syncLinearState)
@@ -1413,21 +1444,6 @@ async function applyFix(redis, fix) {
                 return { success: true, action, scene, details: `marked as ${pendingState}` };
             }
 
-            case 'PROGRESS_TO_IMAGE': {
-                // M5 Шаг 4: Route through orchestrator.setScenePending (includes syncLinearState)
-                // S-5: asset-state writer via the injected orchestration seam
-                await orchestrationSeams.getOrchestrationSeam('setScenePending')(redis, scene.bookId, scene.chapterId, scene.sceneId, 'image');
-
-                await runtimeScheduler.addSceneToActiveIndex(
-                    redis,
-                    scene.bookId,
-                    scene.chapterId,
-                    scene.sceneId
-                );
-
-                return { success: true, action, scene, details: 'progressed to IMAGE_PENDING' };
-            }
-
             case 'RECONCILE_COUNTER_DRIFT': {
                 // Get the current lease count and fix counter
                 const stage = fix.stage || 'audio';
@@ -1436,21 +1452,6 @@ async function applyFix(redis, fix) {
                 await counterReconciliation.correctCounterWithLua(redis, stage, leaseCount);
 
                 return { success: true, action, scene, details: `counter corrected to ${leaseCount}` };
-            }
-
-            case 'PROGRESS_TO_VIDEO': {
-                // M5 Шаг 4: Route through orchestrator.setScenePending (includes syncLinearState)
-                // S-5: asset-state writer via the injected orchestration seam
-                await orchestrationSeams.getOrchestrationSeam('setScenePending')(redis, scene.bookId, scene.chapterId, scene.sceneId, 'video');
-
-                await runtimeScheduler.addSceneToActiveIndex(
-                    redis,
-                    scene.bookId,
-                    scene.chapterId,
-                    scene.sceneId
-                );
-
-                return { success: true, action, scene, details: 'progressed to VIDEO_PENDING' };
             }
 
             case 'RECOVER_ORPHAN_ASSETS': {
@@ -1477,6 +1478,13 @@ async function applyFix(redis, fix) {
                     }
                 }
 
+                // Registry fact repair above is hygiene. Re-queueing audio is
+                // work — only under an active audio command.
+                if (!(await commandGate.isStageAuthorized(
+                    redis, scene.bookId, scene.chapterId, scene.sceneId, 'audio'))) {
+                    log(`[DIAGNOSTIC] RECOVER_ORPHAN_ASSETS ${scene.bookId}/${scene.chapterId}/${scene.sceneId}: registry marked not-ready; audio not re-queued (no command)`);
+                    return { success: true, action, scene, diagnostic: true, details: 'registry marked for recovery (no command — nothing queued)' };
+                }
                 // M5 Шаг 4: Route through orchestrator.setScenePending (includes syncLinearState)
                 // S-5: asset-state writer via the injected orchestration seam
                 await orchestrationSeams.getOrchestrationSeam('setScenePending')(redis, scene.bookId, scene.chapterId, scene.sceneId, 'audio');
@@ -1755,14 +1763,17 @@ async function reconcileCycle(redis, deps = {}, options = {}) {
                 summary.errors.push(`counter_reconcile: ${err.message}`);
             }
 
-            // C5: Resume incomplete sessions (optional — requires runBackgroundWindowGeneration)
-            if (typeof deps.resumeIncompleteSessions === 'function' && typeof deps.runBackgroundWindowGeneration === 'function') {
+            // C5: Interrupted window sessions (command-only generation): the
+            // host marks sessions that were running at shutdown as
+            // interrupted. Nothing is resumed in the background — the user
+            // resumes with a button.
+            if (typeof deps.interruptIncompleteSessions === 'function') {
                 try {
-                    await deps.resumeIncompleteSessions(log, deps.runBackgroundWindowGeneration);
-                    phases.push('session_resume');
+                    const c5Count = await deps.interruptIncompleteSessions(log);
+                    phases.push(`session_interrupt:${c5Count || 0}`);
                 } catch (err) {
                     warn(`Phase C5 failed: ${err.message}`);
-                    summary.errors.push(`session_resume: ${err.message}`);
+                    summary.errors.push(`session_interrupt: ${err.message}`);
                 }
             }
         }
@@ -1814,15 +1825,17 @@ async function reconcileCycle(redis, deps = {}, options = {}) {
         }
 
         // ══════════════════════════════════════════════
-        // PHASE C8: WORK_TO_DO rebuild (Option E) — startup-only
+        // PHASE C8: asset-state rebuild — startup-only
         // ══════════════════════════════════════════════
-        // Авто-возобновление прерванной генерации после потери Redis. Только
-        // первый цикл (startup:true) — периодический цикл работу НЕ возрождает
-        // (политика Recon #4 §10.3: без user action генерация не стартует).
+        // Command-only generation (2026-10-31): the former WORK_TO_DO rebuild
+        // re-queued work after a restart (PENDING + active index). It now only
+        // restores per-asset FACTS from PG + FS (READY for proven files,
+        // DIRTY for READY without a valid file / version-stale) — it never
+        // writes PENDING and never touches the active index.
         if (startup && !scope) {
             try {
                 const c7Count = await rebuildWorkList(redis);
-                if (c7Count > 0) phases.push(`worklist_rebuild:${c7Count}`);
+                if (c7Count > 0) phases.push(`asset_state_rebuild:${c7Count}`);
             } catch (err) {
                 warn(`Phase C8 failed: ${err.message}`);
                 summary.errors.push(`worklist_rebuild: ${err.message}`);
@@ -2292,24 +2305,26 @@ async function reconcileMissingSceneState(redis, deps) {
     }
 }
 
-// ── PHASE C7: WORK_TO_DO rebuild (Option E) ──────────
-// Cathedral Option E — см. docs/architecture/work-list-rebuild-design.md
-// (Recon #4 design proof). После полной потери Redis пересчитывает WORK_TO_DO
-// из PG + FS и МАТЕРИАЛИЗУЕТ runtime-состояние: per-asset Redis states + SADD
-// в active index. Генерацию НЕ запускает — это делает обычный scheduler tick
-// (единственный владелец execution, SCHEDULER_TICK_LOCK).
+// ── PHASE C8: asset-state rebuild (formerly WORK_TO_DO, Option E) ──
+// Cathedral Option E — см. docs/architecture/work-list-rebuild-design.md.
+// После потери Redis пересчитывает per-asset ФАКТЫ из PG + FS.
 //
-// Доказанные в Recon #4 инварианты:
-//  1. Предикат НЕ читает Redis asset state (C0 over-marks READY/READY/READY
-//     для любой сцены с .mp3) — только PG + FS-проба.
-//  2. States пишутся ДО SADD: scheduler решает «что диспатчить» по Redis
-//     states (shouldScheduleAssets), пустой ключ = NEW = «диспатчить всё».
-//  3. build_id пинится из manifest.book_id — та же формула, что в attemptDispatch.
-//  4. Книги с cancellation tombstone (Operation #1) пропускаются fail-closed.
-//  5. Фаза последняя среди state-write C-фаз и идёт ПОСЛЕ C6 (layer-config
-//     восстановлен — нужен для enabled-слоёв).
-//  6. Ошибки PG — fail-closed: без PG предикат невычислим, фаза прерывается
-//     (нельзя воскресить отменённую работу или потерять dirty-маркеры).
+// Command-only generation (2026-10-31, animastor-docs COMMAND_ONLY_GENERATION):
+// фаза БОЛЬШЕ НЕ СОЗДАЁТ РАБОТУ — не пишет PENDING и не делает SADD в active
+// index. Прерванная генерация возобновляется только кнопкой (задачи реестра
+// помечаются interrupted хостом на старте).
+//
+// Что фаза делает:
+//  1. Предикат НЕ читает Redis asset state (C0 over-marks READY) — только PG + FS.
+//  2. Файл валиден и нет dirty-маркеров → READY (guarded restore-fact write),
+//     поверх GENERATING/PENDING не пишет.
+//  3. Нужна работа (нет файла / stale / dirty-маркер): READY → DIRTY, а NEW при
+//     существующем устаревшем файле → DIRTY (stale-метка, FSM-валидно). Без файла
+//     NEW остаётся NEW; PLACEHOLDER, DIRTY, FAILED, PENDING, GENERATING не
+//     трогаются: работа — только по команде.
+//  4. Книги с cancellation tombstone пропускаются fail-closed.
+//  5. Выключенные слои не трогаются.
+//  6. Ошибки PG — fail-closed (фаза прерывается).
 async function rebuildWorkList(redis) {
     // Все зависимости — lazy require на момент вызова, чтобы фаза была
     // самодостаточной (не зависит от того, с какими зависимостями был
@@ -2335,10 +2350,8 @@ const state = lazyHostBinding('state');
     // host service left this function.
     const placeholderAudioOp = require('./placeholder-audio-port').placeholderAudioOp;
     const sceneWindow = require('./scene-window');
-    const runtimeScheduler = require('./runtime-scheduler');
-    // S-5: asset-state writers via the injected orchestration seams
+    // S-5: asset-state writer via the injected orchestration seam
     const markDirtyScene = orchestrationSeams.getOrchestrationSeam('markDirtyScene');
-    const setScenePending = orchestrationSeams.getOrchestrationSeam('setScenePending');
 
     const AssetState = state.AssetState;
     const STAGES = mediaRegistry.listMediaTypes();
@@ -2423,88 +2436,58 @@ const state = lazyHostBinding('state');
                 }
 
                 const stateMap = {};
-                let needsWork = false;
                 for (const stage of STAGES) {
-                    if (!enabled[stage]) continue; // disabled: PENDING не пишем (isInFlight-override в shouldScheduleAssets)
+                    if (!enabled[stage]) continue; // disabled layer: untouched
                     const fileValid = fsStatus[stage].exists && (stage !== 'audio' || audioReal);
                     const stale = !!staleAssets[`${key}:${stage}`];
                     const dirty = !!dirtyStages[`${key}:${stage}`];
                     const unitDirty = stage === 'image' && unitDirtyScenes.has(key);
-                    if (fileValid && !stale && !dirty && !unitDirty) {
-                        stateMap[stage] = AssetState.READY;
-                    } else {
-                        stateMap[stage] = AssetState.PENDING;
-                        needsWork = true;
-                    }
+                    stateMap[stage] = (fileValid && !stale && !dirty && !unitDirty)
+                        ? AssetState.READY
+                        : AssetState.DIRTY;
                 }
 
-                if (!needsWork) continue;
-
-                // 4. Материализовать states ДО SADD — через SAFE facade (audit gap 1).
-                // Нельзя downgrade-ить выполняющуюся генерацию:
-                //   GENERATING/PENDING/PLACEHOLDER → НЕ трогаем (in-flight/очередь
-                //   владеют стадией; recovery не имеет права их откатывать).
-                //   PENDING-таргеты → orchestrator.setScenePending (валидация переходов:
-                //   GENERATING→PENDING rejected самой таблицей переходов).
-                //   READY-таргеты → guarded restore-fact write (S2.4): только из
-                //   NEW/DIRTY/FAILED/READY, никогда поверх GENERATING/PENDING.
-                //   C0 over-mark (READY без файла) → READY→DIRTY (markDirtyScene) →
-                //   →PENDING (setScenePending) — self-heal P1 через валидные переходы.
+                // 4. Материализовать ФАКТЫ через safe-переходы. Работа не ставится.
                 const currentStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);
+                let touched = false;
                 for (const [stage, target] of Object.entries(stateMap)) {
                     const current = currentStates[stage] || state.AssetState.NEW;
-                    // GENERATING/PENDING — выполняющаяся/очередная генерация:
-                    // recovery не имеет права downgrade-ить её (audit gap 1).
                     if (current === state.AssetState.GENERATING ||
                         current === state.AssetState.PENDING) {
-                        log(`[WORKLIST] ${bookId}/${chapterId}/${sceneId} ${stage}: ${current} — untouched by recovery (in-flight/queued)`);
+                        log(`[WORKLIST] ${bookId}/${chapterId}/${sceneId} ${stage}: ${current} — untouched by rebuild`);
                         continue;
                     }
-                    if (target === state.AssetState.PENDING) {
-                        if (current === state.AssetState.READY || current === state.AssetState.PLACEHOLDER) {
-                            // C0 over-mark (P1, READY без файла) / placeholder-аудио:
-                            // прямой READY→PENDING / PLACEHOLDER→PENDING невалиден;
-                            // READY→DIRTY / PLACEHOLDER→DIRTY валиден → затем DIRTY→PENDING.
-                            // TOCTOU-guard (audit follow-up): scheduler tick работает
-                            // конкурентно (runtime-loop стартует ДО startup-цикла),
-                            // markVersionStaleDirty → dispatch может успеть выставить
-                            // GENERATING между нашим guard-read и markDirtyScene (который
-                            // пишет DIRTY через unsafe без re-validation). Re-read прямо
-                            // перед записью: если состояние изменилось — стадией уже
-                            // владеет кто-то другой, recovery отступает. setScenePending
-                            // ниже сам re-reads + validates (вторая линия обороны).
-                            const fresh = (await state.getAssetStates(redis, bookId, chapterId, sceneId))[stage] || state.AssetState.NEW;
-                            if (fresh !== current) {
-                                log(`[WORKLIST] ${bookId}/${chapterId}/${sceneId} ${stage}: state changed ${current}→${fresh} during rebuild — untouched (owner present)`);
-                                continue;
-                            }
-                            log(`[WORKLIST] ${bookId}/${chapterId}/${sceneId} ${stage}: ${current} → DIRTY → PENDING (valid transitions)`);
-                            await markDirtyScene(redis, bookId, chapterId, sceneId, [stage]);
-                            await setScenePending(redis, bookId, chapterId, sceneId, stage);
-                        } else {
-                            // NEW/DIRTY/FAILED → PENDING — валидные переходы.
-                            await setScenePending(redis, bookId, chapterId, sceneId, stage);
+                    if (target === state.AssetState.DIRTY) {
+                        // Stale marker only (the work waits for an explicit
+                        // command): a READY over-mark, or a NEW stage whose
+                        // artifact exists but is outdated/flagged. A stage
+                        // with no artifact at all stays NEW; PLACEHOLDER,
+                        // DIRTY, FAILED are left as they are.
+                        const markable = current === state.AssetState.READY ||
+                            (current === state.AssetState.NEW && fsStatus[stage].exists);
+                        if (!markable) continue;
+                        const fresh = (await state.getAssetStates(redis, bookId, chapterId, sceneId))[stage] || state.AssetState.NEW;
+                        if (fresh !== current) {
+                            log(`[WORKLIST] ${bookId}/${chapterId}/${sceneId} ${stage}: state changed ${current}→${fresh} during rebuild — untouched (owner present)`);
+                            continue;
                         }
-                    } else {
-                        // target === READY — restore-fact (файл валиден на диске):
-                        // guarded unsafe write, S2.4 (restore path). Пропускаются
-                        // GENERATING/PENDING (см. guard выше); из остальных состояний
-                        // (NEW/DIRTY/FAILED/PLACEHOLDER/READY) восстановить READY
-                        // безопасно — файл доказан FS-пробой.
-                        if (current !== state.AssetState.READY) {
-                            await state.unsafeRestoreAssetState(redis, bookId, chapterId, sceneId, stage, state.AssetState.READY);
-                        }
+                        log(`[WORKLIST] ${bookId}/${chapterId}/${sceneId} ${stage}: ${current} without a valid/current file → DIRTY (stale; regeneration only by command)`);
+                        await markDirtyScene(redis, bookId, chapterId, sceneId, [stage]);
+                        touched = true;
+                    } else if (current !== state.AssetState.READY) {
+                        // target === READY — restore-fact (файл доказан FS-пробой).
+                        await state.unsafeRestoreAssetState(redis, bookId, chapterId, sceneId, stage, state.AssetState.READY);
+                        touched = true;
                     }
                 }
-                await runtimeScheduler.addSceneToActiveIndex(redis, bookId, chapterId, sceneId);
-                scenesAdded++;
+                if (touched) scenesAdded++;
             }
         } catch (err) {
             warn(`Rebuild failed for book ${bookId}: ${err.message}`);
         }
     }
 
-    if (scenesAdded > 0) log(`[WORKLIST] ${scenesAdded} scene(s) re-added for generation resume`);
+    if (scenesAdded > 0) log(`[WORKLIST] ${scenesAdded} scene(s) asset-state facts rebuilt (no work queued)`);
     return scenesAdded;
 }
 

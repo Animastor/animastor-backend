@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS generation_tasks (
     chapter_id      TEXT,
     scene_id        TEXT,
     task_type       TEXT NOT NULL CHECK(task_type IN ('audio','image','video')),
-    status          TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed','cancelled')),
+    status          TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed','cancelled','blocked','interrupted')),
     worker_id       TEXT,
     workspace_id    UUID REFERENCES workspaces(id),
     retry_count     INTEGER DEFAULT 0,
@@ -586,7 +586,7 @@ CREATE TABLE IF NOT EXISTS scene_assets (
     chunks          JSONB,
     build_id        TEXT,
     scene_hash      TEXT,
-    status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','ready','stale','failed','missing','placeholder')),
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','ready','stale','failed','missing','placeholder','cancelled')),
     error           TEXT,
     metadata        JSONB,
     created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
@@ -793,8 +793,8 @@ async function runMigrations() {
     try {
         await query(`ALTER TABLE scene_assets DROP CONSTRAINT IF EXISTS scene_assets_status_check`);
         await query(`ALTER TABLE scene_assets ADD CONSTRAINT scene_assets_status_check
-            CHECK (status IN ('pending','ready','stale','failed','missing','placeholder'))`);
-        console.log('[PG] Updated scene_assets status check constraint (added placeholder)');
+            CHECK (status IN ('pending','ready','stale','failed','missing','placeholder','cancelled'))`);
+        console.log('[PG] Updated scene_assets status check constraint (placeholder, cancelled)');
     } catch (err) {
         if (!err.message.includes('does not exist')) {
             console.error('[PG] Failed to update scene_assets status constraint:', err.message);
@@ -838,6 +838,24 @@ async function runMigrations() {
     } catch (err) {
         if (!err.message.includes('already exists')) {
             console.error('[PG] Failed to add scene_assets.scene_audio_config_version:', err.message);
+        }
+    }
+
+    // Command-only generation (2026-10-31): a cancelled/blocked/interrupted
+    // command leaves terminal rows, never a `queued`/`running` task or a
+    // `pending` asset another path could resurrect.
+    //   generation_tasks.status += 'blocked' (no live worker of the type),
+    //                              'interrupted' (backend restart; resumed
+    //                              only by a button)
+    //   scene_assets.status     += 'cancelled' (above)
+    try {
+        await query(`ALTER TABLE generation_tasks DROP CONSTRAINT IF EXISTS generation_tasks_status_check`);
+        await query(`ALTER TABLE generation_tasks ADD CONSTRAINT generation_tasks_status_check
+            CHECK (status IN ('queued','running','completed','failed','cancelled','blocked','interrupted'))`);
+        console.log('[PG] Updated generation_tasks status check constraint (blocked, interrupted)');
+    } catch (err) {
+        if (!err.message.includes('does not exist')) {
+            console.error('[PG] Failed to update generation_tasks status constraint:', err.message);
         }
     }
 

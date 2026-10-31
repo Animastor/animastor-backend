@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.0 (2026-10-31) — генерация только по явной команде
+
+Правило владельца: GPU-генерация запускается только кнопками «аудио» /
+«картинки» / «всё»; никаких автозапусков следующих стадий и фоновых
+запусков; задачи только на включённые слои. Основание — разбор
+`reports/2026-10-31/auto-image-task-ba-incident.md` (§6, §8). Описание:
+animastor-docs `architecture/COMMAND_ONLY_GENERATION.md`.
+
+**Инвариант:** сцена×стадия попадает в active index / dispatch только при
+активной задаче реестра (создана явной командой, стадия = type задачи), при
+включённом слое и без отмены (cancel flag / tombstone).
+
+### Added
+
+- `runtime/command-gate.js` — единственная точка вычисления инварианта
+  (`getAuthorizedStages`, `isStageAuthorized`), force-набор сцена×стадия,
+  `rollbackGeneratingToDirty`, `blockStageNoWorker`. Экспорт
+  `runtime.commandGate`.
+- ProgressEventsPort: операция `blockSceneStage` (хост помечает команду
+  blocked в реестре и PG).
+
+### Changed (поведение)
+
+- `active-scenes-index.addActiveScene` — запись в active index только при
+  авторизованной стадии; иначе `{ added:false, denied:true }`.
+- `runtime-scheduler.shouldScheduleAssets` — стадии только по гейту; убраны
+  fallback на layer-config без задачи и `isInFlight`-override.
+- `runtime-scheduler.tick/attemptDispatch` — force только для сцен×стадий
+  команды (ключ `animastor:force-dispatch-stages:<book>`, вместо книжного
+  `animastor:force-dispatch:<book>`); `no_worker_available` → стадия blocked
+  (GENERATING → DIRTY, задача blocked), без автоповтора.
+- `markVersionStaleDirty` — только помечает stale, в работу не ставит.
+- `orchestrator.resetScenes` — пишет force-набор вместо книжного флага.
+- `scene-orchestrator.dispatchStage` — NEW-сцена переводит в PENDING только
+  диспатчимую стадию; при `no_worker_available` откат в DIRTY, не PENDING.
+- `reconciliation-engine`:
+  - удалены `PROGRESS_TO_IMAGE` / `PROGRESS_TO_VIDEO`; partial build — только
+    диагностика;
+  - `REGENERATE_MISSING_ASSET`, `MOVE_TO_PENDING`, `RELEASE_STALE_LEASE`,
+    перезапуск аудио в `RECOVER_ORPHAN_ASSETS` — только под активной командой
+    стадии, иначе диагностика; осиротевший GENERATING без команды → DIRTY;
+  - C5 вызывает `deps.interruptIncompleteSessions` (возобновления нет);
+  - C8 `rebuildWorkList` пересобирает только факты asset-state, PENDING и
+    active index не пишет.
+- `scene-window.startScene` — без авторизованной стадии сцену не стартует;
+  `trySlideWindowOnComplete` — за флагом хоста `windowAutoNextEnabled()`
+  (по умолчанию выкл.).
+- `dispatch-engine.repairOrphanGeneratingStates` — опция `target: 'dirty'`.
+
 ## 0.2.0 (2026-10-27)
 
 Version-line split for `stage143a-foundation-phase1`: the branch line moves

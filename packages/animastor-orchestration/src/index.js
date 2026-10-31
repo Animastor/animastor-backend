@@ -75,6 +75,7 @@ const EAGER_EXPORTS = {
 const RUNTIME_NS = {
     scheduler: './runtime/runtime-scheduler',
     activeScenes: './runtime/active-scenes-index',
+    commandGate: './runtime/command-gate',
     reconciliation: './runtime/reconciliation-engine',
     dispatch: './runtime/dispatch-engine',
     leaseManager: './runtime/lease-manager',

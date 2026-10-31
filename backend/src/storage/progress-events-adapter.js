@@ -52,9 +52,36 @@ function reconcileCompletedTasks(redis, bookId, getAssetStates) {
     return generationProgress().reconcileCompletedTasks(redis, bookId, getAssetStates);
 }
 
+// Command-only generation (2026-10-31): the tier reports "no live worker of
+// this type" for a scene×stage; the host blocks the command in every store
+// it owns — task registry (blocked, reason «нет воркера <type>»), PG
+// generation_tasks (blocked) and the PG scene_assets row the dispatch stamp
+// left `pending` (→ failed with the reason; ready rows untouched). PG legs are
+// best-effort: the registry write alone already revokes the authorization.
+async function blockSceneStage(redis, bookId, chapterId, sceneId, type, reason) {
+    const result = await generationProgress().blockSceneStage(redis, bookId, chapterId, sceneId, type, reason);
+    const taskRepo = require('./postgres/repositories/task-repo');
+    for (const task of result.tasks || []) {
+        try {
+            await taskRepo.updateTaskStatus(task.task_id, 'blocked', reason);
+        } catch (err) {
+            console.warn(`[PROGRESS-EVENTS] PG block of task ${task.task_id} failed: ${err.message}`);
+        }
+    }
+    try {
+        const sceneAssetsRepo = require('./postgres/repositories/scene-assets-repo');
+        result.assetRows = await sceneAssetsRepo.markPendingAssetsFailed(
+            bookId, [type], [{ chapter_id: chapterId, scene_id: sceneId }], `blocked:${reason}`);
+    } catch (err) {
+        console.warn(`[PROGRESS-EVENTS] PG scene_assets block for ${bookId}/${chapterId}/${sceneId}:${type} failed: ${err.message}`);
+    }
+    return result;
+}
+
 module.exports = {
     publishProgress,
     getSceneTaskState,
     hasActiveTasks,
     reconcileCompletedTasks,
+    blockSceneStage,
 };

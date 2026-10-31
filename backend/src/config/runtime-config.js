@@ -249,6 +249,21 @@ function shareFeaturesEnabled() {
 }
 
 // ======================================================
+// WINDOW AUTO-NEXT (command-only generation, 2026-10-31)
+// ======================================================
+// WINDOW_AUTO_NEXT_ENABLED gates every "start the next window by itself"
+// path: the window generator processing a queued window session after the
+// current one finishes, and the scene window sliding forward after its scenes
+// complete. Default OFF — generation runs only by an explicit command (owner
+// rule; animastor-docs architecture/COMMAND_ONLY_GENERATION.md). Kept behind a
+// flag until the owner decides on the window flow. Read lazily (env flip of a
+// running process, both states in one test run).
+function windowAutoNextEnabled() {
+    const v = process.env.WINDOW_AUTO_NEXT_ENABLED;
+    return v === '1' || v === 'true' || v === 'on';
+}
+
+// ======================================================
 // RESULT FENCING (Stage 131 — staged artifacts & fenced commit)
 // ======================================================
 // GPU_FENCING_MODE gates the staged-artifact publication path of a GPU
@@ -352,6 +367,9 @@ module.exports = {
     WORKER_HEARTBEAT_TYPES,
     WORKER_HEARTBEAT_KEY,
     WORKER_HEARTBEAT_TYPE_PATTERN,
+
+    // Window auto-next (command-only generation, default OFF)
+    windowAutoNextEnabled,
 
     // Worker sharing V1 (kill-switch, default OFF)
     shareFeaturesEnabled,

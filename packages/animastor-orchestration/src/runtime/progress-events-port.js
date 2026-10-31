@@ -39,6 +39,11 @@
 //                           pre-pass; the getAssetStates callback arrives
 //                           as an argument exactly as pre-O-5)
 //
+//   blockSceneStage       — command-only generation (2026-10-31): no live
+//                           worker of a stage's type → block the command
+//                           that asked for it (registry + PG are host-side;
+//                           runtime-scheduler via command-gate)
+//
 // Deliberately NOT in the port: createTasks/listTasks/getTask/updateTask/
 // markCompleted/markCancelled/removeTask/clear (routes-side task CRUD —
 // the HTTP contour owns task lifecycle), getActiveTasksByType,
@@ -53,6 +58,7 @@ const OPS = [
     'getSceneTaskState',
     'hasActiveTasks',
     'reconcileCompletedTasks',
+    'blockSceneStage',
 ];
 
 let impl = null;

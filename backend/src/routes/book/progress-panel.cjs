@@ -6,6 +6,13 @@
 // task_id rather than worker type, so multiple Audio/Image/Video commands can
 // run concurrently with different scopes and target scenes.
 //
+// Command-only generation (2026-10-31): ONLY real task-registry tasks are
+// shown. The former synthetic rows (task_id=null, built from the active index
+// when the registry was empty) are gone — they showed the owner a "task" no
+// command had created (incident 2026-10-30 BA). Rows carry the task status:
+// `blocked` (no live worker of the type, blocked_reason «no_worker:<type>»)
+// and `interrupted` (backend restart) stay visible but are not "running".
+//
 // Contract: JSON field "workers" in the API response is legacy, retained for
 // backward compatibility. In new code use `rows`/`taskRows`; rename the JSON
 // field only in a coordinated frontend+backend release (see
@@ -247,8 +254,9 @@ module.exports = function(app, redis, deps) {
                 }
 
                 const cancelled = task.status === 'cancelled';
+                const stopped = isStopped(task);
                 const doneByProgress = counts.total > 0 && counts.ready >= counts.total;
-                const done = task.status === 'completed' || (!cancelled && doneByProgress);
+                const done = task.status === 'completed' || (!cancelled && !stopped && doneByProgress);
                 const ready = task.status === 'completed' ? counts.total : counts.ready;
                 const percent = done
                     ? 100
@@ -272,6 +280,7 @@ module.exports = function(app, redis, deps) {
                     visible: true,
                     indeterminate: counts.indeterminate,
                     cancelled,
+                    ...statusFields(task),
                 });
             }
 
@@ -292,8 +301,9 @@ module.exports = function(app, redis, deps) {
         }
 
         const cancelled = task.status === 'cancelled';
+        const stopped = isStopped(task);
         const doneByProgress = counts.total > 0 && counts.ready >= counts.total;
-        const done = task.status === 'completed' || (!cancelled && doneByProgress);
+        const done = task.status === 'completed' || (!cancelled && !stopped && doneByProgress);
         const ready = task.status === 'completed' ? counts.total : counts.ready;
         const percent = done
             ? 100
@@ -333,61 +343,29 @@ module.exports = function(app, redis, deps) {
             visible: true,
             indeterminate: counts.indeterminate,
             cancelled,
+            ...statusFields(task),
         }];
     }
 
-    async function legacyTasks(bookId) {
-        const grouped = new Map([
-            ['audio', []],
-            ['image', []],
-            ['video', []],
-        ]);
-        try {
-            const activeKeys = await activeScenes.getAllActiveSceneKeys(redis);
-            for (const key of activeKeys) {
-                const parsed = activeScenes.parseSceneKey(key);
-                if (!parsed || parsed.bookId !== bookId) continue;
-                const assetStates = await state.getAssetStates(
-                    redis,
-                    parsed.bookId,
-                    parsed.chapterId,
-                    parsed.sceneId
-                );
-                for (const type of grouped.keys()) {
-                    if (assetStates[type] === state.AssetState.PENDING ||
-                        assetStates[type] === state.AssetState.GENERATING) {
-                        grouped.get(type).push({
-                            chapter_id: parsed.chapterId,
-                            scene_id: parsed.sceneId,
-                        });
-                    }
-                }
-            }
-        } catch (err) {
-            console.warn(`[PROGRESS-PANEL] Legacy active-state lookup failed for ${bookId}: ${err.message}`);
-        }
+    /** blocked / interrupted: the command stopped without finishing. */
+    function isStopped(task) {
+        return task.status === 'blocked' || task.status === 'interrupted';
+    }
 
-        return [...grouped.entries()]
-            .filter(([, targets]) => targets.length > 0)
-            .map(([type, targets]) => ({
-                task_id: null,
-                type,
-                status: 'active',
-                scope: 'whole_book',
-                chapter_id: null,
-                scene_id: null,
-                targets,
-                started_at: null,
-            }));
+    function statusFields(task) {
+        return {
+            status: task.status || 'active',
+            blocked: task.status === 'blocked',
+            blocked_reason: task.status === 'blocked' ? (task.blocked_reason || null) : null,
+            interrupted: task.status === 'interrupted',
+        };
     }
 
     app.get('/api/v1/book/:bookId/progress-panel', async (req, res) => {
         try {
             const { bookId } = req.params;
-            let tasks = await generationProgress.listTasks(redis, bookId);
-            if (tasks.length === 0) {
-                tasks = await legacyTasks(bookId);
-            }
+            // Only real registry tasks (no synthetic rows from the index).
+            const tasks = await generationProgress.listTasks(redis, bookId);
 
             const chunkData = await loadChunks(bookId);
             let buildId = null;
@@ -403,7 +381,9 @@ module.exports = function(app, redis, deps) {
             }
 
             const visibleTasks = rows.filter(t => t.visible);
-            const anyIncomplete = visibleTasks.some(t => !t.done && !t.cancelled);
+            // A blocked/interrupted task waits for a NEW command — it is not
+            // running, so it does not keep the panel "in progress".
+            const anyIncomplete = visibleTasks.some(t => !t.done && !t.cancelled && !t.blocked && !t.interrupted);
             const overallPercent = visibleTasks.length > 0
                 ? Math.round(
                     visibleTasks.reduce((sum, t) => sum + t.percent, 0) /

@@ -825,7 +825,55 @@ async function getFlaggedDirtyScenes(bookId) {
     return result.rows;
 }
 
+// ======================================================
+// Command-only generation (2026-10-31): terminal statuses for work that will
+// NOT run. A `pending` row is "queued work" for every PG reader (worklist,
+// dirty markers); a cancelled/blocked command must not leave one behind
+// (incident 2026-10-30 BA: two image/pending rows survived Stop All).
+// Only `pending` rows change — `ready`/`placeholder`/`stale` are never touched.
+// ======================================================
+
+function sceneFilter(scenes, params) {
+    if (!Array.isArray(scenes) || scenes.length === 0) return '';
+    params.push(scenes.map(s => String(s.chapter_id)));
+    const chIdx = params.length;
+    params.push(scenes.map(s => String(s.scene_id)));
+    const scIdx = params.length;
+    return ` AND (chapter_id, scene_id) IN (SELECT * FROM unnest($${chIdx}::text[], $${scIdx}::text[]))`;
+}
+
+async function updatePendingAssets(bookId, assetTypes, scenes, status, error) {
+    const types = (assetTypes || []).filter(Boolean);
+    if (!bookId || types.length === 0) return 0;
+    const params = [status, error || null, bookId, types];
+    const where = `book_id = $3 AND asset_type = ANY($4::text[]) AND status = 'pending'` + sceneFilter(scenes, params);
+    const result = await query(`
+        UPDATE scene_assets
+        SET status = $1, error = COALESCE($2, error), updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+        WHERE ${where}
+    `, params);
+    return result.rowCount || 0;
+}
+
+/**
+ * Cancel the PENDING asset rows of the given stages (whole book, or only the
+ * given scenes). @returns {Promise<number>} rows changed.
+ */
+async function cancelPendingAssets(bookId, assetTypes, scenes = null, reason = 'cancelled') {
+    return updatePendingAssets(bookId, assetTypes, scenes, 'cancelled', reason);
+}
+
+/**
+ * A blocked stage (no live worker of its type): PENDING rows → failed with
+ * the blocking reason. @returns {Promise<number>} rows changed.
+ */
+async function markPendingAssetsFailed(bookId, assetTypes, scenes = null, reason = 'blocked') {
+    return updatePendingAssets(bookId, assetTypes, scenes, 'failed', reason);
+}
+
 module.exports = {
+    cancelPendingAssets,
+    markPendingAssetsFailed,
     upsertAsset,
     markReady,
     markStale,

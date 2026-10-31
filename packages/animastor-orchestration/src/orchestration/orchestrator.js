@@ -465,7 +465,7 @@ async function reconcile(redis, bookId, chapterId, sceneId) {
 //   options.readdToActiveIndex — вернуть сцены планировщику после reset (default true)
 //
 // Что делает:
-//   1. force-dispatch флаг
+//   1. force-набор: только сцены×стадии этой регенерации
 //   2. событие SCENE_RESET в journal
 //   3. удаление из active index
 //   4. снятие dispatch leases только для сбрасываемых стадий
@@ -497,11 +497,18 @@ async function resetScenes(redis, bookId, buildId, scenes, layerCfg, options = {
     const scopeDisplay = `${scope}${chapterId ? '/' + chapterId : ''}${sceneId ? '/' + sceneId : ''}`;
     log(`[RESET-SCENES] ${bookId}: ${scenes.length} scenes, scope=${scopeDisplay}`);
 
-    // 1. Force-dispatch flag (T1: TTL из TIMEOUTS)
-        await redis.set(
-        `animastor:force-dispatch:${bookId}`, '1',
-        'EX', runtimeConfig.TIMEOUTS.FORCE_DISPATCH_TTL_S
-    );
+    // 1. Force set (T1: TTL из TIMEOUTS). Command-only generation: force
+    // covers EXACTLY the scene×stage pairs reset here (dirty_layers ∩ enabled
+    // layers of the request) — never the whole book (incident 2026-10-30:
+    // one-scene audio regenerate force-dispatched an unrelated image stage).
+    const commandGate = require('../runtime/command-gate');
+    await commandGate.addForceStages(redis, bookId, scenes.map(ds => ({
+        chapter_id: ds.chapter_id,
+        scene_id: ds.scene_id,
+        stages: (ds.dirty_layers || mediaRegistry.listMediaTypes()).filter(stage =>
+            layerCfg?.[`${stage}_enabled`] !== false
+        ),
+    })), runtimeConfig.TIMEOUTS.FORCE_DISPATCH_TTL_S);
 
     // 2. Event journal — start
     await journal.appendSceneEvent(redis, bookId, chapterId || bookId, sceneId || 'all',
@@ -601,10 +608,13 @@ async function resetScenes(redis, bookId, buildId, scenes, layerCfg, options = {
     // Selective generation can defer this until its task registry is ready.
     // Гарантированно выполняется даже при ошибке markDirty (шаг 8).
     if (readdToActiveIndex) {
+        // Command-gated write: only scenes with an authorized stage enter.
+        let readded = 0;
         for (const ds of scenes) {
-            await scheduler.addSceneToActiveIndex(redis, bookId, ds.chapter_id, ds.scene_id);
+            const r = await scheduler.addSceneToActiveIndex(redis, bookId, ds.chapter_id, ds.scene_id);
+            if (r && !r.denied) readded++;
         }
-        log(`[RESET-SCENES] ${bookId}: ${scenes.length} scenes re-added to active index`);
+        log(`[RESET-SCENES] ${bookId}: ${readded}/${scenes.length} scenes re-added to active index (command-gated)`);
     } else {
         log(`[RESET-SCENES] ${bookId}: activation deferred for ${scenes.length} scenes`);
     }

@@ -130,6 +130,92 @@ async function reconcileCompletedTasks(redis, bookId, getAssetStates) {
     return completed;
 }
 
+function targetsScene(task, chapterId, sceneId) {
+    return (task.targets || []).some(t => t.chapter_id === chapterId && t.scene_id === sceneId);
+}
+
+/**
+ * Command-only generation: a stage could not be enqueued because no live
+ * worker of its type exists. Every ACTIVE task of that type targeting the
+ * scene becomes `blocked` (reason «нет воркера <type>»). A blocked task is
+ * NOT active: it authorizes nothing, so nothing retries it; it stays visible
+ * in the progress panel until a new command supersedes it or a cancel.
+ * @returns {Promise<{tasks: object[]}>} the tasks that were blocked now.
+ */
+async function blockSceneStage(redis, bookId, chapterId, sceneId, type, reason) {
+    if (!redis || !bookId) return { tasks: [] };
+    const blocked = [];
+    for (const task of await listTasks(redis, bookId)) {
+        if (task.status !== 'active' || task.type !== type) continue;
+        if (!targetsScene(task, chapterId, sceneId)) continue;
+        const updated = await updateTask(redis, bookId, task.task_id, {
+            status: 'blocked',
+            blocked_reason: reason || `no_worker:${type}`,
+            blocked_at: Date.now(),
+            blocked_scene: { chapter_id: chapterId, scene_id: sceneId },
+        });
+        if (updated) blocked.push(updated);
+    }
+    return { tasks: blocked };
+}
+
+/**
+ * Backend start: every task still `active` in the registry belonged to a run
+ * the restart interrupted. It becomes `interrupted` (visible, resumable only
+ * by a button) — the backend never resumes it by itself.
+ * @returns {Promise<object[]>} the interrupted tasks.
+ */
+async function interruptActiveTasks(redis, bookId) {
+    if (!redis || !bookId) return [];
+    const out = [];
+    for (const task of await listTasks(redis, bookId)) {
+        if (task.status !== 'active') continue;
+        const updated = await updateTask(redis, bookId, task.task_id, {
+            status: 'interrupted',
+            interrupted_at: Date.now(),
+        });
+        if (updated) out.push(updated);
+    }
+    return out;
+}
+
+/** Book ids that have a task-registry hash (SCAN, no KEYS). */
+async function listBooksWithTasks(redis) {
+    const books = [];
+    if (!redis) return books;
+    let cursor = '0';
+    do {
+        const [next, keys] = await redis.scan(cursor, 'MATCH', `${KEY_PREFIX}:*`, 'COUNT', 200);
+        cursor = next;
+        for (const k of keys || []) books.push(k.slice(KEY_PREFIX.length + 1));
+    } while (cursor !== '0');
+    return books;
+}
+
+/**
+ * A new explicit command supersedes the blocked/interrupted tasks of the
+ * same worker types on the same scenes: they are dropped from the registry
+ * so the panel shows only the new command.
+ * @param {string[]} types
+ * @param {Array<{chapter_id:string, scene_id:string}>} scenes
+ * @returns {Promise<string[]>} removed task ids.
+ */
+async function removeSupersededTasks(redis, bookId, types, scenes) {
+    if (!redis || !bookId) return [];
+    const typeSet = new Set(types || []);
+    const sceneKeys = new Set((scenes || []).map(s => `${s.chapter_id}:${s.scene_id}`));
+    const removed = [];
+    for (const task of await listTasks(redis, bookId)) {
+        if (task.status !== 'blocked' && task.status !== 'interrupted') continue;
+        if (!typeSet.has(task.type)) continue;
+        const overlaps = (task.targets || []).some(t => sceneKeys.has(`${t.chapter_id}:${t.scene_id}`));
+        if (!overlaps) continue;
+        await redis.hdel(key(bookId), task.task_id);
+        removed.push(task.task_id);
+    }
+    return removed;
+}
+
 async function removeTask(redis, bookId, id) {
     if (!redis || !bookId || !id) return;
     await redis.hdel(key(bookId), id);
@@ -155,6 +241,10 @@ module.exports = {
     hasActiveTasks,
     getActiveTasksByType,
     reconcileCompletedTasks,
+    blockSceneStage,
+    interruptActiveTasks,
+    listBooksWithTasks,
+    removeSupersededTasks,
     removeTask,
     clear,
 };

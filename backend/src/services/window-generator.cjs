@@ -2,8 +2,16 @@
 // ANIMASTOR BACKEND — WINDOW GENERATOR
 // ======================================================
 // Background window generation — processes the next window
-// of scenes from the source text, creates chunks, registers
-// scenes for GPU processing, and reports progress.
+// of scenes from the source text, creates chunks + placeholder
+// audio, and reports progress.
+//
+// Command-only generation (2026-10-31, animastor-docs
+// architecture/COMMAND_ONLY_GENERATION.md):
+//   • scenes of a new window are NEVER registered for the GPU scheduler
+//     (no active-index write) — GPU work starts only by an explicit
+//     audio/image/video command that creates task-registry tasks;
+//   • processing the next QUEUED window after this one finishes is an
+//     automatic start — behind WINDOW_AUTO_NEXT_ENABLED, default OFF.
 
 const { log } = require('../helpers/utils.cjs');
 const { isBookCancelled } = require('./agent-session');
@@ -17,9 +25,9 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
      * Reports progress via genSessionRepo.progress_msg (visible via /agent-status).
      */
     async function runBackgroundWindowGeneration(bookId, sessionId, options = {}) {
-        const { registerForGpu = true, buildId = 'default' } = options;
+        const { buildId = 'default' } = options;
         const bgLog = (msg) => log(`[BG-GEN][${bookId}:${sessionId}] ${msg}`);
-        bgLog(`🚀 === BACKGROUND WINDOW GENERATION START (registerForGpu=${registerForGpu}) ===`);
+        bgLog(`🚀 === BACKGROUND WINDOW GENERATION START ===`);
 
         try {
             // — 1. Mark session as generating + set initial progress —
@@ -99,24 +107,9 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                             console.warn(`[BG-GEN] Placeholder audio failed: ${phErr.message}`);
                         }
 
-                    // — 5. Register scenes for GPU scheduler (only if registerForGpu is true) —
-                    if (registerForGpu) {
-                        bgLog(`🎮 Registering ${phScenes.length} scenes for GPU scheduler (registerForGpu=true)...`);
-                        for (const ps of phScenes) {
-                            try {
-                                // T8: syncLinearState удалён — регистрируем сцену напрямую
-                                await activeScenes.addActiveScene(
-                                    redis, bookId, ps.chapter_id, ps.scene_id
-                                );
-                                bgLog(`  🎮 Scene ${ps.chapter_id}/${ps.scene_id} registered for GPU`);
-                            } catch (regErr) {
-                                console.warn(`[BG-GEN] Failed to register scene ${ps.chapter_id}/${ps.scene_id}: ${regErr.message}`);
-                            }
-                        }
-                    } else {
-                        bgLog(`⏭️ Skipping GPU registration for ${phScenes.length} scenes (triggered by auto window gen, not user Generate button)`);
-                        bgLog(`⏭️ Scenes will be picked up later when user clicks "Generate" button`);
-                    }
+                    // — 5. No GPU registration (command-only generation): the
+                    //   new scenes wait for an explicit audio/image/video command.
+                    bgLog(`⏭️ ${phScenes.length} scene(s) NOT registered for GPU — generation starts only by an explicit command`);
 
                         // Update scene indices
                         try {
@@ -139,9 +132,12 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                 });
             }
 
-            // — 6. Process next queued session if any —
+            // — 6. Next queued session: automatic start → behind the flag —
             const queued = await genSessionRepo.getSessionsByStatus(bookId, 'queued');
-            if (queued.length > 0) {
+            const autoNext = !!(config && typeof config.windowAutoNextEnabled === 'function' && config.windowAutoNextEnabled());
+            if (queued.length > 0 && !autoNext) {
+                bgLog(`⏸ ${queued.length} queued window(s) left for an explicit command (WINDOW_AUTO_NEXT_ENABLED off)`);
+            } else if (queued.length > 0) {
                 const nextSession = queued[0];
                 bgLog(`🔄 Processing queued window ${nextSession.window_index} (session=${nextSession.id})`);
                 await genSessionRepo.updateSession(nextSession.id, { status: 'pending' });

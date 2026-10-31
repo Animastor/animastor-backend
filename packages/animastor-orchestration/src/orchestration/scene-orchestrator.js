@@ -68,19 +68,21 @@ const EXECUTORS = {
     video: executeVideoDispatch,
 };
 
-async function startScene(redis, scene, loadedBook, buildId) {
+async function startScene(redis, scene, loadedBook, buildId, stage = 'audio') {
     const bookId = scene.book_id;
     const chapterId = scene.chapter_id;
     const sceneId = scene.scene_id;
 
-    log(`START SCENE: ${bookId}/${chapterId}/${sceneId}`);
+    log(`START SCENE: ${bookId}/${chapterId}/${sceneId} (stage=${stage})`);
 
-    await logEvent(redis, scene, 'SCENE_STARTED', 'audio_pending', {
+    await logEvent(redis, scene, 'SCENE_STARTED', `${stage}_pending`, {
         buildId, bookId, chapterId, sceneId
     });
 
-    // T7: через фасад — единый владелец PENDING
-    await setScenePending(redis, bookId, chapterId, sceneId, 'audio', buildId);
+    // T7: через фасад — единый владелец PENDING. Command-only generation:
+    // only the stage being dispatched becomes PENDING — a NEW scene asked for
+    // `image` must not get an unrequested `audio` PENDING.
+    await setScenePending(redis, bookId, chapterId, sceneId, stage, buildId);
     await runtimeScheduler.addSceneToActiveIndex(redis, bookId, chapterId, sceneId);
     log(`ADDED TO ACTIVE: ${bookId}/${chapterId}/${sceneId}`);
 
@@ -652,7 +654,7 @@ async function dispatchStage(redis, scene, loadedBook, buildId, overrideStage, d
     );
     if (isNewScene) {
         log(`NEW SCENE: ${bookId}/${chapterId}/${sceneId} (asset-state)`);
-        await startScene(redis, scene, loadedBook, buildId);
+        await startScene(redis, scene, loadedBook, buildId, overrideStage || 'audio');
     }
 
     if (!overrideStage) {
@@ -673,7 +675,19 @@ async function dispatchStage(redis, scene, loadedBook, buildId, overrideStage, d
     result = await executor(redis, scene, loadedBook, buildId, dispatchId);
 
     result = result || { dispatched: false, reason: 'no_result', jobs: 0 };
-    if (!result.dispatched && !result.completed) {
+    if (!result.dispatched && !result.completed && result.reason === 'no_worker_available') {
+        // Command-only generation: no live worker of this type → the stage is
+        // BLOCKED, not re-queued. GENERATING → DIRTY only (never PENDING): the
+        // scheduler marks the command blocked and nothing retries it until a
+        // new command arrives (incident 2026-10-30: endless no_worker loop).
+        const rollback = await require('../runtime/command-gate').rollbackGeneratingToDirty(
+            redis, bookId, chapterId, sceneId, overrideStage, 'no_worker_available');
+        if (!rollback.changed && rollback.reason !== 'state_dirty' && rollback.reason !== 'state_ready') {
+            warn(`DISPATCH_ROLLBACK_FAILED: ${bookId}/${chapterId}/${sceneId} ${overrideStage}: ${rollback.reason} — blocked stage not released`);
+            result.rollbackFailed = true;
+            result.rollbackReason = rollback.reason;
+        }
+    } else if (!result.dispatched && !result.completed) {
         // FSM-валидный rollback (GENERATING → DIRTY → PENDING). Прямой
         // generating→pending запрещён FSM; раньше здесь вызывался setScenePending,
         // rejection молча проглатывался — и сцена навсегда оставалась в GENERATING
