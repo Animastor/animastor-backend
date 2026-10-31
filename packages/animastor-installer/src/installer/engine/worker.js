@@ -594,7 +594,7 @@ function readLogFrom(io, logFile, offset) {
  * Stops early when the process died or authentication failed.
  * @returns {Promise<{ comfy_ready, heartbeat, auth_failed, exited, reason, logFile, scan }>}
  */
-async function waitForWorkerReady(io, { workerDir, pid = null, logFile = null, logOffset = 0, comfyTimeoutMs = 90000, heartbeatTimeoutMs = 45000, pollMs = 1000, requireHeartbeat = true, platformAdapter = null }) {
+async function waitForWorkerReady(io, { workerDir, pid = null, logFile = null, logOffset = 0, comfyTimeoutMs = 90000, heartbeatTimeoutMs = 45000, pollMs = 1000, requireHeartbeat = true, platformAdapter = null, comfyUp = null, comfyUpTimeoutMs = 0 }) {
     const log = logFile || workerLogPath(workerDir);
     const adapter = platformAdapter || adapterOf({});
     const now = () => (io.now ? io.now() : Date.now());
@@ -611,6 +611,21 @@ async function waitForWorkerReady(io, { workerDir, pid = null, logFile = null, l
     let deadline = now() + comfyTimeoutMs;
     let phase = scan.comfy_ready ? 'heartbeat' : 'comfy';
     if (phase === 'heartbeat') deadline = now() + heartbeatTimeoutMs;
+    // comfyUp (installer 0.2.3): the comfyTimeoutMs window opens only once
+    // ComfyUI itself answers — up to comfyUpTimeoutMs are spent waiting for
+    // that first (0 = check once, then count as before).
+    if (phase === 'comfy' && typeof comfyUp === 'function') {
+        const upDeadline = now() + Math.max(0, comfyUpTimeoutMs);
+        for (;;) {
+            let up = false;
+            try { up = await comfyUp(); } catch (_) { up = false; }
+            if (up) break;
+            scan = scanWorkerLog(readLogFrom(io, log, logOffset));
+            if (scan.comfy_ready || scan.auth_failed || !alive() || now() >= upDeadline) break;
+            await new Promise((r) => setTimeout(r, pollMs));
+        }
+        deadline = now() + comfyTimeoutMs;
+    }
     for (;;) {
         scan = scanWorkerLog(readLogFrom(io, log, logOffset));
         if (scan.auth_failed) {

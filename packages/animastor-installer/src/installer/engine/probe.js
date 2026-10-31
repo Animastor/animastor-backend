@@ -200,7 +200,8 @@ function detectRunningComfyUI(io, { uid = (typeof process.getuid === 'function' 
  */
 function listRunningComfyUI(io, { uid = (typeof process.getuid === 'function' ? process.getuid() : null) } = {}) {
     if (uid == null) return [];
-    const r = io.exec('pgrep', ['-u', String(uid), '-f', 'main\\.py']);
+    let r = null;
+    try { r = io.exec('pgrep', ['-u', String(uid), '-f', 'main\\.py']); } catch (_) { r = null; }
     if (!r || r.code !== 0) return [];
     const out = [];
     for (const pidStr of String(r.stdout || '').split(/\s+/).filter(Boolean)) {

@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.2.2, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.3, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -93,10 +93,23 @@ allows it (root or passwordless `sudo -n`). The Worker Key in `.env` is never
 asked for again on a re-run.
 
 `doctor --yes` is the boot path: no TTY, no questions, ONE line of output and
-an exit code. It waits up to `--comfy-wait-ms` (default 180000) for the
-platform's ComfyUI, installs missing apt packages, starts the worker (and its
+an exit code. It installs missing apt packages, starts the worker (and its
 own ComfyUI in `managed` mode), and re-applies the PATH block — E2E nodes
-reset `~/.bashrc`/`~/.profile` on every boot. `~/animastor/start-worker.sh` is
+reset `~/.bashrc`/`~/.profile` on every boot.
+
+Type A (the platform starts ComfyUI, e.g. TIR): when the install state says
+the ComfyUI belongs to the platform (`mode existing`, `startComfyui=false`,
+or `comfy_owner.owner = foreign` recorded by an earlier run) and no verified
+platform instance answers yet, `doctor` waits up to `--comfy-wait-ms`
+(default 180000 on boot) for the `main.py` process AND its
+`GET /system_stats`, re-reading the address from the process cmdline on every
+poll and logging progress every 30 s. Only then are `COMFY_URL` /
+`COMFY_PORT` / `NOTEBOOK_PATH` recomputed and the worker started; its 90 s
+"ComfyUI ready" window opens after ComfyUI answered. If ComfyUI does not come
+up in time the result is `FAILED` — "ComfyUI is started by the platform; it
+did not come up in N s" — and the worker is NOT started against the address
+of a previous boot. `animastor status` labels such a ComfyUI
+"started by the platform (pid …)". `~/animastor/start-worker.sh` is
 replaced by a wrapper (`exec ~/.local/bin/animastor start "$@"`, old script
 kept as `start-worker.sh.bak`); ready-to-use boot scripts for both node types
 are in `animastor-docs/04-planning/INSTALLER_BOOT_STARTUP.md`.

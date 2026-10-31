@@ -305,6 +305,67 @@ async function waitForComfyUrl(io, { url = null, timeoutMs = 180000, intervalMs 
     }
 }
 
+/**
+ * True when the RECORDED installation says "this ComfyUI belongs to the
+ * platform" (installer 0.2.3, type A): a previous run saw a foreign
+ * instance (state.comfy_owner.owner === 'foreign'), or the installation is
+ * an `existing` one / never starts its own ComfyUI and did not create it.
+ * A managed install of a clean Ubuntu (type B: owned, startComfyui=true) is
+ * never platform-owned.
+ */
+function platformOwnedByRecord(state) {
+    if (!state) return false;
+    if (state.comfy_owner && state.comfy_owner.owner === 'foreign') return true;
+    const owned = !!(state.components && state.components.comfyui && state.components.comfyui.owned);
+    if (owned) return false;
+    const opts = state.installer_options || {};
+    return state.mode === 'existing' || opts.startComfyui === false;
+}
+
+/** The platform message for type A when ComfyUI never came up. */
+function platformComfyMissingReason(waitedMs, lastSeen = null) {
+    const secs = Math.round(Number(waitedMs || 0) / 1000);
+    const seen = lastSeen && lastSeen.pid
+        ? ` (process pid ${lastSeen.pid} at ${lastSeen.url} did not answer GET /system_stats)`
+        : ' (no ComfyUI main.py process appeared)';
+    return `ComfyUI is started by the platform; it did not come up in ${secs} s${seen}`;
+}
+
+/**
+ * Boot (type A): wait until the PLATFORM's ComfyUI runs AND answers. Every
+ * poll re-reads the processes (pgrep + /proc cmdline) and re-verifies GET
+ * /system_stats at the address built from THAT cmdline — the port and the
+ * notebook prefix of the previous boot are never reused. Progress goes to
+ * `onProgress` once per `progressMs` (the boot log).
+ * @returns {Promise<{ ok: boolean, instance: object, waited_ms: number, last_seen: { pid, url }|null }>}
+ */
+async function waitForPlatformComfyUI(io, {
+    state = null, root = null, timeoutMs = 180000, intervalMs = 3000, progressMs = 30000,
+    onProgress = null, sleep = null,
+} = {}) {
+    const now = () => (typeof io.now === 'function' ? io.now() : Date.now());
+    const pause = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const started = now();
+    let nextProgress = started + progressMs;
+    let lastSeen = null;
+    for (;;) {
+        const instance = await resolveComfyOwner(io, { state, root });
+        const waited = now() - started;
+        if (instance.owner === 'foreign') return { ok: true, instance, waited_ms: waited, last_seen: lastSeen };
+        const proc = (instance.instances || []).find((i) => !i.ours) || null;
+        lastSeen = proc ? { pid: proc.pid, url: proc.url } : lastSeen;
+        if (waited >= timeoutMs) return { ok: false, instance, waited_ms: waited, last_seen: lastSeen };
+        if (onProgress && now() >= nextProgress) {
+            const what = proc
+                ? `process pid ${proc.pid} at ${proc.url} does not answer GET /system_stats yet`
+                : 'no ComfyUI main.py process yet';
+            onProgress(`waiting for the platform's ComfyUI — ${what} (${Math.round(waited / 1000)} s of ${Math.round(timeoutMs / 1000)} s)`);
+            nextProgress += progressMs;
+        }
+        await pause(Math.min(intervalMs, Math.max(1, timeoutMs - waited)));
+    }
+}
+
 module.exports = {
     INSTALLER_LISTEN,
     normalizePrefix,
@@ -318,4 +379,7 @@ module.exports = {
     stopInstallerInstance,
     waitForComfyUrl,
     describeInstance,
+    platformOwnedByRecord,
+    platformComfyMissingReason,
+    waitForPlatformComfyUI,
 };

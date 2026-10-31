@@ -404,18 +404,61 @@ function missingRequiredHostPackages(io) {
 }
 
 /**
- * Wait for the platform's ComfyUI (boot: it starts after the installer).
- * Re-resolves the ownership facts on every poll — the port and the notebook
- * prefix are read from the process each time, never remembered.
+ * Should this run wait for the platform's ComfyUI before anything else?
+ * (installer 0.2.3) Yes when a wait is configured, no verified foreign
+ * instance answers yet, and either nothing runs at all or the recorded
+ * installation says the ComfyUI belongs to the platform (type A) — the
+ * latter holds even when some other main.py is visible, so the worker is
+ * never started before the platform's ComfyUI answers.
  */
-async function waitForPlatformComfy(io, { state = null, root = null, timeoutMs = 180000, intervalMs = 3000 } = {}) {
-    const deadline = Date.now() + timeoutMs;
-    let inst = await comfyOwner.resolveComfyOwner(io, { state, root });
-    while (inst.owner === 'none' && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, intervalMs));
-        inst = await comfyOwner.resolveComfyOwner(io, { state, root });
+function shouldWaitForPlatformComfy({ waitMs, instance, state }) {
+    if (!(waitMs > 0) || !instance || instance.owner === 'foreign') return false;
+    return instance.owner === 'none' || comfyOwner.platformOwnedByRecord(state);
+}
+
+/**
+ * The boot gate (installer 0.2.3): wait for the platform's ComfyUI when
+ * shouldWaitForPlatformComfy() says so — progress in the log every 30 s —
+ * and decide whether the run may continue.
+ * @returns {Promise<{ instance: object, waited: object|null, failed: boolean }>}
+ */
+async function platformComfyGate(io, { state = null, root = null, waitMs = 0, instance = null, logger = null, sleep = null, intervalMs = 3000, progressMs = 30000 } = {}) {
+    let inst = instance || await comfyOwner.resolveComfyOwner(io, { state, root });
+    if (!shouldWaitForPlatformComfy({ waitMs, instance: inst, state })) return { instance: inst, waited: null, failed: false };
+    const info = (line) => { if (logger) logger.info(line); };
+    info(`waiting up to ${Math.round(waitMs / 1000)} s for the platform's ComfyUI (process + GET /system_stats)`);
+    const waited = await comfyOwner.waitForPlatformComfyUI(io, {
+        state, root, timeoutMs: waitMs, intervalMs, progressMs, sleep, onProgress: info,
+    });
+    inst = waited.instance;
+    if (waited.ok) {
+        info(`the platform's ComfyUI answers at ${inst.url} (pid ${inst.pid}, after ${Math.round(waited.waited_ms / 1000)} s)`);
+        return { instance: inst, waited, failed: false };
     }
-    return inst;
+    // Nobody will start a ComfyUI for this installation (type A / existing):
+    // stop here instead of wiring the worker to the previous boot's address.
+    const failed = comfyOwner.platformOwnedByRecord(state) || inst.mode === 'existing';
+    if (failed && logger) logger.error(comfyOwner.platformComfyMissingReason(waited.waited_ms, waited.last_seen));
+    return { instance: inst, waited, failed };
+}
+
+/**
+ * Type A, the platform's ComfyUI never came up within --comfy-wait-ms: the
+ * result is FAILED with one cause and one fix; the engine (worker start,
+ * .env rewrite) does not run, so the worker is never started against the
+ * address of a previous boot.
+ */
+function platformComfyMissingResult({ waited, tool, mode }) {
+    const reason = comfyOwner.platformComfyMissingReason(waited.waited_ms, waited.last_seen);
+    return {
+        status: 'failed',
+        mode,
+        warnings: [],
+        blocked: [],
+        verification: null,
+        results: { comfy_owner: { owner: 'none', mode, url: null }, worker: [] },
+        e2e: engineMod.platformComfyMissingChecks({ reason, tool }),
+    };
 }
 
 /** The `animastor` command recorded for this installation (fix lines). */
@@ -501,7 +544,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     const boot = isBootRun(flags, doctor);
     // ComfyUI root: --root > ~/ComfyUI (when it holds a ComfyUI) > the root
     // of the user's running ComfyUI process > ~/ComfyUI (managed creates it).
-    const runningComfy = probeMod.detectRunningComfyUI(realIo);
+    let runningComfy = probeMod.detectRunningComfyUI(realIo);
     const rootPick = probeMod.resolveComfyRoot(realIo, { explicit: flags.root || null, defaultRoot: DEFAULT_ROOT, running: runningComfy });
     flags.root = rootPick.root;
     const root = rootPick.root;
@@ -554,11 +597,21 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     // not start decides the mode (existing) and the worker address; the
     // installer never starts a second one next to it.
     let instance = await comfyOwner.resolveComfyOwner(realIo, { state: priorState, root });
-    const comfyWaitMs = flags['comfy-wait-ms'] ? Number(flags['comfy-wait-ms'])
+    const comfyWaitMs = flags['comfy-wait-ms'] !== undefined && flags['comfy-wait-ms'] !== ''
+        ? Number(flags['comfy-wait-ms'])
         : (Number(process.env.ANIMASTOR_COMFY_WAIT_MS) || (boot ? 180000 : 0));
-    if (comfyWaitMs > 0 && instance.owner === 'none') {
-        if (!boot) console.log(`Waiting up to ${Math.round(comfyWaitMs / 1000)} s for the platform's ComfyUI…`);
-        instance = await waitForPlatformComfy(realIo, { state: priorState, root, timeoutMs: comfyWaitMs });
+    // Type A boot: the platform starts ComfyUI AFTER this script — wait for
+    // it (process + /system_stats) before the address is recomputed into
+    // .env and the worker is started; never start it against the address
+    // of a previous boot.
+    const gate = await platformComfyGate(realIo, { state: priorState, root, waitMs: comfyWaitMs, instance, logger });
+    instance = gate.instance;
+    if (gate.waited && gate.waited.ok) runningComfy = probeMod.detectRunningComfyUI(realIo);
+    if (gate.failed) {
+        printResult(platformComfyMissingResult({ waited: gate.waited, tool: toolCommandPath(flags), mode: 'existing' }), { flags, mode: 'existing', boot });
+        process.exitCode = 1;
+        prompt.close();
+        return;
     }
 
     // The machine decides the mode. An explicit --mode that contradicts it is
@@ -824,6 +877,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
                 nodeBinary: nodePick,
                 replaceWorkerKey,
                 comfyOwner: instance,
+                comfyWaitMs,
                 hubVersion,
             },
         });
@@ -1565,5 +1619,5 @@ module.exports = {
     makeSecretProvider, resolveToolsDecision, resolveToolsDir, installOptions, runHostGates,
     PLATFORM_RUNTIME, printPlatformNotices, homeDir,
     toolCommand, toolCommandPath, detectHubVersion, priorReusableDecisions, isBootRun,
-    missingRequiredHostPackages, waitForPlatformComfy,
+    missingRequiredHostPackages, shouldWaitForPlatformComfy, platformComfyGate, platformComfyMissingResult,
 };

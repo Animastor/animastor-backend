@@ -38,6 +38,7 @@ const comfyui = require('./engine/comfyui');
 const workerMod = require('./engine/worker');
 const stateMod = require('./engine/state');
 const prereq = require('./engine/prereq');
+const comfyOwner = require('./engine/comfy-owner');
 
 /** Adapter for one call (explicit override wins over auto-detect). */
 function adapterOf(opts = {}) {
@@ -145,6 +146,20 @@ async function collectStatus(io, targets, opts = {}) {
     const envVals = targets.workerDir ? workerMod.readEnvValues(io, targets.workerDir) : {};
     let baseUrl = port ? `http://127.0.0.1:${port}` : null;
     if (external && envVals.COMFY_URL) baseUrl = envVals.COMFY_URL;
+    // Who started the ComfyUI (installer 0.2.3): a running main.py the
+    // installer did not start is the PLATFORM's — its address comes from its
+    // own cmdline (port/prefix change between boots), not from .env.
+    let foreign = null;
+    if (external) {
+        try {
+            const procs = await comfyOwner.inspectComfyInstances(io, { state: targets.state });
+            foreign = procs.find((p) => !p.ours && p.verified) || procs.find((p) => !p.ours) || null;
+        } catch (_) { foreign = null; }
+        if (foreign && foreign.verified) baseUrl = foreign.url;
+    }
+    const startedBy = !external ? 'installer'
+        : foreign ? 'platform'
+            : comfyOwner.platformOwnedByRecord(targets.state) && targets.state.comfy_owner ? 'platform' : 'user';
     const stats = baseUrl ? await comfyui.systemStats(io, baseUrl) : null;
     // Hub heartbeat as the worker itself reports it (its log).
     let hub = null;
@@ -169,7 +184,10 @@ async function collectStatus(io, targets, opts = {}) {
     }
     return {
         worker: { running: !!workerPid, pid: workerPid || null },
-        comfyui: { running: comfyPids.length > 0, root_present: comfyRootPresent, port, pids: comfyPids, external, url: baseUrl },
+        comfyui: {
+            running: comfyPids.length > 0, root_present: comfyRootPresent, port, pids: comfyPids, external, url: baseUrl,
+            started_by: startedBy, foreign_pid: foreign ? foreign.pid : null,
+        },
         api: { ok: !!stats },
         queue,
         hub,
@@ -185,7 +203,14 @@ function renderStatus(snapshot) {
     lines.push('');
     lines.push(`Worker:   ${snapshot.worker.running ? `${ok} RUNNING` : `${bad} STOPPED`}`);
     if (snapshot.comfyui.external) {
-        lines.push(`ComfyUI:  ${snapshot.api.ok ? `${ok} RUNNING` : `${bad} UNREACHABLE`} (your own${snapshot.comfyui.url ? `, ${snapshot.comfyui.url}` : ''})`);
+        const c = snapshot.comfyui;
+        const state = snapshot.api.ok ? `${ok} RUNNING` : `${bad} UNREACHABLE`;
+        if (c.started_by === 'platform') {
+            const pid = c.foreign_pid ? `pid ${c.foreign_pid}` : 'no process running';
+            lines.push(`ComfyUI:  ${state} — started by the platform (${pid})${c.url ? `, ${c.url}` : ''}`);
+        } else {
+            lines.push(`ComfyUI:  ${state} (your own${c.url ? `, ${c.url}` : ''})`);
+        }
     } else {
         lines.push(`ComfyUI:  ${snapshot.comfyui.running
             ? `${ok} RUNNING${snapshot.comfyui.port ? ` :${snapshot.comfyui.port}` : ''}`

@@ -342,6 +342,10 @@ async function runInstallation(args) {
         const saved = st.installer_options || {};
         const requestedStartComfy = options.startComfyui;
         for (const k of ['comfyPort', 'startWorker']) {
+            // A foreign (platform) ComfyUI dictates the port from its cmdline
+            // — the remembered port of a previous boot is not reused (and not
+            // announced as "reusing").
+            if (k === 'comfyPort' && foreignComfy) continue;
             if (options[k] === undefined && saved[k] !== undefined) {
                 options[k] = saved[k];
                 log.info(`reusing remembered setting: ${k}=${saved[k]}`);
@@ -364,7 +368,9 @@ async function runInstallation(args) {
         // the "installed, never online" failure.
         if (options.startWorker === undefined) options.startWorker = decisions.worker_setup !== false;
         // Never wire this install to a FOREIGN service on the default port.
-        if (options.comfyPort !== undefined) {
+        // (Our own-port logic only: with the platform's ComfyUI the port is
+        // its --port, the "occupied → pick a new one" search does not apply.)
+        if (options.comfyPort !== undefined && !foreignComfy) {
             const ours = st.comfyui_runtime && st.comfyui_runtime.port === options.comfyPort;
             const s = await comfyPortState(io, options.comfyPort);
             if (s === 'foreign' && !ours) {
@@ -392,6 +398,16 @@ async function runInstallation(args) {
         };
         // Hub version seen by this run (bootstrap env) — `animastor doctor`
         // prints it instead of "hub unknown" on later runs.
+        // Who runs the ComfyUI, as seen by THIS run (installer 0.2.3): the
+        // boot path of the next run waits for a platform ComfyUI by it.
+        if (comfyOwner && comfyOwner.owner !== 'none') {
+            st.comfy_owner = {
+                owner: comfyOwner.owner,
+                pid: comfyOwner.pid ?? null,
+                url: comfyOwner.url || null,
+                seen_at: new Date(io.now()).toISOString(),
+            };
+        }
         if (options.hubVersion) st.hub_version = String(options.hubVersion);
         else if (process.env.ANIMASTOR_HUB_VERSION) st.hub_version = process.env.ANIMASTOR_HUB_VERSION;
     }
@@ -1112,8 +1128,14 @@ async function runInstallation(args) {
                     throw new Error(res.reason || 'worker did not start');
                 }
                 if (res.already_running) log.info(`worker already running (pid ${res.pid}) — not spawning a second instance`);
+                // The 90 s "worker → ComfyUI ready" window opens only once
+                // ComfyUI itself answers (installer 0.2.3) — a ComfyUI that is
+                // still loading must not eat the worker's time.
+                const comfyUpUrl = comfyUrl || (foreignComfy && foreignComfy.url) || null;
                 const ready = await withBusy('Waiting for the worker to reach ComfyUI', () => worker.waitForWorkerReady(io, {
                     workerDir, pid: res.pid, logFile: res.logFile, logOffset: res.logOffset || 0,
+                    comfyUp: comfyUpUrl ? async () => !!(await comfyui.systemStats(io, comfyUpUrl)) : null,
+                    comfyUpTimeoutMs: options.comfyWaitMs || 0,
                     comfyTimeoutMs: options.workerReadyTimeoutMs || 90000,
                     pollMs: options.pollIntervalMs || 1000,
                     requireHeartbeat: false,
@@ -1176,6 +1198,8 @@ async function runInstallation(args) {
         };
         result.e2e = await endToEndChecks(io, {
             mode, comfyUrl, comfyPort, hubUrl,
+            comfyTried: (result.results.comfy_url && result.results.comfy_url.tried) || (foreignComfy && foreignComfy.url ? [foreignComfy.url] : []),
+            platformComfy: !!foreignComfy,
             workerWanted: !!(options.startWorker && workerDir && !runtimeFatal),
             workerStart, workerReady,
             tool: options.toolCommand || toolCommandFrom(result.results.management_tools),
@@ -1240,6 +1264,18 @@ function desiredEnvWiring({ manifests, nodeBin = null, comfyUrl = null, comfyPor
     return out;
 }
 
+/**
+ * End-to-end checks for type A when the platform's ComfyUI never came up:
+ * one ✗ with the cause and the fix, the worker is not started at all.
+ */
+function platformComfyMissingChecks({ reason, tool = 'animastor' }) {
+    return [
+        { id: 'comfyui', ok: false, label: 'ComfyUI API', detail: reason, fix: `run \`${tool} doctor\` after the platform's ComfyUI is up` },
+        { id: 'worker', ok: null, label: 'Worker → ComfyUI', detail: 'not started — the platform\'s ComfyUI is not up (no worker against the address of a previous boot)', fix: null },
+        { id: 'heartbeat', ok: null, label: 'Hub heartbeat (Online)', detail: 'not checked — worker not started', fix: null },
+    ];
+}
+
 /** The command users type for fixes: `animastor` when linked into PATH, else the absolute tool path. */
 function toolCommandFrom(tools) {
     if (tools && tools.command) return tools.command;
@@ -1252,17 +1288,26 @@ function toolCommandFrom(tools) {
  * prints exactly these (no "scroll up").
  * @returns {Promise<Array<{ id, ok: boolean|null, label, detail, fix }>>}
  */
-async function endToEndChecks(io, { mode, comfyUrl, comfyPort, hubUrl, workerWanted, workerStart, workerReady, tool = 'animastor' }) {
+async function endToEndChecks(io, { mode, comfyUrl, comfyPort, hubUrl, workerWanted, workerStart, workerReady, tool = 'animastor', comfyTried = [], platformComfy = false }) {
     const checks = [];
     const stats = comfyUrl ? await comfyui.systemStats(io, comfyUrl) : null;
+    // Addresses in the result are always FULL (with the notebook prefix):
+    // every URL that was really tried, not a bare host:port.
+    const tried = (comfyTried || []).filter(Boolean);
+    const where = comfyUrl || (tried.length > 0 ? tried.join(', ') : `http://127.0.0.1:${comfyPort || 8188}`);
+    const prefixed = tried.find((u) => /^https?:\/\/[^/]+\/./.test(u)) || null;
     checks.push(stats
         ? { id: 'comfyui', ok: true, label: 'ComfyUI API', detail: comfyUrl, fix: null }
         : {
             id: 'comfyui', ok: false, label: 'ComfyUI API',
-            detail: `not reachable at http://127.0.0.1:${comfyPort || 8188} (GET /system_stats)`,
+            detail: `not reachable at ${where} (GET /system_stats)`,
             fix: mode === 'managed'
                 ? `${tool} start`
-                : `start your ComfyUI on port ${comfyPort || 8188}, then run: ${tool} doctor`,
+                : platformComfy
+                    ? `ComfyUI is started by the platform — when ${comfyUrl || prefixed || where} answers, run: ${tool} doctor`
+                    : prefixed
+                        ? `start your ComfyUI so that ${prefixed} answers, then run: ${tool} doctor`
+                        : `start your ComfyUI on port ${comfyPort || 8188}, then run: ${tool} doctor`,
         });
     if (!workerWanted) {
         checks.push({ id: 'worker', ok: null, label: 'Worker → ComfyUI', detail: 'worker start skipped (--no-start-worker)', fix: `${tool} start` });
@@ -1481,6 +1526,7 @@ module.exports = {
     createInterruptGuard,
     comfyPortState,
     autoPickComfyPort,
+    platformComfyMissingChecks,
     desiredEnvWiring,
     endToEndChecks,
     CPU_MODE_WARNING,
