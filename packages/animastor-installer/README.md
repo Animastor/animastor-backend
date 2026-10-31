@@ -114,6 +114,23 @@ replaced by a wrapper (`exec ~/.local/bin/animastor start "$@"`, old script
 kept as `start-worker.sh.bak`); ready-to-use boot scripts for both node types
 are in `animastor-docs/04-planning/INSTALLER_BOOT_STARTUP.md`.
 
+`animastor boot` (0.2.4) is the whole node startup script on both node types:
+it detaches at once (own session, stdin `/dev/null`, output appended to
+`~/animastor/logs/bootstrap.log` under a header with the boot time) and exits
+0; the detached `doctor --yes` waits up to 600 s by default. TIR starts its
+ComfyUI only after the startup script has finished, so waiting inside the
+script deadlocks. On type A the pip requirements of every required profile
+custom node are checked in the Python of the running `main.py` (taken from
+`/proc/<pid>`); missing ones are installed (boot / `--yes`: no question;
+interactive: one question) and the platform's ComfyUI is restarted — exactly
+that pid is stopped and the run waits until the platform starts a new one
+with the node classes. Restarting a ComfyUI the installer did not start needs
+the option: `--restart-platform-comfy` / `--no-restart-platform-comfy`, or the
+answer recorded in `install-state.json` (`installer_options.restartPlatformComfy`);
+`animastor boot` on type A defaults to yes. Type B checks its own venv and
+restarts its own ComfyUI. Missing node classes are re-checked until the end
+of the wait window when deps were just installed or the ComfyUI pid changed.
+
 The fix list is APPLIED: `COMFY_URL`, `COMFY_PORT` and `NOTEBOOK_PATH` are
 rewritten in `.env` (only real differences are listed, one entry per key), and
 a second run over the fixed `.env` prints no fix list. The address is

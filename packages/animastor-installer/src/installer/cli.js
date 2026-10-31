@@ -14,6 +14,7 @@
  *   animastor-installer resume
  *   animastor-installer uninstall  [--all] [--yes] [--dry-run] [--state PATH] [--home PATH]
  *   animastor-installer start | stop | status | logs [-f] [--lines N] | doctor [--new-key]
+ *   animastor-installer boot       (node startup script: detaches `doctor --yes`, exits 0 at once)
  *                                  (what the `animastor` command in PATH runs)
  *
  * Flags:
@@ -53,6 +54,7 @@ const fixes = require('./engine/fixes');
 const workerMod = require('./engine/worker');
 const comfyuiMod = require('./engine/comfyui');
 const comfyOwner = require('./engine/comfy-owner');
+const nodeDeps = require('./engine/node-deps');
 const downloader = require('./engine/downloader');
 const { resolveRepoBundleDir } = require('./worker-bundle-source');
 const engineMod = require('./engine/engine');
@@ -104,6 +106,8 @@ const DEFAULT_HUB_URL = 'https://animastor.org/gpu';
 // Argument parsing
 // ---------------------------------------------------------------------------
 
+const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy'];
+
 function parseArgs(argv) {
     const args = argv.slice(2);
     const parsed = { command: null, profiles: [], flags: {} };
@@ -112,7 +116,7 @@ function parseArgs(argv) {
         const a = args[i];
         if (a.startsWith('--')) {
             const key = a.slice(2);
-            if (['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix'].includes(key)) {
+            if (BOOLEAN_FLAGS.includes(key)) {
                 parsed.flags[key] = true;
             } else {
                 const val = args[++i];
@@ -413,6 +417,11 @@ function missingRequiredHostPackages(io) {
  */
 function shouldWaitForPlatformComfy({ waitMs, instance, state }) {
     if (!(waitMs > 0) || !instance || instance.owner === 'foreign') return false;
+    // Type B (installer 0.2.4): the installer created this ComfyUI and starts
+    // it itself — there is no platform instance to wait for (with the 600 s
+    // default of `animastor boot` that would be ten idle minutes).
+    const owned = !!(state && state.components && state.components.comfyui && state.components.comfyui.owned);
+    if (owned && !comfyOwner.platformOwnedByRecord(state)) return false;
     return instance.owner === 'none' || comfyOwner.platformOwnedByRecord(state);
 }
 
@@ -459,6 +468,222 @@ function platformComfyMissingResult({ waited, tool, mode }) {
         results: { comfy_owner: { owner: 'none', mode, url: null }, worker: [] },
         e2e: engineMod.platformComfyMissingChecks({ reason, tool }),
     };
+}
+
+/**
+ * May this run restart the PLATFORM's ComfyUI (installer 0.2.4)? An
+ * explicit flag wins, then the recorded answer (install-state
+ * installer_options.restartPlatformComfy), then the boot default: yes on
+ * type A — the node is unattended and nothing else brings the node classes
+ * back. An interactive run without a record asks (askRestartPlatformComfy).
+ * @returns {{ allowed: boolean|null, source: 'flag'|'state'|'boot'|'unset' }}
+ */
+function restartPlatformComfyDecision(flags, state, { boot = false } = {}) {
+    if (flags['restart-platform-comfy']) return { allowed: true, source: 'flag' };
+    if (flags['no-restart-platform-comfy']) return { allowed: false, source: 'flag' };
+    const rec = state && state.installer_options ? state.installer_options.restartPlatformComfy : undefined;
+    if (rec === true || rec === false) return { allowed: rec, source: 'state' };
+    if (boot) return { allowed: true, source: 'boot' };
+    return { allowed: null, source: 'unset' };
+}
+
+const RESTART_PLATFORM_QUESTION = 'After a node restart the pip packages of custom nodes can disappear. May `animastor boot` reinstall them and restart the platform\'s ComfyUI so the nodes load?';
+
+/**
+ * The custom-node dependency gate (installer 0.2.4) for a ComfyUI that the
+ * PLATFORM runs (type A): check the pip requirements of every required
+ * profile node in the Python of the running main.py; install the missing
+ * ones (boot / --yes: no question; interactive: one question, which also
+ * records the restart option); then — only when restarting the platform's
+ * ComfyUI is allowed — stop exactly that pid and wait until the platform
+ * started a new one with the node classes. Never starts a ComfyUI itself.
+ * @returns {Promise<{ instance, checked: boolean, installed: string[], restarted: boolean, pid_changed: boolean, failed: boolean, reason: string|null, record: object }>}
+ */
+async function platformNodeDepsGate(io, {
+    instance, state = null, root, manifests, flags = {}, boot = false, yes = false, prompt = null,
+    waitMs = 600000, logger = null, statePath = null, sleep = null, intervalMs = 3000, progressMs = 30000,
+} = {}) {
+    const out = { instance, checked: false, installed: [], restarted: false, pid_changed: false, failed: false, reason: null, record: {} };
+    if (!instance || instance.owner !== 'foreign' || !instance.pid) return out;
+    const info = (line) => { if (logger) logger.info(line); };
+    const warn = (line) => { if (logger) logger.warn(line); };
+    const decision = restartPlatformComfyDecision(flags, state, { boot });
+    let restartAllowed = decision.allowed;
+    const interactive = !boot && !yes && !!(prompt && prompt.available);
+
+    const py = nodeDeps.pythonOfProcess(io, instance.pid);
+    if (!py.python) {
+        warn(`custom-node dependencies not checked: the Python of the ComfyUI process (pid ${instance.pid}) is unknown (${py.source})`);
+        return out;
+    }
+    const check = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests });
+    out.checked = true;
+    for (const e of check.errors) warn(`custom-node dependency check: ${e}`);
+    if (check.nodes.length === 0) {
+        info(`custom-node dependencies satisfied in ${py.python} (ComfyUI pid ${instance.pid})`);
+        if (interactive && restartAllowed === null) {
+            restartAllowed = await prompt.confirm(RESTART_PLATFORM_QUESTION, { defaultYes: true });
+            out.record.restartPlatformComfy = restartAllowed;
+        }
+        return out;
+    }
+    const what = nodeDeps.describeUnsatisfied(check.nodes);
+    info(`custom-node dependencies missing in ${py.python} (ComfyUI pid ${instance.pid}): ${what}`);
+    let install = boot || yes;
+    if (interactive) {
+        const restartPart = restartAllowed === false ? '' : ` and restart the platform's ComfyUI (pid ${instance.pid}) so it loads them`;
+        install = await prompt.confirm(`Install the missing Python packages — ${what} — into ${py.python}${restartPart}?`, { defaultYes: true });
+        if (restartAllowed === null) {
+            restartAllowed = install;
+            out.record.restartPlatformComfy = install;
+        }
+    }
+    const tool = toolCommandPath(flags);
+    if (!install) {
+        out.failed = true;
+        out.reason = `custom-node dependencies missing in the ComfyUI Python ${py.python}: ${what}`;
+        out.fix = `${tool} doctor --yes`;
+        return out;
+    }
+    const constraintsPath = statePath ? path.join(path.dirname(statePath), 'node-deps-constraints.txt') : null;
+    const inst = nodeDeps.installNodeDeps(io, { python: py.python, nodes: check.nodes, torch: check.torch, constraintsPath, log: logger });
+    out.installed = inst.installed;
+    if (!inst.ok) {
+        out.failed = true;
+        out.reason = inst.failed.map((f) => `${f.directory}: ${f.reason}`).join('; ');
+        out.fix = `${tool} doctor`;
+        return out;
+    }
+    const again = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests });
+    if (again.nodes.length > 0) {
+        out.failed = true;
+        out.reason = `pip finished, but the requirements are still not satisfied in ${py.python}: ${nodeDeps.describeUnsatisfied(again.nodes)}`;
+        out.fix = `${tool} doctor`;
+        return out;
+    }
+    info(`custom-node dependencies installed: ${inst.installed.join(', ')}`);
+    if (restartAllowed !== true) {
+        // A ComfyUI that is not ours is never stopped without the option.
+        out.failed = true;
+        out.reason = `custom-node dependencies were installed, but the platform's ComfyUI (pid ${instance.pid}) imported the nodes before that and was not restarted (restart of the platform's ComfyUI is off)`;
+        out.fix = `restart the ComfyUI from the platform console, or run: ${tool} doctor --restart-platform-comfy`;
+        return out;
+    }
+    const expectClasses = check.nodes.flatMap((n) => n.classes);
+    const rr = await nodeDeps.restartPlatformComfyUI(io, {
+        pid: instance.pid, timeoutMs: waitMs, intervalMs, expectClasses, sleep, log: logger, onProgress: info, progressMs,
+    });
+    out.restarted = rr.stopped;
+    if (!rr.ok) {
+        out.failed = true;
+        out.reason = rr.reason;
+        out.fix = `when the platform's ComfyUI is up again, run: ${tool} doctor`;
+        if (rr.stopped) out.pid_changed = rr.pid != null;
+        return out;
+    }
+    info(`the platform started ComfyUI again: pid ${rr.old_pid} → ${rr.pid} at ${rr.url} (after ${Math.round(rr.waited_ms / 1000)} s), node classes present`);
+    out.pid_changed = true;
+    out.instance = await comfyOwner.resolveComfyOwner(io, { state, root });
+    return out;
+}
+
+/** FAILED result of the dependency gate (the engine — worker start — does not run). */
+function nodeDepsFailedResult({ gate, mode }) {
+    return {
+        status: 'failed',
+        mode,
+        warnings: [],
+        blocked: [],
+        verification: null,
+        results: { comfy_owner: { owner: gate.instance && gate.instance.owner, mode, url: (gate.instance && gate.instance.url) || null }, worker: [] },
+        e2e: [
+            { id: 'node-deps', ok: false, label: 'Custom-node dependencies', detail: gate.reason, fix: gate.fix || null },
+            { id: 'worker', ok: null, label: 'Worker → ComfyUI', detail: 'not started — the ComfyUI has no node classes for this profile', fix: null },
+        ],
+    };
+}
+
+/** Store one installer option in install-state.json (a recorded answer). */
+function recordInstallerOption(io, statePath, key, value) {
+    const st = stateStore.loadState(io, statePath);
+    if (!st) return false;
+    st.installer_options = { ...(st.installer_options || {}), [key]: value };
+    stateStore.saveState(io, statePath, st, io.now);
+    return true;
+}
+
+/** ~/animastor/logs/bootstrap.log — the boot log next to the worker dir. */
+function bootLogPath(flags) {
+    return flags['boot-log'] || path.join(path.dirname(resolveWorkerDir(flags)), 'logs', 'bootstrap.log');
+}
+
+/** System boot time from /proc/stat (btime) as ISO, or null. */
+function systemBootTime(io) {
+    try {
+        const m = /^btime\s+(\d+)/m.exec(String(io.fs.readFileSync('/proc/stat', 'utf8')));
+        return m ? new Date(Number(m[1]) * 1000).toISOString() : null;
+    } catch (_) { return null; }
+}
+
+/** The argv of the detached `doctor --yes` that `animastor boot` starts. */
+function bootChildArgs(flags, { cliPath = __filename, defaultWaitMs = 600000 } = {}) {
+    const args = [cliPath, 'doctor', '--yes'];
+    for (const [k, v] of Object.entries(flags)) {
+        if (k === 'profiles' || k === 'yes' || k === 'boot-log' || v === undefined || v === null || v === false) continue;
+        if (v === true) args.push(`--${k}`);
+        else args.push(`--${k}`, String(v));
+    }
+    if (flags['comfy-wait-ms'] === undefined || flags['comfy-wait-ms'] === '') {
+        if (!process.env.ANIMASTOR_COMFY_WAIT_MS) args.push('--comfy-wait-ms', String(defaultWaitMs));
+    }
+    return args;
+}
+
+/**
+ * `animastor boot` (installer 0.2.4) — the WHOLE node startup script. TIR
+ * starts its own ComfyUI only AFTER the startup script has finished, so any
+ * wait inside the script is a deadlock (live 31.10: doctor gave up 05:19:06,
+ * main.py started 05:19:35). boot therefore detaches at once — new session
+ * (setsid), stdin /dev/null, stdout/stderr appended to
+ * ~/animastor/logs/bootstrap.log under a header with the boot time — and
+ * exits 0; the detached `doctor --yes` waits (600 s by default), restores the
+ * node dependencies, restarts the platform's ComfyUI when needed and starts
+ * the worker.
+ */
+function cmdBoot(flags, { io = createRealIo(), spawn = require('child_process').spawn, execPath = process.execPath, cliPath = __filename, now = () => new Date() } = {}) {
+    const logFile = bootLogPath(flags);
+    let fd = null;
+    try {
+        io.fs.mkdirSync(path.dirname(logFile), { recursive: true });
+        fd = fs.openSync(logFile, 'a');
+        const btime = systemBootTime(io);
+        fs.writeSync(fd, `\n===== animastor boot ${now().toISOString()} (system boot ${btime || 'unknown'}) =====\n`);
+        const args = bootChildArgs(flags, { cliPath });
+        const child = spawn(execPath, args, {
+            detached: true,
+            stdio: ['ignore', fd, fd],
+            cwd: homeDir(),
+            env: { ...process.env, ANIMASTOR_BOOT: '1' },
+        });
+        if (child && typeof child.unref === 'function') child.unref();
+        const pid = child && child.pid;
+        fs.writeSync(fd, `animastor boot: doctor --yes detached (pid ${pid || '?'}): ${args.slice(1).join(' ')}\n`);
+        console.log(`animastor boot: started in the background (pid ${pid || '?'}), log ${logFile}`);
+        process.exitCode = 0;
+        return { pid: pid || null, logFile, args };
+    } catch (err) {
+        console.error(`animastor boot: could not start the background run: ${err.message} (log ${logFile})`);
+        process.exitCode = 1;
+        return { pid: null, logFile, error: err.message };
+    } finally {
+        if (fd != null) { try { fs.closeSync(fd); } catch (_) { /* closed */ } }
+    }
+}
+
+/** The one line for the node startup script (printed at the end of an install). */
+function startupScriptLine(flags) {
+    const tool = toolCommandPath(flags);
+    return `export PATH="$HOME/.local/bin:$PATH"; ${tool} boot`;
 }
 
 /** The `animastor` command recorded for this installation (fix lines). */
@@ -604,6 +829,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     // it (process + /system_stats) before the address is recomputed into
     // .env and the worker is started; never start it against the address
     // of a previous boot.
+    const windowStart = realIo.now();
     const gate = await platformComfyGate(realIo, { state: priorState, root, waitMs: comfyWaitMs, instance, logger });
     instance = gate.instance;
     if (gate.waited && gate.waited.ok) runningComfy = probeMod.detectRunningComfyUI(realIo);
@@ -613,6 +839,36 @@ async function cmdInstall(flags, { doctor = false } = {}) {
         prompt.close();
         return;
     }
+
+    // Type A (installer 0.2.4): the pip packages of the custom nodes live
+    // outside /home and vanish with a node restart — check them in the Python
+    // of the platform's main.py, reinstall, and (when allowed) let the
+    // platform start its ComfyUI again so the node classes load.
+    const recordedPid = priorState && priorState.comfy_owner ? priorState.comfy_owner.pid : null;
+    const depsGate = dryRun ? null : await platformNodeDepsGate(realIo, {
+        instance, state: priorState, root, manifests: loadedManifests, flags, boot, yes, prompt,
+        waitMs: Math.max(60000, comfyWaitMs - (realIo.now() - windowStart)), logger, statePath,
+    });
+    if (depsGate) {
+        instance = depsGate.instance;
+        if (depsGate.restarted) runningComfy = probeMod.detectRunningComfyUI(realIo);
+        if (depsGate.record.restartPlatformComfy !== undefined) {
+            recordInstallerOption(realIo, statePath, 'restartPlatformComfy', depsGate.record.restartPlatformComfy);
+        }
+        if (depsGate.failed) {
+            printResult(nodeDepsFailedResult({ gate: depsGate, mode: instance.mode }), { flags, mode: instance.mode, boot });
+            process.exitCode = 1;
+            prompt.close();
+            return;
+        }
+    }
+    // Node classes are re-checked until the end of the window when the node
+    // dependencies were just installed or the ComfyUI is a new process.
+    const pidChanged = !!(depsGate && depsGate.pid_changed)
+        || (recordedPid != null && instance.pid != null && Number(recordedPid) !== Number(instance.pid));
+    const nodeClassesDeadline = (depsGate && depsGate.installed.length > 0) || pidChanged
+        ? windowStart + Math.max(comfyWaitMs, 0)
+        : null;
 
     // The machine decides the mode. An explicit --mode that contradicts it is
     // reported, never silently applied: starting a second ComfyUI next to the
@@ -878,6 +1134,10 @@ async function cmdInstall(flags, { doctor = false } = {}) {
                 replaceWorkerKey,
                 comfyOwner: instance,
                 comfyWaitMs,
+                nodeClassesDeadline,
+                restartPlatformComfy: restartPlatformComfyDecision(flags, priorState, { boot }).source === 'flag'
+                    ? !!flags['restart-platform-comfy']
+                    : (depsGate && depsGate.record.restartPlatformComfy !== undefined ? depsGate.record.restartPlatformComfy : undefined),
                 hubVersion,
             },
         });
@@ -1197,6 +1457,8 @@ function printResult(result, { flags = {}, mode = null, boot = false } = {}) {
     // after a node reboot the PATH block is gone, and a copy-pasted relative
     // `animastor` must not be the only way to run the command.
     console.log(`\nAnimastor command: ${toolCommandPath(flags)}`);
+    // The node startup script is this ONE line on both node types (0.2.4).
+    console.log(`Node startup script (one line): ${startupScriptLine(flags)}`);
     // A failed/blocked installation must be visible in the exit code so
     // scripts (and the E2E smoke test) can react.
     if (!summary.ok || result.status === 'failed' || result.status === 'blocked') process.exitCode = 1;
@@ -1531,7 +1793,7 @@ async function main() {
     const args = parseArgs(process.argv);
     const pkg = require('../../package.json');
     // install/doctor print the full banner; the everyday tool commands stay quiet.
-    if (!['install', 'doctor', 'start', 'stop', 'logs', 'status'].includes(args.command)) {
+    if (!['install', 'doctor', 'start', 'stop', 'logs', 'status', 'boot'].includes(args.command)) {
         console.log(`animastor-installer v${pkg.version} (platform: ${PLATFORM_RUNTIME.platform}, deployment: ${PLATFORM_RUNTIME.deployment})`);
     }
     printPlatformNotices();
@@ -1547,6 +1809,9 @@ async function main() {
             break;
         case 'doctor':
             await cmdDoctor(args.flags);
+            break;
+        case 'boot':
+            cmdBoot(args.flags);
             break;
         case 'detect':
             await cmdDetect(args.flags);
@@ -1582,7 +1847,7 @@ async function main() {
             await cmdRebootComfyUI(args.flags);
             break;
         default:
-            console.error('Usage: animastor-installer <detect|plan|install|verify|validate|resume|uninstall|start|stop|status|logs|doctor|monitor|reboot-worker|reboot-comfyui> [options]');
+            console.error('Usage: animastor-installer <detect|plan|install|verify|validate|resume|uninstall|start|stop|status|logs|doctor|boot|monitor|reboot-worker|reboot-comfyui> [options]');
             console.error('  --profile P[,P2]   Generation profile id');
             console.error('  --mode MODE        managed | existing | shared');
             console.error('  --root PATH        ComfyUI root (default: ~/ComfyUI)');
@@ -1594,7 +1859,9 @@ async function main() {
             console.error('  a free port when 8188 is taken; opt out:');
             console.error('    --no-start-comfy  --no-start-worker  --comfy-port N');
             console.error('  management (the `animastor` command in PATH):');
-            console.error('    animastor start | stop | status | logs [-f] | doctor [--new-key]');
+            console.error('    animastor start | stop | status | logs [-f] | doctor [--new-key] | boot');
+            console.error('    boot: node startup script — detaches `doctor --yes` (log ~/animastor/logs/bootstrap.log), exits 0');
+            console.error('    --restart-platform-comfy / --no-restart-platform-comfy  restart the platform ComfyUI after node deps');
             console.error('    (also: monitor | reboot-worker | reboot-comfyui)');
             console.error('    (--state/--root/--worker-dir/--port override discovery)');
             console.error('    installer flags: --install-tools / --no-tools / --tools-dir PATH');
@@ -1620,4 +1887,6 @@ module.exports = {
     PLATFORM_RUNTIME, printPlatformNotices, homeDir,
     toolCommand, toolCommandPath, detectHubVersion, priorReusableDecisions, isBootRun,
     missingRequiredHostPackages, shouldWaitForPlatformComfy, platformComfyGate, platformComfyMissingResult,
+    restartPlatformComfyDecision, platformNodeDepsGate, nodeDepsFailedResult, recordInstallerOption,
+    cmdBoot, bootChildArgs, bootLogPath, startupScriptLine,
 };

@@ -38,6 +38,7 @@ const repoBundleSource = require('../worker-bundle-source');
 const prereq = require('./prereq');
 const management = require('../management');
 const comfyOwnerMod = require('./comfy-owner');
+const nodeDeps = require('./node-deps');
 const { createProgressReporter } = require('./progress');
 const { buildVerificationReport } = require('../verification-report');
 
@@ -396,6 +397,10 @@ async function runInstallation(args) {
             startComfyui: !!options.startComfyui,
             startWorker: !!options.startWorker,
         };
+        // Restart of the platform's ComfyUI after node dependencies (0.2.4):
+        // a recorded answer survives every run; an explicit flag replaces it.
+        const restartPlatform = options.restartPlatformComfy !== undefined ? options.restartPlatformComfy : saved.restartPlatformComfy;
+        if (restartPlatform === true || restartPlatform === false) st.installer_options.restartPlatformComfy = restartPlatform;
         // Hub version seen by this run (bootstrap env) — `animastor doctor`
         // prints it instead of "hub unknown" on later runs.
         // Who runs the ComfyUI, as seen by THIS run (installer 0.2.3): the
@@ -646,6 +651,23 @@ async function runInstallation(args) {
             const a = st.artifacts[id];
             return !!(a && a.detail && /python dependencies incomplete/.test(a.detail.reason || ''));
         });
+        // Type B (installer 0.2.4): the pip requirements of every required
+        // node on disk are checked in the Python of OUR ComfyUI (the running
+        // main.py, else the venv) — unsatisfied ones get the same idempotent
+        // pip retry, and the managed instance is restarted below.
+        if (!runtimeFatal && !dryRun && mode === 'managed' && !foreignComfy) {
+            const oursPid = comfyOwner && comfyOwner.ours ? comfyOwner.ours.pid : null;
+            const fromProc = oursPid ? nodeDeps.pythonOfProcess(io, oursPid).python : null;
+            const venvPy = platformAdapter.venvPythonBin(path.join(comfyuiRoot, 'venv'));
+            const depsPython = fromProc || (io.fs.existsSync(venvPy) ? venvPy : null);
+            if (depsPython) {
+                const dc = nodeDeps.checkNodeDeps(io, { python: depsPython, root: comfyuiRoot, manifests });
+                for (const n of dc.nodes) {
+                    if (!retryDeps.includes(n.id)) retryDeps.push(n.id);
+                    log.info(`custom-node dependencies missing in ${depsPython}: ${nodeDeps.describeUnsatisfied([n])}`);
+                }
+            }
+        }
         const nodesApproved = !runtimeFatal && nodesStep && nodesStep.action && nodesStep.decision === 'yes';
         if (!runtimeFatal && (nodesApproved || retryDeps.length > 0)) {
             const python = platformAdapter.venvPythonBin(path.join(comfyuiRoot, 'venv'));
@@ -696,6 +718,11 @@ async function runInstallation(args) {
             // /object_info registry reflects the files on disk; otherwise
             // verification below would check a stale process and fail.
             const nodesChanged = result.results.custom_nodes.some((x) => x.status === 'installed' && !x.reason);
+            if (nodesChanged && !options.nodeClassesDeadline) {
+                // Freshly installed nodes: the class check below may wait for
+                // the restarted ComfyUI (0.2.4).
+                options.nodeClassesDeadline = io.now() + Math.max(options.comfyWaitMs || 0, options.verifyTimeoutMs || 120000);
+            }
             if (nodesChanged && options.startComfyui !== false) {
                 const port = options.comfyPort || 8188;
                 const rr = await log.step('restart ComfyUI', () => withBusy('Waiting for ComfyUI to restart', () => comfyui.restartManagedComfyUI(io, {
@@ -1384,7 +1411,21 @@ async function runVerification({ io, manifests, roots, options, log, crypto, tok
                     for (const cls of dep.provides_classes || []) manifestClasses.add(cls);
                 }
             }
-            const missingClasses = Array.from(manifestClasses).filter((c) => !classes.has(c));
+            let missingClasses = Array.from(manifestClasses).filter((c) => !classes.has(c));
+            // Installer 0.2.4: right after the node dependencies were
+            // installed or when the ComfyUI is a new process, the classes are
+            // re-checked until the end of the wait window — not FAILED at once.
+            const deadline = Number(options.nodeClassesDeadline) || 0;
+            const pause = options.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+            if (missingClasses.length > 0 && deadline > io.now()) {
+                log.info(`node classes not registered yet (${missingClasses.join(', ')}) — re-checking for up to ${Math.round((deadline - io.now()) / 1000)} s`);
+                while (missingClasses.length > 0 && io.now() < deadline) {
+                    await pause(Math.min(options.pollIntervalMs || 3000, Math.max(1, deadline - io.now())));
+                    const again = await comfyui.objectInfoClasses(io, baseUrl);
+                    if (again) missingClasses = Array.from(manifestClasses).filter((c) => !again.has(c));
+                }
+                if (missingClasses.length === 0) log.info('node classes registered');
+            }
             if (missingClasses.length > 0) live.comfyui.missing_node_classes = missingClasses;
         }
         // workflow static validation (no generation) — only meaningful when
