@@ -1304,6 +1304,21 @@ describe('Happy Path: Scheduler Tick Lock', () => {
 // These tests assert delegation contracts, so later steps (Д.1/Д.2/Д.3)
 // can change internals while keeping the same command surface.
 
+
+// Command-only generation (2026-10-31): a stage is schedulable only under an
+// ACTIVE task-registry task (the explicit command) — this writes that record.
+// (Written as raw registry records — the same shape the task-managed test below
+// uses — because this suite's module stubs leave the media registry partial.)
+async function giveCommand(redis, types, bookId, chapterId, sceneId) {
+    const generationProgress = require('../src/services/generation-progress');
+    for (const type of types) {
+        await redis.hset(generationProgress.key(bookId), `cmd-${type}`, JSON.stringify({
+            task_id: `cmd-${type}`, type, status: 'active', scope: 'current_scene',
+            chapter_id: chapterId, scene_id: sceneId,
+            targets: [{ chapter_id: chapterId, scene_id: sceneId }], started_at: Date.now(),
+        }));
+    }
+}
 describe('Happy Path: Orchestrator facade — planScene', () => {
     let redis;
     let orchestrator;
@@ -1314,7 +1329,9 @@ describe('Happy Path: Orchestrator facade — planScene', () => {
     });
 
     it('planScene delegates to shouldScheduleAssets and returns {stages, allDone}', async () => {
-        // No state set → audio+image schedulable, video gated on image (not ready)
+        // No state set + an audio/image/video command → audio+image
+        // schedulable, video gated on image (not ready)
+        await giveCommand(redis, ['audio', 'image', 'video'], BOOK_ID, CHAPTER_ID, SCENE_ID);
         const result = await orchestrator.planScene(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
         expect(result).to.have.keys('stages', 'allDone');
         expect(result.stages).to.include('audio');
@@ -1828,6 +1845,7 @@ describe('Happy Path: Д.2 — shouldScheduleAssets is a pure decision', () => {
         await sceneState.setAssetStates(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, {
             audio: 'generating', image: 'pending', video: 'new',
         });
+        await giveCommand(redis, ['audio', 'image'], BOOK_ID, CHAPTER_ID, SCENE_ID);
         const before = await sceneState.getAssetStates(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
         const result = await scheduler.shouldScheduleAssets(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
         const after = await sceneState.getAssetStates(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);

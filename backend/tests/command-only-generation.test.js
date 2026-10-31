@@ -320,8 +320,12 @@ describe('Command-only generation (owner rule 2026-10-31)', function () {
             await redis.sadd(scheduler.ACTIVE_SCENES_KEY, `${b}:${CH}:${S2}`);
             stubExecutor({ dispatched: true, jobs: 1 });
 
+            // The redis mock stores hash fields as flat `key:field` entries, so a
+            // SCAN for registry hashes cannot be emulated — the book list is
+            // injected through the existing deps parameter (real SCAN in prod).
             const out = await interruptActiveGenerationTasks(redis, {
-                generationProgress, scheduler,
+                generationProgress: { ...generationProgress, listBooksWithTasks: async () => [b] },
+                scheduler,
                 taskRepo: { interruptActiveTasks: async () => 0 },
                 log: () => {},
             });

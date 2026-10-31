@@ -52,6 +52,13 @@ async function createActiveDispatch(redis, stage, dispatchId) {
     return dispatchId;
 }
 
+
+// Command-only generation (2026-10-31): a stage is schedulable only under an
+// ACTIVE task-registry task (the explicit command) — this writes that record.
+async function giveCommand(redis, types, bookId, chapterId, sceneId) {
+    return require('../src/services/generation-progress').createTasks(redis, bookId, types,
+        { scope: 'current_scene', chapterId, sceneId }, [{ chapter_id: chapterId, scene_id: sceneId }]);
+}
 describe('stage dispatch lifecycle guard (video re-dispatch incident fix)', () => {
 
     describe('CASE A: partial scene (image READY + video NEW)', () => {
@@ -199,6 +206,7 @@ describe('stage dispatch lifecycle guard (video re-dispatch incident fix)', () =
             await setState(redis, 'audio', state.AssetState.READY);
             await setState(redis, 'image', state.AssetState.READY);
             await setState(redis, 'video', state.AssetState.PENDING);
+            await giveCommand(redis, ['video'], B, C, S);
 
             const { stages } = await runtimeScheduler.shouldScheduleAssets(
                 redis, B, C, S

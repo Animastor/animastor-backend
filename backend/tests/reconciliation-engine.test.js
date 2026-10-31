@@ -21,6 +21,14 @@ const BOOK_ID = 'test-book';
 const CHAPTER_ID = 'ch-1';
 const SCENE_ID = 's-1';
 
+// Command-only generation (2026-10-31): fixes that queue work run only for a
+// scene×stage under an ACTIVE task-registry task (the explicit command).
+// `giveCommand` writes exactly that registry record on the test redis.
+async function giveCommand(redis, type, bookId = BOOK_ID, chapterId = CHAPTER_ID, sceneId = SCENE_ID) {
+    return require('../src/services/generation-progress').createTasks(redis, bookId, [type],
+        { scope: 'current_scene', chapterId, sceneId }, [{ chapter_id: chapterId, scene_id: sceneId }]);
+}
+
 function sceneRef() {
     return { bookId: BOOK_ID, chapterId: CHAPTER_ID, sceneId: SCENE_ID };
 }
@@ -872,6 +880,9 @@ describe('applyFix — RELEASE_STALE_LEASE (audit c8b79f6 recovery)', () => {
             await dispatchEngine.setDispatchMetadata(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'video', metadata);
             await dispatchEngine.acquireQuota(redis, 'video');
             await redis.expire(lease.leaseKey, 60);
+            // the dead dispatch belonged to an active video command
+            await giveCommand(redis, 'video');
+            await setAssetState(redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'video', 'generating');
 
             const counterBefore = await dispatchEngine.getActiveCounter(redis, 'video');
             expect(counterBefore).to.equal(1);
@@ -938,16 +949,20 @@ describe('getFixRecommendations', () => {
         expect(fixes[0].safeToExecute).to.be.true;
     });
 
-    it('returns PROGRESS_TO_IMAGE for partial_audio_only', () => {
+    // Command-only generation: PROGRESS_TO_IMAGE / PROGRESS_TO_VIDEO are
+    // removed — a partial build never becomes an executable fix.
+    it('partial_audio_only no longer yields PROGRESS_TO_IMAGE (not executable)', () => {
         const engine = require(RECONCILE_PATH);
         const fixes = engine.getFixRecommendations([{ scene: sceneRef(), issue: 'partial_audio_only' }]);
-        expect(fixes[0].action).to.equal('PROGRESS_TO_IMAGE');
+        expect(fixes[0].action).to.not.equal('PROGRESS_TO_IMAGE');
+        expect(fixes[0].safeToExecute).to.equal(false);
     });
 
-    it('returns PROGRESS_TO_VIDEO for partial_image_video_missing', () => {
+    it('partial_image_video_missing no longer yields PROGRESS_TO_VIDEO (not executable)', () => {
         const engine = require(RECONCILE_PATH);
         const fixes = engine.getFixRecommendations([{ scene: sceneRef(), issue: 'partial_image_video_missing' }]);
-        expect(fixes[0].action).to.equal('PROGRESS_TO_VIDEO');
+        expect(fixes[0].action).to.not.equal('PROGRESS_TO_VIDEO');
+        expect(fixes[0].safeToExecute).to.equal(false);
     });
 
     it('returns RELEASE_STALE_LOCKS for stale_locks', () => {
@@ -1028,6 +1043,23 @@ describe('applyFix — REGENERATE_MISSING_ASSET', () => {
     let redis;
     afterEach(() => { delete require.cache[RECONCILE_PATH]; });
 
+    it('without a command: diagnostics only — nothing set PENDING, nothing queued', async () => {
+        redis = createMockRedis();
+        const calls = [];
+        const engine = mockDeps(redis, {
+            setScenePending: async (...a) => { calls.push(a); },
+        });
+        const result = await engine.applyFix(redis, {
+            scene: { bookId: BOOK_ID, chapterId: CHAPTER_ID, sceneId: SCENE_ID },
+            action: 'REGENERATE_MISSING_ASSET',
+            reason: 'IMAGE_READY but no image file (IU) (image)',
+        });
+        expect(result.success).to.equal(false);
+        expect(result.diagnostic).to.equal(true);
+        expect(calls).to.have.length(0);
+        expect(await redis.smembers('animastor:active-scenes')).to.have.length(0);
+    });
+
     it('calls orchestrator.setScenePending for audio', async () => {
         redis = createMockRedis();
         const calls = [];
@@ -1036,6 +1068,7 @@ describe('applyFix — REGENERATE_MISSING_ASSET', () => {
                 calls.push({ bookId, chapterId, sceneId, assetType });
             },
         });
+        await giveCommand(redis, 'audio');
         const result = await engine.applyFix(redis, {
             scene: { bookId: BOOK_ID, chapterId: CHAPTER_ID, sceneId: SCENE_ID },
             action: 'REGENERATE_MISSING_ASSET',
@@ -1054,6 +1087,7 @@ describe('applyFix — REGENERATE_MISSING_ASSET', () => {
                 calls.push({ assetType });
             },
         });
+        await giveCommand(redis, 'video');
         const result = await engine.applyFix(redis, {
             scene: { bookId: BOOK_ID, chapterId: CHAPTER_ID, sceneId: SCENE_ID },
             action: 'REGENERATE_MISSING_ASSET',
@@ -1071,6 +1105,7 @@ describe('applyFix — REGENERATE_MISSING_ASSET', () => {
                 calls.push({ assetType });
             },
         });
+        await giveCommand(redis, 'image');
         const result = await engine.applyFix(redis, {
             scene: { bookId: BOOK_ID, chapterId: CHAPTER_ID, sceneId: SCENE_ID },
             action: 'REGENERATE_MISSING_ASSET',
@@ -1097,6 +1132,7 @@ describe('applyFix — MOVE_TO_PENDING', () => {
                 calls.markDirty.push({ bookId, chapterId, sceneId });
             },
         });
+        await giveCommand(redis, 'audio');
         const result = await engine.applyFix(redis, {
             scene: { bookId: BOOK_ID, chapterId: CHAPTER_ID, sceneId: SCENE_ID },
             action: 'MOVE_TO_PENDING',

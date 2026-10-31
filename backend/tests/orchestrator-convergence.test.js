@@ -650,11 +650,19 @@ describe('stage 50: partial-build checks skip in-flight generations', () => {
 // ======================================================
 // GROUP 6 — tick observability: per-stage failures surface with reasons
 // ======================================================
+
+// Command-only generation (2026-10-31): a stage is schedulable only under an
+// ACTIVE task-registry task (the explicit command) — this writes that record.
+async function giveCommand(redis, types, bookId, chapterId, sceneId) {
+    return require('../src/services/generation-progress').createTasks(redis, bookId, types,
+        { scope: 'current_scene', chapterId, sceneId }, [{ chapter_id: chapterId, scene_id: sceneId }]);
+}
 describe('stage 50: attemptDispatch surfaces per-stage failures (no «undefined for» masking)', () => {
     let redis;
     beforeEach(() => { redis = createMockRedis(); });
 
     it('a failed stage returns success:false with the real reason', async () => {
+        await giveCommand(redis, ['audio'], B, C, S);
         await state.setAssetState(redis, B, C, S, 'audio', state.AssetState.PENDING);
 
         const result = await withStubbedDispatchEngine({
@@ -667,6 +675,7 @@ describe('stage 50: attemptDispatch surfaces per-stage failures (no «undefined 
     });
 
     it('a completed stage (already_done) is not reported as an error', async () => {
+        await giveCommand(redis, ['audio'], B, C, S);
         await state.setAssetState(redis, B, C, S, 'audio', state.AssetState.PENDING);
 
         const result = await withStubbedDispatchEngine({
@@ -679,6 +688,7 @@ describe('stage 50: attemptDispatch surfaces per-stage failures (no «undefined 
     });
 
     it('mixed stages: dispatched wins, other stage failures still listed', async () => {
+        await giveCommand(redis, ['audio', 'image'], B, C, S);
         await state.setAssetState(redis, B, C, S, 'audio', state.AssetState.PENDING);
         await state.setAssetState(redis, B, C, S, 'image', state.AssetState.PENDING);
 
