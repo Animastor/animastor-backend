@@ -38,6 +38,10 @@ log() { echo "[test-backend] $*"; }
 # shellcheck disable=SC1090
 set -a; source "$ENV_FILE"; set +a
 
+# Tests never reach external services: closed local port unless .env.test overrides.
+export HUB_URL="${HUB_URL:-http://127.0.0.1:9}"
+export AI_API_BASE_URL="${AI_API_BASE_URL:-http://127.0.0.1:9}"
+
 # --- 2. hard assertions BEFORE anything connects ----------------------------
 # These mirror the in-process guards, failing fast with a clear message.
 [[ "${PG_DB:-}" == *_test ]] || err "PG_DB='${PG_DB:-}' must end in _test (refusing to run)"
