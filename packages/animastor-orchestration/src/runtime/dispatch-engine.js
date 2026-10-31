@@ -498,7 +498,8 @@ async function getDispatchEvidence(redis, bookId, chapterId, sceneId, stage) {
  *
  * @param {Object} redis
  * @param {string} bookId
- * @param {{reason?: string}} [opts]
+ * @param {{reason?: string, target?: 'pending'|'dirty'}} [opts] — target 'dirty'
+ *        (command-only generation, Stop All) releases to DIRTY without re-queueing.
  * @returns {Promise<{repaired: Array<{chapterId, sceneId, stage, path}>}>}
  */
 async function repairOrphanGeneratingStates(redis, bookId, opts = {}) {
@@ -530,6 +531,16 @@ async function repairOrphanGeneratingStates(redis, bookId, opts = {}) {
                 if (states[stage] !== stateModule.AssetState.GENERATING) continue;
                 const evidence = await getDispatchEvidence(redis, bookId, chapterId, sceneId, stage);
                 if (evidence.alive) continue;
+                if (opts.target === 'dirty') {
+                    // Command-only generation (Stop All): release the ghost
+                    // to DIRTY without re-queueing it (no PENDING).
+                    const released = await require('./command-gate').rollbackGeneratingToDirty(
+                        redis, bookId, chapterId, sceneId, stage, reason);
+                    if (released.changed) {
+                        repaired.push({ chapterId, sceneId, stage, path: [stateModule.AssetState.DIRTY] });
+                    }
+                    continue;
+                }
                 const rollback = await rollbackStageToPending(
                     redis, bookId, chapterId, sceneId, stage, null, reason
                 );

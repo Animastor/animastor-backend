@@ -107,6 +107,10 @@ function buildComposition({ sessionRepo, order }) {
                     releaseClaimsForBook: async () => ({ released: 0, done: 0, scanned: 0 }),
                     releaseClaimsForScene: async () => ({ released: 0, done: 0, scanned: 0 }),
                 };
+            // Command-only generation: the shared stage-cancellation routine
+            // (cancel-worker / PUT layer-config) injected into routeDeps.
+            case './services/stage-cancellation.cjs':
+                return { cancelStage: async () => ({}) };
             default:
                 throw new Error(`composition slice required an unexpected module: ${spec}`);
         }

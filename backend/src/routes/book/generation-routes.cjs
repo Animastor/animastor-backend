@@ -17,6 +17,11 @@ const generationCancelRepo = require('../../storage/postgres/repositories/genera
 const { createAgentSessionControl } = require('../../services/agent-session-control');
 // S-2: media registry for worker-type validation
 const mediaRegistry = require('@animastor/generation').mediaRegistry;
+// Command-only generation: the gate (task registry ∧ layer ∧ no cancel) and
+// the shared "stop this stage" routine (registry, leases, hub, index, PG).
+// The shared stage-cancellation routine arrives through deps
+// (deps.stageCancellation, composition root) — contour-route requires are frozen.
+const commandGate = require('@animastor/orchestration').runtime.commandGate;
 
 module.exports = function(app, redis, deps) {
     // Stage 116 (D4): queue-idempotency port (injected by the composition root
@@ -36,6 +41,18 @@ module.exports = function(app, redis, deps) {
     const { log } = utils;
 
     const sessionControl = agentSessionControl || createAgentSessionControl();
+
+    const cancelStage = (params) => {
+        const impl = deps.stageCancellation;
+        if (!impl || typeof impl.cancelStage !== 'function') {
+            throw new Error('generation-routes: deps.stageCancellation is not wired (composition root)');
+        }
+        return impl.cancelStage(params);
+    };
+    const stageCancelDeps = () => ({
+        generationProgress, taskRepo, sceneAssetsRepo, dispatchEngine,
+        scheduler: runtime.scheduler, commandGate, config, log,
+    });
 
     // ======================================================
     // GENERATE NEXT (slide window)
@@ -103,6 +120,26 @@ module.exports = function(app, redis, deps) {
                 analysis_mode, analysis_parallelism,
             });
             log(`[LAYER-CONFIG] book=${bookId} → a=${cfg.audio_enabled} i=${cfg.image_enabled} v=${cfg.video_enabled} cs=${cfg.chunk_size} ato=${cfg.audio_timeout_minutes} ito=${cfg.image_timeout_minutes} vto=${cfg.video_timeout_minutes} am=${cfg.analysis_mode} ap=${cfg.analysis_parallelism}`);
+
+            // Command-only generation: switching a layer OFF stops that stage
+            // for the whole book — tasks, leases, hub copies, active index and
+            // PG pending rows (a disabled layer must not keep running, incident
+            // 2026-10-30 BA). Idempotent: repeating it is harmless.
+            const cancelledStages = [];
+            for (const stage of mediaRegistry.listMediaTypes()) {
+                if ((req.body || {})[`${stage}_enabled`] !== false || cfg[`${stage}_enabled`] !== false) continue;
+                try {
+                    await cancelStage({
+                        redis, bookId, stage, tasks: null, wholeBook: true,
+                        reason: `layer_disabled:${stage}`, context: 'LAYER-CONFIG',
+                        deps: stageCancelDeps(),
+                    });
+                    cancelledStages.push(stage);
+                } catch (cancelErr) {
+                    console.error(`[LAYER-CONFIG] ${bookId}: cancelling disabled stage ${stage} failed: ${cancelErr.message}`);
+                }
+            }
+
             res.json({
                 book_id: bookId,
                 audio_enabled: cfg.audio_enabled,
@@ -114,9 +151,9 @@ module.exports = function(app, redis, deps) {
                 video_timeout_minutes: cfg.video_timeout_minutes,
                 analysis_mode: cfg.analysis_mode,
                 analysis_parallelism: cfg.analysis_parallelism,
+                cancelled_stages: cancelledStages,
             });
         } catch (err) {
-            console.error('[LAYER-CONFIG] PUT error:', err.message);
             console.error('[LAYER-CONFIG] PUT error:', err.message);
             res.status(500).json({ error: err.message });
         }
@@ -183,53 +220,19 @@ module.exports = function(app, redis, deps) {
                 await dispatchEngine.clearLeasesForBookByStage(redis, bookId, 'image');
                 log(`[CANCEL-WORKER] ${bookId}: cover (audio+image) leases cleared`);
             } else {
-                for (const task of tasks) {
-                    await generationProgress.markCancelled(redis, bookId, task.task_id);
-                    try {
-                        await taskRepo.updateTaskStatus(task.task_id, 'cancelled');
-                    } catch (pgErr) {
-                        console.warn(`[CANCEL-WORKER] Failed to persist cancellation for ${task.task_id}: ${pgErr.message}`);
-                    }
-                }
-
-                const scenesToCancel = [];
-                const seen = new Set();
-                for (const task of tasks) {
-                    for (const target of task.targets || []) {
-                        const remaining = await generationProgress.getSceneTaskState(
-                            redis,
-                            bookId,
-                            target.chapter_id,
-                            target.scene_id
-                        );
-                        if (remaining.activeTypes.has(resolvedType)) continue;
-                        const sceneKey = `${target.chapter_id}:${target.scene_id}`;
-                        if (seen.has(sceneKey)) continue;
-                        seen.add(sceneKey);
-                        scenesToCancel.push({
-                            chapter_id: target.chapter_id,
-                            scene_id: target.scene_id,
-                            stages: [resolvedType],
-                        });
-                    }
-                }
-
-                let cancellation;
-                if (scenesToCancel.length > 0) {
-                    cancellation = await dispatchEngine.clearLeasesForScenes(redis, bookId, scenesToCancel);
-                } else if (tasks.length === 0 && !taskId) {
-                    // Backward compatibility for work started before task ids existed.
-                    cancellation = await dispatchEngine.clearLeasesForBookByStage(redis, bookId, resolvedType);
-                } else {
-                    cancellation = { dispatchIds: [] };
-                }
-                await dispatchEngine.clearHubDispatches(cancellation.dispatchIds, {
-                    hubUrl: config.HUB_URL,
-                    apiKey: config.GPU_HUB_API_KEY,
+                // Command-only generation: one routine stops the stage —
+                // registry tasks, leases, hub copies, GENERATING ghosts,
+                // active index and PG `pending` rows (→ cancelled). A row
+                // stop (task_id) touches only that task's targets; a section
+                // stop (type) stops the stage for the whole book.
+                await cancelStage({
+                    redis, bookId, stage: resolvedType,
+                    tasks,
+                    wholeBook: !taskId,
+                    reason: taskId ? `cancel-worker:task:${taskId}` : `cancel-worker:${resolvedType}`,
                     context: 'CANCEL-WORKER',
-                    warn: message => console.warn(message),
+                    deps: stageCancelDeps(),
                 });
-                log(`[CANCEL-WORKER] ${bookId}: ${resolvedType} cancelled for ${scenesToCancel.length} scene(s)`);
             }
 
             log(`[CANCEL-WORKER] ${bookId}: type=${resolvedType} cancelled successfully`);
@@ -282,11 +285,14 @@ module.exports = function(app, redis, deps) {
             // FSM-safe path GENERATING → DIRTY → PENDING. Live stages (lease/
             // dispatch-meta/in-flight marker present) are never touched.
             try {
+                // Command-only generation: release to DIRTY, never PENDING —
+                // a cancelled book keeps no queued work.
                 const orphanRepair = await dispatchEngine.repairOrphanGeneratingStates(redis, bookId, {
-                    reason: 'stop_all_orphan_repair'
+                    reason: 'stop_all_orphan_repair',
+                    target: 'dirty',
                 });
                 if (orphanRepair.repaired.length > 0) {
-                    log(`[CANCEL-GENERATION] ${bookId}: ${orphanRepair.repaired.length} orphan GENERATING state(s) rolled back (GENERATING → DIRTY → PENDING)`);
+                    log(`[CANCEL-GENERATION] ${bookId}: ${orphanRepair.repaired.length} orphan GENERATING state(s) released (GENERATING → DIRTY)`);
                 }
             } catch (orphanErr) {
                 console.warn(`[CANCEL-GENERATION] Orphan GENERATING sweep failed for ${bookId}: ${orphanErr.message}`);
@@ -295,6 +301,20 @@ module.exports = function(app, redis, deps) {
             // Clear per-worker cancel tracking (if any was set)
             await redis.del(`animastor:cancelled-workers:${bookId}`);
             await generationProgress.clear(redis, bookId);
+            await commandGate.clearForceStages(redis, bookId);
+
+            // Command-only generation: no `pending` scene_assets row survives
+            // Stop All (incident 2026-10-30: image/pending rows outlived the
+            // cancel and were a resurrection mine). ready/placeholder untouched.
+            try {
+                const cancelledRows = await sceneAssetsRepo.cancelPendingAssets(
+                    bookId, mediaRegistry.listMediaTypes(), null, 'cancel-generation');
+                if (cancelledRows > 0) {
+                    log(`[CANCEL-GENERATION] ${bookId}: ${cancelledRows} pending scene_assets row(s) → cancelled`);
+                }
+            } catch (pgErr) {
+                console.warn(`[CANCEL-GENERATION] Failed to cancel pending scene_assets rows: ${pgErr.message}`);
+            }
 
             // Persist terminal state for GPU tasks.
             try {
@@ -415,15 +435,6 @@ module.exports = function(app, redis, deps) {
 
             const buildId = loadedBook.manifest?.build_id || 'default';
 
-            await runtime.sceneWindow.clearCancelFlag(redis, bookId);
-            // Cathedral Recon #3 §5.4 option 1: an explicit new run removes the
-            // cancellation tombstone so future automatic resumption is unblocked.
-            try {
-                await generationCancelRepo.clear(bookId);
-                log(`[REGENERATE] ${bookId}: cancellation tombstone cleared`);
-            } catch (tombErr) {
-                console.warn(`[REGENERATE] Failed to clear cancellation tombstone for ${bookId}: ${tombErr.message}`);
-            }
             // force-dispatch is owned by orchestrator.resetScenes().
 
             const effectiveScope = scope || 'whole_book';
@@ -448,7 +459,38 @@ module.exports = function(app, redis, deps) {
                     type => persistedLayerCfg[`${type}_enabled`] !== false
                 );
             }
+            // Command-only generation: tasks only for ENABLED layers. A
+            // disabled layer in an explicit worker_types list is dropped; if
+            // nothing is left the command is refused (no task, no work).
+            const skippedWorkerTypes = requestedWorkerTypes.filter(
+                type => persistedLayerCfg[`${type}_enabled`] === false
+            );
+            requestedWorkerTypes = requestedWorkerTypes.filter(
+                type => persistedLayerCfg[`${type}_enabled`] !== false
+            );
+            if (requestedWorkerTypes.length === 0) {
+                log(`[REGENERATE] ${bookId}: refused — every requested layer is disabled (${skippedWorkerTypes.join(',') || 'none enabled'})`);
+                return res.status(409).json({
+                    error: 'layer_disabled',
+                    message: 'All requested layers are disabled in layer-config',
+                    disabled_worker_types: skippedWorkerTypes,
+                });
+            }
+            if (skippedWorkerTypes.length > 0) {
+                log(`[REGENERATE] ${bookId}: disabled layer(s) dropped from the command: ${skippedWorkerTypes.join(',')}`);
+            }
             const requestedTypeSet = new Set(requestedWorkerTypes);
+            // An explicit, accepted command clears the cancel flag and the
+            // cancellation tombstone (a refused command above leaves both) —
+            // the command gate then authorizes the new tasks.
+            await runtime.sceneWindow.clearCancelFlag(redis, bookId);
+            try {
+                await generationCancelRepo.clear(bookId);
+                log(`[REGENERATE] ${bookId}: cancellation tombstone cleared`);
+            } catch (tombErr) {
+                console.warn(`[REGENERATE] Failed to clear cancellation tombstone for ${bookId}: ${tombErr.message}`);
+            }
+
             // S-2: layer config fields derived from registry
             const requestLayerCfg = {};
             for (const t of mediaRegistry.listMediaTypes()) {
@@ -714,6 +756,18 @@ module.exports = function(app, redis, deps) {
                 }
             }
 
+            // A new command supersedes blocked/interrupted tasks of the same
+            // types on the same scenes (the panel shows only the new command).
+            try {
+                const superseded = await generationProgress.removeSupersededTasks(
+                    redis, bookId, requestedWorkerTypes, filteredDirty);
+                if (superseded.length > 0) {
+                    log(`[REGENERATE] ${bookId}: superseded ${superseded.length} blocked/interrupted task(s)`);
+                }
+            } catch (supErr) {
+                console.warn(`[REGENERATE] superseding old tasks failed for ${bookId}: ${supErr.message}`);
+            }
+
             const generationTasks = await generationProgress.createTasks(
                 redis,
                 bookId,
@@ -777,6 +831,7 @@ module.exports = function(app, redis, deps) {
                 scope: effectiveScope,
                 dirty_scenes: filteredDirty,
                 marked: marked.marked,
+                skipped_worker_types: skippedWorkerTypes,
                 tasks: generationTasks.map(task => ({
                     task_id: task.task_id,
                     type: task.type,

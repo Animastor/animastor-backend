@@ -101,6 +101,24 @@ class FakeRedis {
     }
 }
 
+// Command-only generation (2026-10-31): a scene window starts only scenes an
+// explicit command authorized (an active task-registry task of the stage).
+// `giveCommand` is that command — the same registry record /regenerate writes.
+async function giveCommand(redis, scenes = allScenes, types = ['audio', 'image']) {
+    return generationProgress.createTasks(redis, 'book-1', types, { scope: 'whole_book' },
+        scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id })));
+}
+
+// The automatic window slide is behind WINDOW_AUTO_NEXT_ENABLED (default OFF).
+async function withAutoNext(fn) {
+    const saved = process.env.WINDOW_AUTO_NEXT_ENABLED;
+    process.env.WINDOW_AUTO_NEXT_ENABLED = '1';
+    try { return await fn(); } finally {
+        if (saved === undefined) delete process.env.WINDOW_AUTO_NEXT_ENABLED;
+        else process.env.WINDOW_AUTO_NEXT_ENABLED = saved;
+    }
+}
+
 const allScenes = [
     { chapter_id: 'ch-1', scene_id: 's-1' },
     { chapter_id: 'ch-1', scene_id: 's-2' },
@@ -361,6 +379,7 @@ describe('scope-aware slideWindow', () => {
 
     it('slideWindow within current_scene scope only starts that scene', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'current_scene', chapter_id: 'ch-1', scene_id: 's-2' }, allScenes);
         const result = await sw.slideWindow(redis, 'book-1', null, 'b1');
         expect(result.started).to.equal(1);
@@ -371,6 +390,7 @@ describe('scope-aware slideWindow', () => {
 
     it('slideWindow within current_chapter scope only starts scenes in chapter', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'current_chapter', chapter_id: 'ch-1' }, allScenes);
         const result = await sw.slideWindow(redis, 'book-1', null, 'b1');
         expect(result.started).to.equal(3);
@@ -380,6 +400,7 @@ describe('scope-aware slideWindow', () => {
 
     it('slideWindow across windows chains through scope', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'current_chapter', chapter_id: 'ch-1' }, allScenes);
         // Window is [0,3); WINDOW_SIZE=3 so all 3 scenes start in one call
         const r1 = await sw.slideWindow(redis, 'book-1', null, 'b1');
@@ -389,6 +410,7 @@ describe('scope-aware slideWindow', () => {
 
     it('slideWindow skips already-started scenes within scope', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
         // Pre-seed ch-1/s-1 as video_ready (terminal state — cached content)
         redis.store.set('animastor:scene-state:book-1:ch-1:s-1', makeStartedState());
@@ -401,6 +423,7 @@ describe('scope-aware slideWindow', () => {
 
     it('isWindowComplete uses BOOK_WINDOW_START, not WINDOW_SIZE-based', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         // Set bounds for current_scene at ch-1/s-2 (index 1)
         await sw.setWindowBounds(redis, 'book-1', { scope: 'current_scene', chapter_id: 'ch-1', scene_id: 's-2' }, allScenes);
         // Simulate slide started that 1 scene
@@ -414,6 +437,7 @@ describe('scope-aware slideWindow', () => {
 
     it('isWindowComplete returns false if any in-scope scene not ready', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'current_scene', chapter_id: 'ch-1', scene_id: 's-2' }, allScenes);
         await sw.slideWindow(redis, 'book-1', null, 'b1');
         // ch-1/s-2 is still audio_pending (was set by startScene), keep as-is
@@ -422,35 +446,45 @@ describe('scope-aware slideWindow', () => {
         expect(ok).to.be.false;
     });
 
-    it('trySlideWindowOnComplete advances to next batch when current window complete', async () => {
+    it('trySlideWindowOnComplete is OFF by default (no automatic next window)', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
         await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
-        // Start first window (3 scenes)
-        const r1 = await sw.slideWindow(redis, 'book-1', null, 'b1');
-        expect(r1.started).to.equal(3);
-        // T8: Mark all started scenes as ready via per-asset state
-        for (let i = 0; i < 3; i++) {
-            const s = allScenes[i];
-            makeSceneReady(redis, 'book-1', s.chapter_id, s.scene_id);
-        }
-        // Try slide — should start next batch
-        const r2 = await sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1');
-        expect(r2.started).to.equal(3);
-        expect(parseInt(await redis.get(sw.BOOK_SCENE_NEXT('book-1')))).to.equal(6);
+        const r = await sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1');
+        expect(r).to.deep.equal({ started: 0, remaining: 0, reason: 'auto_next_disabled' });
     });
 
-    it('trySlideWindowOnComplete does nothing if window not complete', async () => {
+    it('trySlideWindowOnComplete (flag ON) never starts the next batch without a command', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
         await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
+        const first = allScenes.slice(0, 3);
+        const tasks = await giveCommand(redis, first);
+        const r1 = await sw.slideWindow(redis, 'book-1', null, 'b1');
+        expect(r1.started).to.equal(3);
+        for (const s of first) makeSceneReady(redis, 'book-1', s.chapter_id, s.scene_id);
+        for (const t of tasks) await generationProgress.markCompleted(redis, 'book-1', t.task_id);
+
+        const r2 = await withAutoNext(() => sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1'));
+        expect(r2.started).to.equal(0);
+        // the window pointer did not skip the unstarted scenes
+        expect(parseInt(await redis.get(sw.BOOK_SCENE_NEXT('book-1')))).to.equal(3);
+        const next = JSON.parse((await redis.get('animastor:asset-state:book-1:ch-2:s-1')) || '{}');
+        expect(next.audio).to.not.equal('pending');
+    });
+
+    it('trySlideWindowOnComplete (flag ON) does nothing if window not complete', async () => {
+        const sw = loadSceneWindowWithStubs({ redis });
+        await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
+        const tasks = await giveCommand(redis, allScenes.slice(0, 3));
         await sw.slideWindow(redis, 'book-1', null, 'b1');
-        // Don't mark any as ready (asset-states are still 'pending' from startScene)
-        const r = await sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1');
+        for (const t of tasks) await generationProgress.markCancelled(redis, 'book-1', t.task_id);
+        const r = await withAutoNext(() => sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1'));
         expect(r.started).to.equal(0);
         expect(r.reason).to.equal('window_incomplete');
     });
 
     it('trySlideWindowOnComplete returns done when scope fully covered', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'current_scene', chapter_id: 'ch-1', scene_id: 's-2' }, allScenes);
         await sw.slideWindow(redis, 'book-1', null, 'b1');
         makeSceneReady(redis, 'book-1', 'ch-1', 's-2');
@@ -462,6 +496,7 @@ describe('scope-aware slideWindow', () => {
     it('trySlideWindowOnComplete does not advance a task-managed generation', async () => {
         const sw = loadSceneWindowWithStubs({ redis });
         await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
+        await giveCommand(redis, allScenes.slice(0, 3));
         await sw.slideWindow(redis, 'book-1', null, 'b1');
         for (let i = 0; i < 3; i++) {
             const s = allScenes[i];
@@ -475,7 +510,7 @@ describe('scope-aware slideWindow', () => {
             [{ chapter_id: 'ch-1', scene_id: 's-1', dirty_layers: ['audio'] }]
         );
 
-        const result = await sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1');
+        const result = await withAutoNext(() => sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1'));
 
         expect(result).to.deep.equal({
             started: 0,
@@ -528,6 +563,7 @@ describe('cancel-generation flag', () => {
         // Start sliding - should get up to WINDOW_SIZE scenes
         // Simulate cancel after first scene starts by manually checking in the loop
         // We do this by starting 1 scene, then setting cancel, then calling slideWindow again
+        await giveCommand(redis);
         const r1 = await sw.slideWindow(redis, 'book-1', null, 'b1');
         expect(r1.started).to.equal(3);
         // T8: Mark the 3 started scenes as complete via per-asset state
@@ -535,7 +571,7 @@ describe('cancel-generation flag', () => {
             makeSceneReady(redis, 'book-1', allScenes[i].chapter_id, allScenes[i].scene_id);
         }
         await sw.setCancelFlag(redis, 'book-1');
-        const r2 = await sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1');
+        const r2 = await withAutoNext(() => sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1'));
         expect(r2.started).to.equal(0);
         expect(r2.reason).to.equal('cancelled');
     });
@@ -549,7 +585,7 @@ describe('cancel-generation flag', () => {
             makeSceneReady(redis, 'book-1', allScenes[i].chapter_id, allScenes[i].scene_id);
         }
         await sw.setCancelFlag(redis, 'book-1');
-        const r = await sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1');
+        const r = await withAutoNext(() => sw.trySlideWindowOnComplete(redis, 'book-1', null, 'b1'));
         expect(r.started).to.equal(0);
         expect(r.reason).to.equal('cancelled');
     });
@@ -603,6 +639,7 @@ describe('scene cache-skip (content on disk)', () => {
     it('slideWindow resets and restarts non-terminal scene without content on disk', async () => {
         // No content files created — scene should be reset and restarted
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
 
         // Seed scene ch-1/s-1 with non-terminal state
@@ -624,6 +661,7 @@ describe('scene cache-skip (content on disk)', () => {
         // Content does NOT exist on disk but scene state is VIDEO_READY
         // Scene should still be skipped (we trust the state machine)
         const sw = loadSceneWindowWithStubs({ redis });
+        await giveCommand(redis);
         await sw.setWindowBounds(redis, 'book-1', { scope: 'whole_book' }, allScenes);
 
         const stateKey = `animastor:scene-state:book-1:ch-1:s-1`;

@@ -477,6 +477,13 @@ async function isWindowComplete(redis, bookId) {
  * Try to slide window forward if all current window scenes have audio + image complete.
  */
 async function trySlideWindowOnComplete(redis, bookId, loadedBook, buildId) {
+    // Command-only generation: sliding the window forward after its scenes
+    // complete is an automatic start of the next scenes. Behind the
+    // WINDOW_AUTO_NEXT_ENABLED flag, default OFF (owner decision pending).
+    const autoNext = typeof config.windowAutoNextEnabled === 'function' && config.windowAutoNextEnabled();
+    if (!autoNext) {
+        return { started: 0, remaining: 0, reason: 'auto_next_disabled' };
+    }
     if (await isCancelled(redis, bookId)) {
         log(`trySlideWindowOnComplete: generation cancelled for ${bookId}`);
         return { started: 0, remaining: 0, reason: 'cancelled' };
@@ -572,9 +579,14 @@ async function slideWindow(redis, bookId, loadedBook, buildId) {
         await scheduler.removeSceneFromActiveIndex(redis, bookId, scene.chapter_id, scene.scene_id);
 
         const didStart = await startScene(redis, scene, buildId, bookId);
-        if (didStart) {
-            started++;
+        if (!didStart) {
+            // Command-only generation: a scene no command authorizes is not
+            // started, and the window pointer does NOT move past it — the
+            // window waits for an explicit command instead of skipping scenes.
+            log(`Slide stopped at ${scene.chapter_id}/${scene.scene_id}: not started (no command / cancelled)`);
+            break;
         }
+        started++;
         nextIdx++;
     }
 
@@ -693,6 +705,15 @@ async function startScene(redis, s, buildId, bookId) {
         // endpoint (/assets-state) correctly counts this scene as ready.
         await restoreChunkStatusForScene(redis, buildId, bookId, chapterId, sceneId);
         return true;
+    }
+
+    // Command-only generation: a scene window may only start scenes an
+    // explicit command authorized (active task-registry task ∧ layer enabled
+    // ∧ not cancelled). Without it nothing is written — no PENDING, no index.
+    const auth = await require('./command-gate').getAuthorizedStages(redis, bookId, chapterId, sceneId);
+    if (auth.stages.size === 0) {
+        log(`startScene skipped: ${bookId}/${chapterId}/${sceneId} has no command-authorized stage (${require('./command-gate').describeDenied(auth.denied)})`);
+        return false;
     }
 
     // Check layer config: if audio is disabled, skip to IMAGE_PENDING

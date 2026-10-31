@@ -33,12 +33,28 @@ async function getActiveCount(redis) {
 }
 
 /**
- * Add scene to active index when it enters generating/pending state.
+ * Add scene to active index — COMMAND-GATED (generation only by explicit
+ * command, see ./command-gate). The scene enters the index only when at
+ * least one of its stages is authorized: an ACTIVE task-registry task of that
+ * stage targets the scene, the layer is enabled and the book is not
+ * cancelled. Otherwise nothing is written and `{ added:false, denied:true }`
+ * is returned with the per-stage denial reasons.
+ *
+ * This is the ONE write path into the index (scheduler wrapper, regenerate,
+ * reconcile, scene-window, host services and the player all reach it), so
+ * no background path can queue work without a command.
  */
 async function addActiveScene(redis, bookId, chapterId, sceneId) {
     const sceneKey = `${bookId}:${chapterId}:${sceneId}`;
+    // Lazy: command-gate → scene-window → this module (acyclic at load time).
+    const auth = await require('./command-gate').getAuthorizedStages(redis, bookId, chapterId, sceneId);
+    if (auth.stages.size === 0) {
+        const reasons = require('./command-gate').describeDenied(auth.denied);
+        console.log(`[ACTIVE-INDEX] GATE_DENY ${sceneKey}: no command-authorized stage (${reasons}) — not added`);
+        return { added: false, denied: true, sceneKey, reasons: auth.denied };
+    }
     const added = await redis.sadd(ACTIVE_SCENES_KEY, sceneKey);
-    return { added: added > 0, sceneKey };
+    return { added: added > 0, sceneKey, stages: [...auth.stages] };
 }
 
 /**

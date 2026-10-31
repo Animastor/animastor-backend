@@ -267,8 +267,11 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
             if (count > 0) rawReads.push(`${rel(file)} x${count}`);
         }
         expect(rawReads, 'the pinned raw-Redis layer-config read set (§32.27: deliberately NOT in the port)').to.deep.equal([
+            // Command-only generation (2026-10-31): the scheduler's single
+            // raw read MOVED into the command gate (same read, same count) —
+            // runtime-scheduler.getLayerConfig now delegates to it.
+            'packages/animastor-orchestration/src/runtime/command-gate.js x1',
             'packages/animastor-orchestration/src/runtime/reconciliation-engine.js x1',
-            'packages/animastor-orchestration/src/runtime/runtime-scheduler.js x1',
             'packages/animastor-orchestration/src/runtime/scene-window.js x3',
         ]);
 

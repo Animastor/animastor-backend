@@ -410,17 +410,16 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
     // TEST C — full incident E2E: ghost 0/9 → Stop All → cycles
     // ======================================================
     describe('C. incident E2E: ghost 0/9 → Stop All → 3 reconcile cycles', () => {
-        it('UI synthesizes ghost 0/9 before Stop All', async () => {
+        it('UI no longer synthesizes a ghost row (command-only: only real registry tasks)', async () => {
             await seedGhost(S);
             const panel = mountProgressPanel();
             const res = makeRes();
             await panel({ params: { bookId: B } }, res);
             expect(res.statusCode).to.equal(200);
-            const imageRows = res.body.tasks.filter(t => t.type === 'image');
-            expect(imageRows, 'ghost image row synthesized from active-scenes').to.have.length(1);
-            expect(imageRows[0].total).to.equal(IU_COUNT);
-            expect(imageRows[0].ready).to.equal(0);
-            expect(imageRows[0].done).to.equal(false);
+            // Formerly a task_id=null "0/9" row was synthesized from the
+            // active index (incident 2026-10-30 BA: a "task" no command made).
+            expect(res.body.tasks.filter(t => t.type === 'image')).to.have.length(0);
+            expect(res.body.any_incomplete).to.equal(false);
         });
 
         it('Stop All clears the orphan GENERATING, tombstone + cancel flag set', async () => {
@@ -438,8 +437,9 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
                 global.fetch = originalFetch;
             }
 
-            // orphan state repaired: GENERATING → DIRTY → PENDING
-            expect(await imageState()).to.equal('pending');
+            // orphan state released: GENERATING → DIRTY (command-only: a
+            // cancelled book keeps no PENDING work)
+            expect(await imageState()).to.equal('dirty');
             const states = await state.getAssetStates(redis, B, C, S);
             expect(states.audio).to.equal('ready');
             // scene removed from active index
@@ -471,7 +471,7 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
             // tombstone honored: scene NOT re-added to active-scenes
             expect(await activeScenes()).to.have.length(0);
             // state stays out of GENERATING (no resurrection, no new ghost)
-            expect(await imageState()).to.equal('pending');
+            expect(await imageState()).to.equal('dirty');
             // no new dispatch was created
             expect(await allKeysByPattern('animastor:dispatch-lease:*')).to.have.length(0);
             const events = await journalEvents();
@@ -489,10 +489,25 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
     // TEST D — autonomous recovery without Stop All
     // ======================================================
     describe('D. autonomous orphan self-heal (no tombstone)', () => {
-        it('reconciliation repairs orphan GENERATING and makes it dispatchable', async function () {
+        it('without a command the orphan is released to DIRTY and NOT re-queued', async function () {
+            this.timeout(10000);
+            await seedGhost(S); // no evidence, no tombstone, no cancel flag, no task
+            createAudioFile();
+
+            await runCycles(1);
+
+            expect(await imageState()).to.equal('dirty');
+            const { stages } = await scheduler.shouldScheduleAssets(redis, B, C, S);
+            expect(stages).to.not.include('image');
+            expect(await allKeysByPattern('animastor:dispatch-lease:*')).to.have.length(0);
+        });
+
+        it('under an active image command reconciliation repairs orphan GENERATING and makes it dispatchable', async function () {
             this.timeout(10000);
             await seedGhost(S); // no evidence, no tombstone, no cancel flag
             createAudioFile();
+            await genProgress.createTasks(redis, B, ['image'], { scope: 'current_scene', chapterId: C, sceneId: S },
+                [{ chapter_id: C, scene_id: S }]);
 
             await runCycles(1);
 
@@ -514,6 +529,8 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
             this.timeout(10000);
             await seedGhost(S);
             createAudioFile();
+            await genProgress.createTasks(redis, B, ['image'], { scope: 'current_scene', chapterId: C, sceneId: S },
+                [{ chapter_id: C, scene_id: S }]);
 
             await runCycles(3);
 
@@ -576,8 +593,8 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
 
             await runCycles(3);
 
-            // state hygiene performed...
-            expect(await imageState()).to.equal('pending');
+            // state hygiene performed (released to DIRTY, never PENDING)...
+            expect(await imageState()).to.equal('dirty');
             // ...but no resurrection
             expect(await activeScenes()).to.have.length(0);
         });
@@ -605,6 +622,9 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
             // new generation B: the regenerate path clears tombstone + flag
             await cancelRepoStub.clear(B);
             await sceneWindow.clearCancelFlag(redis, B);
+            // ...and creates the task-registry task (the explicit command)
+            await genProgress.createTasks(redis, B, ['audio'], { scope: 'current_scene', chapterId: C, sceneId: S },
+                [{ chapter_id: C, scene_id: S }]);
 
             const fix = {
                 scene: { bookId: B, chapterId: C, sceneId: S },

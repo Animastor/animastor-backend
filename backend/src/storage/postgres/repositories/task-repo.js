@@ -40,7 +40,8 @@ async function updateTaskStatus(taskId, status, error) {
         setClauses.push('started_at = $' + (params.length + 1));
         params.push(now);
     }
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+    if (status === 'completed' || status === 'failed' || status === 'cancelled' ||
+        status === 'blocked' || status === 'interrupted') {
         setClauses.push('completed_at = $' + (params.length + 1));
         params.push(now);
     }
@@ -98,6 +99,37 @@ async function cancelActiveTasksForBook(bookId, error = 'Cancelled by user') {
 }
 
 /**
+ * Command-only generation: backend start. Every queued/running task row
+ * belonged to a run the restart interrupted → 'interrupted' (resumed only by
+ * a button, never automatically).
+ * @returns {Promise<number>} rows updated.
+ */
+async function interruptActiveTasks(error = 'Interrupted by backend restart') {
+    const now = Math.floor(Date.now() / 1000);
+    const result = await query(`
+        UPDATE generation_tasks
+        SET status = 'interrupted', completed_at = $1, error = COALESCE(error, $2)
+        WHERE status IN ('queued', 'running')
+    `, [now, error]);
+    return result.rowCount || 0;
+}
+
+/**
+ * Command-only generation: PUT /layer-config disabled a layer — the active
+ * task rows of that type are cancelled.
+ * @returns {Promise<number>} rows updated.
+ */
+async function cancelActiveTasksForBookByType(bookId, taskType, error = 'Cancelled: layer disabled') {
+    const now = Math.floor(Date.now() / 1000);
+    const result = await query(`
+        UPDATE generation_tasks
+        SET status = 'cancelled', completed_at = $1, error = COALESCE(error, $2)
+        WHERE book_id = $3 AND task_type = $4 AND status IN ('queued', 'running')
+    `, [now, error, bookId, taskType]);
+    return result.rowCount || 0;
+}
+
+/**
  * True if the scene+stage still has an active (queued/running) generation
  * task row. Used by orphan-GENERATING self-heal (audit d9d67a3) as a
  * fail-safe: an active task row proves the generation may still be driven,
@@ -117,6 +149,8 @@ async function hasActiveTaskForScene(bookId, sceneId, taskType) {
 
 module.exports = {
     createTask,
+    interruptActiveTasks,
+    cancelActiveTasksForBookByType,
     recordTaskClaim,
     updateTaskStatus,
     incrementRetry,
