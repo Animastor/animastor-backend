@@ -540,7 +540,7 @@ describe('PW-4 fail-closed — admin SYSTEM routes, share seam, verify', () => {
         const res = await fetch(`${base}/api/v1/worker/verify`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${created.token}` },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ worker_version: '2.2.0' }),
         });
         expect(res.status).to.equal(200);
         const body = await res.json();
@@ -550,6 +550,27 @@ describe('PW-4 fail-closed — admin SYSTEM routes, share seam, verify', () => {
         expect(body.worker_type).to.equal('image');
         expect(body.workspace_id).to.equal(user.workspaceId);
         expect(body.workspace_name).to.be.a('string').and.not.empty;
+
+        // The bundle version reported at verify is persisted for diagnostics.
+        const { rows } = await query('SELECT version FROM workers WHERE worker_id = $1', [created.worker.worker_id]);
+        expect(rows[0].version).to.equal('2.2.0');
+    });
+
+    it('verify: an invalid worker_version is ignored, the credential still verifies', async () => {
+        const created = await (await fetch(`${base}/api/v1/workers`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Cookie: user.cookie },
+            body: JSON.stringify({ name: 'verify-bad-version', worker_type: 'image' }),
+        })).json();
+
+        const res = await fetch(`${base}/api/v1/worker/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${created.token}` },
+            body: JSON.stringify({ worker_version: 'not a version!!' }),
+        });
+        expect(res.status).to.equal(200);
+        const { rows } = await query('SELECT version FROM workers WHERE worker_id = $1', [created.worker.worker_id]);
+        expect(rows[0].version).to.equal(null);
     });
 
     it('verify: valid SYSTEM credential → workspace null', async () => {

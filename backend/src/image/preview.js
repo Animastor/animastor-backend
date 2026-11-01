@@ -9,6 +9,20 @@ const config = require('../config/runtime-config');
 const helpers = require('./helpers');
 const { makeIUImageFilename, makePreviewFilename } = require('../storage/filesystem-store');
 
+// A preview request for an IU that has not been generated yet is a normal
+// state (the UI asks for every visible unit), not an anomaly. Log it once per
+// IU and at info level: a warn line on every poll is pure noise, and the route
+// still answers 404 exactly as before.
+const missingPreviewLogged = new Set();
+const MISSING_PREVIEW_LOG_MAX = 2000;
+
+function logMissingPreviewOnce(sourceName) {
+    if (missingPreviewLogged.has(sourceName)) return;
+    if (missingPreviewLogged.size >= MISSING_PREVIEW_LOG_MAX) missingPreviewLogged.clear();
+    missingPreviewLogged.add(sourceName);
+    helpers.log(`preview source not found for ${sourceName} in any build dir (logged once per IU)`);
+}
+
 async function getOrCreatePreview(bookId, chapterId, sceneId, iuId, buildId) {
     const strippedId = iuId.replace(/^iu/, '');
     const sourceName = makeIUImageFilename(bookId, chapterId, sceneId, strippedId);
@@ -105,7 +119,7 @@ async function getOrCreatePreview(bookId, chapterId, sceneId, iuId, buildId) {
         }
     }
 
-    helpers.warn(`preview source not found for ${sourceName} in any build dir`);
+    logMissingPreviewOnce(sourceName);
     return null;
 }
 

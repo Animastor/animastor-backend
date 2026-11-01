@@ -39,6 +39,29 @@ function probeIUImage(iuId, buildId, OUTPUT_DIR) {
     }
 }
 
+// Reconciliation calls this reader on every cycle, so an unconditional log
+// printed the same canonical file once a minute per ready scene (audit
+// 2026-11-01: 29 lines for 2 scenes in 15 minutes). Emit the line only when
+// the selected file actually changes — name, size or mtime — and keep the
+// cache bounded so a long-lived process cannot grow it without limit.
+const canonicalImageLogged = new Map();
+const CANONICAL_IMAGE_LOG_MAX = 5000;
+
+function logCanonicalImageChange(cacheKey, dir, fileName) {
+    let fingerprint = fileName;
+    try {
+        const st = fs.statSync(path.join(dir, fileName));
+        fingerprint = `${fileName}:${st.size}:${st.mtimeMs}`;
+    } catch (_) { /* stat failure — fall back to the name */ }
+    if (canonicalImageLogged.get(cacheKey) === fingerprint) return;
+    if (canonicalImageLogged.size >= CANONICAL_IMAGE_LOG_MAX) {
+        const oldest = canonicalImageLogged.keys().next().value;
+        canonicalImageLogged.delete(oldest);
+    }
+    canonicalImageLogged.set(cacheKey, fingerprint);
+    helpers.log(`CANONICAL IU IMAGE: ${fileName}`);
+}
+
 function resolveCanonicalSceneImage(OUTPUT_DIR, buildId, bookId, chapterId, sceneId) {
     const dir = path.join(OUTPUT_DIR, buildId);
     const scenePrefix = artifactNaming.iuImagePrefix(bookId, chapterId, sceneId);
@@ -51,7 +74,7 @@ function resolveCanonicalSceneImage(OUTPUT_DIR, buildId, bookId, chapterId, scen
         const iuImages = files.filter(f => f.startsWith(scenePrefix) && f.endsWith('.png'));
         if (iuImages.length > 0) {
             iuImages.sort();
-            helpers.log(`CANONICAL IU IMAGE: ${iuImages[0]}`);
+            logCanonicalImageChange(`${buildId}/${bookId}/${chapterId}/${sceneId}`, dir, iuImages[0]);
             return iuImages[0];
         }
     } catch (err) {

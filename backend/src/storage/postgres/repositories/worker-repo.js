@@ -747,10 +747,20 @@ async function findActiveByIdWithTokenHash(workerId, now = Date.now()) {
     return row;
 }
 
-/** Best-effort liveness mirror from heartbeats (Settings UI). */
-async function touchLastSeen(workerId) {
+/**
+ * Best-effort liveness mirror from heartbeats (Settings UI).
+ *
+ * `version` is the worker bundle version reported by the worker on its
+ * first-run credential verification (optional). COALESCE keeps the last known
+ * value when a (legacy) worker omits it: an unknown version must not erase a
+ * previously recorded one.
+ */
+async function touchLastSeen(workerId, version) {
     try {
-        await query(`UPDATE workers SET last_seen = $2 WHERE worker_id = $1`, [workerId, Date.now()]);
+        await query(
+            `UPDATE workers SET last_seen = $2, version = COALESCE($3, version) WHERE worker_id = $1`,
+            [workerId, Date.now(), version || null]
+        );
     } catch (_) { /* non-fatal */ }
 }
 
