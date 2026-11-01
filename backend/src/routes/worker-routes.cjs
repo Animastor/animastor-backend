@@ -180,7 +180,15 @@ module.exports = function(app, redis) {
                 workspaceName = ws ? ws.name : null;
             } catch (_) { /* non-fatal — name is cosmetic */ }
         }
-        try { await workerRepo.touchLastSeen(w.id); } catch (_) { /* non-fatal */ }
+        // Optional bundle version reported by the worker (worker.cjs sends its
+        // package.json version here). Strictly validated and bounded: this is
+        // display/diagnostics data only, never authorization input, and an
+        // invalid value is ignored rather than failing a valid credential check.
+        const rawVersion = req.body && req.body.worker_version;
+        const workerVersion = (typeof rawVersion === 'string'
+            && /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(rawVersion.trim()))
+            ? rawVersion.trim() : null;
+        try { await workerRepo.touchLastSeen(w.id, workerVersion); } catch (_) { /* non-fatal */ }
         res.json({
             verified: true,
             worker_id: w.id,
