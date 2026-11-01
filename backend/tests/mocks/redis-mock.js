@@ -364,7 +364,7 @@ function createMockRedis() {
             arr.splice(index, 1);
             return 1;
         },
-        sadd: async (key, member) => { const s = store.get(key) || new Set(); s.add(member); store.set(key, s); return 1; },
+        sadd: async (key, member) => { const s = store.get(key) || new Set(); const had = s.has(member); s.add(member); store.set(key, s); return had ? 0 : 1; },
         srem: async (key, member) => { const s = store.get(key); if (s) { s.delete(member); return 1; } return 0; },
         smembers: async (key) => { const s = store.get(key); return s ? [...s] : []; },
         scard: async (key) => { const s = store.get(key); return s ? s.size : 0; },

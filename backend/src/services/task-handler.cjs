@@ -486,15 +486,30 @@ module.exports = function(redis, config, deps) {
 
                 // Increment per-IU progress counter (used by assets-state endpoint
                 // instead of filesystem listing, which includes stale PNGs).
+                // P1 (2026-11-01): idempotent per IU × generation. A replay of
+                // the same fence (duplicate_same_fence — reconcile/recovery
+                // replays bypass the route dedup) must not count the IU twice;
+                // a real regeneration carries a new fence and counts again.
+                // The counter key itself stays a plain integer string, so
+                // every reader (GET + parseInt + clamp) is unchanged and
+                // tolerates values written before this change.
                 try {
                     const progKey = `animastor:iu-progress:${bookId}:${chapterId}:${sceneId}:image`;
-                    const ready = await redis.incr(progKey);
-                    await redis.expire(progKey, 14400);
-                    // Push an immediate increment to any open SSE stream so the
-                    // UI advances without waiting for the next poll tick.
-                    await publishProgress(redis, bookId, {
-                        layer: 'image', chapterId, sceneId, ready,
-                    });
+                    const idsKey = `animastor:iu-progress-ids:${bookId}:${chapterId}:${sceneId}:image`;
+                    const member = `${iuId}:${fence || dispatch_id || ''}`;
+                    const firstConfirmation = Number(await redis.sadd(idsKey, member)) === 1;
+                    await redis.expire(idsKey, 14400);
+                    if (firstConfirmation) {
+                        const ready = await redis.incr(progKey);
+                        await redis.expire(progKey, 14400);
+                        // Push an immediate increment to any open SSE stream so the
+                        // UI advances without waiting for the next poll tick.
+                        await publishProgress(redis, bookId, {
+                            layer: 'image', chapterId, sceneId, ready,
+                        });
+                    } else {
+                        log(`IU progress: ${iuId} already counted for this generation — counter unchanged`);
+                    }
                 } catch (progErr) {
                     console.warn(`⚠️ Failed to increment IU progress counter: ${progErr.message}`);
                 }

@@ -92,7 +92,7 @@ const REDIS_OWNERSHIP = [
         readers: ['backend', 'gpu-hub'],
         writers: ['gpu-hub'],
         crossModule: false,
-        note: 'Result handoff (result:{build}:{book}:{chapter}:{scene}:{type}, TTL 1h). Backend consumes results written by the hub. Backend also DELs stale result blobs during purge (redis-helpers) — cleanup, not authorship.',
+        note: 'Result handoff (result:{build}:{book}:{chapter}:{scene}:{type}, TTL 1h). Hub compare-and-deletes it on a final backend ACK (processed / terminal reject); kept on deduped/failed delivery. Backend consumes results written by the hub. Backend also DELs stale result blobs during purge (redis-helpers) — cleanup, not authorship.',
     },
     {
         pattern: 'animastor:error:*',
@@ -277,6 +277,14 @@ const REDIS_OWNERSHIP = [
         note: 'IU generation progress per scene (orchestrator, scene-callbacks, iu-progress-utils).',
     },
     {
+        pattern: 'animastor:iu-progress-ids:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'SET of {iuId}:{fence} already counted into animastor:iu-progress:* (task-handler) — makes the counter idempotent per IU × generation; DEL on resetScenes / entity-cleanup.',
+    },
+    {
         pattern: 'animastor:iu:*',
         owner: 'backend',
         readers: ['backend'],
@@ -290,7 +298,7 @@ const REDIS_OWNERSHIP = [
         readers: ['backend'],
         writers: ['backend'],
         crossModule: false,
-        note: 'Authoritative result dedup on the backend (generation-routes, audio-orchestrator, iu-processor) — distinct from the hub-side animastor:job:* dedup.',
+        note: 'Authoritative result dedup on the backend (generation-routes, audio-orchestrator, iu-processor) — distinct from the hub-side animastor:job:* dedup. Value: \'1\' in flight, done:{dispatch_id} settled; reconcile Phase A reads it to drop the hub fallback copy of a settled delivery.',
     },
     {
         pattern: 'animastor:error-processed:*',

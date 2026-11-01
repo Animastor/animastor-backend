@@ -1887,6 +1887,41 @@ function resultDedupKey(jobId, buildId) {
 }
 
 /**
+ * Dedup marker values. The route acquires the key with `SET NX` and the
+ * IN-FLIGHT value `'1'` (unchanged); once the delivery is SETTLED — the
+ * handler confirmed the commit, or a terminal fence verdict — it records
+ * `done:<dispatch_id>`. The key stays dispatch-independent (Stage 114: the
+ * route still deduplicates any redelivery); the dispatch in the value lets
+ * the reconciler tell a true duplicate of a settled delivery from a result
+ * of a NEWER dispatch of the same job_id (audio/video do not clear the
+ * marker on re-dispatch, so for them the HTTP push of a regeneration within
+ * the TTL is answered `deduped` and only the reconciler publishes it).
+ */
+const RESULT_DEDUP_TTL_S = 3600;
+const RESULT_DEDUP_DONE_PREFIX = 'done:';
+
+async function markResultSettled(redis, jobId, buildId, dispatchId) {
+    await redis.set(resultDedupKey(jobId, buildId),
+        `${RESULT_DEDUP_DONE_PREFIX}${dispatchId || ''}`, 'EX', RESULT_DEDUP_TTL_S);
+}
+
+/**
+ * Read the dedup marker for a result delivery.
+ * @returns {Promise<{state:'none'|'in_flight'|'settled', dispatchId:string|null}>}
+ *   in_flight also covers a legacy `'1'` written before the settled value
+ *   existed — never proof of completion.
+ */
+async function readResultDedup(redis, jobId, buildId) {
+    const raw = await redis.get(resultDedupKey(jobId, buildId));
+    if (raw == null || raw === false) return { state: 'none', dispatchId: null };
+    const v = String(raw);
+    if (v.startsWith(RESULT_DEDUP_DONE_PREFIX)) {
+        return { state: 'settled', dispatchId: v.slice(RESULT_DEDUP_DONE_PREFIX.length) || null };
+    }
+    return { state: 'in_flight', dispatchId: null };
+}
+
+/**
  * Shorten the TTL of a claim whose POST outcome was ambiguous (the hub may
  * have taken the task). The claim is KEPT (releasing it would re-open the
  * duplicate hole) but it must not block the task for the full backstop TTL.
@@ -2138,4 +2173,7 @@ module.exports = {
     readArtifactManifest,
     // result idempotency
     resultDedupKey,
+    RESULT_DEDUP_TTL_S,
+    markResultSettled,
+    readResultDedup,
 };

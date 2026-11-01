@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.1 (2026-11-01) — результат GPU обрабатывается один раз
+
+Основание: `reports/2026-11-01/gpu-audio-image-run-analysis.md`, P1 — каждый
+результат обрабатывался дважды (HTTP-push hub → backend, затем Phase A
+reconcile подбирал оставшийся `animastor:result:*` мимо
+`animastor:result-processed:*`). Описание: animastor-docs
+`architecture/GPU_HUB_CONTRACT.md` §«Result ACK».
+
+### Changed (поведение)
+
+- `reconciliation-engine.recoverResultKeys` (Phase A): перед
+  `handleTaskResult` читает маркер `animastor:result-processed:{job}:{build}`.
+  Значение `done:<dispatch_id>` того же dispatch, что в result-ключе, —
+  ключ удаляется молча (без лога), handler не вызывается.
+  Маркер `'1'` (в работе / старый формат), маркер другого dispatch
+  (перегенерация audio/video в пределах TTL) или его отсутствие — как
+  раньше, через fenced handler.
+- Терминальный отказ (`no_active_dispatch` и др.) для дубля доставленного
+  результата (маркер есть) — уровень info; для сироты (маркера нет) — warn.
+- `orchestrator.resetScenes` вместе с `iu-progress` удаляет
+  `animastor:iu-progress-ids:*` (множество IU×fence, хост task-handler).
+
+Fence, dedup-ключ маршрута и command-gate (Stage 155) не меняются.
+
 ## 0.3.0 (2026-10-31) — генерация только по явной команде
 
 Правило владельца: GPU-генерация запускается только кнопками «аудио» /

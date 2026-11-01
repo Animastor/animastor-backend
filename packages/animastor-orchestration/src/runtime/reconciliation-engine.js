@@ -63,6 +63,25 @@ function error(msg) {
     console.error(`${logPrefix} ❌ ${msg}`);
 }
 
+// SYNC: backend/src/helpers/queue-idempotency.cjs — resultDedupKey /
+// readResultDedup (marker `'1'` = in flight, `done:<dispatch_id>` = settled).
+// Read-only here: the result route is the only writer.
+const RESULT_DEDUP_DONE_PREFIX = 'done:';
+async function readResultDedup(redis, jobId, buildId) {
+    let raw = null;
+    try {
+        raw = await redis.get(`animastor:result-processed:${jobId}:${buildId}`);
+    } catch (_) {
+        return { state: 'unknown', dispatchId: null };
+    }
+    if (raw == null || raw === false) return { state: 'none', dispatchId: null };
+    const v = String(raw);
+    if (v.startsWith(RESULT_DEDUP_DONE_PREFIX)) {
+        return { state: 'settled', dispatchId: v.slice(RESULT_DEDUP_DONE_PREFIX.length) || null };
+    }
+    return { state: 'in_flight', dispatchId: null };
+}
+
 // ======================================================
 // RECONCILIATION REPORT
 // ======================================================
@@ -1947,11 +1966,34 @@ async function recoverResultKeys(redis, deps, scope) {
                     warn(`Skipping legacy result without build/dispatch identity: ${job_id}`);
                     continue;
                 }
+
+                // P1 (2026-11-01): the hub's fallback copy of a delivery the
+                // result route already SETTLED is a duplicate — drop it
+                // silently, never replay it (the replay re-ran the ready chain
+                // and logged false no_active_dispatch warnings). Only a marker
+                // carrying THIS dispatch counts: an in-flight / legacy '1'
+                // marker or one from an older dispatch of the same job_id
+                // (audio/video regeneration within the TTL) is no proof — such
+                // a result goes through the fenced handler exactly as before.
+                const dedup = await readResultDedup(redis, job_id, buildId);
+                if (dedup.state === 'settled' && dedup.dispatchId === String(dispatchId)) {
+                    await redis.del(key);
+                    continue;
+                }
                 try {
                     await taskHandler.handleTaskResult(job_id, result_base64, buildId, dispatchId);
                 } catch (rejectErr) {
                     if (rejectErr && TERMINAL_REJECTIONS.has(rejectErr.code)) {
-                        warn(`Result ${job_id} terminally rejected (${rejectErr.code}) — dropping result key, no infinite retry`);
+                        // A replay of a delivery the route has seen (a marker
+                        // exists) is a duplicate: info. No marker (an orphan
+                        // that never reached the route) or an unreadable
+                        // marker: warn, as before.
+                        const msg = `Result ${job_id} terminally rejected (${rejectErr.code}) — dropping result key, no infinite retry`;
+                        if (dedup.state === 'in_flight' || dedup.state === 'settled') {
+                            log(`${msg} (duplicate of a delivered result)`);
+                        } else {
+                            warn(msg);
+                        }
                         await redis.del(key);
                     } else {
                         throw rejectErr;

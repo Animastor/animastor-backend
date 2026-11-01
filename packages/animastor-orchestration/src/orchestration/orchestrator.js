@@ -575,6 +575,8 @@ async function resetScenes(redis, bookId, buildId, scenes, layerCfg, options = {
 
         const progKey = `animastor:iu-progress:${bookId}:${ds.chapter_id}:${ds.scene_id}:image`;
         try { await redis.del(progKey); } catch (_) {}
+        // SYNC: backend task-handler — the IU×fence set behind the counter.
+        try { await redis.del(`animastor:iu-progress-ids:${bookId}:${ds.chapter_id}:${ds.scene_id}:image`); } catch (_) {}
 
         try {
             let cursor = '0';

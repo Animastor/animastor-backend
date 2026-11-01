@@ -507,6 +507,20 @@ module.exports = function(app, redis, deps) {
                 return res.json({ ok: true, deduped: true });
             }
             log(`[GPU RESULT] Dedup acquired for ${job_id}`);
+            // P1 (2026-11-01): a SETTLED delivery records its dispatch in the
+            // marker (`done:<dispatch_id>`), so the reconciler drops the hub's
+            // fallback copy of exactly this delivery instead of replaying it.
+            // Best-effort: a failed write only means a later replay is
+            // re-checked by the fence (as before).
+            const markSettled = async () => {
+                try {
+                    if (queueIdempotency && typeof queueIdempotency.markResultSettled === 'function') {
+                        await queueIdempotency.markResultSettled(redis, job_id, build_id, dispatch_id);
+                    }
+                } catch (markErr) {
+                    log(`[GPU RESULT] settled marker not written for ${job_id}: ${markErr.message}`);
+                }
+            };
 
             // Stage 133 (audit 132 · B1/B2/B5) — fenced publication gate.
             //
@@ -566,6 +580,7 @@ module.exports = function(app, redis, deps) {
                 // completion/ready metadata chain proceed (handler switch).
                 if (handlerOutcome && handlerOutcome.fenced) {
                     log(`[GPU RESULT] Fenced commit ${handlerOutcome.commit} for ${job_id} (fence=${(handlerOutcome.fence || '').slice(0, 12)}) — settlement done by the commit`);
+                    await markSettled();
                     return res.json({ ok: true });
                 }
                 // Stage 114 — the logical task is COMPLETE now: release the
@@ -624,12 +639,14 @@ module.exports = function(app, redis, deps) {
                     && queueIdempotency.FENCE_COMMIT_REJECTED.has(procErr.code);
                 if (terminalFenceReject) {
                     log(`[GPU RESULT] Fenced commit REJECTED (${procErr.code}) for ${job_id} — terminal, not retried`);
+                    await markSettled();
                     return res.json({ ok: true, rejected: true, reason: procErr.code });
                 }
                 log(`[GPU RESULT] handleTaskResult FAILED: ${job_id} — ${procErr.message}`);
                 await redis.del(dedupKey).catch(() => {});
                 throw procErr;
             }
+            await markSettled();
             res.json({ ok: true });
         } catch (err) {
             console.error('[GPU RESULT] Error:', err.message);
