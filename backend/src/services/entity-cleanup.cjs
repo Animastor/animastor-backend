@@ -256,6 +256,7 @@ module.exports = function (redis, config, deps) {
                 `animastor:audio-scene-lock:${bookId}:${chapterId}:${sceneId}`,
                 `animastor:scene-video:${bookId}:${chapterId}:${sceneId}`,
                 `animastor:iu-progress:${bookId}:${chapterId}:${sceneId}:image`,
+                `animastor:iu-progress-ids:${bookId}:${chapterId}:${sceneId}:image`,
             );
             const scenePrefix = artifactNaming.scenePrefix(bookId, chapterId, sceneId);
             summary.chunks += await deleteSceneChunks(bookId, chapterId, sceneId);

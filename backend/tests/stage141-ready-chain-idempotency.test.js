@@ -13,15 +13,14 @@
 //   C2  recovery (`resumePendingPublications`) never re-runs the ready chain:
 //       it only finishes/verifies the rename, so an already-published fence
 //       leaves the counter untouched;
-//   C3  CONFIRMED LIMITATION: a replay that bypasses the route dedup key —
-//       reconciliation Phase A / audio recovery calling `handleTaskResult`
-//       directly (reconciliation-engine.js:1887, audio-recovery.cjs:215) —
-//       DOES run the ready chain again for an already-published fence, so the
-//       raw counter can exceed the number of confirmed IUs. The counter is a
-//       progress DISPLAY source: the consumer clamps it with
-//       `iuReadyFromCounters` (iu-progress-utils.cjs), and stage completion is
-//       decided from the filesystem listing + PG (task-handler.cjs:248), never
-//       from this counter. C3 asserts exactly that clamping.
+//   C3  a replay that bypasses the route dedup key (reconciliation Phase A /
+//       audio recovery calling `handleTaskResult` directly) answers
+//       duplicate_same_fence. Until P1 (2026-11-01) it re-ran the INCR and
+//       the counter over-counted (3 for 2 IUs in prod); the counter is now
+//       idempotent per IU × fence (`animastor:iu-progress-ids:*`), and the
+//       consumer clamp (`iuReadyFromCounters`) stays as the second line.
+//       The Phase A replay itself is covered in
+//       gpu-result-delivery-idempotency.test.js.
 //
 // The Redis verdicts use the independent mirror of FENCE_COMMIT_SCRIPT
 // (tests/mocks/redis-mock.js), like every other fencing test in this suite.
@@ -230,7 +229,7 @@ describe('Stage 141 — ready-chain / iu-progress idempotency', () => {
         expect(readCanonical()).to.equal('IU-BYTES-V1');
     });
 
-    it('C3: a replay that bypasses the route dedup re-runs the chain — counter overcounts, consumer clamps (documented limitation)', async () => {
+    it('C3: a replay that bypasses the route dedup does not re-count the IU (idempotent per IU × fence), consumer still clamps', async () => {
         await seedIntent(redis, F1);
         await seedReceipt(redis, 'd1', F1);
         await seedDispatchMeta(redis, 'd1');
@@ -250,10 +249,10 @@ describe('Stage 141 — ready-chain / iu-progress idempotency', () => {
         expect(replay.publication, 'publication itself never flaps').to.equal('already_published');
         expect(readCanonical(), 'canonical bytes unchanged by the replay').to.equal('IU-BYTES-V1');
 
-        // ── CONFIRMED LIMITATION (Stage 140 §4.3) ────────────────────────
-        expect(await progressCounter(redis), 'raw counter overcounts on a replay').to.equal(2);
-        // …but the counter only feeds progress DISPLAY: every consumer clamps
-        // it with iuReadyFromCounters, so readiness can never exceed `total`.
+        // P1 (2026-11-01): the replay of the same fence is not counted again.
+        expect(await progressCounter(redis), 'counter is idempotent per IU × fence').to.equal(1);
+        // The counter only feeds progress DISPLAY and every consumer still
+        // clamps it, so values written before the fix can never exceed `total`.
         expect(iuReadyFromCounters(1, 0, 2)).to.equal(1);
         expect(iuReadyFromCounters(4, 0, 7)).to.equal(4);
         // Stage completion is decided from the filesystem listing + PG, never
