@@ -366,13 +366,16 @@ describe('Private worker setup contract API (Phase 3)', function () {
             expect(res.status).to.equal(200);
             const body = await res.json();
             expect(body.profile_ids).to.deep.equal(['image/qwen-image']);
-            expect(body.steps.map((s) => s.id)).to.include('download-bootstrap').and.include('run-bootstrap');
-            const download = body.steps.find((s) => s.id === 'download-bootstrap');
-            // profile/mode embedded in the bootstrap download URL
-            expect(download.code).to.contain('/gpu/installer?profile=image%2Fqwen-image&mode=managed');
-            // the run command is just the script — no flags, no typing
+            // Contract 0.2.4: Linux is ONE command — there is no separate
+            // download-bootstrap step anymore (Windows/isolated keep theirs).
+            expect(body.steps.map((s) => s.id)).to.deep.equal(['run-bootstrap', 'verify']);
+            expect(body.steps.find((s) => s.id === 'download-bootstrap')).to.equal(undefined);
             const run = body.steps.find((s) => s.id === 'run-bootstrap');
-            expect(run.code).to.equal('bash animastor-installer.sh');
+            // profile/mode embedded in the URL; the URL is ALWAYS double-quoted
+            // so the shell does not treat the `&` separators as "run in
+            // background" and silently drop profile/mode/platform.
+            expect(run.code).to.match(/^curl -fsSL "https?:\/\/[^"]*\/gpu\/installer\?profile=image%2Fqwen-image&mode=managed&platform=linux" \| bash$/);
+            expect(run.body).to.match(/Worker Key/i);
             // the old tarball+node instruction is gone from the contract
             expect(JSON.stringify(body)).to.not.contain('worker-source');
             expect(JSON.stringify(body)).to.not.contain('node worker.cjs');
