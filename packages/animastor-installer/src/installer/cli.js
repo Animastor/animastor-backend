@@ -56,6 +56,7 @@ const comfyuiMod = require('./engine/comfyui');
 const comfyOwner = require('./engine/comfy-owner');
 const nodeDeps = require('./engine/node-deps');
 const pydepsMod = require('./engine/pydeps');
+const overridesMod = require('./engine/overrides');
 const downloader = require('./engine/downloader');
 const { resolveRepoBundleDir } = require('./worker-bundle-source');
 const engineMod = require('./engine/engine');
@@ -107,7 +108,7 @@ const DEFAULT_HUB_URL = 'https://animastor.org/gpu';
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy', 'help'];
+const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy', 'accept-node-deps-overrides', 'help'];
 
 /**
  * Every option that takes a value. Installer 0.2.5: an option that is in
@@ -552,14 +553,53 @@ const RESTART_PLATFORM_QUESTION = 'When the custom-node dependencies have to be 
  *      line, cwd and environment (node-deps restartForeignComfyUI).
  * @returns {Promise<{ instance, checked: boolean, installed: string[], restarted: boolean, pid_changed: boolean, failed: boolean, reason: string|null, fix?: string, record: object, persistence: object|null, prestartup: object|null }>}
  */
+/**
+ * Compare the overlay with the platform Python and log every replacement
+ * (installer 0.2.6): "[i] <pkg> platform X → overlay Y (needed by <node>)",
+ * a major change as a warning. Null when the comparison itself failed.
+ * @returns {{ overrides: object[], conflicts: object[] }|null}
+ */
+function overridesStep(io, { python, sitePackages, root, manifests = [], otherManifests = [], info, warn }) {
+    const all = [...(manifests || []), ...(otherManifests || [])];
+    const nodes = overridesMod.nodesOfProfiles(io, { root, manifests: all });
+    const raw = overridesMod.inspectOverlay(io, { python, sitePackages, root, nodes });
+    if (!raw.ok) {
+        warn(`overlay version comparison failed: ${raw.error}`);
+        return null;
+    }
+    const res = overridesMod.analyzeOverrides(raw, nodes, { profileCount: overridesMod.profileIds(all).length });
+    for (const o of res.overrides) {
+        const line = `node-deps overlay replaces a platform package: ${overridesMod.describeOverride(o)}`;
+        if (o.major) warn(`${line}${overridesMod.majorNote(o)}`);
+        else info(line);
+    }
+    return res;
+}
+
+/** Manifests of the profiles recorded on this ComfyUI that this run does not install (unknown ids are skipped). */
+function otherProfileManifests(priorState, profiles, { load = manifest.loadManifest, logger = null } = {}) {
+    const ids = new Set();
+    for (const p of (priorState && Array.isArray(priorState.profiles) ? priorState.profiles : [])) ids.add(p);
+    const nd = priorState && priorState.installer_options && priorState.installer_options.nodeDeps;
+    for (const o of (nd && Array.isArray(nd.overrides) ? nd.overrides : [])) for (const p of o.profiles || []) ids.add(p);
+    const out = [];
+    for (const id of ids) {
+        if ((profiles || []).includes(id)) continue;
+        try { out.push(load(id)); } catch (err) {
+            if (logger) logger.warn(`profile ${id} recorded on this ComfyUI is unknown to this installer — not checked for version replacements (${err.message})`);
+        }
+    }
+    return out;
+}
+
 async function platformNodeDepsGate(io, {
     instance, state = null, root, manifests, flags = {}, boot = false, yes = false, prompt = null,
     waitMs = 600000, logger = null, statePath = null, sleep = null, intervalMs = 3000, progressMs = 30000,
-    workerDir = null, platformGraceMs = 30000,
+    workerDir = null, platformGraceMs = 30000, otherManifests = [], command = 'doctor',
 } = {}) {
     const out = {
         instance, checked: false, installed: [], restarted: false, pid_changed: false, failed: false, reason: null, record: {},
-        persistence: null, prestartup: null,
+        persistence: null, prestartup: null, overrides: [], conflicts: [],
     };
     if (!instance || instance.owner !== 'foreign' || !instance.pid) return out;
     const info = (line) => { if (logger) logger.info(line); };
@@ -591,6 +631,8 @@ async function platformNodeDepsGate(io, {
     out.checked = true;
     for (const e of check.errors) warn(`custom-node dependency check: ${e}`);
     let needRestart = !!(out.prestartup && (out.prestartup.status === 'created' || out.prestartup.status === 'updated'));
+    let snapshotOf = null;
+    const dropSnap = () => { if (snapshotOf) overridesMod.dropSnapshot(io, snapshotOf); snapshotOf = null; };
     if (check.nodes.length === 0) {
         info(`custom-node dependencies satisfied in ${py.python}${overlayReady() ? ` (+ overlay ${persist.sitePackages})` : ''} (ComfyUI pid ${instance.pid})`);
         if (interactive && restartAllowed === null) {
@@ -628,6 +670,13 @@ async function platformNodeDepsGate(io, {
         if (persist.kind !== 'overlay') {
             warn(`node dependencies go into ${py.python} itself (${persist.reason}) — they are lost with a node restart; \`${tool} boot\` reinstalls them`);
         }
+        // Another profile on this ComfyUI (installer 0.2.6): a replacement it
+        // refuses must be undone — the overlay venv is copied aside first.
+        if (persist.kind === 'overlay' && overridesMod.profileIds([...(manifests || []), ...(otherManifests || [])]).length > 1) {
+            const snap = overridesMod.snapshotOverlay(io, persist.paths.dir);
+            if (snap.ok) snapshotOf = persist.paths.dir;
+            else warn(`overlay snapshot not taken (${snap.reason}) — a refused version replacement cannot be undone`);
+        }
         const constraintsPath = statePath ? path.join(path.dirname(statePath), 'node-deps-constraints.txt') : null;
         const inst = nodeDeps.installNodeDeps(io, {
             python: py.python, nodes: check.nodes, torch: check.torch, constraintsPath, log: logger,
@@ -635,6 +684,7 @@ async function platformNodeDepsGate(io, {
         });
         out.installed = inst.installed;
         if (!inst.ok) {
+            dropSnap();
             out.failed = true;
             out.reason = inst.failed.map((f) => `${f.directory}: ${f.reason}`).join('; ');
             out.fix = `fix the pip error above (network, disk space, a package conflict), then run: ${tool} doctor --yes --restart-platform-comfy`;
@@ -642,6 +692,7 @@ async function platformNodeDepsGate(io, {
         }
         const again = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests, extraPaths: extraPaths() });
         if (again.nodes.length > 0) {
+            dropSnap();
             out.failed = true;
             out.reason = `pip finished, but the requirements are still not satisfied in ${py.python}: ${nodeDeps.describeUnsatisfied(again.nodes)}`;
             out.fix = `install them by hand: ${persist.kind === 'overlay' ? persist.paths.python : py.python} -m pip install -r <requirements.txt>, then run: ${tool} doctor --restart-platform-comfy`;
@@ -651,7 +702,61 @@ async function platformNodeDepsGate(io, {
         needRestart = true;
     }
     out.persistence = { kind: persist.kind, base: persist.base, site_packages: persist.sitePackages || null, reason: persist.reason || null, python: py.python };
-    out.record.nodeDeps = { target: persist.kind, overlay: persist.sitePackages || null, python: py.python };
+    const prevDeps = (state && state.installer_options && state.installer_options.nodeDeps) || {};
+    let accepted = Array.isArray(prevDeps.accepted) ? prevDeps.accepted.slice() : [];
+    out.record.nodeDeps = { target: persist.kind, overlay: persist.sitePackages || null, python: py.python, overrides: [], accepted };
+    // Version replacements by the overlay (installer 0.2.6): logged, shown in
+    // RESULT, recorded; a replacement that touches another profile or the
+    // ComfyUI core needs consent.
+    if (overlayReady()) {
+        const ov = overridesStep(io, {
+            python: py.python, sitePackages: persist.sitePackages, root, manifests, otherManifests, info, warn,
+        });
+        if (ov) {
+            out.overrides = ov.overrides;
+            out.conflicts = ov.conflicts;
+            out.record.nodeDeps.overrides = ov.overrides.map(overridesMod.recordOf);
+            const pending = overridesMod.pendingConflicts(ov.conflicts, accepted);
+            if (pending.length > 0) {
+                const lines = pending.map(overridesMod.describeConflict);
+                for (const l of lines) warn(`version replacement affects another profile: ${l}`);
+                let consent = !!flags['accept-node-deps-overrides'];
+                if (!consent && interactive) {
+                    consent = await prompt.confirm(`The node-deps overlay is first in sys.path of the whole ComfyUI. It replaces packages that another profile or ComfyUI itself uses:\n  - ${lines.join('\n  - ')}\nKeep these replacements (the other profile may stop working)?`, { defaultYes: false });
+                }
+                if (consent) {
+                    const at = new Date(typeof io.now === 'function' ? io.now() : Date.now()).toISOString();
+                    accepted = [...accepted, ...pending.map((c) => overridesMod.acceptedEntry(c, at))];
+                    out.record.nodeDeps.accepted = accepted;
+                    info(`version replacements accepted (${flags['accept-node-deps-overrides'] ? '--accept-node-deps-overrides' : 'answer'}): ${pending.map(overridesMod.conflictKey).join(', ')}`);
+                    dropSnap();
+                } else {
+                    let undone = '';
+                    if (snapshotOf) {
+                        const rs = overridesMod.restoreOverlay(io, snapshotOf);
+                        snapshotOf = null;
+                        if (rs.ok) {
+                            undone = '; the overlay was restored to its state before this run';
+                            info(`overlay ${persist.paths.dir} restored from the snapshot — the replacements were not kept`);
+                            const back = overridesStep(io, { python: py.python, sitePackages: persist.sitePackages, root, manifests, otherManifests, info: () => {}, warn: () => {} });
+                            out.record.nodeDeps.overrides = back ? back.overrides.map(overridesMod.recordOf) : [];
+                            out.overrides = back ? back.overrides : [];
+                        } else {
+                            undone = `; restoring the overlay failed: ${rs.reason}`;
+                            warn(rs.reason);
+                        }
+                    }
+                    out.failed = true;
+                    const why = boot ? 'boot never consents' : (interactive ? 'not accepted' : 'no consent (--yes is not consent; use --accept-node-deps-overrides)');
+                    out.reason = `the node-deps overlay would replace packages another profile on this ComfyUI uses (${why}): ${lines.join('; ')}${undone}. One GPU node — one profile`;
+                    const profileArg = command === 'install' && Array.isArray(flags.profiles) && flags.profiles.length > 0 ? ` --profile ${flags.profiles.join(',')}` : '';
+                    out.fix = `install this profile on a separate GPU node, or accept the replacements: ${tool} ${command === 'install' ? 'install' : 'doctor'}${profileArg} --accept-node-deps-overrides`;
+                    return out;
+                }
+            }
+        }
+    }
+    dropSnap();
     // The running process imported the custom nodes at its start: the
     // remedy for missing classes with the packages in place is a restart —
     // decided by FACT (/object_info), not only by "installed just now":
@@ -1117,6 +1222,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     const depsGate = dryRun ? null : await platformNodeDepsGate(realIo, {
         instance, state: priorState, root, manifests: loadedManifests, flags, boot, yes, prompt,
         waitMs: Math.max(180000, comfyWaitMs - (realIo.now() - windowStart)), logger, statePath, workerDir,
+        otherManifests: otherProfileManifests(priorState, flags.profiles, { logger }), command: doctor ? 'doctor' : 'install',
     });
     if (depsGate) {
         instance = depsGate.instance;
@@ -1128,7 +1234,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
         ownedServices.push(...nodeDepsOwnedServices(depsGate));
         recordOwnedServices(realIo, statePath, ownedServices);
         if (depsGate.failed) {
-            printResult(withPre(nodeDepsFailedResult({ gate: depsGate, mode: instance.mode })), { flags, mode: instance.mode, boot });
+            printResult(withPre({ ...nodeDepsFailedResult({ gate: depsGate, mode: instance.mode }), node_deps_overrides: depsGate.overrides }), { flags, mode: instance.mode, boot });
             process.exitCode = 1;
             prompt.close();
             return;
@@ -1415,7 +1521,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
                 hubVersion,
             },
         });
-        printResult(withPre(result), { flags, mode, boot, hubVersion });
+        printResult(withPre({ ...result, node_deps_overrides: depsGate ? depsGate.overrides : [] }), { flags, mode, boot, hubVersion });
     } catch (err) {
         if (err instanceof NoTerminalError) {
             console.error('');
@@ -1671,6 +1777,8 @@ async function cmdVerify(flags) {
 /** Blocked steps + host remediation as summary items (shared by both outputs). */
 function resultExtras(result, tool) {
     const extra = preflightExtras(result.preflight);
+    // Version replacements of the node-deps overlay (installer 0.2.6).
+    extra.push(...overridesMod.resultItems(result.node_deps_overrides));
     for (const b of result.blocked || []) {
         let fix = result.remediation && result.remediation.command ? `${result.remediation.command} && ${tool} doctor` : `${tool} doctor`;
         if (/accept_runtime_change/.test(b.reason || '')) fix = `if ComfyUI already works, this can be ignored; to let the installer replace the runtime run: ${tool} doctor --accept-runtime-change`;
@@ -2144,6 +2252,7 @@ async function main() {
             console.error('    animastor start | stop | status | logs [-f] | doctor [--new-key] | boot');
             console.error('    boot: node startup script — detaches `doctor --yes` (log ~/animastor/logs/bootstrap.log), exits 0');
             console.error('    --restart-platform-comfy / --no-restart-platform-comfy  restart the platform ComfyUI after node deps');
+    console.error('    --accept-node-deps-overrides  consent: the node-deps overlay may replace a package another profile / ComfyUI core uses');
             console.error('    (also: monitor | reboot-worker | reboot-comfyui)');
             console.error('    (--state/--root/--worker-dir/--port override discovery)');
             console.error('    installer flags: --install-tools / --no-tools / --tools-dir PATH');
@@ -2172,5 +2281,5 @@ module.exports = {
     restartPlatformComfyDecision, platformNodeDepsGate, nodeDepsFailedResult, recordInstallerOption,
     cmdBoot, bootChildArgs, bootLogPath, startupScriptLine,
     preflightSelfUpdate, preflightExtras, installedToolsVersion, ownVersion,
-    nodeDepsOwnedServices, recordOwnedServices,
+    nodeDepsOwnedServices, recordOwnedServices, otherProfileManifests, overridesStep,
 };

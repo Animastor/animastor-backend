@@ -102,7 +102,9 @@ function renderFinalSummary({ verification = null, e2e = [], extra = [], tool = 
     const failures = items.filter((c) => c.ok === false);
     const lines = ['', '==================== RESULT ===================='];
     for (const c of items) {
-        const mark = c.ok === true ? '✓' : c.ok === false ? '✗' : '·';
+        // ok: 'info' → [i], 'warn' → ! (installer 0.2.6: node-deps overlay
+        // version replacements) — shown, never counted as a failure.
+        const mark = c.ok === true ? '✓' : c.ok === false ? '✗' : c.ok === 'info' ? '[i]' : c.ok === 'warn' ? '!' : '·';
         lines.push(`${mark} ${c.label}${c.detail ? `: ${oneLine(c.detail)}` : ''}`);
         if (c.ok === false && c.fix) lines.push(`    fix: ${c.fix}`);
     }
