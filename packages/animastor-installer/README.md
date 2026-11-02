@@ -147,6 +147,26 @@ for `GET /system_stats` at the original `--baseurl` address and the node
 classes in `/object_info`. Type B checks its own venv and restarts its own
 ComfyUI.
 
+Version replacements of the overlay (0.2.6): the overlay is first in
+`sys.path` of the WHOLE ComfyUI, so a node that pins a version (qwen-tts:
+`transformers==4.57.3`) replaces the platform's package for ComfyUI and every
+other node (E2E 02.11: transformers 5.0.0→4.57.3, huggingface_hub
+1.3.5→0.36.2, cryptography 3.4.8→50.0.2). After the dependencies are in place
+the overlay is compared with the platform Python (`python -I`,
+`importlib.metadata`, overlay not on `sys.path`); every replacement is logged
+and shown in RESULT as
+`[i] <pkg> platform X → overlay Y (needed by <node>)` — `!` when the major
+version goes up or down — and recorded in `install-state.json`
+(`installer_options.nodeDeps.overrides`). One GPU node — one profile: when
+another profile is installed (or being installed) on the same ComfyUI and a
+replacement touches a package one of its nodes uses, or — with more than one
+profile — a ComfyUI core requirement (`<ComfyUI>/requirements.txt`) whose
+range excludes the overlay version, the replacement needs consent: an
+interactive question (default No) or `--accept-node-deps-overrides`; the
+answer is recorded (`installer_options.nodeDeps.accepted`). `boot` and a
+plain `--yes` never consent: the run is FAILED with the cause, and the overlay
+is restored from the copy taken before pip (`py<X.Y>.pre-install`).
+
 Every install/doctor run first brings the management tools (`animastor`,
 the persistent installer copy) and an installed worker bundle to its own
 version — before any check that can end the run — so every printed fix

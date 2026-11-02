@@ -402,6 +402,10 @@ async function runInstallation(args) {
         // a recorded answer survives every run; an explicit flag replaces it.
         const restartPlatform = options.restartPlatformComfy !== undefined ? options.restartPlatformComfy : saved.restartPlatformComfy;
         if (restartPlatform === true || restartPlatform === false) st.installer_options.restartPlatformComfy = restartPlatform;
+        // Node-deps record of the dependency gate (overlay, version
+        // replacements, accepted conflicts — installer 0.2.6) is written by
+        // the CLI before the engine runs: kept, not dropped.
+        if (saved.nodeDeps) st.installer_options.nodeDeps = saved.nodeDeps;
         // Hub version seen by this run (bootstrap env) — `animastor doctor`
         // prints it instead of "hub unknown" on later runs.
         // Who runs the ComfyUI, as seen by THIS run (installer 0.2.3): the

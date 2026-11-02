@@ -36,6 +36,7 @@ const { createLogger } = require('../src/installer/engine/logger');
 const owner = require('../src/installer/engine/comfy-owner');
 const nodeDeps = require('../src/installer/engine/node-deps');
 const pydeps = require('../src/installer/engine/pydeps');
+const overridesMod = require('../src/installer/engine/overrides');
 const engine = require('../src/installer/engine/engine');
 const summary = require('../src/installer/engine/summary');
 const { buildVerificationReport } = require('../src/installer/verification-report');
@@ -125,6 +126,10 @@ function world({
             tick();
             if (cmd === 'pgrep') return w.alive ? { code: 0, stdout: String(w.pid), stderr: '' } : { code: 1, stdout: '', stderr: '' };
             if (args[0] === '-I' && args[1] === '-c' && /version_info/.test(args[2])) return { code: 0, stdout: '3.10\n', stderr: '' };
+            if (args[0] === '-I' && args[1] === '-c' && args[2] === overridesMod.OVERRIDES_SCRIPT) {
+                // 0.2.6 overlay comparison: nothing replaced in this world
+                return { code: 0, stdout: `${JSON.stringify({ overrides: [], nodes: [], core: {} })}\n`, stderr: '' };
+            }
             if (args[0] === '-I' && args[1] === '-c') {
                 const extra = args.slice(4);
                 w.checks.push({ cmd, extra });
@@ -453,7 +458,7 @@ describe('0.2.5 V4 node dependencies survive a node restart', () => {
         const script = env.fs.readFileSync(`${ROOT}/custom_nodes/animastor-pydeps/prestartup_script.py`, 'utf8');
         assert.ok(script.startsWith(pydeps.PRESTARTUP_MARKER));
         assert.ok(script.includes(JSON.stringify(`${HOME}/animastor/pydeps`)));
-        assert.deepStrictEqual(g.record.nodeDeps, { target: 'overlay', overlay: OVERLAY_SP, python: PY });
+        assert.deepStrictEqual(g.record.nodeDeps, { target: 'overlay', overlay: OVERLAY_SP, python: PY, overrides: [], accepted: [] });
         // the re-check after pip sees the overlay exactly as ComfyUI does
         assert.ok(env.w.checks[env.w.checks.length - 1].extra.includes(OVERLAY_SP), JSON.stringify(env.w.checks));
         assert.strictEqual(g.restart.started_by, 'installer');
