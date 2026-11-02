@@ -288,6 +288,14 @@ async function failStage(redis, bookId, chapterId, sceneId, stage, buildId, reas
         throw new Error(`orchestrator.failStage: unknown stage '${stage}'`);
     }
 
+    // GPU E2E 2026-11-02 (§6.1): a fail signal without dispatch_id comes
+    // from a legacy / stale record (no epoch) — it can never fail the live
+    // dispatch. A regular no-op, not a reject.
+    if (!dispatchId || typeof dispatchId !== 'string') {
+        log(`[FAIL-STAGE] stale_state_ignored ${bookId}/${chapterId}/${sceneId} ${stage}: no dispatch_id (reason=${reason})`);
+        return { failed: false, reason: 'stale_state_ignored' };
+    }
+
     const identity = await dispatchEngine.verifyDispatchIdentity(
         redis,
         bookId,

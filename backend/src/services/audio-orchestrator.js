@@ -159,8 +159,43 @@ async function setGenerating(redis, bookId, chapterId, sceneId) {
     return await transitionState(redis, bookId, chapterId, sceneId, PHASES.GENERATING);
 }
 
-async function setWaitingChunks(redis, bookId, chapterId, sceneId) {
-    return await transitionState(redis, bookId, chapterId, sceneId, PHASES.WAITING_CHUNKS);
+/**
+ * GENERATING → WAITING_CHUNKS.
+ *
+ * With `epoch` ({ dispatchId, expectedCount?, buildId?, now? }) the transition
+ * opens a NEW dispatch epoch (GPU E2E 2026-11-02 §6.1): `started_at=now`,
+ * `dispatch_id`, `expected_count`, `chunks_received=0`, and every field of a
+ * previous / cancelled attempt (`fail_reason`, `failed_at`, `last_chunk_at`)
+ * is dropped. Without it the record kept `started_at` of a cancelled attempt
+ * 75 minutes earlier and the stall watchdog failed a healthy run
+ * (`chunk_stall_timeout:4619s` 28 s after the dispatch).
+ * Without `epoch` the legacy behaviour (phase only) is unchanged.
+ */
+async function setWaitingChunks(redis, bookId, chapterId, sceneId, epoch = null) {
+    if (!epoch || !epoch.dispatchId) {
+        return await transitionState(redis, bookId, chapterId, sceneId, PHASES.WAITING_CHUNKS);
+    }
+    const current = await getState(redis, bookId, chapterId, sceneId);
+    if (!current) return { success: false, reason: 'no_state' };
+    const allowed = VALID_TRANSITIONS[current.phase] || [];
+    if (current.phase !== PHASES.WAITING_CHUNKS && !allowed.includes(PHASES.WAITING_CHUNKS)) {
+        warn(`Invalid transition: ${current.phase} → ${PHASES.WAITING_CHUNKS} for ${bookId}/${chapterId}/${sceneId}`);
+        return { success: false, reason: 'invalid_transition', from: current.phase, to: PHASES.WAITING_CHUNKS };
+    }
+    const expected = Number.isInteger(epoch.expectedCount) && epoch.expectedCount >= 0
+        ? epoch.expectedCount
+        : current.expected_count;
+    const next = {
+        phase: PHASES.WAITING_CHUNKS,
+        expected_count: expected,
+        chunks_received: 0,
+        started_at: Number(epoch.now) || Date.now(),
+        build_id: epoch.buildId || current.build_id,
+        dispatch_id: String(epoch.dispatchId),
+    };
+    await setState(redis, bookId, chapterId, sceneId, next);
+    log(`${bookId}/${chapterId}/${sceneId}: ${PHASES.WAITING_CHUNKS} (new dispatch epoch ${String(epoch.dispatchId).slice(0, 24)}, expected=${expected})`);
+    return { success: true, state: next };
 }
 
 async function setMerging(redis, bookId, chapterId, sceneId) {
@@ -182,7 +217,7 @@ async function setFailed(redis, bookId, chapterId, sceneId, reason) {
 
 async function completeChunk(redis, bookId, chapterId, sceneId, chunkIndex, buildId, deps = {}) {
     const startTime = Date.now();
-    const { audio, orchestrator, getChunk, dispatchId } = deps;
+    const { audio, orchestrator, dispatchId } = deps;
     const OUTPUT_DIR = config.OUTPUT_DIR;
     const buildDir = path.join(OUTPUT_DIR, buildId);
     if (!fs.existsSync(buildDir)) {
@@ -319,20 +354,9 @@ async function completeChunk(redis, bookId, chapterId, sceneId, chunkIndex, buil
     log(`${bookId}/${chapterId}/${sceneId} → MERGING (${expectedCount} chunks, ${Date.now() - startTime}ms since first check)`);
 
     try {
-        // Trim padded chunks
-        if (audio && typeof audio.trimPaddedSceneAudio === 'function') {
-            for (let i = 0; i < chunkPaths.length; i++) {
-                const currentChunkId = artifactNaming.sceneChunkAudioName(bookId, chapterId, sceneId, i + 1).replace(/\.mp3$/, '');
-                try {
-                    const currentMeta = getChunk ? await getChunk(currentChunkId) : null;
-                    if (currentMeta && currentMeta.padded_text) {
-                        await audio.trimPaddedSceneAudio(chunkPaths[i], currentMeta.original_text_length);
-                    }
-                } catch (trimErr) {
-                    warn(`TRIM failed for ${currentChunkId}: ${trimErr.message}`);
-                }
-            }
-        }
+        // Padded chunks are trimmed BEFORE their fenced commit (task-handler,
+        // GPU E2E 2026-11-02 §6.2). The merge never rewrites a committed
+        // chunk: the canonical artifact changes only inside a fence.
 
         // Merge chunks
         let mergeSuccess = false;
@@ -391,6 +415,20 @@ async function failWaitingScene(redis, bookId, chapterId, sceneId, buildId, reas
         return { failed: false, reason: 'not_waiting_chunks', phase: orchState ? orchState.phase : null };
     }
 
+    // GPU E2E 2026-11-02 (§6.1, §8 п.5): a record is failed only on behalf
+    // of a dispatch. Without any dispatch identity (legacy / pre-epoch record,
+    // caller without one) nothing is written — no FAILED phase, no dedup/
+    // metadata reset, no failStage — so a stale record can no longer produce
+    // `[FAIL-STAGE] Rejected … missing_dispatch_id` followed by an
+    // `[INVARIANT] audio-orch violation` (FAILED vs GENERATING). The live-
+    // dispatch comparison itself is done by the caller (reconciliation
+    // watchdog) and, again, by orchestrator.failStage.
+    const effectiveDispatchId = dispatchId || orchState.dispatch_id || null;
+    if (orchestrator && !effectiveDispatchId) {
+        log(`failWaitingScene: ${bookId}/${chapterId}/${sceneId} — stale_state_ignored (no dispatch_id); record not failed (${reason})`);
+        return { failed: false, reason: 'stale_state_ignored' };
+    }
+
     const expectedCount = parseInt(orchState.expected_count || '1', 10);
     const buildDir = path.join(config.OUTPUT_DIR, buildId);
     const missingIndices = [];
@@ -436,7 +474,7 @@ async function failWaitingScene(redis, bookId, chapterId, sceneId, buildId, reas
     if (orchestrator) {
         try {
             await orchestrator.failStage(redis, bookId, chapterId, sceneId, 'audio', buildId,
-                reason, { dispatchId });
+                reason, { dispatchId: effectiveDispatchId });
             log(`Audio FAILED→PENDING via failStage for ${bookId}/${chapterId}/${sceneId}`);
         } catch (fsErr) {
             warn(`failStage failed: ${fsErr.message}`);

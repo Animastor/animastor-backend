@@ -658,7 +658,7 @@ async function listSharedWithMe(userId, now = Date.now()) {
         capabilities: row.capabilities || null,
         owner_workspace_id: row.owner_workspace_id,
         revoked_at: row.revoked_at != null ? Number(row.revoked_at) : null,
-        last_seen: row.last_seen != null ? Number(row.last_seen) : null,
+        last_seen: lastSeenMs(row),
         created_at: row.created_at != null ? Number(row.created_at) : null,
         granted_at: row.granted_at != null ? Number(row.granted_at) : null,
         share_policy: {
@@ -748,20 +748,74 @@ async function findActiveByIdWithTokenHash(workerId, now = Date.now()) {
 }
 
 /**
- * Best-effort liveness mirror from heartbeats (Settings UI).
+ * `workers.last_seen` is epoch SECONDS (WL-1, GPU E2E 2026-11-02 §8 п.6).
+ * The public API keeps milliseconds (the live heartbeat `ts` is ms and both
+ * fronts render ms), so every reader converts through this helper.
+ */
+function lastSeenMs(row) {
+    if (!row || row.last_seen == null) return null;
+    const v = Number(row.last_seen);
+    if (!Number.isFinite(v)) return null;
+    // A legacy ms value that escaped WL-1 is passed through unchanged.
+    return v > 100000000000 ? v : v * 1000;
+}
+
+function nowSeconds(nowMs = Date.now()) {
+    return Math.floor(Number(nowMs) / 1000);
+}
+
+/**
+ * Best-effort liveness mirror on credential verification.
  *
  * `version` is the worker bundle version reported by the worker on its
  * first-run credential verification (optional). COALESCE keeps the last known
  * value when a (legacy) worker omits it: an unknown version must not erase a
- * previously recorded one.
+ * previously recorded one. A successful verify is a sign of life: status
+ * becomes 'online' (the heartbeat sync turns it 'offline' when beacons stop).
  */
 async function touchLastSeen(workerId, version) {
     try {
         await query(
-            `UPDATE workers SET last_seen = $2, version = COALESCE($3, version) WHERE worker_id = $1`,
-            [workerId, Date.now(), version || null]
+            `UPDATE workers SET last_seen = $2, status = 'online', version = COALESCE($3, version)
+              WHERE worker_id = $1 AND revoked_at IS NULL`,
+            [workerId, nowSeconds(), version || null]
         );
     } catch (_) { /* non-fatal */ }
+}
+
+/**
+ * Mirror the hub heartbeats into PG (GPU E2E 2026-11-02 §8 п.6): the hub
+ * writes `animastor:worker:heartbeat:<type>:<id>` (TTL 30 s) on every beacon
+ * but nothing updated `workers`, so PG said `offline` for a live worker.
+ *
+ * @param {Array<{workerId:string, tsMs:number, version?:string|null}>} live
+ *        workers with a live heartbeat key
+ * @returns {Promise<{online:number, offline:number}>}
+ */
+async function syncLivenessFromHeartbeats(live) {
+    const list = (Array.isArray(live) ? live : [])
+        .filter(w => w && typeof w.workerId === 'string'
+            && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(w.workerId));
+    const ids = list.map(w => w.workerId);
+    const ts = list.map(w => nowSeconds(Number.isFinite(Number(w.tsMs)) ? Number(w.tsMs) : Date.now()));
+    const versions = list.map(w => (typeof w.version === 'string' && /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(w.version)) ? w.version : null);
+    let online = 0;
+    if (ids.length > 0) {
+        const r = await query(`
+            UPDATE workers w
+               SET status = 'online',
+                   last_seen = GREATEST(COALESCE(w.last_seen, 0), v.ts),
+                   version = COALESCE(v.version, w.version)
+              FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::bigint[]) AS ts, unnest($3::text[]) AS version) v
+             WHERE w.worker_id = v.id AND w.revoked_at IS NULL
+        `, [ids, ts, versions]);
+        online = r.rowCount || 0;
+    }
+    const off = await query(`
+        UPDATE workers SET status = 'offline'
+         WHERE status <> 'offline' AND NOT (worker_id = ANY($1::uuid[]))
+    `, [ids]);
+    return { online, offline: off.rowCount || 0 };
 }
 
 module.exports = {
@@ -785,6 +839,8 @@ module.exports = {
     purgeWorker,
     revokeSystemWorker,
     touchLastSeen,
+    syncLivenessFromHeartbeats,
+    lastSeenMs,
     startSharePolicy,
     stopSharePolicy,
     getActiveSharePolicy,

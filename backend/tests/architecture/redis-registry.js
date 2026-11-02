@@ -791,6 +791,17 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'Per-task publication marker (Stage 135): fence + stage (renaming|published), TTL mirrors the done marker (7 d). Distinguishes "this fence is in canonical" from "an older generation leaves a file there"; drives retry/resume and the ready-metadata chain.',
     },
+    {
+        // GPU E2E 2026-11-02 (§6.2) — terminal record of a committed fence
+        // whose canonical bytes diverged from the manifest with no staged
+        // copy left. Stops the 60-second resume loop; bound to the fence.
+        pattern: 'animastor:fence-unrecoverable:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Per-task unrecoverable-publication record: { fence, reason, at, job_id, expected_sha256, expected_bytes }, no TTL. resumePendingPublications skips a fence that carries it (one warn when marked); a NEW fence is never skipped and a successful publication clears it.',
+    },
 ];
 
 module.exports = { REDIS_OWNERSHIP };

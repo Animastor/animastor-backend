@@ -57,8 +57,8 @@ function setGenerating(redis, bookId, chapterId, sceneId) {
     return audioFsmService().setGenerating(redis, bookId, chapterId, sceneId);
 }
 
-function setWaitingChunks(redis, bookId, chapterId, sceneId) {
-    return audioFsmService().setWaitingChunks(redis, bookId, chapterId, sceneId);
+function setWaitingChunks(redis, bookId, chapterId, sceneId, epoch) {
+    return audioFsmService().setWaitingChunks(redis, bookId, chapterId, sceneId, epoch);
 }
 
 function setMerging(redis, bookId, chapterId, sceneId) {

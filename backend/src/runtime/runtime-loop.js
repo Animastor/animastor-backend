@@ -18,6 +18,9 @@ const prometheus = require('../metrics/prometheus');
 // Reconciliation cycle interval (60 seconds — not every 5s tick)
 const RECONCILE_INTERVAL_MS = 60000;
 
+// Last worker-liveness sync error (logged once per distinct error).
+let lastWorkerLivenessError = null;
+
 const logPrefix = '[RUNTIME-LOOP]';
 
 function log(msg) {
@@ -156,8 +159,8 @@ async function executeReconcileCycle(redis) {
         try {
             const resultPublication = require('../services/result-publication.cjs');
             const rec = await resultPublication.resumePendingPublications(redis, require('../config/runtime-config'));
-            if (rec.resumed > 0 || rec.cleaned > 0 || rec.errors > 0) {
-                log(`  Staged-artifact recovery: resumed=${rec.resumed} cleaned=${rec.cleaned} orphans=${rec.orphans} errors=${rec.errors}`);
+            if (rec.resumed > 0 || rec.cleaned > 0 || rec.errors > 0 || rec.markedUnrecoverable > 0) {
+                log(`  Staged-artifact recovery: resumed=${rec.resumed} cleaned=${rec.cleaned} orphans=${rec.orphans} errors=${rec.errors} unrecoverable=${rec.unrecoverable}`);
             }
             // Staging GC (contract 126 §5.5): age-gated, bounded, strictly
             // fail-closed — a Redis error aborts the pass WITHOUT deleting
@@ -169,6 +172,21 @@ async function executeReconcileCycle(redis) {
             }
         } catch (recErr) {
             warn(`Staged-artifact recovery failed: ${recErr.message}`);
+        }
+
+        // GPU E2E 2026-11-02 (§8 п.6) — mirror hub heartbeats into PG
+        // `workers` (status/last_seen/version). Best effort, never throws.
+        try {
+            const wl = await require('../services/worker-liveness-sync.cjs').syncWorkerLiveness(redis);
+            if (!wl.ok) {
+                if (wl.error !== lastWorkerLivenessError) warn(`Worker liveness sync failed: ${wl.error}`);
+                lastWorkerLivenessError = wl.error;
+            } else {
+                lastWorkerLivenessError = null;
+                if (wl.offline > 0) log(`  Worker liveness: live=${wl.live} online=${wl.online} → offline=${wl.offline}`);
+            }
+        } catch (wlErr) {
+            warn(`Worker liveness sync failed: ${wlErr.message}`);
         }
 
         log('Starting periodic reconciliation cycle');

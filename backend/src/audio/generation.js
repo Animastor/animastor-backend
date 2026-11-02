@@ -157,6 +157,42 @@ async function trimPaddedSceneAudio(filePath, originalTextLength) {
     }
 }
 
+/**
+ * Trim a padded TTS chunk IN MEMORY, before its fenced commit.
+ *
+ * GPU E2E 2026-11-02 (§6.2): the merge used to trim the canonical chunk file
+ * AFTER the fenced commit, so the canonical bytes stopped matching the
+ * committed manifest (`canonical_content_mismatch` every 60 s, forever).
+ * Invariant now: the canonical artifact never changes outside a fence — the
+ * trim runs on a private temp copy of the GPU bytes and the TRIMMED bytes are
+ * what gets staged, committed (manifest sha256/bytes) and published.
+ *
+ * Deterministic for the same input (ffmpeg stream copy), so a redelivery of
+ * the same fence stages identical bytes. Never throws: on any failure the
+ * original bytes are returned untouched (`trimmed:false`).
+ *
+ * @returns {Promise<{buffer: Buffer, trimmed: boolean}>}
+ */
+async function trimPaddedAudioBuffer(buffer, originalTextLength, { extension = '.mp3' } = {}) {
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) return { buffer, trimmed: false };
+    const os = require('os');
+    let dir = null;
+    try {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'animastor-trim-'));
+        const file = path.join(dir, 'chunk' + extension);
+        fs.writeFileSync(file, buffer);
+        await trimPaddedSceneAudio(file, originalTextLength);
+        const out = fs.readFileSync(file);
+        if (out.length === 0) return { buffer, trimmed: false };
+        return { buffer: out, trimmed: !out.equals(buffer) };
+    } catch (err) {
+        helpers.log(`⚠️ trimPaddedAudioBuffer: ${err.message} — committing untrimmed bytes`);
+        return { buffer, trimmed: false };
+    } finally {
+        if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {} }
+    }
+}
+
 // ══════════════════════════════════════════════════════
 //  HELPERS
 // ══════════════════════════════════════════════════════
@@ -661,6 +697,7 @@ module.exports = {
     generateSceneAudio,
     mergeBookAudio,
     trimPaddedSceneAudio,
+    trimPaddedAudioBuffer,
     buildMergedDialogueWorkflow,
     resolveAudioAssembly,
     WORKFLOW_NARRATION,
