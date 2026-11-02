@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.2.5, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.7, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -166,6 +166,16 @@ interactive question (default No) or `--accept-node-deps-overrides`; the
 answer is recorded (`installer_options.nodeDeps.accepted`). `boot` and a
 plain `--yes` never consent: the run is FAILED with the cause, and the overlay
 is restored from the copy taken before pip (`py<X.Y>.pre-install`).
+
+Node classes for the worker (0.2.7): the worker bundle (>= 2.2.2) asks for
+tasks only when ComfyUI's `/object_info` lists every node class of its
+profile. The list is `<worker dir>/node-classes.json`
+(`{"profiles":{"audio/qwen-tts":[…]}}`), written from the manifests'
+`provides_classes` (required dependencies only) on a fresh install, on a
+bundle update and on every `doctor`/`boot` run — a node installed by an
+older installer gets it on its next doctor/boot. An identical file is left
+untouched; the file is registered for the uninstaller. Without the file the
+worker keeps the previous behaviour (ComfyUI API only) and logs one warning.
 
 Every install/doctor run first brings the management tools (`animastor`,
 the persistent installer copy) and an installed worker bundle to its own

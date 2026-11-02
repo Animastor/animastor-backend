@@ -1002,6 +1002,21 @@ async function runInstallation(args) {
             }
         }
 
+        // 4.6a node-classes.json (installer 0.2.7) — the profile's node
+        // classes for the worker's readiness gate (bundle >= 2.2.2). Written
+        // on every run where a bundle is installed (fresh install, update,
+        // re-run); never fatal.
+        if (workerDir && io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) {
+            const nc = worker.writeNodeClasses(io, { workerDir, manifests, log });
+            result.results.worker.push({ id: 'node-classes', node_classes: nc });
+            if (nc.status === 'written' && st.components.worker) {
+                const owned = new Set(st.components.worker.files_installed || []);
+                owned.add(worker.NODE_CLASSES_FILE);
+                st.components.worker.files_installed = Array.from(owned);
+                save();
+            }
+        }
+
         // 4.7 Worker Key + .env configuration ----------------------------------------
         // Runs on EVERY install where the worker is wanted — even full re-runs
         // whose plan has no worker-key step (nothing left to ask). configureEnv
@@ -1652,6 +1667,7 @@ module.exports = {
     autoPickComfyPort,
     platformComfyMissingChecks,
     refreshInstalledWorkerBundle,
+    writeNodeClasses: worker.writeNodeClasses,
     desiredEnvWiring,
     endToEndChecks,
     CPU_MODE_WARNING,
