@@ -865,6 +865,24 @@ function nodeDepsFailedResult({ gate, mode }) {
     };
 }
 
+/**
+ * Register a file the installer wrote into the worker dir (uninstall removes
+ * it). Only for the recorded worker of THIS dir; no-op without a state.
+ */
+function recordWorkerFile(io, statePath, workerDir, file) {
+    try {
+        const st = stateStore.loadState(io, statePath);
+        const w = st && st.components && st.components.worker;
+        if (!w || !w.dir || path.resolve(w.dir) !== path.resolve(workerDir)) return false;
+        const files = new Set(w.files_installed || []);
+        if (files.has(file)) return false;
+        files.add(file);
+        w.files_installed = Array.from(files);
+        stateStore.saveState(io, statePath, st, io.now);
+        return true;
+    } catch (_) { return false; }
+}
+
 /** Store one installer option in install-state.json (a recorded answer). */
 function recordInstallerOption(io, statePath, key, value) {
     const st = stateStore.loadState(io, statePath);
@@ -1015,6 +1033,15 @@ async function preflightSelfUpdate(io, {
             out.bundle = { status: 'failed', reason: err.message };
         }
         if (out.bundle && out.bundle.status === 'failed' && logger) logger.warn(`worker bundle ${out.bundle.have || '?'} could not be updated to ${out.bundle.want || '?'}: ${out.bundle.reason}`);
+        // Installer 0.2.7: node-classes.json for the worker's readiness gate
+        // — on install, bundle update, doctor and boot alike, so a node
+        // installed by an older installer gets it on its next doctor/boot.
+        try {
+            out.node_classes = engineMod.writeNodeClasses(io, { workerDir, manifests, log: logger, version: ownVersion() });
+            if (out.node_classes.status === 'written') recordWorkerFile(io, statePath, workerDir, 'node-classes.json');
+        } catch (err) {
+            out.node_classes = { status: 'failed', reason: err.message };
+        }
     }
     return out;
 }

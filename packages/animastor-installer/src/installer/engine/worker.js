@@ -735,6 +735,72 @@ async function restartManagedWorker(io, { workerDir, log = null, stopTimeoutMs =
     return { restarted: true, previously_running: previouslyRunning, pid: start.pid, alive: start.alive, reason: start.reason };
 }
 
+// ── node-classes.json (installer 0.2.7, worker bundle >= 2.2.2) ─────────────
+// GPU E2E 2026-11-02: a worker took tasks from a ComfyUI without its
+// profile's nodes. Bundle 2.2.2 asks for tasks only after ComfyUI's
+// /object_info lists every class of this file; without the file it keeps the
+// old behaviour (ComfyUI API only) and logs one warning. The installer writes
+// it from the manifests' `provides_classes` (required dependencies only) on a
+// fresh install, on a bundle update and on every doctor/boot run — so a node
+// installed by an older installer gets it on its next doctor/boot.
+//
+//   { "generated_by": "animastor-installer <v>",
+//     "profiles": { "audio/qwen-tts": ["Qwen3TTSLoader", …] } }
+const NODE_CLASSES_FILE = 'node-classes.json';
+
+/** {profileId: [classes]} of the given manifests (required deps only, sorted, unique). */
+function nodeClassesOfManifests(manifests) {
+    const profiles = {};
+    for (const m of manifests || []) {
+        const id = m && m.profile && m.profile.id;
+        if (!id) continue;
+        const set = new Set(profiles[id] || []);
+        for (const dep of m.dependencies || []) {
+            if (dep && dep.requirement && dep.requirement !== 'required') continue;
+            for (const cls of (dep && dep.provides_classes) || []) {
+                if (typeof cls === 'string' && cls.trim()) set.add(cls.trim());
+            }
+        }
+        profiles[id] = Array.from(set).sort();
+    }
+    return profiles;
+}
+
+/**
+ * Write <workerDir>/node-classes.json for the profiles of this run. Only when
+ * a worker bundle is installed there (worker.cjs present). Atomic (temp +
+ * rename); an identical file is left untouched.
+ * @returns {{ status: 'written'|'current'|'absent'|'skipped'|'failed', path?: string, profiles?: object, reason?: string }}
+ */
+function writeNodeClasses(io, { workerDir, manifests, log = null, version = null }) {
+    if (!workerDir || !io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) return { status: 'absent' };
+    const profiles = nodeClassesOfManifests(manifests);
+    if (Object.keys(profiles).length === 0) return { status: 'skipped', reason: 'no profile manifests' };
+    const file = path.join(workerDir, NODE_CLASSES_FILE);
+    let v = version;
+    if (!v) { try { v = require('../../../package.json').version || null; } catch (_) { v = null; } }
+    const doc = { generated_by: `animastor-installer${v ? ` ${v}` : ''}`, profiles };
+    const text = JSON.stringify(doc, null, 2) + '\n';
+    try {
+        if (io.fs.existsSync(file)) {
+            let current = null;
+            try { current = JSON.parse(String(io.fs.readFileSync(file, 'utf8'))); } catch (_) { current = null; }
+            if (current && JSON.stringify(current.profiles || null) === JSON.stringify(profiles)) {
+                return { status: 'current', path: file, profiles };
+            }
+        }
+        const tmp = `${file}.tmp-${process.pid}`;
+        io.fs.writeFileSync(tmp, text);
+        io.fs.renameSync(tmp, file);
+        const n = Object.values(profiles).reduce((a, l) => a + l.length, 0);
+        if (log) log.info(`${NODE_CLASSES_FILE} written: ${Object.keys(profiles).join(', ')} (${n} node class(es)) — the worker takes tasks only when ComfyUI lists them`);
+        return { status: 'written', path: file, profiles };
+    } catch (err) {
+        if (log) log.warn(`${NODE_CLASSES_FILE} could not be written: ${err.message} — the worker falls back to the ComfyUI-API-only readiness`);
+        return { status: 'failed', path: file, reason: err.message };
+    }
+}
+
 module.exports = {
     installWorkerBundle,
     ensureWorkerDependencies,
@@ -759,4 +825,7 @@ module.exports = {
     verifyRegistration,
     checkWorkerCanStart,
     renderEnvLines,
+    NODE_CLASSES_FILE,
+    nodeClassesOfManifests,
+    writeNodeClasses,
 };
