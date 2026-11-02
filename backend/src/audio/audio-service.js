@@ -14,7 +14,7 @@
 //   chunks.js         - findExistingSceneChunks, allSceneChunksExist, areSceneAudioChunksReady, makeChunkId, getChunkAudioPath
 //   segments.js       - splitTextIntoChunks, splitDialogueIntoChunks, narratorVoice, padShortText, buildSegments
 //   pipeline.js       - buildSceneAudio, createConcatFile, mergeSceneAudioChunks, recoverSceneAudioFromChunks
-//   generation.js     - generateSceneAudio, mergeBookAudio, trimPaddedSceneAudio
+//   generation.js     - generateSceneAudio, mergeBookAudio, trimPaddedSceneAudio, trimPaddedAudioBuffer
 //   silence.js        - generateSilentAudio, writeSilentMP3Node
 
 const helpers = require('./helpers');
@@ -78,6 +78,7 @@ module.exports = {
     generateSceneAudio: generation.generateSceneAudio,
     mergeBookAudio: generation.mergeBookAudio,
     trimPaddedSceneAudio: generation.trimPaddedSceneAudio,
+    trimPaddedAudioBuffer: generation.trimPaddedAudioBuffer,
     WORKFLOW_NARRATION: generation.WORKFLOW_NARRATION,
     WORKFLOW_DIALOGUE: generation.WORKFLOW_DIALOGUE,
 

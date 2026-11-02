@@ -1841,6 +1841,25 @@ async function runMigrations() {
 
     console.log('[PG] System AI control schema initialized');
 
+    // ── WL-1: workers.last_seen in SECONDS (GPU E2E 2026-11-02 §8 п.6) ──
+    // Every other *_at/last_seen BIGINT of the schema is epoch seconds, but
+    // touchLastSeen wrote Date.now() (ms): 1793622717060 → to_timestamp() =
+    // year 58807. Normalize existing ms values (> 1e11 can only be ms — 1e11 s
+    // is the year 5138) and forbid them from now on. Idempotent.
+    try {
+        const fixed = await query(`UPDATE workers SET last_seen = last_seen / 1000
+            WHERE last_seen IS NOT NULL AND last_seen > 100000000000`);
+        if (fixed.rowCount > 0) {
+            console.log(`[PG] WL-1: workers.last_seen ms → s on ${fixed.rowCount} row(s)`);
+        }
+        await query(`ALTER TABLE workers DROP CONSTRAINT IF EXISTS workers_last_seen_seconds_check`);
+        await query(`ALTER TABLE workers ADD CONSTRAINT workers_last_seen_seconds_check
+            CHECK (last_seen IS NULL OR last_seen < 100000000000)`);
+        console.log('[PG] WL-1: workers.last_seen seconds check ensured');
+    } catch (err) {
+        console.error('[PG] WL-1 workers.last_seen normalization failed:', err.message);
+    }
+
     // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
     // DDL lives here (guardrail PG-5 — single DDL owner). The statements
     // are executed ONLY while the IU_IMAGE_VERSIONED kill-switch is on, so

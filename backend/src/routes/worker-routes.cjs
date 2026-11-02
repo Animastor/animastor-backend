@@ -104,7 +104,7 @@ async function liveInfo(redis, row) {
             return { status: 'ONLINE', last_seen: (typeof ts === 'number' ? ts : Date.now()) };
         }
     } catch (_) { /* non-fatal — treat as offline */ }
-    return { status: 'OFFLINE', last_seen: row.last_seen != null ? Number(row.last_seen) : null };
+    return { status: 'OFFLINE', last_seen: workerRepo.lastSeenMs(row) };
 }
 
 /**

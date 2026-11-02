@@ -524,7 +524,7 @@ describe('audio-orch invariant (R6)', () => {
 
         const orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
         const result = await orchestrator.failStage(
-            redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'audio', 'build-1', 'test_error'
+            redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'audio', 'build-1', 'test_error', { dispatchId: 'dispatch-ok' }
         );
 
         expect(result).to.deep.include({ failed: true, redispatch: true });

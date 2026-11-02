@@ -11,7 +11,9 @@
 //   • GENERATING states left without a lease → DIRTY (never PENDING);
 //   • active index   — scenes with no command-authorized stage left → removed;
 //   • PG scene_assets — `pending` rows of the stage → `cancelled`
-//                       (`ready`/`placeholder`/`stale` untouched).
+//                       (`ready`/`placeholder`/`stale` untouched);
+//   • audio/video-orch records (non-DONE) and dispatch receipts of the
+//     cancelled scenes × stage (services/cancel-scene-state.cjs).
 //
 // Used by POST /cancel-worker (type or task_id), PUT /layer-config
 // (X_enabled=false) and, for the PG leg, POST /cancel-generation.
@@ -123,6 +125,19 @@ async function cancelStage(p) {
         }
     }
 
+    // 5a. Scene FSM records + dispatch receipts of the cancelled stage
+    //     (GPU E2E 2026-11-02 §8 п.4) — a cancelled attempt must not leave
+    //     an audio/video-orch record whose `started_at` the next dispatch
+    //     inherits. DONE records are kept.
+    try {
+        const cleared = await clearCancelledSceneState(
+            redis, bookId, { stages: [stage], scenes: scenes === null ? null : scenes });
+        summary.orchCleared = cleared.orchDeleted;
+        summary.receiptsCleared = cleared.receiptsDeleted;
+    } catch (stateErr) {
+        console.warn(`[${context}] Scene state cleanup failed for ${bookId}/${stage}: ${stateErr.message}`);
+    }
+
     // 6. PG scene_assets pending → cancelled
     try {
         summary.assetRows = await sceneAssetsRepo.cancelPendingAssets(
@@ -135,4 +150,8 @@ async function cancelStage(p) {
     return summary;
 }
 
-module.exports = { cancelStage };
+// Re-exported so cancel-generation reaches it through the same composition-
+// root dependency (deps.stageCancellation) — contour-route requires are frozen.
+const { clearCancelledSceneState } = require('./cancel-scene-state.cjs');
+
+module.exports = { cancelStage, clearCancelledSceneState };

@@ -298,6 +298,23 @@ module.exports = function(app, redis, deps) {
                 console.warn(`[CANCEL-GENERATION] Orphan GENERATING sweep failed for ${bookId}: ${orphanErr.message}`);
             }
 
+            // GPU E2E 2026-11-02 (§8 п.4): the scene FSM records and dispatch
+            // receipts of the cancelled work go too — a cancelled attempt's
+            // audio-orch record must not leak `started_at` into the next
+            // command's dispatch.
+            try {
+                const impl = deps.stageCancellation;
+                if (!impl || typeof impl.clearCancelledSceneState !== 'function') {
+                    throw new Error('deps.stageCancellation.clearCancelledSceneState is not wired (composition root)');
+                }
+                const cleared = await impl.clearCancelledSceneState(redis, bookId, { stages: null, scenes: null });
+                if (cleared.orchDeleted > 0 || cleared.receiptsDeleted > 0 || cleared.errors > 0) {
+                    log(`[CANCEL-GENERATION] ${bookId}: scene state cleared — orch=${cleared.orchDeleted} receipts=${cleared.receiptsDeleted} errors=${cleared.errors}`);
+                }
+            } catch (stateErr) {
+                console.warn(`[CANCEL-GENERATION] Scene state cleanup failed for ${bookId}: ${stateErr.message}`);
+            }
+
             // Clear per-worker cancel tracking (if any was set)
             await redis.del(`animastor:cancelled-workers:${bookId}`);
             await generationProgress.clear(redis, bookId);

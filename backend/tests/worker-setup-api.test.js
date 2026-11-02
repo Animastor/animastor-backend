@@ -469,10 +469,48 @@ describe('Private worker setup contract API (Phase 3)', function () {
             const { worker } = await cw.json();
             await writeHeartbeat(redis, 'audio', worker.worker_id);
             await redis.del(config.WORKER_HEARTBEAT_KEY('audio', worker.worker_id));
-            await query('UPDATE workers SET last_seen = $1 WHERE worker_id = $2', [Date.now(), worker.worker_id]);
+            // WL-1: PG stores seconds; the API keeps milliseconds.
+            const seenS = Math.floor(Date.now() / 1000);
+            await query('UPDATE workers SET last_seen = $1 WHERE worker_id = $2', [seenS, worker.worker_id]);
             const res = await (await fetch(`${base}/api/v1/private-worker/setup/workers/${worker.worker_id}`, { headers: { Cookie: alice.cookie } })).json();
             expect(res.worker.status).to.equal('OFFLINE');
-            expect(res.worker.last_seen).to.be.a('number');
+            expect(res.worker.last_seen).to.equal(seenS * 1000);
+        });
+
+        // GPU E2E 2026-11-02 (§8 п.6) — WL-1 + heartbeat mirror on the real
+        // test PG: seconds only (CHECK), live → online/version, gone → offline.
+        it('WL-1: workers.last_seen rejects ms; heartbeat sync mirrors status/last_seen/version', async () => {
+            const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
+            const { syncWorkerLiveness } = require('../src/services/worker-liveness-sync.cjs');
+            const cw = await fetch(`${base}/api/v1/workers`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Cookie: alice.cookie },
+                body: JSON.stringify({ name: 'wl1-liveness', worker_type: 'audio' }),
+            });
+            const { worker } = await cw.json();
+            let rejected = null;
+            try {
+                await query('UPDATE workers SET last_seen = $1 WHERE worker_id = $2', [Date.now(), worker.worker_id]);
+            } catch (err) { rejected = err; }
+            expect(rejected && rejected.message).to.contain('workers_last_seen_seconds_check');
+
+            const tsMs = Date.now();
+            await redis.set(config.WORKER_HEARTBEAT_KEY('audio', worker.worker_id),
+                JSON.stringify({ type: 'audio', worker_id: worker.worker_id, ts: tsMs, version: '2.2.2' }), 'EX', 30);
+            const on = await syncWorkerLiveness(redis, { workerRepo });
+            expect(on.ok).to.equal(true);
+            let row = (await query('SELECT status, last_seen, version FROM workers WHERE worker_id = $1', [worker.worker_id])).rows[0];
+            expect(row.status).to.equal('online');
+            expect(Number(row.last_seen)).to.equal(Math.floor(tsMs / 1000));
+            expect(row.version).to.equal('2.2.2');
+
+            await redis.del(config.WORKER_HEARTBEAT_KEY('audio', worker.worker_id));
+            const off = await syncWorkerLiveness(redis, { workerRepo });
+            expect(off.ok).to.equal(true);
+            row = (await query('SELECT status, last_seen, version FROM workers WHERE worker_id = $1', [worker.worker_id])).rows[0];
+            expect(row.status).to.equal('offline');
+            expect(Number(row.last_seen), 'last_seen kept after going offline').to.equal(Math.floor(tsMs / 1000));
+            expect(row.version).to.equal('2.2.2');
         });
 
         it('never exposes token/token_hash — at most token_prefix', async () => {

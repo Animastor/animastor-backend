@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.2 (2026-11-02) — эпоха dispatch в audio-orch, без ложного FAILED
+
+Основание: `reports/2026-11-02/gpu-e2e-installer-025-logs.md` §6.1, §8 п.3, п.5 —
+состояние audio-orch отменённой попытки (11:09) пережило отмену, новый
+dispatch (12:25) унаследовал его `started_at`, и watchdog через 28 с после
+dispatch'а пометил здоровый прогон FAILED (`chunk_stall_timeout:4619s`), затем
+`[FAIL-STAGE] Rejected … missing_dispatch_id` и `[INVARIANT] 1 audio-orch violations`.
+Описание: animastor-docs `architecture/COMMAND_ONLY_GENERATION.md` §«Эпоха dispatch».
+
+### Changed (поведение)
+
+- `scene-orchestrator.executeAudioDispatch` открывает новую эпоху на каждом
+  dispatch: `setWaitingChunks(…, { dispatchId, buildId, expectedCount })`.
+  Хост пишет `started_at=now`, `dispatch_id`, `expected_count`,
+  `chunks_received=0` и убирает `fail_reason`/`failed_at`/`last_chunk_at`
+  прошлой попытки. Хост без поддержки 5-го аргумента ведёт себя как раньше.
+- `reconciliation-engine.checkStalledAudioScenes`: запись проваливается, только
+  если её `dispatch_id` равен живому `dispatch-meta` сцены. Запись без
+  `dispatch_id` или другого dispatch — `stale_state_ignored` (одна info-строка
+  на запись, не FAILED). `failWaitingScene` получает `dispatchId` записи.
+- `orchestrator.failStage` без `dispatchId` → `{failed:false,
+  reason:'stale_state_ignored'}` (info), а не `Rejected … missing_dispatch_id`.
+
+Fence, command-gate (Stage 155) и retry-политика не меняются.
+
 ## 0.3.1 (2026-11-01) — результат GPU обрабатывается один раз
 
 Основание: `reports/2026-11-01/gpu-audio-image-run-analysis.md`, P1 — каждый

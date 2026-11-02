@@ -557,16 +557,57 @@ describe('checkStalledAudioScenes', () => {
         expect(count).to.equal(0);
     });
 
-    it('returns >0 for stalled WAITING_CHUNKS (last_chunk_at older than threshold)', async () => {
+    // GPU E2E 2026-11-02 (§6.1): the watchdog fails only the record of the
+    // LIVE dispatch (record.dispatch_id == dispatch metadata).
+    const DISPATCH_ENGINE_SRC = path.resolve(__dirname, '../../packages/animastor-orchestration/src/runtime/dispatch-engine');
+    async function seedLiveDispatch(r, dispatchId) {
+        await require(DISPATCH_ENGINE_SRC).setDispatchMetadata(r, BOOK_ID, CHAPTER_ID, SCENE_ID, 'audio', {
+            dispatch_id: dispatchId, stage: 'audio', started_at: Date.now(), worker: 'scheduler',
+            retry_attempt: 0, status: 'dispatched',
+        });
+    }
+
+    it('returns >0 for stalled WAITING_CHUNKS of the live dispatch (last_chunk_at older than threshold)', async () => {
         redis = createMockRedis();
         const audioOrchKey = `animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
         await redis.set(audioOrchKey, JSON.stringify({
-            phase: 'WAITING_CHUNKS', build_id: 'build-1',
+            phase: 'WAITING_CHUNKS', build_id: 'build-1', dispatch_id: 'dispatch-live',
             last_chunk_at: Date.now() - 1900000, // ~31.7 min ago, > 30 min threshold (AUDIO_CHUNK_STALL_MS = 1_800_000)
         }));
+        await seedLiveDispatch(redis, 'dispatch-live');
         const engine = mockDeps(redis);
         const count = await engine.checkStalledAudioScenes(redis, { orchestrator: { failStage: async () => {} } });
         expect(count).to.equal(1);
+    });
+
+    it('GPU E2E 2026-11-02: a stalled-looking record WITHOUT dispatch_id is stale_state_ignored (not failed)', async () => {
+        redis = createMockRedis();
+        const audioOrchKey = `animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
+        await redis.set(audioOrchKey, JSON.stringify({
+            phase: 'WAITING_CHUNKS', build_id: 'build-1', expected_count: 2,
+            started_at: Date.now() - 4619000, // the incident record: 11:09 attempt seen at 12:26
+        }));
+        await seedLiveDispatch(redis, 'dispatch-new');
+        const engine = mockDeps(redis);
+        let failStageCalls = 0;
+        const count = await engine.checkStalledAudioScenes(redis, { orchestrator: { failStage: async () => { failStageCalls++; } } });
+        expect(count).to.equal(0);
+        expect(failStageCalls).to.equal(0);
+        expect(JSON.parse(await redis.get(audioOrchKey)).phase).to.equal('WAITING_CHUNKS');
+    });
+
+    it('GPU E2E 2026-11-02: a record of ANOTHER dispatch (stale epoch) is not failed', async () => {
+        redis = createMockRedis();
+        const audioOrchKey = `animastor:audio-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
+        await redis.set(audioOrchKey, JSON.stringify({
+            phase: 'WAITING_CHUNKS', build_id: 'build-1', dispatch_id: 'dispatch-old',
+            started_at: Date.now() - 4619000,
+        }));
+        await seedLiveDispatch(redis, 'dispatch-new');
+        const engine = mockDeps(redis);
+        const count = await engine.checkStalledAudioScenes(redis, { orchestrator: { failStage: async () => {} } });
+        expect(count).to.equal(0);
+        expect(JSON.parse(await redis.get(audioOrchKey)).phase).to.equal('WAITING_CHUNKS');
     });
 
     it('skips WAITING_CHUNKS without last_chunk_at', async () => {

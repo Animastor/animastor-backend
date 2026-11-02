@@ -280,7 +280,16 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
     // jobs, иначе первый чанк может вернуться быстрее чем setWaitingChunks выполнится,
     // и completeChunk увидит фазу GENERATING → early return → чанк на диске есть,
     // но merge не запускается → retry exhausting → failStage → re-dispatch → цикл.
-    await audioFsmOp('setWaitingChunks')(redis, bookId, chapterId, sceneId);
+    //
+    // GPU E2E 2026-11-02 (§6.1): every dispatch opens a NEW audio-orch epoch
+    // (started_at=now, dispatch_id, expected_count; fail_reason/failed_at/
+    // last_chunk_at of an earlier or cancelled attempt are dropped). The stall
+    // watchdog compares this dispatch_id with the live dispatch metadata.
+    await audioFsmOp('setWaitingChunks')(redis, bookId, chapterId, sceneId, {
+        dispatchId,
+        buildId,
+        expectedCount: segments.buildSegments(sceneData).length,
+    });
 
     const result = await audio.generateSceneAudio(redis, sceneData, bookData, buildId, bookId, dispatchId);
 

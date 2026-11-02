@@ -473,6 +473,33 @@ async function checkPartialBuilds(redis, bookId, chapterId, sceneId) {
 // Важно: watchdog НЕ конкурирует с gpu-hub timeout — они ловят
 // разные сценарии (стоп прогресса vs мёртвый воркер).
 
+// GPU E2E 2026-11-02 (§6.1) — dispatch epoch of an audio-orch record.
+// current=true only when the record carries a dispatch_id AND it equals the
+// live dispatch metadata of the scene's audio stage. A metadata read error is
+// "cannot prove" → not current (the watchdog never fails on a guess).
+async function _audioDispatchEpoch(redis, bookId, chapterId, sceneId, orchState) {
+    if (!orchState || !orchState.dispatch_id) return { current: false, reason: 'no_dispatch_id' };
+    let meta = null;
+    try {
+        meta = await require('./dispatch-engine').getDispatchMetadata(redis, bookId, chapterId, sceneId, 'audio');
+    } catch (_) {
+        return { current: false, reason: 'dispatch_metadata_unreadable' };
+    }
+    if (!meta || !meta.dispatch_id) return { current: false, reason: 'no_active_dispatch' };
+    if (meta.dispatch_id !== orchState.dispatch_id) return { current: false, reason: 'other_dispatch' };
+    return { current: true, reason: 'current_dispatch' };
+}
+
+// One info line per stale record (scene + its epoch), not one per cycle.
+const _staleAudioOrchLogged = new Set();
+function _logStaleAudioOrchOnce(sceneRef, orchState, reason) {
+    const k = `${sceneRef}|${orchState.dispatch_id || ''}|${orchState.started_at || ''}`;
+    if (_staleAudioOrchLogged.has(k)) return;
+    if (_staleAudioOrchLogged.size > 5000) _staleAudioOrchLogged.clear();
+    _staleAudioOrchLogged.add(k);
+    log(`[STALLED-AUDIO] ${sceneRef} — stale_state_ignored (${reason}): the record is not of the live dispatch, not failing it`);
+}
+
 async function checkStalledAudioScenes(redis, deps) {
     // O-7: the audio FSM is consumed through the AudioFsmPort (host adapter:
     // storage/audio-fsm-adapter). The pre-O-7 optional-load semantics are
@@ -513,12 +540,24 @@ async function checkStalledAudioScenes(redis, deps) {
             const age = Date.now() - threshold;
             if (age < AUDIO_CHUNK_STALL_MS) continue;
 
+            // GPU E2E 2026-11-02 (§6.1): the record must belong to the LIVE
+            // dispatch. A record without dispatch_id (legacy / pre-epoch) or
+            // of another dispatch is a stale epoch — failing it marked a
+            // healthy run FAILED (`chunk_stall_timeout:4619s`). It is ignored
+            // (one info line per record), never failed.
+            const epoch = await _audioDispatchEpoch(redis, bookId, chapterId, sceneId, orchState);
+            if (!epoch.current) {
+                _logStaleAudioOrchOnce(`${bookId}/${chapterId}/${sceneId}`, orchState, epoch.reason);
+                continue;
+            }
+
             const reason = `chunk_stall_timeout:${Math.round(age / 1000)}s`;
-            warn(`[STALLED-AUDIO] ${bookId}/${chapterId}/${sceneId} — ${reason} (last_chunk_at=${!!lastChunkAt} started_at=${!!startedAt})`);
+            warn(`[STALLED-AUDIO] ${bookId}/${chapterId}/${sceneId} — ${reason} (last_chunk_at=${!!lastChunkAt} started_at=${!!startedAt} dispatch=${String(orchState.dispatch_id).slice(0, 24)})`);
 
             try {
                 await audioOrch.failWaitingScene(redis, bookId, chapterId, sceneId, buildId, reason, {
-                    orchestrator: deps.orchestrator
+                    orchestrator: deps.orchestrator,
+                    dispatchId: orchState.dispatch_id,
                 });
                 stalled++;
             } catch (err) {
@@ -551,7 +590,7 @@ async function checkStalledAudioScenes(redis, deps) {
                     warn(`[STALLED-AUDIO] completeChunk recovery failed: ${err.message}`);
                     try {
                         await audioOrch.failWaitingScene(redis, bookId, chapterId, sceneId, buildId,
-                            `recovery_fallback:${err.message}`, { orchestrator: deps.orchestrator });
+                            `recovery_fallback:${err.message}`, { orchestrator: deps.orchestrator, dispatchId: orchState.dispatch_id });
                         stalled++;
                     } catch (fsErr) {
                         warn(`[STALLED-AUDIO] failWaitingScene fallback failed: ${fsErr.message}`);
@@ -561,7 +600,7 @@ async function checkStalledAudioScenes(redis, deps) {
                 warn(`[STALLED-AUDIO] ${bookId}/${chapterId}/${sceneId} — ${presentCount}/${expectedCount} on disk, no last_chunk_at. Partial chunks, failing scene.`);
                 try {
                     await audioOrch.failWaitingScene(redis, bookId, chapterId, sceneId, buildId,
-                        `partial_chunks:${presentCount}/${expectedCount}_no_timestamps`, { orchestrator: deps.orchestrator });
+                        `partial_chunks:${presentCount}/${expectedCount}_no_timestamps`, { orchestrator: deps.orchestrator, dispatchId: orchState.dispatch_id });
                     stalled++;
                 } catch (err) {
                     warn(`[STALLED-AUDIO] failWaitingScene failed: ${err.message}`);

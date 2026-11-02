@@ -1665,6 +1665,74 @@ async function markFencePublication(redis, { bookId, chapterId, sceneId, jobId, 
     }
 }
 
+// ── unrecoverable publication (GPU E2E 2026-11-02 §6.2) ────────────────────
+// A committed fence whose canonical bytes no longer match its manifest AND
+// whose staged copy is gone cannot be re-published by the resume loop — there
+// is nothing to publish from. Without a terminal record the loop retried it
+// every 60 s forever (`canonical_content_mismatch`). The record is bound to
+// the fence: a NEW fence of the same task is never skipped, and a redelivery
+// that re-stages the same fence publishes normally and clears the record.
+//
+//   { fence, reason, at, job_id, expected_sha256, expected_bytes }
+//
+// Durable (no TTL), like the manifest it shadows — a TTL would only restart
+// the 60-second loop after it expires.
+const IDEM_UNRECOVERABLE_PREFIX = 'animastor:fence-unrecoverable:';
+
+/** Key of the per-task "fence is unrecoverable" record. */
+function fenceUnrecoverableKey(bookId, chapterId, sceneId, jobId) {
+    return `${IDEM_UNRECOVERABLE_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}`;
+}
+
+/**
+ * Read the unrecoverable record of a task. Never throws.
+ * @returns {Promise<{status:'ok'|'absent'|'corrupt'|'error', record?:object}>}
+ */
+async function readFenceUnrecoverable(redis, { bookId, chapterId, sceneId, jobId } = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return { status: 'absent' };
+    let raw;
+    try {
+        raw = await redis.get(fenceUnrecoverableKey(bookId, chapterId, sceneId, jobId));
+    } catch (err) {
+        return { status: 'error', error: String((err && err.message) || err || 'redis error').slice(0, 200) };
+    }
+    if (raw == null || raw === false) return { status: 'absent' };
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.fence) return { status: 'corrupt' };
+    return { status: 'ok', record: parsed };
+}
+
+/** Mark a committed fence unrecoverable (reason + time). Returns false on a Redis error. */
+async function markFenceUnrecoverable(redis, { bookId, chapterId, sceneId, jobId, fence, reason, expectedSha256 = null, expectedBytes = null, now = Date.now() } = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId || !fence) return false;
+    const record = {
+        fence: String(fence).toLowerCase(),
+        reason: String(reason || 'unknown').slice(0, 120),
+        at: Number(now) || 0,
+        job_id: String(jobId),
+    };
+    if (/^[0-9a-f]{64}$/i.test(String(expectedSha256 || ''))) record.expected_sha256 = String(expectedSha256).toLowerCase();
+    if (Number.isFinite(Number(expectedBytes)) && expectedBytes !== null) record.expected_bytes = Number(expectedBytes);
+    try {
+        await redis.set(fenceUnrecoverableKey(bookId, chapterId, sceneId, jobId), JSON.stringify(record));
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+/** Remove the unrecoverable record of a task (best effort, never throws). */
+async function clearFenceUnrecoverable(redis, { bookId, chapterId, sceneId, jobId } = {}) {
+    if (!redis || !bookId || !chapterId || !sceneId || !jobId) return false;
+    try {
+        await redis.del(fenceUnrecoverableKey(bookId, chapterId, sceneId, jobId));
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 /** Key of the idempotent commit journal entry of one (task, fence). */
 function fenceJournalKey(bookId, chapterId, sceneId, jobId, fence) {
     return `${IDEM_FENCE_JOURNAL_PREFIX}${encodeKeyComponent(bookId)}:${encodeKeyComponent(chapterId)}:${encodeKeyComponent(sceneId)}:${encodeKeyComponent(jobId)}:${encodeKeyComponent(fence)}`;
@@ -2162,6 +2230,11 @@ module.exports = {
     fencePublishKey,
     readFencePublication,
     markFencePublication,
+    IDEM_UNRECOVERABLE_PREFIX,
+    fenceUnrecoverableKey,
+    readFenceUnrecoverable,
+    markFenceUnrecoverable,
+    clearFenceUnrecoverable,
     FENCE_COMMIT_SCRIPT,
     FENCE_COMMIT_VERDICTS,
     FENCE_COMMIT_REJECTED,

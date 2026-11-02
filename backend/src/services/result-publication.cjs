@@ -864,6 +864,12 @@ async function commitFencedResult(redis, config, {
         bookId, chapterId, sceneId, jobId, buildId, fence, canonicalPath,
     }, { fs: fsImpl });
 
+    // A (re)delivery that published this task supersedes any earlier
+    // "unrecoverable" verdict (GPU E2E 2026-11-02 §6.2). Best effort.
+    if (publication.published || publication.reason === 'already_published') {
+        await qidem.clearFenceUnrecoverable(redis, { bookId, chapterId, sceneId, jobId });
+    }
+
     return {
         status: verdict.status, staged,
         published: publication.published,
@@ -897,7 +903,7 @@ async function commitFencedResult(redis, config, {
  */
 async function resumePendingPublications(redis, config, { limit = RESUME_MANIFEST_LIMIT } = {}, deps = {}) {
     const fsImpl = deps.fs || fs;
-    const out = { scanned: 0, resumed: 0, cleaned: 0, orphans: 0, superseded: 0, errors: 0 };
+    const out = { scanned: 0, resumed: 0, cleaned: 0, orphans: 0, superseded: 0, errors: 0, unrecoverable: 0, markedUnrecoverable: 0 };
     if (!redis || typeof redis.scan !== 'function') return out;
     const prefix = qidem.IDEM_MANIFEST_PREFIX;
     let cursor = '0';
@@ -952,6 +958,15 @@ async function resumePendingPublications(redis, config, { limit = RESUME_MANIFES
                 const canonical = path.resolve(buildDir, String(manifest.canonical_path || ''));
                 const staged = path.resolve(buildDir, String(manifest.staged_path || ''));
                 if (!_isInside(buildDir, canonical) || !_isInside(buildDir, staged)) { out.errors++; continue; }
+                // GPU E2E 2026-11-02 (§6.2) — a fence already marked
+                // unrecoverable is skipped silently (one warn was logged when
+                // it was marked). Only THIS fence: a newer fence of the task
+                // carries a different id and is resumed normally.
+                const unrec = await qidem.readFenceUnrecoverable(redis, { bookId, chapterId, sceneId, jobId });
+                if (unrec.status === 'ok' && String(unrec.record.fence).toLowerCase() === String(fence).toLowerCase()) {
+                    out.unrecoverable++;
+                    continue;
+                }
                 try {
                     // The SAME state machine as the in-process publication:
                     // only the publication marker can prove that the canonical
@@ -968,6 +983,22 @@ async function resumePendingPublications(redis, config, { limit = RESUME_MANIFES
                     // Stage 137 — a fence that lost its intent (or its
                     // publication lock) while the rename was in flight is
                     // SUPERSEDED, never "resumed". No success is reported.
+                    if (err && err.code === 'canonical_content_mismatch') {
+                        // GPU E2E 2026-11-02 (§6.2): no staged copy, canonical
+                        // diverged — nothing can ever be re-published from
+                        // here. Terminal: record reason + time, warn ONCE.
+                        const marked = await qidem.markFenceUnrecoverable(redis, {
+                            bookId, chapterId, sceneId, jobId, fence,
+                            reason: 'canonical_content_mismatch',
+                            expectedSha256: manifest.sha256, expectedBytes: manifest.bytes,
+                        });
+                        if (marked) {
+                            out.unrecoverable++;
+                            out.markedUnrecoverable++;
+                            console.warn(`[RESULT-PUBLICATION] fence=${String(fence).slice(0, 12)} job=${jobId} marked unrecoverable (canonical_content_mismatch, no staged copy) — resume will not retry it; a redelivery of the result can still re-stage it`);
+                            continue;
+                        }
+                    }
                     if (err && err.code === 'staged_missing') out.orphans++;
                     else if (err && (err.code === 'stale_intent' || err.code === 'publication_lock_lost')) out.superseded++;
                     else out.errors++;

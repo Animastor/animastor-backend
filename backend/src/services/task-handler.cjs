@@ -336,7 +336,29 @@ module.exports = function(redis, config, deps) {
         const cleanBase64 = result_base64.includes(',')
             ? result_base64.split(',')[1]
             : result_base64;
-        const resultBuffer = Buffer.from(cleanBase64, 'base64');
+        let resultBuffer = Buffer.from(cleanBase64, 'base64');
+
+        // GPU E2E 2026-11-02 (§6.2) — a padded TTS chunk is trimmed BEFORE
+        // staging, so the fenced manifest (sha256/bytes) describes the final
+        // canonical file. The merge no longer rewrites committed chunks:
+        // the canonical artifact never changes outside a fence.
+        if (parsed.kind === 'audio_chunk' && resultBuffer.length > 0
+            && audio && typeof audio.trimPaddedAudioBuffer === 'function'
+            && typeof deps.getChunk === 'function') {
+            let chunkMeta = null;
+            try { chunkMeta = await deps.getChunk(parsed.assetId); } catch (_) { chunkMeta = null; }
+            if (chunkMeta && chunkMeta.padded_text) {
+                const trim = await audio.trimPaddedAudioBuffer(resultBuffer, chunkMeta.original_text_length, {
+                    extension: `.${asset.extension || 'mp3'}`,
+                });
+                if (trim && Buffer.isBuffer(trim.buffer) && trim.buffer.length > 0) {
+                    if (trim.trimmed) {
+                        log(`✂️ Padded chunk trimmed before commit: ${job_id} ${resultBuffer.length} → ${trim.buffer.length} bytes`);
+                    }
+                    resultBuffer = trim.buffer;
+                }
+            }
+        }
 
         // ── Stage 131 — staged artifacts & fenced commit ──────────────────
         // The fence of THIS result is proven by the immutable dispatch
