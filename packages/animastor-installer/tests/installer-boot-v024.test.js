@@ -105,6 +105,7 @@ function depsWorld({ restartAfter = 20000, classesLoad = true, installed = false
         fs.mkdirSync(`/proc/${pid}`, { recursive: true });
         fs.writeFileSync(`/proc/${pid}/cmdline`, [PY, `${ROOT}/main.py`, '--listen', '0.0.0.0', '--port', String(port), '--baseurl', PREFIX].join('\0'));
         fs.symlinkSync(ROOT, `/proc/${pid}/cwd`);
+        fs.writeFileSync(`/proc/${pid}/environ`, ['PATH=/opt/conda/bin:/usr/bin', 'HOME=/home/jovyan', 'TIR_TOKEN=x'].join('\0'));
     };
     writeProc(900);
     const tick = () => {
@@ -135,6 +136,17 @@ function depsWorld({ restartAfter = 20000, classesLoad = true, installed = false
                 return { code: 0, stdout: 'Successfully installed', stderr: '' };
             }
             return { code: 0, stdout: '', stderr: '' };
+        },
+        // installer 0.2.5: the installer starts the same command line itself
+        // when the platform does not (pid 902)
+        spawnDaemon(cmd, args, opts) {
+            w.spawns = (w.spawns || []).concat([{ cmd, args, opts }]);
+            w.pid = 902;
+            w.alive = !w.spawnDies;
+            w.procHasClasses[902] = w.installed && classesLoad;
+            if (opts && opts.logFile) fs.writeFileSync(opts.logFile, w.spawnDies ? 'Traceback\nRuntimeError: CUDA error: no kernel image\n' : 'Starting server\n');
+            writeProc(902);
+            return 902;
         },
         kill(pid, sig) {
             w.kills.push({ pid, sig });
@@ -352,18 +364,39 @@ describe('0.2.4 node dependencies in the Python of the running ComfyUI', () => {
         assert.ok(/the platform started ComfyUI again \(pid 901 at .*\) but it answers, node classes missing: Qwen3TTSLoader, Qwen3TTSVoiceDesign after 120 s/.test(gate.reason), gate.reason);
     });
 
-    it('X6: the platform does not start ComfyUI again within the window → FAILED with a clear reason', async () => {
-        const { io, sleep } = depsWorld({ restartAfter: null });
+    it('X6 (0.2.5): the platform does not start ComfyUI again within the grace window → the installer starts the SAME command line (argv, cwd, environ) and waits for the classes', async () => {
+        const { io, w, sleep, url } = depsWorld({ restartAfter: null });
         const gate = await cli.platformNodeDepsGate(io, {
             instance: await foreignInstance(io), state: typeAState(), root: ROOT, manifests: [ttsManifest()], boot: true,
-            waitMs: 90000, sleep,
+            waitMs: 90000, sleep, workerDir: '/home/jovyan/animastor/worker',
         });
-        assert.strictEqual(gate.failed, true);
+        assert.strictEqual(gate.failed, false, gate.reason);
         assert.strictEqual(gate.restarted, true);
-        assert.strictEqual(gate.reason, 'the platform did not start ComfyUI again within 90 s after it was stopped (old pid 900) — start it from the platform console');
+        assert.strictEqual(gate.restart.started_by, 'installer');
+        assert.strictEqual(w.spawns.length, 1);
+        const sp = w.spawns[0];
+        assert.strictEqual(sp.cmd, PY);
+        assert.deepStrictEqual(sp.args, [`${ROOT}/main.py`, '--listen', '0.0.0.0', '--port', '8890', '--baseurl', PREFIX]);
+        assert.strictEqual(sp.opts.cwd, ROOT);
+        assert.deepStrictEqual(sp.opts.env, { PATH: '/opt/conda/bin:/usr/bin', HOME: '/home/jovyan', TIR_TOKEN: 'x' });
+        assert.strictEqual(sp.opts.logFile, '/home/jovyan/animastor/logs/comfyui-restart.log');
+        assert.strictEqual(gate.instance.pid, 902);
+        assert.strictEqual(gate.instance.url, url, 'the --baseurl prefix is kept');
     });
 
-    it('X6b: deps already satisfied → nothing installed, nothing stopped', async () => {
+    it('X6b (0.2.5): the relaunched ComfyUI exits → FAILED at once with the tail of its log', async () => {
+        const { io, w, sleep } = depsWorld({ restartAfter: null });
+        w.spawnDies = true;
+        const gate = await cli.platformNodeDepsGate(io, {
+            instance: await foreignInstance(io), state: typeAState(), root: ROOT, manifests: [ttsManifest()], boot: true,
+            waitMs: 90000, sleep, workerDir: '/home/jovyan/animastor/worker',
+        });
+        assert.strictEqual(gate.failed, true);
+        assert.ok(/the restarted ComfyUI \(pid 902\) exited: .*CUDA error: no kernel image/.test(gate.reason), gate.reason);
+        assert.ok(/comfyui-restart\.log/.test(gate.fix), gate.fix);
+    });
+
+    it('X6c0: deps already satisfied → nothing installed, nothing stopped', async () => {
         const { io, w, sleep } = depsWorld({ installed: true });
         const gate = await cli.platformNodeDepsGate(io, {
             instance: await foreignInstance(io), state: typeAState(), root: ROOT, manifests: [ttsManifest()], boot: true, waitMs: 600000, sleep,
@@ -401,9 +434,9 @@ describe('0.2.4 restart option', () => {
             waitMs: 600000, sleep,
         });
         assert.strictEqual(questions.length, 1);
-        assert.ok(/^Install the missing Python packages — qwen3-tts \(.*\) — into \/opt\/conda\/bin\/python3 and restart the platform's ComfyUI \(pid 900\) so it loads them\?$/.test(questions[0]), questions[0]);
+        assert.ok(/^Install the missing Python packages — qwen3-tts \(.*\) — for \/opt\/conda\/bin\/python3 and restart the platform's ComfyUI \(pid 900\) so it loads them\?$/.test(questions[0]), questions[0]);
         assert.strictEqual(gate.failed, false, gate.reason);
-        assert.deepStrictEqual(gate.record, { restartPlatformComfy: true });
+        assert.strictEqual(gate.record.restartPlatformComfy, true);
         assert.strictEqual(w.pid, 901);
 
         // the record lands in install-state.json and survives the next engine run
@@ -420,7 +453,7 @@ describe('0.2.4 restart option', () => {
             prompt: { available: true, confirm: async (q) => { q3.push(q); return false; } }, waitMs: 600000, sleep: w3.sleep,
         });
         assert.strictEqual(q3.length, 1);
-        assert.deepStrictEqual(g3.record, { restartPlatformComfy: false });
+        assert.strictEqual(g3.record.restartPlatformComfy, false);
         assert.strictEqual(w3.w.kills.length, 0);
     });
 });

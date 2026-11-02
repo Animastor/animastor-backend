@@ -67,6 +67,13 @@ function summarizeRuntime(entries) {
         .join(', ') || null;
 }
 
+/** Headline of a missing-node-classes cause (node-deps diagnoseMissingClasses). */
+const CAUSE_TITLE = {
+    'deps-missing': 'Python packages missing',
+    'import-failed': 'IMPORT FAILED in the ComfyUI log',
+    'restart-needed': 'ComfyUI restart needed',
+};
+
 /**
  * @param {object} args
  * @param {object} args.report - resolver report
@@ -88,9 +95,9 @@ function buildVerificationReport({ report, live = {} }) {
     let fails = 0;
     let warns = 0;
 
-    const push = (verdict, label, detail) => {
+    const push = (verdict, label, detail, extra = null) => {
         lines.push(line(verdict, label, detail));
-        checks.push({ verdict, label, detail: detail || null });
+        checks.push({ verdict, label, detail: detail || null, ...(extra || {}) });
         if (verdict === false) fails += 1;
         else if (verdict === null) warns += 1;
     };
@@ -134,9 +141,16 @@ function buildVerificationReport({ report, live = {} }) {
             const nodeEntriesAll = byKind('custom_node');
             const presentButUnregistered = nodeEntriesAll.length > 0
                 && nodeEntriesAll.every((e) => e.status === 'installed');
-            push(false, 'ComfyUI node classes', `missing: ${c.missing_node_classes.join(', ')}${presentButUnregistered
-                ? ' — the node files are present, but the running ComfyUI did not register them (import failed — see <ComfyUI>/comfyui-installer.log — or the instance predates the install); restart ComfyUI and re-run verify'
-                : ''}`);
+            const cause = c.missing_node_classes_cause || null;
+            if (cause && cause.kind && cause.kind !== 'unknown') {
+                // Installer 0.2.5: the cause, not a generic "re-run" (the fix
+                // line is chosen from cause.kind in engine/summary.js).
+                push(false, 'ComfyUI node classes', `missing: ${c.missing_node_classes.join(', ')} — ${CAUSE_TITLE[cause.kind] || cause.kind}: ${cause.detail}`, { cause });
+            } else {
+                push(false, 'ComfyUI node classes', `missing: ${c.missing_node_classes.join(', ')}${presentButUnregistered
+                    ? ' — the node files are present, but the running ComfyUI did not register them (import failed — see <ComfyUI>/comfyui-installer.log — or the instance predates the install); restart ComfyUI and re-run verify'
+                    : ''}${cause && cause.detail ? ` (${cause.detail})` : ''}`, cause ? { cause } : null);
+            }
         }
     } else {
         push(null, 'ComfyUI API', 'not checked (start ComfyUI and re-run verification)');

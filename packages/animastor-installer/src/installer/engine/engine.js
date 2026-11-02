@@ -39,6 +39,7 @@ const prereq = require('./prereq');
 const management = require('../management');
 const comfyOwnerMod = require('./comfy-owner');
 const nodeDeps = require('./node-deps');
+const pydeps = require('./pydeps');
 const { createProgressReporter } = require('./progress');
 const { buildVerificationReport } = require('../verification-report');
 
@@ -415,6 +416,11 @@ async function runInstallation(args) {
         }
         if (options.hubVersion) st.hub_version = String(options.hubVersion);
         else if (process.env.ANIMASTOR_HUB_VERSION) st.hub_version = process.env.ANIMASTOR_HUB_VERSION;
+    }
+    // Installer 0.2.5: what the CLI created before the engine ran (node-deps
+    // overlay, prestartup custom node) is owned → removed by `uninstall`.
+    for (const e of options.ownedServices || []) {
+        if (e && e.path && !dryRun) state.addOwnedComponent(st, 'services', e);
     }
     const save = () => state.saveState(io, statePath, st, io.now);
     if (initialState) {
@@ -1139,7 +1145,7 @@ async function runInstallation(args) {
         let workerStart = null;
         if (options.startWorker && workerDir && !runtimeFatal) {
             const r = await log.step('start worker', async () => {
-                const bundleChanged = result.results.worker.some((x) => x.bundle && (x.bundle.files_installed || []).length > 0);
+                const bundleChanged = !!options.bundleRefreshedEarly || result.results.worker.some((x) => x.bundle && (x.bundle.files_installed || []).length > 0);
                 const res = worker.startWorker(io, { workerDir, nodeBin, graceMs: options.workerGraceMs || 3000, forceRestart: workerConfigChanged || bundleChanged });
                 workerStart = res;
                 if (!res.started || !res.alive) {
@@ -1250,6 +1256,51 @@ async function runInstallation(args) {
         return result;
     } finally {
         if (removeInterruptGuard) removeInterruptGuard();
+    }
+}
+
+/**
+ * Installer 0.2.5: bring an INSTALLED worker bundle to the version this
+ * installer ships (its bundled copy, else the hub's published bundle) —
+ * called by the CLI BEFORE any check that can end the run early (live E2E
+ * 02.11: installer 0.2.4 stopped at the node-deps gate and left bundle 2.2.0
+ * behind). A missing installation is left to the regular install step.
+ * @returns {Promise<{ status: 'absent'|'current'|'unknown'|'updated'|'failed', have: string|null, want: string|null, files_installed?: string[], reason?: string }>}
+ */
+async function refreshInstalledWorkerBundle(io, { workerDir, manifest, repoRoot = null, hubUrl = null, log = null, nodeBin = null }) {
+    if (!workerDir || !manifest || !io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) return { status: 'absent', have: null, want: null };
+    const srcDir = repoBundleSource.resolveRepoBundleDir(io.fs, repoRoot);
+    const have = worker.readPkgVersion(io, workerDir);
+    let want = srcDir ? worker.readPkgVersion(io, srcDir) : null;
+    if (!want && hubUrl && io.http && io.http.fetchJson) {
+        try {
+            const meta = await io.http.fetchJson(`${hubUrl.replace(/\/$/, '')}/worker-bundle/sha256`);
+            if (meta && meta.status === 200 && meta.json && typeof meta.json.version === 'string') want = meta.json.version;
+        } catch (_) { /* hub unreachable */ }
+    }
+    if (!have || !want) return { status: 'unknown', have, want };
+    if (have === want) return { status: 'current', have, want };
+    const wbFiles = ((manifest.worker_bundle || {}).files) || [];
+    const missingFromRepo = wbFiles.filter((f) => !(srcDir && io.fs.existsSync(path.join(srcDir, f))));
+    let bundleDir = null;
+    let bundleTmp = null;
+    try {
+        if (missingFromRepo.length > 0 && hubUrl) {
+            const fetched = await worker.fetchHubWorkerBundle(io, { hubUrl });
+            if (fetched.bundleDir) { bundleDir = fetched.bundleDir; bundleTmp = fetched.tmpDir; }
+            else return { status: 'failed', have, want, reason: `worker bundle fetch failed: ${fetched.reason}` };
+        }
+        const r = worker.installWorkerBundle(io, { workerDir, manifest, repoRoot, bundleDir, hubUrl, httpFetchText: null, log, update: true, nodeBin });
+        if (r.status !== 'installed') return { status: 'failed', have, want, reason: r.reason || r.status };
+        const now = worker.readPkgVersion(io, workerDir);
+        if (now !== want) return { status: 'failed', have, want, reason: `bundle is ${now} after the update, expected ${want}` };
+        return { status: 'updated', have, want, files_installed: r.files_installed || [] };
+    } catch (err) {
+        return { status: 'failed', have, want, reason: err.message };
+    } finally {
+        if (bundleTmp) {
+            try { io.fs.rmSync(bundleTmp, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+        }
     }
 }
 
@@ -1426,7 +1477,35 @@ async function runVerification({ io, manifests, roots, options, log, crypto, tok
                 }
                 if (missingClasses.length === 0) log.info('node classes registered');
             }
-            if (missingClasses.length > 0) live.comfyui.missing_node_classes = missingClasses;
+            if (missingClasses.length > 0) {
+                live.comfyui.missing_node_classes = missingClasses;
+                // Installer 0.2.5: say WHY (missing packages / IMPORT FAILED /
+                // restart needed) — "run doctor" alone looped on the live node.
+                try {
+                    const ownerInfo = options.comfyOwner || null;
+                    const pid = ownerInfo && ownerInfo.pid ? ownerInfo.pid : null;
+                    const py = pid ? nodeDeps.pythonOfProcess(io, pid).python : null;
+                    let extraPaths = [];
+                    if (py && workerDir && ownerInfo && ownerInfo.owner === 'foreign') {
+                        const plan = pydeps.planPersistence(io, { python: py, root: comfyuiRoot, base: pydeps.overlayBase(workerDir), create: false });
+                        if (plan.kind === 'overlay' && plan.sitePackages && io.fs.existsSync(plan.sitePackages)) extraPaths = [plan.sitePackages];
+                    }
+                    const logFiles = [
+                        workerDir ? path.join(path.dirname(path.resolve(workerDir)), 'logs', 'comfyui-restart.log') : null,
+                        comfyuiRoot ? path.join(comfyuiRoot, 'comfyui-installer.log') : null,
+                    ].filter(Boolean);
+                    const diag = await nodeDeps.diagnoseMissingClasses(io, {
+                        missingClasses, manifests, root: comfyuiRoot, url: baseUrl, pid, python: py, extraPaths, logFiles,
+                    });
+                    live.comfyui.missing_node_classes_cause = {
+                        kind: diag.kind, detail: diag.detail, log_source: diag.log_source,
+                        owner: ownerInfo && ownerInfo.owner === 'foreign' ? 'foreign' : 'managed',
+                    };
+                    log.info(`node classes missing — cause: ${diag.kind}: ${diag.detail}`);
+                } catch (err) {
+                    log.warn(`node classes missing — cause not determined: ${err.message}`);
+                }
+            }
         }
         // workflow static validation (no generation) — only meaningful when
         // at least one OPTIONAL profile workflow copy is actually installed;
@@ -1568,6 +1647,7 @@ module.exports = {
     comfyPortState,
     autoPickComfyPort,
     platformComfyMissingChecks,
+    refreshInstalledWorkerBundle,
     desiredEnvWiring,
     endToEndChecks,
     CPU_MODE_WARNING,
