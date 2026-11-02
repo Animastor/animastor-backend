@@ -255,7 +255,7 @@ async function rotateCredential(workerId, workspaceId) {
  */
 async function revokeWorker(workerId, workspaceId) {
     const { rows, rowCount } = await query(`
-        UPDATE workers SET revoked_at = EXTRACT(EPOCH FROM NOW())::bigint * 1000
+        UPDATE workers SET revoked_at = EXTRACT(EPOCH FROM NOW())::bigint
         WHERE worker_id = $1 AND workspace_id = $2 AND revoked_at IS NULL
         RETURNING token_hash
     `, [workerId, workspaceId]);
@@ -323,7 +323,7 @@ async function rotateSystemCredential(workerId) {
 /** Revoke a SYSTEM worker (admin path). @see revokeWorker */
 async function revokeSystemWorker(workerId) {
     const { rows, rowCount } = await query(`
-        UPDATE workers SET revoked_at = EXTRACT(EPOCH FROM NOW())::bigint * 1000
+        UPDATE workers SET revoked_at = EXTRACT(EPOCH FROM NOW())::bigint
         WHERE worker_id = $1 AND mode = 'system' AND revoked_at IS NULL
         RETURNING token_hash
     `, [workerId]);
@@ -657,7 +657,7 @@ async function listSharedWithMe(userId, now = Date.now()) {
         worker_type: row.worker_type,
         capabilities: row.capabilities || null,
         owner_workspace_id: row.owner_workspace_id,
-        revoked_at: row.revoked_at != null ? Number(row.revoked_at) : null,
+        revoked_at: revokedAtMs(row),
         last_seen: lastSeenMs(row),
         created_at: row.created_at != null ? Number(row.created_at) : null,
         granted_at: row.granted_at != null ? Number(row.granted_at) : null,
@@ -752,12 +752,21 @@ async function findActiveByIdWithTokenHash(workerId, now = Date.now()) {
  * The public API keeps milliseconds (the live heartbeat `ts` is ms and both
  * fronts render ms), so every reader converts through this helper.
  */
-function lastSeenMs(row) {
-    if (!row || row.last_seen == null) return null;
-    const v = Number(row.last_seen);
+function secondsToApiMs(value) {
+    if (value == null) return null;
+    const v = Number(value);
     if (!Number.isFinite(v)) return null;
-    // A legacy ms value that escaped WL-1 is passed through unchanged.
+    // A legacy ms value that escaped WL-1/WL-2 is passed through unchanged.
     return v > 100000000000 ? v : v * 1000;
+}
+
+function lastSeenMs(row) {
+    return row ? secondsToApiMs(row.last_seen) : null;
+}
+
+/** `workers.revoked_at` is epoch SECONDS (WL-2); the API keeps ms. */
+function revokedAtMs(row) {
+    return row ? secondsToApiMs(row.revoked_at) : null;
 }
 
 function nowSeconds(nowMs = Date.now()) {
@@ -841,6 +850,7 @@ module.exports = {
     touchLastSeen,
     syncLivenessFromHeartbeats,
     lastSeenMs,
+    revokedAtMs,
     startSharePolicy,
     stopSharePolicy,
     getActiveSharePolicy,

@@ -513,6 +513,27 @@ describe('Private worker setup contract API (Phase 3)', function () {
             expect(row.version).to.equal('2.2.2');
         });
 
+        it('WL-2: workers.revoked_at is written in seconds, rejects ms; the API keeps ms', async () => {
+            const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
+            const cw = await fetch(`${base}/api/v1/workers`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Cookie: alice.cookie },
+                body: JSON.stringify({ name: 'wl2-revoke', worker_type: 'audio' }),
+            });
+            const { worker } = await cw.json();
+            const before = Math.floor(Date.now() / 1000);
+            const row = await workerRepo.revokeWorker(worker.worker_id, worker.workspace_id);
+            expect(row, 'revoked').to.be.ok;
+            const stored = Number((await query('SELECT revoked_at FROM workers WHERE worker_id = $1', [worker.worker_id])).rows[0].revoked_at);
+            expect(stored).to.be.within(before - 1, before + 5);
+            expect(workerRepo.revokedAtMs({ revoked_at: stored })).to.equal(stored * 1000);
+            let rejected = null;
+            try {
+                await query('UPDATE workers SET revoked_at = $1 WHERE worker_id = $2', [Date.now(), worker.worker_id]);
+            } catch (err) { rejected = err; }
+            expect(rejected && rejected.message).to.contain('workers_revoked_at_seconds_check');
+        });
+
         it('never exposes token/token_hash — at most token_prefix', async () => {
             const text = await (await fetch(`${base}/api/v1/private-worker/setup/workers/${aliceWorker.worker_id}`, { headers: { Cookie: alice.cookie } })).text();
             expect(text).to.not.contain('token_hash');

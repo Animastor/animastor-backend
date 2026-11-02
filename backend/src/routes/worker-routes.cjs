@@ -124,7 +124,7 @@ async function publicWorker(redis, row) {
         status: live.status,
         token_prefix: row.token_prefix || null,
         last_seen: live.last_seen,
-        revoked_at: row.revoked_at != null ? Number(row.revoked_at) : null,
+        revoked_at: workerRepo.revokedAtMs(row),
         created_at: row.created_at != null ? Number(row.created_at) : null,
     };
 }
