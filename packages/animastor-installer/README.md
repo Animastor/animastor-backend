@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.2.3, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.5, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -119,17 +119,41 @@ it detaches at once (own session, stdin `/dev/null`, output appended to
 `~/animastor/logs/bootstrap.log` under a header with the boot time) and exits
 0; the detached `doctor --yes` waits up to 600 s by default. TIR starts its
 ComfyUI only after the startup script has finished, so waiting inside the
-script deadlocks. On type A the pip requirements of every required profile
-custom node are checked in the Python of the running `main.py` (taken from
-`/proc/<pid>`); missing ones are installed (boot / `--yes`: no question;
-interactive: one question) and the platform's ComfyUI is restarted — exactly
-that pid is stopped and the run waits until the platform starts a new one
-with the node classes. Restarting a ComfyUI the installer did not start needs
-the option: `--restart-platform-comfy` / `--no-restart-platform-comfy`, or the
-answer recorded in `install-state.json` (`installer_options.restartPlatformComfy`);
-`animastor boot` on type A defaults to yes. Type B checks its own venv and
-restarts its own ComfyUI. Missing node classes are re-checked until the end
-of the wait window when deps were just installed or the ComfyUI pid changed.
+script deadlocks.
+
+Custom-node Python dependencies on type A (0.2.5): the pip requirements of
+every required profile custom node are checked in the Python of the running
+`main.py` (taken from `/proc/<pid>`). Missing ones go into a persistent
+OVERLAY venv `~/animastor/pydeps/py<X.Y>` (`python -m venv --without-pip
+--system-site-packages`: pip of the platform runs there and writes only what
+the platform lacks; torch is pinned as a constraint) and a generated custom
+node `custom_nodes/animastor-pydeps/prestartup_script.py` puts that
+site-packages in front of `sys.path` before ComfyUI imports the nodes. All of
+it is in `/home`, so after a node restart the platform's ComfyUI loads the
+nodes with no reinstall and no restart. (As root, pip into `/usr/bin/python3`
+writes `/usr/local/lib/python3.X/dist-packages` and `--user` writes
+`/root/.local` — both are lost with a node restart.) A ComfyUI without
+prestartup-script support falls back to the 0.2.4 behaviour (install into its
+Python; boot reinstalls). When the running ComfyUI lacks the node classes it
+is restarted — only with consent: `--restart-platform-comfy` /
+`--no-restart-platform-comfy`, the answer recorded in `install-state.json`
+(`installer_options.restartPlatformComfy`, asked once interactively, default
+Yes), or the boot default (yes). A plain `--yes` is not consent. The restart
+stops exactly that pid (its argv, cwd and environment are read from `/proc`
+first; nothing is stopped when they are unreadable or the signal is refused),
+gives the platform 30 s to start it again, otherwise starts the same command
+line itself (detached, log `~/animastor/logs/comfyui-restart.log`) and waits
+for `GET /system_stats` at the original `--baseurl` address and the node
+classes in `/object_info`. Type B checks its own venv and restarts its own
+ComfyUI.
+
+Every install/doctor run first brings the management tools (`animastor`,
+the persistent installer copy) and an installed worker bundle to its own
+version — before any check that can end the run — so every printed fix
+command exists in the installed `animastor`. Unknown options are an error
+(exit 2). When node classes are missing the result names the cause: missing
+packages, an `IMPORT FAILED` line from the ComfyUI log (`/internal/logs`,
+the process stdout file, the restart log) or a needed restart.
 
 The fix list is APPLIED: `COMFY_URL`, `COMFY_PORT` and `NOTEBOOK_PATH` are
 rewritten in `.env` (only real differences are listed, one entry per key), and

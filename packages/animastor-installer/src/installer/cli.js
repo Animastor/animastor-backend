@@ -55,6 +55,7 @@ const workerMod = require('./engine/worker');
 const comfyuiMod = require('./engine/comfyui');
 const comfyOwner = require('./engine/comfy-owner');
 const nodeDeps = require('./engine/node-deps');
+const pydepsMod = require('./engine/pydeps');
 const downloader = require('./engine/downloader');
 const { resolveRepoBundleDir } = require('./worker-bundle-source');
 const engineMod = require('./engine/engine');
@@ -106,31 +107,70 @@ const DEFAULT_HUB_URL = 'https://animastor.org/gpu';
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy'];
+const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy', 'help'];
+
+/**
+ * Every option that takes a value. Installer 0.2.5: an option that is in
+ * neither list is an ERROR (exit 2) — installer 0.2.3 silently swallowed
+ * `doctor --restart-platform-comfy` (a flag it did not know) and ran a plain
+ * doctor, which printed the same fix again (live E2E 02.11).
+ */
+const VALUE_FLAGS = ['profile', 'mode', 'root', 'worker-dir', 'hub-url', 'repo-root', 'state', 'tools-dir',
+    'comfy-port', 'comfy-wait-ms', 'verify-timeout-ms', 'port', 'lines', 'history-max', 'home', 'boot-log'];
+
+/** Commands main() dispatches. */
+const COMMANDS = ['detect', 'plan', 'install', 'verify', 'validate', 'resume', 'uninstall', 'start', 'stop', 'status',
+    'logs', 'doctor', 'boot', 'monitor', 'reboot-worker', 'reboot-comfyui'];
+
+/** Exit code of a command line the CLI does not understand. */
+const USAGE_EXIT = 2;
 
 function parseArgs(argv) {
     const args = argv.slice(2);
-    const parsed = { command: null, profiles: [], flags: {} };
+    const parsed = { command: null, profiles: [], flags: {}, errors: [] };
     const positional = [];
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
         if (a.startsWith('--')) {
-            const key = a.slice(2);
+            let key = a.slice(2);
+            let inline = null;
+            const eq = key.indexOf('=');
+            if (eq > 0) { inline = key.slice(eq + 1); key = key.slice(0, eq); }
             if (BOOLEAN_FLAGS.includes(key)) {
+                if (inline !== null) parsed.errors.push(`option --${key} takes no value (got --${key}=${inline})`);
                 parsed.flags[key] = true;
+            } else if (VALUE_FLAGS.includes(key)) {
+                let val = inline;
+                if (val === null) {
+                    const next = args[i + 1];
+                    if (next === undefined || (next.startsWith('--') && next.length > 2)) {
+                        parsed.errors.push(`option --${key} needs a value`);
+                        val = '';
+                    } else {
+                        val = next;
+                        i += 1;
+                    }
+                }
+                parsed.flags[key] = val;
             } else {
-                const val = args[++i];
-                parsed.flags[key] = val || '';
+                parsed.errors.push(`unknown option --${key}`);
             }
         } else if (a === '-f') {
             parsed.flags.follow = true;
         } else if (a === '-y') {
             parsed.flags.yes = true;
+        } else if (a === '-h') {
+            parsed.flags.help = true;
+        } else if (a.startsWith('-') && a.length > 1) {
+            parsed.errors.push(`unknown option ${a}`);
         } else {
             positional.push(a);
         }
     }
     parsed.command = positional[0] || null;
+    if (positional.length > 1) parsed.errors.push(`unexpected argument(s): ${positional.slice(1).join(' ')}`);
+    // An unknown COMMAND keeps its old behaviour: usage + exit 1 (main()).
+    parsed.unknownCommand = parsed.command !== null && !COMMANDS.includes(parsed.command);
     const profileFlag = parsed.flags.profile || '';
     if (profileFlag) {
         parsed.profiles = profileFlag.split(',').map((s) => s.trim()).filter(Boolean);
@@ -475,7 +515,10 @@ function platformComfyMissingResult({ waited, tool, mode }) {
  * explicit flag wins, then the recorded answer (install-state
  * installer_options.restartPlatformComfy), then the boot default: yes on
  * type A — the node is unattended and nothing else brings the node classes
- * back. An interactive run without a record asks (askRestartPlatformComfy).
+ * back. An interactive run without a record asks (default Yes) and records
+ * the answer. A plain `--yes` is NOT consent to stop a process the installer
+ * does not own (installer 0.2.5 ADR): it needs the flag, a recorded yes, or
+ * the boot run.
  * @returns {{ allowed: boolean|null, source: 'flag'|'state'|'boot'|'unset' }}
  */
 function restartPlatformComfyDecision(flags, state, { boot = false } = {}) {
@@ -487,104 +530,218 @@ function restartPlatformComfyDecision(flags, state, { boot = false } = {}) {
     return { allowed: null, source: 'unset' };
 }
 
-const RESTART_PLATFORM_QUESTION = 'After a node restart the pip packages of custom nodes can disappear. May `animastor boot` reinstall them and restart the platform\'s ComfyUI so the nodes load?';
+const RESTART_PLATFORM_QUESTION = 'When the custom-node dependencies have to be (re)installed, may animastor (also `animastor boot`) restart the platform\'s ComfyUI with the same command line so the nodes load?';
 
 /**
- * The custom-node dependency gate (installer 0.2.4) for a ComfyUI that the
- * PLATFORM runs (type A): check the pip requirements of every required
- * profile node in the Python of the running main.py; install the missing
- * ones (boot / --yes: no question; interactive: one question, which also
- * records the restart option); then — only when restarting the platform's
- * ComfyUI is allowed — stop exactly that pid and wait until the platform
- * started a new one with the node classes. Never starts a ComfyUI itself.
- * @returns {Promise<{ instance, checked: boolean, installed: string[], restarted: boolean, pid_changed: boolean, failed: boolean, reason: string|null, record: object }>}
+ * The custom-node dependency gate for a ComfyUI that the PLATFORM runs
+ * (type A; installer 0.2.4, persistence + restart reworked in 0.2.5):
+ *
+ *   1. the pip requirements of every required profile node are checked in
+ *      the Python of the running main.py — with the persistent overlay
+ *      (~/animastor/pydeps, engine/pydeps.js) in front of sys.path, exactly
+ *      as ComfyUI sees it after the generated prestartup script;
+ *   2. missing ones are installed (boot / --yes / --restart-platform-comfy:
+ *      no question; interactive: one question that also records the restart
+ *      option) INTO THE OVERLAY — it lives in /home and survives a node
+ *      restart; only when the overlay is impossible (old ComfyUI without
+ *      prestartup scripts, no venv module) into the platform Python as in
+ *      0.2.4 (lost with a restart — boot reinstalls them);
+ *   3. the running ComfyUI loads new packages only on a restart: when the
+ *      node classes are not in its /object_info and restarting the
+ *      platform's ComfyUI is allowed, it is restarted with the same command
+ *      line, cwd and environment (node-deps restartForeignComfyUI).
+ * @returns {Promise<{ instance, checked: boolean, installed: string[], restarted: boolean, pid_changed: boolean, failed: boolean, reason: string|null, fix?: string, record: object, persistence: object|null, prestartup: object|null }>}
  */
 async function platformNodeDepsGate(io, {
     instance, state = null, root, manifests, flags = {}, boot = false, yes = false, prompt = null,
     waitMs = 600000, logger = null, statePath = null, sleep = null, intervalMs = 3000, progressMs = 30000,
+    workerDir = null, platformGraceMs = 30000,
 } = {}) {
-    const out = { instance, checked: false, installed: [], restarted: false, pid_changed: false, failed: false, reason: null, record: {} };
+    const out = {
+        instance, checked: false, installed: [], restarted: false, pid_changed: false, failed: false, reason: null, record: {},
+        persistence: null, prestartup: null,
+    };
     if (!instance || instance.owner !== 'foreign' || !instance.pid) return out;
     const info = (line) => { if (logger) logger.info(line); };
     const warn = (line) => { if (logger) logger.warn(line); };
     const decision = restartPlatformComfyDecision(flags, state, { boot });
     let restartAllowed = decision.allowed;
     const interactive = !boot && !yes && !!(prompt && prompt.available);
+    const tool = toolCommandPath(flags);
 
     const py = nodeDeps.pythonOfProcess(io, instance.pid);
     if (!py.python) {
         warn(`custom-node dependencies not checked: the Python of the ComfyUI process (pid ${instance.pid}) is unknown (${py.source})`);
         return out;
     }
-    const check = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests });
+    const base = workerDir ? pydepsMod.overlayBase(workerDir) : null;
+    let persist = pydepsMod.planPersistence(io, { python: py.python, root, base, create: false });
+    const overlayReady = () => persist.kind === 'overlay' && persist.paths && io.fs.existsSync(persist.paths.cfg);
+    const extraPaths = () => (overlayReady() ? [persist.sitePackages] : []);
+    const ensurePrestartup = () => {
+        if (!overlayReady()) return null;
+        const r = pydepsMod.ensurePrestartupNode(io, { root, base });
+        if (r.status === 'created' || r.status === 'updated') info(`prestartup node ${r.dir}: ${r.status} — ComfyUI adds ${persist.sitePackages} before it imports the custom nodes`);
+        else if (r.status === 'foreign' || r.status === 'failed') warn(`prestartup node not written: ${r.reason}`);
+        return r;
+    };
+    out.prestartup = ensurePrestartup();
+
+    const check = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests, extraPaths: extraPaths() });
     out.checked = true;
     for (const e of check.errors) warn(`custom-node dependency check: ${e}`);
+    let needRestart = !!(out.prestartup && (out.prestartup.status === 'created' || out.prestartup.status === 'updated'));
     if (check.nodes.length === 0) {
-        info(`custom-node dependencies satisfied in ${py.python} (ComfyUI pid ${instance.pid})`);
+        info(`custom-node dependencies satisfied in ${py.python}${overlayReady() ? ` (+ overlay ${persist.sitePackages})` : ''} (ComfyUI pid ${instance.pid})`);
         if (interactive && restartAllowed === null) {
+            // Asked once and recorded: the unattended boot run must know it.
             restartAllowed = await prompt.confirm(RESTART_PLATFORM_QUESTION, { defaultYes: true });
             out.record.restartPlatformComfy = restartAllowed;
         }
-        return out;
-    }
-    const what = nodeDeps.describeUnsatisfied(check.nodes);
-    info(`custom-node dependencies missing in ${py.python} (ComfyUI pid ${instance.pid}): ${what}`);
-    let install = boot || yes;
-    if (interactive) {
-        const restartPart = restartAllowed === false ? '' : ` and restart the platform's ComfyUI (pid ${instance.pid}) so it loads them`;
-        install = await prompt.confirm(`Install the missing Python packages — ${what} — into ${py.python}${restartPart}?`, { defaultYes: true });
-        if (restartAllowed === null) {
-            restartAllowed = install;
-            out.record.restartPlatformComfy = install;
+    } else {
+        const what = nodeDeps.describeUnsatisfied(check.nodes);
+        info(`custom-node dependencies missing in ${py.python} (ComfyUI pid ${instance.pid}): ${what}`);
+        let install = boot || yes || !!flags['restart-platform-comfy'];
+        if (interactive && !install) {
+            const restartPart = restartAllowed === false ? '' : ` and restart the platform's ComfyUI (pid ${instance.pid}) so it loads them`;
+            install = await prompt.confirm(`Install the missing Python packages — ${what} — for ${py.python}${restartPart}?`, { defaultYes: true });
+            if (restartAllowed === null) {
+                restartAllowed = install;
+                out.record.restartPlatformComfy = install;
+            }
         }
+        if (!install) {
+            out.failed = true;
+            out.reason = `custom-node dependencies missing in the ComfyUI Python ${py.python}: ${what}`;
+            out.fix = `${tool} doctor --yes --restart-platform-comfy`;
+            return out;
+        }
+        if (persist.kind === 'overlay') {
+            persist = pydepsMod.planPersistence(io, { python: py.python, root, base, create: true });
+            if (persist.kind === 'overlay') {
+                const pr = ensurePrestartup();
+                if (pr && (pr.status === 'foreign' || pr.status === 'failed')) {
+                    persist = { ...persist, kind: 'system', reason: pr.reason };
+                } else if (pr && !out.prestartup) out.prestartup = pr;
+            }
+        }
+        if (persist.kind !== 'overlay') {
+            warn(`node dependencies go into ${py.python} itself (${persist.reason}) — they are lost with a node restart; \`${tool} boot\` reinstalls them`);
+        }
+        const constraintsPath = statePath ? path.join(path.dirname(statePath), 'node-deps-constraints.txt') : null;
+        const inst = nodeDeps.installNodeDeps(io, {
+            python: py.python, nodes: check.nodes, torch: check.torch, constraintsPath, log: logger,
+            pipPython: persist.kind === 'overlay' ? persist.paths.python : null,
+        });
+        out.installed = inst.installed;
+        if (!inst.ok) {
+            out.failed = true;
+            out.reason = inst.failed.map((f) => `${f.directory}: ${f.reason}`).join('; ');
+            out.fix = `fix the pip error above (network, disk space, a package conflict), then run: ${tool} doctor --yes --restart-platform-comfy`;
+            return out;
+        }
+        const again = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests, extraPaths: extraPaths() });
+        if (again.nodes.length > 0) {
+            out.failed = true;
+            out.reason = `pip finished, but the requirements are still not satisfied in ${py.python}: ${nodeDeps.describeUnsatisfied(again.nodes)}`;
+            out.fix = `install them by hand: ${persist.kind === 'overlay' ? persist.paths.python : py.python} -m pip install -r <requirements.txt>, then run: ${tool} doctor --restart-platform-comfy`;
+            return out;
+        }
+        info(`custom-node dependencies installed: ${inst.installed.join(', ')} → ${persist.kind === 'overlay' ? persist.sitePackages : py.python}`);
+        needRestart = true;
     }
-    const tool = toolCommandPath(flags);
-    if (!install) {
-        out.failed = true;
-        out.reason = `custom-node dependencies missing in the ComfyUI Python ${py.python}: ${what}`;
-        out.fix = `${tool} doctor --yes`;
+    out.persistence = { kind: persist.kind, base: persist.base, site_packages: persist.sitePackages || null, reason: persist.reason || null, python: py.python };
+    out.record.nodeDeps = { target: persist.kind, overlay: persist.sitePackages || null, python: py.python };
+    // The running process imported the custom nodes at its start: the
+    // remedy for missing classes with the packages in place is a restart —
+    // decided by FACT (/object_info), not only by "installed just now":
+    // `doctor --restart-platform-comfy` must restart even when nothing was
+    // installed in this run (otherwise the printed fix loops).
+    const expectClasses = nodeDeps.profileNodeRequirements(io, { root, manifests }).flatMap((n) => n.classes);
+    if (expectClasses.length === 0) return out;
+    const have = instance.url ? await comfyuiMod.objectInfoClasses(io, instance.url) : null;
+    if (!have && !needRestart) return out; // not answering — the platform gate/verification reports it
+    const missingNow = have ? expectClasses.filter((c) => !have.has(c)) : expectClasses;
+    if (missingNow.length === 0) {
+        if (needRestart) info(`the running ComfyUI (pid ${instance.pid}) already has the node classes — no restart needed`);
         return out;
     }
-    const constraintsPath = statePath ? path.join(path.dirname(statePath), 'node-deps-constraints.txt') : null;
-    const inst = nodeDeps.installNodeDeps(io, { python: py.python, nodes: check.nodes, torch: check.torch, constraintsPath, log: logger });
-    out.installed = inst.installed;
-    if (!inst.ok) {
-        out.failed = true;
-        out.reason = inst.failed.map((f) => `${f.directory}: ${f.reason}`).join('; ');
-        out.fix = `${tool} doctor`;
-        return out;
+    if (!needRestart && decision.source !== 'flag') {
+        // A node that fails for another reason (syntax error, CUDA, …) is
+        // not fixed by restarting it on every boot: report the cause.
+        const diag = await nodeDeps.diagnoseMissingClasses(io, {
+            missingClasses: missingNow, manifests, root, url: instance.url, pid: instance.pid, python: py.python,
+            extraPaths: extraPaths(), logFiles: workerDir ? [path.join(path.dirname(path.resolve(workerDir)), 'logs', 'comfyui-restart.log')] : [],
+        });
+        if (diag.kind === 'import-failed') {
+            out.failed = true;
+            out.reason = `node classes missing: ${missingNow.join(', ')} — ${diag.detail}`;
+            out.fix = `fix the import error of the custom node (ComfyUI log: ${diag.log_source}), then run: ${tool} doctor --restart-platform-comfy`;
+            return out;
+        }
+        info(`node classes missing in the running ComfyUI (pid ${instance.pid}): ${missingNow.join(', ')} — ${diag.detail}`);
     }
-    const again = nodeDeps.checkNodeDeps(io, { python: py.python, root, manifests });
-    if (again.nodes.length > 0) {
-        out.failed = true;
-        out.reason = `pip finished, but the requirements are still not satisfied in ${py.python}: ${nodeDeps.describeUnsatisfied(again.nodes)}`;
-        out.fix = `${tool} doctor`;
-        return out;
+    if (restartAllowed === null && interactive) {
+        restartAllowed = await prompt.confirm(`The running ComfyUI (pid ${instance.pid}) loaded the custom nodes before their dependencies were in place. Restart it now (same command line, working directory and environment)?`, { defaultYes: true });
+        out.record.restartPlatformComfy = restartAllowed;
     }
-    info(`custom-node dependencies installed: ${inst.installed.join(', ')}`);
     if (restartAllowed !== true) {
         // A ComfyUI that is not ours is never stopped without the option.
         out.failed = true;
-        out.reason = `custom-node dependencies were installed, but the platform's ComfyUI (pid ${instance.pid}) imported the nodes before that and was not restarted (restart of the platform's ComfyUI is off)`;
+        out.reason = `custom-node dependencies are in place, but the platform's ComfyUI (pid ${instance.pid}) imported the nodes before that and was not restarted (restart of the platform's ComfyUI is off): ${missingNow.join(', ')} missing`;
         out.fix = `restart the ComfyUI from the platform console, or run: ${tool} doctor --restart-platform-comfy`;
         return out;
     }
-    const expectClasses = check.nodes.flatMap((n) => n.classes);
-    const rr = await nodeDeps.restartPlatformComfyUI(io, {
-        pid: instance.pid, timeoutMs: waitMs, intervalMs, expectClasses, sleep, log: logger, onProgress: info, progressMs,
+    const restartLog = workerDir ? path.join(path.dirname(path.resolve(workerDir)), 'logs', 'comfyui-restart.log') : null;
+    const rr = await nodeDeps.restartForeignComfyUI(io, {
+        pid: instance.pid, timeoutMs: waitMs, intervalMs, expectClasses: missingNow, sleep, log: logger, onProgress: info, progressMs,
+        platformGraceMs, logFile: restartLog,
     });
     out.restarted = rr.stopped;
+    out.restart = { started_by: rr.started_by, log_file: rr.log_file };
     if (!rr.ok) {
         out.failed = true;
         out.reason = rr.reason;
-        out.fix = `when the platform's ComfyUI is up again, run: ${tool} doctor`;
+        out.fix = rr.stopped
+            ? `${rr.log_file ? `see ${rr.log_file}; ` : ''}when ComfyUI answers again, run: ${tool} doctor`
+            : `restart the ComfyUI from the platform console, then run: ${tool} doctor`;
         if (rr.stopped) out.pid_changed = rr.pid != null;
+        if (rr.missing_classes && rr.missing_classes.length > 0 && rr.pid) {
+            const diag = await nodeDeps.diagnoseMissingClasses(io, {
+                missingClasses: rr.missing_classes, manifests, root, url: rr.url, pid: rr.pid, python: py.python,
+                extraPaths: extraPaths(), logFiles: [restartLog].filter(Boolean),
+            });
+            out.reason = `${rr.reason} — ${diag.detail}`;
+            if (diag.kind === 'import-failed') out.fix = `fix the import error of the custom node (log: ${diag.log_source}), then run: ${tool} doctor --restart-platform-comfy`;
+        }
         return out;
     }
-    info(`the platform started ComfyUI again: pid ${rr.old_pid} → ${rr.pid} at ${rr.url} (after ${Math.round(rr.waited_ms / 1000)} s), node classes present`);
+    const who = rr.started_by === 'installer' ? 'the installer started ComfyUI again (same command line, cwd and environment)' : 'the platform started ComfyUI again';
+    info(`${who}: pid ${rr.old_pid} → ${rr.pid} at ${rr.url} (after ${Math.round(rr.waited_ms / 1000)} s), node classes present`);
     out.pid_changed = true;
     out.instance = await comfyOwner.resolveComfyOwner(io, { state, root });
     return out;
+}
+
+/** Owned paths created by the dependency gate (overlay venv base, prestartup node). */
+function nodeDepsOwnedServices(gate) {
+    const out = [];
+    if (!gate || !gate.persistence || gate.persistence.kind !== 'overlay') return out;
+    if (gate.persistence.base) out.push({ id: 'node-deps-overlay', path: gate.persistence.base });
+    if (gate.prestartup && gate.prestartup.dir && gate.prestartup.status !== 'foreign' && gate.prestartup.status !== 'failed') {
+        out.push({ id: 'node-deps-prestartup-node', path: gate.prestartup.dir });
+    }
+    return out;
+}
+
+/** Register owned service paths in an existing install-state.json (no-op without one). */
+function recordOwnedServices(io, statePath, entries) {
+    if (!entries || entries.length === 0) return false;
+    const st = stateStore.loadState(io, statePath);
+    if (!st) return false;
+    for (const e of entries) stateStore.addOwnedComponent(st, 'services', e);
+    stateStore.saveState(io, statePath, st, io.now);
+    return true;
 }
 
 /** FAILED result of the dependency gate (the engine — worker start — does not run). */
@@ -678,6 +835,110 @@ function cmdBoot(flags, { io = createRealIo(), spawn = require('child_process').
     } finally {
         if (fd != null) { try { fs.closeSync(fd); } catch (_) { /* closed */ } }
     }
+}
+
+/** This installer's version (package.json next to src/). */
+function ownVersion() {
+    try { return require('../../package.json').version; } catch (_) { return null; }
+}
+
+/** Version of the persistent installer copy behind the `animastor` command (<base>/installer), or null. */
+function installedToolsVersion(io, flags) {
+    const dir = path.join(path.dirname(resolveToolsDir(flags)), 'installer');
+    try { return JSON.parse(String(io.fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))).version || null; } catch (_) { return null; }
+}
+
+/**
+ * Installer 0.2.5 — FIRST change of every install/doctor run, before any
+ * check that can end the run with ✗: the management tools (the `animastor`
+ * command and the persistent installer copy it runs) and an installed worker
+ * bundle are brought to THIS installer's version. Live E2E 02.11: 0.2.4
+ * stopped at the node-deps gate before its "install management tools" step,
+ * so ~/.local/bin/animastor stayed 0.2.3 (bundle 2.2.0) and the printed fix
+ * `animastor doctor --restart-platform-comfy` ran a version that did not
+ * know the flag. Every fix command printed afterwards names a command of
+ * THIS version — or the result says why it could not be updated.
+ * @returns {Promise<{ tools: object|null, tools_error: string|null, tools_skipped: string|null, bundle: object|null, version: string|null, tools_version: string|null }>}
+ */
+async function preflightSelfUpdate(io, {
+    flags, statePath, root, workerDir, hubUrl, repoRoot, manifests = [], logger = null, dryRun = false,
+    nodeBin = null, home = homeDir(), linkDir = undefined, cliPath = __filename,
+    installerSrcRoot = path.resolve(__dirname, '..', '..'),
+} = {}) {
+    const out = { tools: null, tools_error: null, tools_skipped: null, bundle: null, version: ownVersion(), tools_version: null };
+    if (dryRun) { out.tools_skipped = 'dry-run'; return out; }
+    const toolsDirEarly = resolveToolsDir(flags);
+    // Never write as the wrong user (sudo vs. normal user): the host gate
+    // later stops such a run with the full explanation.
+    const own = prereq.checkOwnership(io, {
+        paths: [root, workerDir, statePath, toolsDirEarly].filter(Boolean), home: prereq.currentHome(), currentUid: prereq.currentUid(),
+    });
+    if (!own.ok) { out.tools_skipped = 'ownership mismatch'; return out; }
+    const wantTools = await resolveToolsDecision({ flags, prompt: null, prior: priorToolsDecision(io, statePath) });
+    const toolsDir = toolsDirEarly;
+    if (!wantTools) {
+        out.tools_skipped = 'management tools declined (--no-tools)';
+    } else {
+        try {
+            out.tools = management.installManagementTools(io, {
+                toolsDir,
+                nodePath: nodeBin || process.execPath,
+                cliPath,
+                installerSrcRoot,
+                installerDestRoot: path.join(path.dirname(toolsDir), 'installer'),
+                linkDir: linkDir !== undefined ? linkDir : management.defaultLinkDir(),
+                home,
+                statePath,
+                root,
+                workerDir,
+                hubUrl,
+                log: logger,
+                platformAdapter: PLATFORM_ADAPTER,
+            });
+        } catch (err) {
+            out.tools_error = err.message;
+            if (logger) logger.warn(`management tools could not be updated: ${err.message}`);
+        }
+    }
+    out.tools_version = installedToolsVersion(io, flags);
+    if (manifests.length > 0) {
+        try {
+            out.bundle = await engineMod.refreshInstalledWorkerBundle(io, {
+                workerDir, manifest: manifests[0], repoRoot, hubUrl, log: logger, nodeBin,
+            });
+        } catch (err) {
+            out.bundle = { status: 'failed', reason: err.message };
+        }
+        if (out.bundle && out.bundle.status === 'failed' && logger) logger.warn(`worker bundle ${out.bundle.have || '?'} could not be updated to ${out.bundle.want || '?'}: ${out.bundle.reason}`);
+    }
+    return out;
+}
+
+/**
+ * Result lines for a preflight that could not bring the tools/bundle to
+ * this version — the fix commands of the result would otherwise run an
+ * older `animastor` (or the worker an older bundle) without saying so.
+ */
+function preflightExtras(pre) {
+    if (!pre) return [];
+    const extra = [];
+    if (!pre.tools_skipped && pre.version && pre.tools_version !== pre.version) {
+        extra.push({
+            ok: false,
+            label: 'Management tools',
+            detail: `the animastor command runs installer ${pre.tools_version || 'unknown'}, this installer is ${pre.version}${pre.tools_error ? ` — update failed: ${pre.tools_error}` : ''}; the fix commands of this result need ${pre.version}`,
+            fix: 'run the install command from the Animastor setup page again',
+        });
+    }
+    if (pre.bundle && pre.bundle.status === 'failed') {
+        extra.push({
+            ok: false,
+            label: 'Worker bundle',
+            detail: `installed ${pre.bundle.have || 'unknown'}, this installer ships ${pre.bundle.want || 'unknown'} — update failed: ${pre.bundle.reason}`,
+            fix: 'run the install command from the Animastor setup page again',
+        });
+    }
+    return extra;
 }
 
 /** The one line for the node startup script (printed at the end of an install). */
@@ -806,6 +1067,13 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     const pathEntry = management.restoreCommandPath(realIo, { linkDir: management.defaultLinkDir(), home: homeDir() });
     if (!boot && pathEntry.updated.length > 0) console.log(`PATH block restored: ${pathEntry.updated.join(', ')}`);
 
+    // Tools + bundle of THIS version before anything can stop the run (0.2.5).
+    const preflight = await preflightSelfUpdate(realIo, {
+        flags, statePath, root, workerDir, hubUrl, repoRoot, manifests: loadedManifests, logger, dryRun,
+        nodeBin: (probeMod.pickNodeBinary(realIo) || {}).bin || null,
+    });
+    const withPre = (res) => ({ ...res, preflight });
+
     // Host packages that disappeared with the image restart (boot path).
     if (doctor) {
         const missingPkgs = missingRequiredHostPackages(realIo);
@@ -834,7 +1102,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     instance = gate.instance;
     if (gate.waited && gate.waited.ok) runningComfy = probeMod.detectRunningComfyUI(realIo);
     if (gate.failed) {
-        printResult(platformComfyMissingResult({ waited: gate.waited, tool: toolCommandPath(flags), mode: 'existing' }), { flags, mode: 'existing', boot });
+        printResult(withPre(platformComfyMissingResult({ waited: gate.waited, tool: toolCommandPath(flags), mode: 'existing' })), { flags, mode: 'existing', boot });
         process.exitCode = 1;
         prompt.close();
         return;
@@ -845,9 +1113,10 @@ async function cmdInstall(flags, { doctor = false } = {}) {
     // of the platform's main.py, reinstall, and (when allowed) let the
     // platform start its ComfyUI again so the node classes load.
     const recordedPid = priorState && priorState.comfy_owner ? priorState.comfy_owner.pid : null;
+    const ownedServices = [];
     const depsGate = dryRun ? null : await platformNodeDepsGate(realIo, {
         instance, state: priorState, root, manifests: loadedManifests, flags, boot, yes, prompt,
-        waitMs: Math.max(60000, comfyWaitMs - (realIo.now() - windowStart)), logger, statePath,
+        waitMs: Math.max(180000, comfyWaitMs - (realIo.now() - windowStart)), logger, statePath, workerDir,
     });
     if (depsGate) {
         instance = depsGate.instance;
@@ -855,8 +1124,11 @@ async function cmdInstall(flags, { doctor = false } = {}) {
         if (depsGate.record.restartPlatformComfy !== undefined) {
             recordInstallerOption(realIo, statePath, 'restartPlatformComfy', depsGate.record.restartPlatformComfy);
         }
+        if (depsGate.record.nodeDeps) recordInstallerOption(realIo, statePath, 'nodeDeps', depsGate.record.nodeDeps);
+        ownedServices.push(...nodeDepsOwnedServices(depsGate));
+        recordOwnedServices(realIo, statePath, ownedServices);
         if (depsGate.failed) {
-            printResult(nodeDepsFailedResult({ gate: depsGate, mode: instance.mode }), { flags, mode: instance.mode, boot });
+            printResult(withPre(nodeDepsFailedResult({ gate: depsGate, mode: instance.mode })), { flags, mode: instance.mode, boot });
             process.exitCode = 1;
             prompt.close();
             return;
@@ -971,7 +1243,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
         }
 
         if (plan.blocked.length > 0) {
-            printFinal({ blocked: plan.blocked, tool: toolCommand(flags), mode });
+            printFinal({ blocked: plan.blocked, tool: toolCommand(flags), mode, preflight });
             process.exitCode = 1;
             return;
         }
@@ -1116,7 +1388,7 @@ async function cmdInstall(flags, { doctor = false } = {}) {
             process.exit(1);
         }
         if (plan2.blocked.length > 0) {
-            printFinal({ blocked: plan2.blocked, tool: toolCommand(flags), mode });
+            printFinal({ blocked: plan2.blocked, tool: toolCommand(flags), mode, preflight });
             process.exitCode = 1;
             return;
         }
@@ -1135,13 +1407,15 @@ async function cmdInstall(flags, { doctor = false } = {}) {
                 comfyOwner: instance,
                 comfyWaitMs,
                 nodeClassesDeadline,
+                ownedServices,
+                bundleRefreshedEarly: !!(preflight.bundle && preflight.bundle.status === 'updated'),
                 restartPlatformComfy: restartPlatformComfyDecision(flags, priorState, { boot }).source === 'flag'
                     ? !!flags['restart-platform-comfy']
                     : (depsGate && depsGate.record.restartPlatformComfy !== undefined ? depsGate.record.restartPlatformComfy : undefined),
                 hubVersion,
             },
         });
-        printResult(result, { flags, mode, boot, hubVersion });
+        printResult(withPre(result), { flags, mode, boot, hubVersion });
     } catch (err) {
         if (err instanceof NoTerminalError) {
             console.error('');
@@ -1396,7 +1670,7 @@ async function cmdVerify(flags) {
  */
 /** Blocked steps + host remediation as summary items (shared by both outputs). */
 function resultExtras(result, tool) {
-    const extra = [];
+    const extra = preflightExtras(result.preflight);
     for (const b of result.blocked || []) {
         let fix = result.remediation && result.remediation.command ? `${result.remediation.command} && ${tool} doctor` : `${tool} doctor`;
         if (/accept_runtime_change/.test(b.reason || '')) fix = `if ComfyUI already works, this can be ignored; to let the installer replace the runtime run: ${tool} doctor --accept-runtime-change`;
@@ -1465,8 +1739,8 @@ function printResult(result, { flags = {}, mode = null, boot = false } = {}) {
 }
 
 /** Result block for a plan that is blocked before anything ran. */
-function printFinal({ blocked = [], tool = 'animastor', mode = null }) {
-    const extra = blocked.map((b) => ({ ok: false, label: `Step "${b.step || b.id || 'plan'}"`, detail: b.reason, fix: `${tool} doctor` }));
+function printFinal({ blocked = [], tool = 'animastor', mode = null, preflight = null }) {
+    const extra = [...preflightExtras(preflight), ...blocked.map((b) => ({ ok: false, label: `Step "${b.step || b.id || 'plan'}"`, detail: b.reason, fix: `${tool} doctor` }))];
     console.log(renderFinalSummary({ extra, tool, mode }).text);
 }
 
@@ -1792,6 +2066,14 @@ async function cmdDoctor(flags) {
 async function main() {
     const args = parseArgs(process.argv);
     const pkg = require('../../package.json');
+    // A command line this version does not understand is never "best
+    // effort": an ignored option silently changes what the run does.
+    if (args.errors.length > 0) {
+        for (const e of args.errors) console.error(`animastor-installer ${pkg.version}: ${e}`);
+        console.error(`Run with --help for the list of commands and options (this is installer ${pkg.version}).`);
+        process.exit(USAGE_EXIT);
+    }
+    if (args.flags.help) args.command = null;
     // install/doctor print the full banner; the everyday tool commands stay quiet.
     if (!['install', 'doctor', 'start', 'stop', 'logs', 'status', 'boot'].includes(args.command)) {
         console.log(`animastor-installer v${pkg.version} (platform: ${PLATFORM_RUNTIME.platform}, deployment: ${PLATFORM_RUNTIME.deployment})`);
@@ -1868,7 +2150,7 @@ async function main() {
             console.error('  uninstall flags:');
             console.error('    --all            Full uninstall (remove everything recorded as installed by Animastor)');
             console.error('    --state PATH     Install state file path');
-            process.exit(1);
+            process.exit(args.flags.help ? 0 : 1);
     }
 }
 
@@ -1880,7 +2162,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-    stepQuestion, parseArgs, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor,
+    stepQuestion, parseArgs, BOOLEAN_FLAGS, VALUE_FLAGS, COMMANDS, USAGE_EXIT, cmdDetect, cmdPlan, cmdInstall, cmdStart, cmdStop, cmdLogs, cmdDoctor,
     printResult, printOneLineSummary, resultExtras, cmdVerify, cmdValidateManifests, cmdResume,
     cmdUninstall, cmdStatus, cmdMonitor, cmdRebootWorker, cmdRebootComfyUI, resolveAndPlan,
     makeSecretProvider, resolveToolsDecision, resolveToolsDir, installOptions, runHostGates,
@@ -1889,4 +2171,6 @@ module.exports = {
     missingRequiredHostPackages, shouldWaitForPlatformComfy, platformComfyGate, platformComfyMissingResult,
     restartPlatformComfyDecision, platformNodeDepsGate, nodeDepsFailedResult, recordInstallerOption,
     cmdBoot, bootChildArgs, bootLogPath, startupScriptLine,
+    preflightSelfUpdate, preflightExtras, installedToolsVersion, ownVersion,
+    nodeDepsOwnedServices, recordOwnedServices,
 };

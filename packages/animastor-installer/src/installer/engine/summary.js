@@ -53,6 +53,20 @@ function fixForCheck(check, { tool = 'animastor', mode = null } = {}) {
             return `create a new Worker Key in Animastor → Settings → Workers, then run: ${tool} doctor --new-key`;
         case 'Worker process':
             return `${tool} start`;
+        case 'ComfyUI node classes': {
+            // Installer 0.2.5: one fix per CAUSE; never a bare `doctor` that
+            // repeats the same check (live loop E2E 02.11).
+            const cause = check.cause || {};
+            const foreign = cause.owner === 'foreign' || (cause.owner == null && mode !== 'managed');
+            if (cause.kind === 'deps-missing') return `${tool} doctor --yes${foreign ? ' --restart-platform-comfy' : ''}`;
+            if (cause.kind === 'restart-needed') return foreign ? `${tool} doctor --restart-platform-comfy` : `${tool} reboot-comfyui`;
+            if (cause.kind === 'import-failed') {
+                return `fix the import error of the custom node shown above${cause.log_source ? ` (ComfyUI log: ${cause.log_source})` : ''}, then run: ${foreign ? `${tool} doctor --restart-platform-comfy` : `${tool} reboot-comfyui`}`;
+            }
+            return foreign
+                ? `restart ComfyUI from the platform console (or: ${tool} doctor --restart-platform-comfy) and check its log for "IMPORT FAILED"`
+                : `${tool} reboot-comfyui, then check <ComfyUI>/comfyui-installer.log for "IMPORT FAILED"`;
+        }
         case 'Runtime':
             return /incompatible|version_mismatch/.test(String(check.detail || ''))
                 ? `if ComfyUI already works, this can be ignored; to let the installer replace the torch/python runtime run: ${tool} doctor --accept-runtime-change`
