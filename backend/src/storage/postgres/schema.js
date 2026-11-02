@@ -1860,6 +1860,23 @@ async function runMigrations() {
         console.error('[PG] WL-1 workers.last_seen normalization failed:', err.message);
     }
 
+    // ── WL-2: workers.revoked_at in SECONDS (same rule as WL-1) ─────────
+    // revokeWorker / revokeSystemWorker wrote EXTRACT(EPOCH)*1000 (ms).
+    // Normalize existing ms values and forbid them. Idempotent.
+    try {
+        const fixed = await query(`UPDATE workers SET revoked_at = revoked_at / 1000
+            WHERE revoked_at IS NOT NULL AND revoked_at > 100000000000`);
+        if (fixed.rowCount > 0) {
+            console.log(`[PG] WL-2: workers.revoked_at ms → s on ${fixed.rowCount} row(s)`);
+        }
+        await query(`ALTER TABLE workers DROP CONSTRAINT IF EXISTS workers_revoked_at_seconds_check`);
+        await query(`ALTER TABLE workers ADD CONSTRAINT workers_revoked_at_seconds_check
+            CHECK (revoked_at IS NULL OR revoked_at < 100000000000)`);
+        console.log('[PG] WL-2: workers.revoked_at seconds check ensured');
+    } catch (err) {
+        console.error('[PG] WL-2 workers.revoked_at normalization failed:', err.message);
+    }
+
     // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
     // DDL lives here (guardrail PG-5 — single DDL owner). The statements
     // are executed ONLY while the IU_IMAGE_VERSIONED kill-switch is on, so
