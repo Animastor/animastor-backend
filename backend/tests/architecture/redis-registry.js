@@ -802,6 +802,15 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'Per-task unrecoverable-publication record: { fence, reason, at, job_id, expected_sha256, expected_bytes }, no TTL. resumePendingPublications skips a fence that carries it (one warn when marked); a NEW fence is never skipped and a successful publication clears it.',
     },
+    {
+        // GPU retry policy (owner decision 2026-11-02, services/gpu-retry-policy.cjs).
+        pattern: 'animastor:gpu-retry:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'attempts:<book>:<task>:<ch>:<sc>:<stage> — attempt counter per (registry task × scene × stage) { failures, retries, history[≤10] }, EX 24 h. pending:<book>:<ch>:<sc>:<stage> — a scheduled retry { task_id, retry_no, due_at, boot_id, error_class, … }, EX 1 h; claimed by DEL when the pause ends, dropped (journaled interrupted) at backend start.',
+    },
 ];
 
 module.exports = { REDIS_OWNERSHIP };

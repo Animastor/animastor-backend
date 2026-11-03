@@ -160,6 +160,37 @@ async function blockSceneStage(redis, bookId, chapterId, sceneId, type, reason) 
 }
 
 /**
+ * GPU retry policy (2026-11-02): a GPU attempt of this scene×stage failed
+ * terminally (deterministic / unknown error, or the transient/OOM retries are
+ * exhausted). Every ACTIVE task of that type targeting the scene becomes
+ * `failed` with the classified error. Like `blocked`, a failed task is NOT
+ * active: it authorizes nothing, nothing retries it, it stays visible in the
+ * progress panel until a new command supersedes it (retry = the button).
+ * @param {{error_class:string, error_code?:string, error_message:string, attempts?:number}} info
+ * @returns {Promise<{tasks: object[]}>} the tasks that failed now.
+ */
+async function failSceneStage(redis, bookId, chapterId, sceneId, type, info = {}) {
+    if (!redis || !bookId) return { tasks: [] };
+    const failed = [];
+    for (const task of await listTasks(redis, bookId)) {
+        if (task.status !== 'active' || task.type !== type) continue;
+        if (!targetsScene(task, chapterId, sceneId)) continue;
+        const updated = await updateTask(redis, bookId, task.task_id, {
+            status: 'failed',
+            failed_at: Date.now(),
+            failed_scene: { chapter_id: chapterId, scene_id: sceneId },
+            error_class: info.error_class || 'unknown',
+            error_code: info.error_code || null,
+            error_message: info.error_message || null,
+            attempts: info.attempts || null,
+            retry: null,
+        });
+        if (updated) failed.push(updated);
+    }
+    return { tasks: failed };
+}
+
+/**
  * Backend start: every task still `active` in the registry belonged to a run
  * the restart interrupted. It becomes `interrupted` (visible, resumable only
  * by a button) — the backend never resumes it by itself.
@@ -193,7 +224,7 @@ async function listBooksWithTasks(redis) {
 }
 
 /**
- * A new explicit command supersedes the blocked/interrupted tasks of the
+ * A new explicit command supersedes the blocked/interrupted/failed tasks of the
  * same worker types on the same scenes: they are dropped from the registry
  * so the panel shows only the new command.
  * @param {string[]} types
@@ -206,7 +237,7 @@ async function removeSupersededTasks(redis, bookId, types, scenes) {
     const sceneKeys = new Set((scenes || []).map(s => `${s.chapter_id}:${s.scene_id}`));
     const removed = [];
     for (const task of await listTasks(redis, bookId)) {
-        if (task.status !== 'blocked' && task.status !== 'interrupted') continue;
+        if (task.status !== 'blocked' && task.status !== 'interrupted' && task.status !== 'failed') continue;
         if (!typeSet.has(task.type)) continue;
         const overlaps = (task.targets || []).some(t => sceneKeys.has(`${t.chapter_id}:${t.scene_id}`));
         if (!overlaps) continue;
@@ -242,6 +273,7 @@ module.exports = {
     getActiveTasksByType,
     reconcileCompletedTasks,
     blockSceneStage,
+    failSceneStage,
     interruptActiveTasks,
     listBooksWithTasks,
     removeSupersededTasks,

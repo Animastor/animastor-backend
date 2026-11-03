@@ -138,7 +138,15 @@ const { interruptIncompleteSessions, interruptActiveGenerationTasks } = require(
 // §32.30: orchestration contour physically extracted to @animastor/orchestration
 // (packages/animastor-orchestration). The host consumes ONLY the package root.
 const orchestrationPkg = require('@animastor/orchestration');
-const orchestrator = orchestrationPkg;
+// GPU retry policy (owner decision 2026-11-02): every host caller of
+// failStage (hub /gpu/task/error, stall watchdogs, reconcile replay of
+// undelivered hub errors) goes through the host policy — the stage is failed
+// WITHOUT the package's immediate re-dispatch; a retry (transient/OOM only)
+// happens after a pause and only under a live command. The wrapper inherits
+// every other facade member (prototype chain). Docs: animastor-docs
+// architecture/COMMAND_ONLY_GENERATION.md §«Повтор после ошибки воркера».
+const gpuRetryPolicy = require('./services/gpu-retry-policy.cjs');
+const orchestrator = gpuRetryPolicy.wrapOrchestrator(orchestrationPkg);
 // §32.30: HOST BINDINGS — the package reaches the host-owned modules it is
 // allowed to touch (§32.29 host-stays: config/state/media/gen-scope/seams
 // registry/artifact root/PW-2 resolver) ONLY through this composition-root
@@ -684,6 +692,8 @@ require('./routes/generation-routes.cjs')(app, redis, {
     // Stage 114 — queue idempotency port (injected, not required by the
     // route layer: the contour-route require sets are frozen).
     queueIdempotency,
+    // GPU retry policy (2026-11-02) — /gpu/task/error classification + retry.
+    gpuRetryPolicy,
 });
 // AI Assistant routes — registered through the @animastor/assistant
 // package API (the Assistant HTTP contour lives in
@@ -918,6 +928,14 @@ async function startServer() {
                 await interruptActiveGenerationTasks(redis, { log });
             } catch (intErr) {
                 console.warn('[STARTUP] Interrupting in-flight generation failed:', intErr.message);
+            }
+            // A retry pause of the previous process is dropped (journaled as
+            // interrupted) — a restart never performs a pending retry.
+            try {
+                const dropped = await gpuRetryPolicy.interruptPendingRetries(redis);
+                if (dropped > 0) log(`[STARTUP] ${dropped} pending GPU retr${dropped === 1 ? 'y' : 'ies'} dropped (interrupted)`);
+            } catch (retryErr) {
+                console.warn('[STARTUP] Dropping pending GPU retries failed:', retryErr.message);
             }
             try {
                 runtime.loop.start(redis);
