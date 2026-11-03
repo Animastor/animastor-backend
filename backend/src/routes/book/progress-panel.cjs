@@ -347,9 +347,34 @@ module.exports = function(app, redis, deps) {
         }];
     }
 
-    /** blocked / interrupted: the command stopped without finishing. */
+    /** blocked / interrupted / failed: the command stopped without finishing. */
     function isStopped(task) {
-        return task.status === 'blocked' || task.status === 'interrupted';
+        return task.status === 'blocked' || task.status === 'interrupted' || task.status === 'failed';
+    }
+
+    // GPU retry policy (2026-11-02): `failed` + the classified error of the
+    // terminal attempt; while a retry pause runs the task stays `active` and
+    // `last_error` / `retry` describe the pending retry. Short texts only
+    // (no stack traces) — the classifier already shortened them.
+    function errorFields(task) {
+        const src = task.status === 'failed'
+            ? task
+            : (task.status === 'active' ? (task.last_error || null) : null);
+        return {
+            error_class: src ? (src.error_class || null) : null,
+            error_code: src ? (src.error_code || null) : null,
+            error_message: src ? (src.error_message || null) : null,
+        };
+    }
+
+    function retryFields(task) {
+        const r = task.status === 'active' && task.retry ? task.retry : null;
+        return {
+            retrying: !!r,
+            retry_no: r ? (r.retry_no || null) : null,
+            retry_max: r ? (r.max_retries || null) : null,
+            retry_at: r ? (r.due_at || null) : null,
+        };
     }
 
     function statusFields(task) {
@@ -358,6 +383,10 @@ module.exports = function(app, redis, deps) {
             blocked: task.status === 'blocked',
             blocked_reason: task.status === 'blocked' ? (task.blocked_reason || null) : null,
             interrupted: task.status === 'interrupted',
+            failed: task.status === 'failed',
+            failed_scene: task.status === 'failed' ? (task.failed_scene || null) : null,
+            ...errorFields(task),
+            ...retryFields(task),
         };
     }
 
@@ -381,9 +410,9 @@ module.exports = function(app, redis, deps) {
             }
 
             const visibleTasks = rows.filter(t => t.visible);
-            // A blocked/interrupted task waits for a NEW command — it is not
+            // A blocked/interrupted/failed task waits for a NEW command — it is not
             // running, so it does not keep the panel "in progress".
-            const anyIncomplete = visibleTasks.some(t => !t.done && !t.cancelled && !t.blocked && !t.interrupted);
+            const anyIncomplete = visibleTasks.some(t => !t.done && !t.cancelled && !t.blocked && !t.interrupted && !t.failed);
             const overallPercent = visibleTasks.length > 0
                 ? Math.round(
                     visibleTasks.reduce((sum, t) => sum + t.percent, 0) /

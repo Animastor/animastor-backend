@@ -181,4 +181,57 @@ describe('Progress panel independent generation tasks', () => {
         expect(audioRows.find(task => task.task_id === secondTask.task_id))
             .to.include({ scene_id: 'scene-b', ready: 0, total: 1 });
     });
+
+    // GPU retry policy (2026-11-02): failed task + classified error; a task
+    // in a retry pause stays active with last_error + retry fields.
+    it('shows a failed task with error_class/error_message and a retrying task with retry fields', async () => {
+        const redis = createMockRedis();
+        const bookId = 'gpu-retry-panel-book';
+        const chunks = new Map();
+        const chunkIds = [];
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'scene-a', 1, { expected_chunk_count: 1, audio_status: 'pending' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'scene-b', 1, { expected_chunk_count: 1, image_status: 'pending' });
+        await sceneState.unsafeRestoreAssetStates(redis, bookId, 'ch-1', 'scene-a', {
+            audio: sceneState.AssetState.FAILED, image: sceneState.AssetState.NEW, video: sceneState.AssetState.NEW,
+        });
+        await sceneState.unsafeRestoreAssetStates(redis, bookId, 'ch-1', 'scene-b', {
+            audio: sceneState.AssetState.NEW, image: sceneState.AssetState.FAILED, video: sceneState.AssetState.NEW,
+        });
+        const [audioTask] = await generationProgress.createTasks(redis, bookId, ['audio'],
+            { scope: 'current_scene', chapterId: 'ch-1', sceneId: 'scene-a' },
+            [{ chapter_id: 'ch-1', scene_id: 'scene-a', dirty_layers: ['audio'] }]);
+        const [imageTask] = await generationProgress.createTasks(redis, bookId, ['image'],
+            { scope: 'current_scene', chapterId: 'ch-1', sceneId: 'scene-b' },
+            [{ chapter_id: 'ch-1', scene_id: 'scene-b', dirty_layers: ['image'] }]);
+
+        const failed = await generationProgress.failSceneStage(redis, bookId, 'ch-1', 'scene-a', 'audio', {
+            error_class: 'deterministic', error_code: 'comfy_missing_node',
+            error_message: 'No prompt_id: invalid_prompt: node Qwen3TTSGenerate does not exist', attempts: 1,
+        });
+        expect(failed.tasks.map(t => t.task_id)).to.deep.equal([audioTask.task_id]);
+        await generationProgress.updateTask(redis, bookId, imageTask.task_id, {
+            last_error: { error_class: 'transient', error_code: 'worker_lost', error_message: 'worker_timeout', at: 1 },
+            retry: { scene: { chapter_id: 'ch-1', scene_id: 'scene-b' }, retry_no: 1, max_retries: 2, due_at: 12345 },
+        });
+
+        const res = await createHarness(redis, chunks, chunkIds)(bookId);
+        expect(res.statusCode).to.equal(200);
+        const audio = res.body.tasks.find(t => t.task_id === audioTask.task_id);
+        const image = res.body.tasks.find(t => t.task_id === imageTask.task_id);
+        expect(audio).to.include({
+            status: 'failed', failed: true, done: false, error_class: 'deterministic',
+            error_code: 'comfy_missing_node', retrying: false,
+        });
+        expect(audio.error_message).to.match(/Qwen3TTSGenerate/);
+        expect(audio.failed_scene).to.deep.equal({ chapter_id: 'ch-1', scene_id: 'scene-a' });
+        expect(image).to.include({
+            status: 'active', failed: false, error_class: 'transient', error_message: 'worker_timeout',
+            retrying: true, retry_no: 1, retry_max: 2, retry_at: 12345,
+        });
+        // failed is not "in progress"; the retrying task still is.
+        expect(res.body.any_incomplete).to.equal(true);
+        await generationProgress.updateTask(redis, bookId, imageTask.task_id, { status: 'cancelled', cancelled_at: Date.now(), retry: null });
+        const res2 = await createHarness(redis, chunks, chunkIds)(bookId);
+        expect(res2.body.any_incomplete).to.equal(false);
+    });
 });

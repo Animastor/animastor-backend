@@ -58,6 +58,14 @@ const EventType = {
     AUTO_RECOVER: 'AUTO_RECOVER',
     DISPATCH_BLOCKED_CIRCUIT: 'DISPATCH_BLOCKED_CIRCUIT',
     RETRY_BUDGET_EXCEEDED: 'RETRY_BUDGET_EXCEEDED',
+    // GPU retry policy (2026-11-02): one event per failed attempt (class +
+    // reason + decision), the scheduled pause, the requeue after the pause,
+    // a skipped retry (cancelled / layer off / restart) and the terminal fail.
+    GPU_ATTEMPT_FAILED: 'GPU_ATTEMPT_FAILED',
+    GPU_RETRY_SCHEDULED: 'GPU_RETRY_SCHEDULED',
+    GPU_RETRY_REQUEUED: 'GPU_RETRY_REQUEUED',
+    GPU_RETRY_SKIPPED: 'GPU_RETRY_SKIPPED',
+    GPU_FAILURE_TERMINAL: 'GPU_FAILURE_TERMINAL',
     STARVATION_DETECTED: 'STARVATION_DETECTED',
     PRIORITY_BOOSTED: 'PRIORITY_BOOSTED',
     OVERLOAD_PROTECTION_ENABLED: 'OVERLOAD_PROTECTION_ENABLED',

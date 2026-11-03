@@ -30,6 +30,9 @@ module.exports = function(app, redis, deps) {
         // (backend.cjs) so this route layer does NOT gain a new relative
         // require edge (the contour-route require sets are frozen).
         queueIdempotency,
+        // GPU retry policy (2026-11-02) — injected by the composition root
+        // for the same reason (no new relative require edge).
+        gpuRetryPolicy,
     } = deps;
     const { log } = utils;
 
@@ -660,7 +663,8 @@ module.exports = function(app, redis, deps) {
     app.post('/gpu/task/error', requireHubCallbackAuth, async (req, res) => {
         try {
             const jobSchema = require('../runtime/job-schema');
-            const { job_id, build_id, reason, dispatch_id, protocol_version, worker_id, workspace_id } = req.body || {};
+            const { job_id, build_id, reason, dispatch_id, protocol_version, worker_id, workspace_id,
+                error_class, comfy_status, error_code } = req.body || {};
             if (
                 !job_id ||
                 !build_id ||
@@ -742,17 +746,24 @@ module.exports = function(app, redis, deps) {
                 console.warn(`[GPU ERROR] idempotency settle failed for ${job_id}: ${idemErr.message}`);
             }
 
-            // F2: raw audioOrch.setFailed removed — orchestrator.failStage handles audio-orch sync
-            const result = await orchestrator.failStage(
-                redis,
+            // F2: raw audioOrch.setFailed removed — orchestrator.failStage handles audio-orch sync.
+            // GPU retry policy (2026-11-02): classify (structured error_class /
+            // comfy_status from workers 2.2.3+, text rules for any worker),
+            // fail the stage without immediate re-dispatch, then retry after a
+            // pause (transient/OOM, live command only) or fail the command.
+            const result = await gpuRetryPolicy.handleStageFailure(redis, {
                 bookId,
                 chapterId,
                 sceneId,
                 stage,
-                build_id,
-                reason || 'worker_error',
-                { dispatchId: dispatch_id }
-            );
+                buildId: build_id,
+                reason: reason || 'worker_error',
+                dispatchId: dispatch_id,
+                errorClass: typeof error_class === 'string' ? error_class : undefined,
+                errorCode: typeof error_code === 'string' ? error_code : undefined,
+                comfyStatus: comfy_status,
+                source: 'task_error',
+            });
             res.json({ ok: true, ...result });
         } catch (err) {
             console.error('[GPU ERROR] Handler error:', err.message);

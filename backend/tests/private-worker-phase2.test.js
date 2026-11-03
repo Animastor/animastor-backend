@@ -786,6 +786,9 @@ describe('Private worker Phase 2 — PG persistence & callback re-verification',
             },
             utils: { log: () => {} },
             orchestrator: { failStage: async () => ({ failed: true }) },
+            // GPU retry policy (2026-11-02): /gpu/task/error reaches failStage
+            // through the injected policy (composition root wires the real one).
+            gpuRetryPolicy: { handleStageFailure: async () => ({ failed: true }) },
             taskHandler: { handleTaskResult: async () => {} },
             book: { loadBook: () => null },
             playerModel: { loadBook: () => null },
