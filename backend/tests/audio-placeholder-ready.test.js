@@ -226,6 +226,7 @@ describe('placeholder service: no ready without a fenced commit', function () {
                 generateSilentAudio: async (p) => { writeSilentFile(p, 87021); },
             },
             '../audio/placeholder-marker': marker,
+            '../audio/validation': harness(root).validation,
         });
     }
 
@@ -278,5 +279,45 @@ describe('placeholder service: no ready without a fenced commit', function () {
 
         expect(res.replaced).to.equal(true);
         expect(recorder.map((r) => r.status)).to.deep.equal(['ready']);
+    });
+
+    // Integration A+B: hasRealAudio = the same predicate as
+    // isSceneAudioCommitted (reconcile / scene-window restore facts with it).
+    it('hasRealAudio: an old placeholder WITHOUT a sidecar, status=ready, no chunks → not real', async () => {
+        const canonical = paths(root).canonical;
+        writeSilentFile(canonical, 87021); // pre-marker placeholder: no .placeholder.json
+        expect(marker.isPlaceholderAudioFile(canonical)).to.equal(false);
+        const service = loadService({ status: 'ready', path: canonical });
+
+        expect(await service.hasRealAudio(BOOK, CHAPTER, SCENE, BUILD)).to.equal(false);
+    });
+
+    it('hasRealAudio: a marked placeholder with status=ready and a chunk → not real', async () => {
+        const { canonical, chunk } = paths(root);
+        writeSilentFile(canonical, 87021);
+        marker.writePlaceholderMarker(canonical, { durationSec: 10.848 });
+        writeSilentFile(chunk(1), 4096);
+        const service = loadService({ status: 'ready', path: canonical });
+
+        expect(await service.hasRealAudio(BOOK, CHAPTER, SCENE, BUILD)).to.equal(false);
+    });
+
+    it('hasRealAudio: canonical without marker + chunks on disk + status=ready → real', async () => {
+        const { canonical, chunk } = paths(root);
+        writeSilentFile(canonical, 87021);
+        writeSilentFile(chunk(1), 4096);
+        writeSilentFile(chunk(2), 4096);
+        const service = loadService({ status: 'ready', path: null }); // NULL path → canonical
+
+        expect(await service.hasRealAudio(BOOK, CHAPTER, SCENE, BUILD)).to.equal(true);
+    });
+
+    it('hasRealAudio: committed files but status != ready → not real', async () => {
+        const { canonical, chunk } = paths(root);
+        writeSilentFile(canonical, 87021);
+        writeSilentFile(chunk(1), 4096);
+        const service = loadService({ status: 'stale', path: canonical });
+
+        expect(await service.hasRealAudio(BOOK, CHAPTER, SCENE, BUILD)).to.equal(false);
     });
 });

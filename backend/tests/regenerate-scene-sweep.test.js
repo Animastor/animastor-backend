@@ -82,6 +82,7 @@ describe('/regenerate hub sweep is scene-scoped (incident 2026-11-04)', function
     let savedFetch;
     let hub;
     let logs;
+    let pgTasks;
 
     function stub(request, exports) {
         const resolved = require.resolve(request);
@@ -99,8 +100,10 @@ describe('/regenerate hub sweep is scene-scoped (incident 2026-11-04)', function
         stub('../src/storage/postgres/repositories/scene-assets-repo', {
             setDirtyUnitIds: async () => {}, ensureSceneRow: async () => {},
         });
+        pgTasks = [];
         stub('../src/storage/postgres/repositories/task-repo', {
-            createTask: async () => {}, updateTaskStatus: async () => {},
+            createTask: async (taskId, bookId, chapterId, sceneId, type) => { pgTasks.push({ taskId, bookId, chapterId, sceneId, type }); },
+            updateTaskStatus: async () => {},
         });
         stub('../src/storage/postgres/repositories/generation-cancel-repo', { clear: async () => {} });
         stub('../src/storage/postgres/repositories/book-repo', { getWorkspaceId: async () => null });
@@ -220,6 +223,56 @@ describe('/regenerate hub sweep is scene-scoped (incident 2026-11-04)', function
         expect(hub.calls.filter(c => c.query.book_id)).to.deep.equal([]);
         // the audio job (not part of an image command) survives
         expect(hub.records.has(`${BOOK}_${CH}_${S_TARGET}_0001:audio`)).to.equal(true);
+    });
+
+    // Integration E §6: the click guard lives in the fronts; the backend only
+    // LOGS the source. An old client (web before 6f29cfc, APK ≤ 0.2.5) sends
+    // no client_action and must still get its command and its task.
+    it('an old client WITHOUT client_action → 200, the task is created (Redis + PG), source logged as absent', async () => {
+        const redis = createMockRedis();
+        const handler = mountRoute(redis, { audio_enabled: true, image_enabled: true, video_enabled: false });
+        const res = createResponse();
+        await handler({ params: { bookId: BOOK }, headers: { 'user-agent': 'okhttp/4.12.0' }, body: {
+            scope: 'current_scene', chapter_id: CH, scene_id: S_TARGET, worker_types: ['audio'], rebuild_all: true,
+        } }, res);
+        expect(res.statusCode, JSON.stringify(res.body)).to.equal(200);
+        expect(res.body.error).to.equal(undefined);
+        expect(res.body.tasks).to.have.lengthOf(1);
+        expect(res.body.tasks[0]).to.include({ type: 'audio', target_count: 1 });
+        expect(pgTasks.map(t => [t.type, t.chapterId, t.sceneId])).to.deep.equal([['audio', CH, S_TARGET]]);
+        expect(pgTasks[0].taskId).to.equal(res.body.tasks[0].task_id);
+        expect(logs.find(l => /: command scope=/.test(l))).to.include('client_action=absent');
+    });
+
+    it('client_action with trusted=false is logged, never refused (200, task created)', async () => {
+        const redis = createMockRedis();
+        const handler = mountRoute(redis, { audio_enabled: true, image_enabled: true, video_enabled: false });
+        const res = createResponse();
+        await handler({ params: { bookId: BOOK }, body: {
+            scope: 'current_chapter', chapter_id: CH, worker_types: ['image'], rebuild_all: true,
+            client_action: { kind: 'user_click', source: 'generator.retry_row', action_id: 'ua-00000000000000ff', trusted: false },
+        } }, res);
+        expect(res.statusCode, JSON.stringify(res.body)).to.equal(200);
+        expect(res.body.tasks).to.have.lengthOf(1);
+        expect(res.body.tasks[0].type).to.equal('image');
+        expect(logs.find(l => /: command scope=/.test(l))).to.include('client_action=generator.retry_row id=ua-00000000000000ff trusted=false');
+    });
+
+    it('«Generate Audio» → «Whole book» (fronts always send rebuild_all:true) with image also enabled → no book-wide sweep', async () => {
+        const redis = createMockRedis();
+        await seedIncident(redis);
+        const handler = mountRoute(redis, { audio_enabled: true, image_enabled: true, video_enabled: false });
+        const res = createResponse();
+        await handler({ params: { bookId: BOOK }, body: {
+            scope: 'whole_book', chapter_id: null, scene_id: null, worker_types: ['audio'], rebuild_all: true,
+            client_action: { kind: 'user_click', source: 'generator.scope_dialog', action_id: 'ua-0123456789abcdee', trusted: true },
+        } }, res);
+        expect(res.statusCode, JSON.stringify(res.body)).to.equal(200);
+        expect(hub.calls.filter(c => c.query.book_id), 'book-wide /queue/clear').to.deep.equal([]);
+        // the image command of the book is not touched by an audio command
+        expect(hub.records.has(`${BOOK}_${CH}_${S_OTHER}_iu-677669ab:iu_image`)).to.equal(true);
+        expect(hub.records.has(`${BOOK}_${CH}_${S_TARGET}_iu-4152f8a6:iu_image`)).to.equal(true);
+        expect(logs.find(l => /\[REGENERATE\].*hub sweep/.test(l))).to.include('book_sweep=false');
     });
 
     it('a full restart of the whole book (whole_book + every enabled layer) may sweep the book', async () => {

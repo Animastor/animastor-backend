@@ -21,4 +21,9 @@ GPU job was ever created.
   exist on disk.
 - Docs: `docs/audio/ready-semantics.md`. Data cleanup (not executed):
   `scripts/fix-fake-ready-audio-20261104.sql`.
-- Tests: `backend/tests/audio-placeholder-ready.test.js`.
+- `hasRealAudio` (reconcile / scene-window / scene-restoration) uses the same predicate:
+  `status='ready'` **and** `isSceneAudioCommitted` — an old placeholder without a sidecar under a
+  `ready` row is not real audio (integration A+B).
+- Ships in `@animastor/orchestration` **0.3.4** (together with the unpublished 0.3.3 hub-sweep fix).
+- Tests: `backend/tests/audio-placeholder-ready.test.js`, `backend/tests/worklist-rebuild.integration.test.js`
+  (real-audio fixture now carries its chunk; new case: `ready` row + canonical file without chunks).

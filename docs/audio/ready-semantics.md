@@ -46,6 +46,13 @@ the readiness check only asked “does the canonical file exist and parse”. It
 5. **Chunk records mirror files.** The `already_ready` fast path writes `audio_status: 'ready'`
    only for chunk files that exist on disk; it never fabricates progress for a chunk that no GPU
    produced.
+6. **One predicate for "is this scene's audio real".** `placeholder-audio#hasRealAudio` — used by
+   reconcile (asset-state rebuild), scene-window and scene-restoration to restore the `ready` fact
+   — is `status === 'ready'` **and** `isSceneAudioCommitted(...).ready`. A `ready` row over an old
+   placeholder that predates the marker (no sidecar, no chunks) is therefore not real audio
+   either (integration A+B, 2026-11-04; `reports/2026-11-04/integration-A-B-C.md`).
+
+The canonical copy of this document is animastor-docs `02-orchestration/AUDIO_READY_SEMANTICS.md`.
 
 ## Where each invariant lives
 
@@ -55,7 +62,7 @@ the readiness check only asked “does the canonical file exist and parse”. It
 | Marker written on silence | `backend/src/audio/silence.js` (`generateSilentAudio`) |
 | Committed-audio probe | `backend/src/audio/validation.js` (`isSceneAudioCommitted`) |
 | `already_ready` decision | `backend/src/audio/generation.js` (`generateSceneAudio`) |
-| `ready` upgrade / placeholder creation | `backend/src/services/placeholder-audio.js` |
+| `ready` upgrade / placeholder creation / `hasRealAudio` | `backend/src/services/placeholder-audio.js` |
 | Completion callback probe | `packages/animastor-orchestration/src/orchestration/scene-callbacks.js` |
 | `AUDIO_ALREADY_DONE` guard | `packages/animastor-orchestration/src/orchestration/scene-orchestrator.js` |
 

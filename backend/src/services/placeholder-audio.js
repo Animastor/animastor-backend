@@ -27,6 +27,9 @@ const iuRepo = require('../storage/postgres/repositories/iu-repo');
 // 2026-11-04: silence is explicitly marked; a placeholder file never becomes
 // ready just because it sits on disk at the canonical path.
 const { isPlaceholderAudioFile } = require('../audio/placeholder-marker');
+// The committed-audio predicate — one definition for every "is the scene's
+// audio real" question (validation does not require this module: no cycle).
+const audioValidation = require('../audio/validation');
 
 const logPrefix = '[PLACEHOLDER-AUDIO]';
 
@@ -142,14 +145,16 @@ async function hasRealAudio(bookId, chapterId, sceneId, buildId) {
     try {
         const asset = await sceneAssetsRepo.getAsset(bookId, chapterId, sceneId, 'audio', buildId);
         if (!asset || asset.status !== 'ready') return false;
+        // Integration A+B (2026-11-04): the SAME predicate as the dispatch
+        // guards — `validation.isSceneAudioCommitted`: a canonical file
+        // without the placeholder marker, valid as audio, AND the scene's
+        // chunks on disk. A ready record over an old placeholder that has
+        // no sidecar (created before the marker existed) has no chunks and
+        // is not real audio (sc-4bb85e02: status=ready, 0 chunks).
         // The canonical path is the authority; a NULL/stale `path` column is
-        // legacy drift, not "no audio" (reconcile rebuild relies on this).
-        const canonical = asset.path && fs.existsSync(asset.path)
-            ? asset.path
-            : path.join(config.OUTPUT_DIR, buildId, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
-        if (!fs.existsSync(canonical)) return false;
-        // A ready record over a marked placeholder is a lie (sc-4bb85e02).
-        return !isPlaceholderAudioFile(canonical);
+        // legacy drift, not "no audio".
+        const probe = await audioValidation.isSceneAudioCommitted(buildId, bookId, chapterId, sceneId, null);
+        return !!(probe && probe.ready === true);
     } catch {
         return false;
     }
