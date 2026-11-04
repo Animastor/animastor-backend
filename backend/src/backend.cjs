@@ -562,6 +562,9 @@ const routeDeps = {
     // (cancel-worker, PUT layer-config) — injected, the contour-route
     // require sets are frozen.
     stageCancellation: require('./services/stage-cancellation.cjs'),
+    // 2026-11-04: /regenerate post-release hub sweep plan (scene-scoped,
+    // book-wide only for a full restart of the whole book — fail-closed).
+    regenerateHubSweep: require('./services/regenerate-hub-sweep.cjs'),
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,

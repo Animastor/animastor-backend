@@ -664,7 +664,7 @@ module.exports = function(app, redis, deps) {
         try {
             const jobSchema = require('../runtime/job-schema');
             const { job_id, build_id, reason, dispatch_id, protocol_version, worker_id, workspace_id,
-                error_class, comfy_status, error_code } = req.body || {};
+                error_class, comfy_status, error_code, hub_detail } = req.body || {};
             if (
                 !job_id ||
                 !build_id ||
@@ -716,7 +716,11 @@ module.exports = function(app, redis, deps) {
             const first = await redis.set(dedupKey, '1', 'NX', 'EX', 60);
             if (!first) return res.json({ ok: true, deduped: true });
 
-            log(`[GPU ERROR] ${bookId}/${chapterId}/${sceneId} ${stage} failed: ${reason || 'unknown'} (job=${job_id})`);
+            // Hub v0.2.9: reason stale_dispatch_result + hub_detail
+            // no_running_record = the hub lost the claim of a LIVE dispatch
+            // (identity verified above) — failed here and retried by the GPU
+            // retry policy (transient), no wait for stale-lease recovery.
+            log(`[GPU ERROR] ${bookId}/${chapterId}/${sceneId} ${stage} failed: ${reason || 'unknown'} (job=${job_id}${typeof hub_detail === 'string' ? `, hub=${hub_detail.slice(0, 40)}` : ''})`);
 
             // Stage 114 - a failed job is a JUSTIFIED retry: release the
             // pending-entry claim (the task is no longer pending) and bump the

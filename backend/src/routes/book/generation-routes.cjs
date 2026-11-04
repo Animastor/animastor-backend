@@ -42,6 +42,20 @@ module.exports = function(app, redis, deps) {
 
     const sessionControl = agentSessionControl || createAgentSessionControl();
 
+    // 2026-11-04 (reports/2026-11-04/regenerate-sweep-fix.md): the
+    // /regenerate post-release hub sweep plan arrives through deps
+    // (composition root) — contour-route requires are frozen. Without it the
+    // route is fail-closed: it sweeps only the dispatch ids it reset, never
+    // the whole book.
+    const regenerateHubSweep = deps.regenerateHubSweep || {
+        planRegenerateHubSweep: (p) => {
+            const ids = [...new Set(((p && p.dispatchIds) || []).filter(Boolean))];
+            return { mode: ids.length ? 'dispatch' : 'none', book_sweep: false, dispatch_ids: ids, full_book_restart: false };
+        },
+        formatSweepLog: (bookId, scopeDisplay, plan) =>
+            `[REGENERATE] ${bookId}: hub sweep scope=${scopeDisplay} dispatch_ids=[${plan.dispatch_ids.join(',')}] book_sweep=${plan.book_sweep} mode=${plan.mode}`,
+    };
+
     const cancelStage = (params) => {
         const impl = deps.stageCancellation;
         if (!impl || typeof impl.cancelStage !== 'function') {
@@ -497,6 +511,22 @@ module.exports = function(app, redis, deps) {
                 log(`[REGENERATE] ${bookId}: disabled layer(s) dropped from the command: ${skippedWorkerTypes.join(',')}`);
             }
             const requestedTypeSet = new Set(requestedWorkerTypes);
+            // 2026-11-04 (reports/2026-11-04/regenerate-sweep-fix.md): which
+            // click sent the command. Fronts (web 2026-11-04+, Android
+            // 0.2.6+) send the additive `client_action` {kind:'user_click',
+            // source, action_id, trusted}; older clients send nothing. Logged
+            // only — never a reason to refuse (the current client contract
+            // stays valid); `client_action=absent` marks a command that no
+            // known button sent.
+            {
+                const ca = (req.body && typeof req.body.client_action === 'object' && req.body.client_action) || null;
+                const clip = (v, n) => (typeof v === 'string' ? v.replace(/[^\w.:\-]/g, '').slice(0, n) : '');
+                const caText = ca && ca.kind === 'user_click' && clip(ca.source, 64)
+                    ? `${clip(ca.source, 64)} id=${clip(ca.action_id, 64) || '-'} trusted=${ca.trusted === true}`
+                    : 'absent';
+                const ua = clip(String((req.headers && req.headers['user-agent']) || '').replace(/\s+/g, '_'), 80) || '-';
+                log(`[REGENERATE] ${bookId}: command scope=${effectiveScope}${chapter_id ? '/' + clip(chapter_id, 64) : ''}${scene_id ? '/' + clip(scene_id, 64) : ''} worker_types=${requestedWorkerTypes.join(',')} rebuild_all=${rebuild_all === true} client_action=${caText} ua=${ua}`);
+            }
             // An explicit, accepted command clears the cancel flag and the
             // cancellation tombstone (a refused command above leaves both) —
             // the command gate then authorizes the new tasks.
@@ -735,10 +765,36 @@ module.exports = function(app, redis, deps) {
                 // failed sweep only warns (the claims were already released,
                 // the orphan is bounded by claim TTL) — it is never reported
                 // as a success.
+                //
+                // 2026-11-04 (reports/2026-11-04/regenerate-sweep-fix.md): the
+                // book-wide form swept OTHER scenes' in-flight jobs (a running
+                // image result was rejected 409 and lost). The sweep now
+                // targets ONLY the dispatch ids resetScenes cancelled for this
+                // call; a book-wide sweep is allowed only for a full restart of
+                // the whole book (fail-closed, regenerate-hub-sweep.cjs). The
+                // reset scenes stay OUT of the active index until the task
+                // registry is written below (readdToActiveIndex:false), so no
+                // new dispatch of them can land in the clear→release window.
                 try {
+                    const sweepPlan = regenerateHubSweep.planRegenerateHubSweep({
+                        scope: effectiveScope,
+                        rebuildAll: rebuild_all === true,
+                        requestedWorkerTypes,
+                        enabledWorkerTypes: mediaRegistry.listMediaTypes().filter(
+                            type => persistedLayerCfg[`${type}_enabled`] !== false
+                        ),
+                        dispatchIds: marked && marked.dispatchIds,
+                    });
+                    const scopeDisplay = `${effectiveScope}${chapter_id ? '/' + chapter_id : ''}${scene_id ? '/' + scene_id : ''}`;
+                    log(regenerateHubSweep.formatSweepLog(bookId, scopeDisplay, sweepPlan));
                     const hubPort = require('@animastor/orchestration').ports.hubCancel;
-                    if (hubPort && typeof hubPort.isHubCancelPortWired === 'function' && hubPort.isHubCancelPortWired()) {
-                        const sweep = await hubPort.hubCancelOp('clearHubDispatches')([], { book_id: bookId, context: 'REGENERATE' });
+                    if (sweepPlan.mode !== 'none' && hubPort && typeof hubPort.isHubCancelPortWired === 'function' && hubPort.isHubCancelPortWired()) {
+                        const sweep = await hubPort.hubCancelOp('clearHubDispatches')(
+                            sweepPlan.book_sweep ? [] : sweepPlan.dispatch_ids,
+                            sweepPlan.book_sweep
+                                ? { book_id: bookId, allowBookSweep: true, context: 'REGENERATE' }
+                                : { context: 'REGENERATE' }
+                        );
                         if (sweep && sweep.failed > 0) {
                             console.warn(`[REGENERATE] Post-release lane sweep for ${bookId} incomplete (requested=${sweep.requested}, cleared=${sweep.cleared}, failed=${sweep.failed}) — an orphan entry may survive (bounded by claim TTL)`);
                         }

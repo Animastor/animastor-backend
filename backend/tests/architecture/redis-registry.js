@@ -103,6 +103,14 @@ const REDIS_OWNERSHIP = [
         note: 'Error handoff per job_id (hub task/error path → backend recovery).',
     },
     {
+        pattern: 'animastor:stale-dispatch-signal:*',
+        owner: 'gpu-hub',
+        readers: ['gpu-hub'],
+        writers: ['gpu-hub'],
+        crossModule: false,
+        note: 'Hub v0.2.9: once-per dispatch×job marker (SET NX EX 3600) of the backend signal for a 409 no_running_record result/error (reason stale_dispatch_result) — reports/2026-11-04/regenerate-sweep-fix.md.',
+    },
+    {
         pattern: 'animastor:gpu-hub:workers',
         owner: 'gpu-hub',
         readers: ['backend'],

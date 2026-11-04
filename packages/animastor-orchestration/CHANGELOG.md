@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.3 (2026-11-04) — /regenerate не сносит чужие задачи на хабе
+
+Основание: `reports/2026-11-04/gpu-generation-stall.md` §5.3, §9.1 — `/regenerate`
+одной сцены (audio) закончился `clearHubDispatches([], { book_id })` →
+`DELETE /queue/clear?book_id=`; хаб удалил running-запись image-задачи другой
+сцены (результат отклонён 409 и потерян) и queued-задачу (восстановлена
+stale-lease recovery через 7 мин). Отчёт исправления:
+`reports/2026-11-04/regenerate-sweep-fix.md`. Описание: animastor-docs
+`architecture/COMMAND_ONLY_GENERATION.md` §«Уборка хаба при /regenerate».
+
+### Changed (поведение)
+
+- `dispatch-engine.clearHubDispatches`: book-scoped форма (пустой список id +
+  `book_id`) — **fail-closed**: запрос `?book_id=` уходит только при явном
+  `allowBookSweep: true`; иначе ни одного запроса, warn
+  `book-wide GPU hub sweep … REFUSED`, результат `{requested:0, cleared:0,
+  failed:0, refused:1}`. Per-id форма не менялась.
+- `orchestrator.resetScenes` возвращает `dispatchIds` — dispatch-id,
+  отменённые этим reset'ом (только сбрасываемые сцена×стадия); вызывающий
+  повторно убирает на хабе только их.
+
+Fence, command-gate и retry-политика не меняются.
+
 ## 0.3.2 (2026-11-02) — эпоха dispatch в audio-orch, без ложного FAILED
 
 Основание: `reports/2026-11-02/gpu-e2e-installer-025-logs.md` §6.1, §8 п.3, п.5 —

@@ -499,7 +499,7 @@ async function resetScenes(redis, bookId, buildId, scenes, layerCfg, options = {
     
     if (!scenes || scenes.length === 0) {
         log('[RESET-SCENES] No scenes to reset');
-        return { marked: 0, reset_scenes: 0 };
+        return { marked: 0, reset_scenes: 0, dispatchIds: [] };
     }
 
     const scopeDisplay = `${scope}${chapterId ? '/' + chapterId : ''}${sceneId ? '/' + sceneId : ''}`;
@@ -635,7 +635,10 @@ async function resetScenes(redis, bookId, buildId, scenes, layerCfg, options = {
         { scenes_count: scenes.length, marked: marked.marked }
     ).catch(() => {});
 
-    return { ...marked, reset_scenes: scenes.length };
+    // 0.3.3 (reports/2026-11-04/regenerate-sweep-fix.md): the dispatch ids
+    // cancelled by THIS reset — the only hub entries a caller may sweep again
+    // (a book-wide sweep would remove other scenes' in-flight jobs).
+    return { ...marked, reset_scenes: scenes.length, dispatchIds: [...new Set(cancellation.dispatchIds || [])] };
 }
 
 // ── S-5: pure FSM-writer ownership moved to the state layer ──
