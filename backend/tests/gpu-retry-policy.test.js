@@ -138,6 +138,8 @@ describe('GPU retry policy after a worker error (owner decision 2026-11-02)', fu
             ['fetch failed', 'transient', 'network'],
             ['Invalid JSON from ComfyUI: <html>502 Bad Gateway', 'transient', 'network'],
             ['torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB', 'oom', 'cuda_oom'],
+            ['stale_dispatch_result', 'transient', 'stale_dispatch'],
+            ['Hub rejected result: HTTP 409 {"error":"stale_or_unknown_dispatch","detail":"no_running_record"} stale_dispatch_result', 'transient', 'stale_dispatch'],
             ['Download failed: 404', 'unknown', 'unknown'],
             ['', 'unknown', 'unknown'],
         ];
@@ -400,6 +402,60 @@ describe('GPU retry policy after a worker error (owner decision 2026-11-02)', fu
         await fireNextTimer();
         const skipped = (await journalTypes(redis, b)).find(e => e.type === 'GPU_RETRY_SKIPPED');
         expect(skipped.details.reason).to.equal('task_cancelled');
+    });
+
+    // ── hub v0.2.9: lost claim (409 no_running_record) ────────────────
+    // reports/2026-11-04/regenerate-sweep-fix.md: the hub rejected a result
+    // because its running record was swept away; it now signals the backend
+    // (POST /gpu/task/error reason stale_dispatch_result, error_class
+    // transient). The backend must act AT ONCE on a live dispatch (no wait for
+    // stale-lease recovery) and never on a cancelled/superseded one.
+    it('hub stale_dispatch_result on a LIVE dispatch → failed now, retry in 30 s under the command, re-dispatched', async () => {
+        const b = book('stale-live');
+        await setLayers(redis, b, {});
+        const task = await command(redis, b, 'image');
+        await scheduler.addSceneToActiveIndex(redis, b, CH, S1);
+        const d1 = await tickAndDispatchId(b, 'image');
+        expect(await dispatchEngine.verifyDispatchIdentity(redis, b, CH, S1, 'image', d1)).to.include({ valid: true });
+
+        const r = await workerError(b, 'image', d1, 'stale_dispatch_result', { errorClass: 'transient' });
+        expect(r.failed).to.equal(true);
+        expect(r.policy).to.include({ action: 'retry_scheduled', retry_no: 1, pause_ms: 30000, error_class: 'transient', error_code: 'stale_dispatch' });
+        // the dispatch is finalized right away: no live lease left to wait for
+        expect(await dispatchEngine.getDispatchMetadata(redis, b, CH, S1, 'image')).to.equal(null);
+        // a duplicate signal (task/error after result) is a late signal
+        expect((await workerError(b, 'image', d1, 'stale_dispatch_result', { errorClass: 'transient' })).policy.action).to.equal('ignored');
+
+        await fireNextTimer();
+        const d2 = await tickAndDispatchId(b, 'image');
+        expect(d2).to.be.a('string').and.not.equal(d1);
+        expect(executorCalls).to.deep.equal([`${S1}:image`, `${S1}:image`]);
+        expect((await generationProgress.getTask(redis, b, task.task_id)).status).to.equal('active');
+    });
+
+    it('hub stale_dispatch_result on a dispatch CANCELLED by a reset → ignored, nothing re-dispatched', async () => {
+        const b = book('stale-cancelled');
+        await setLayers(redis, b, {});
+        await command(redis, b, 'image');
+        await scheduler.addSceneToActiveIndex(redis, b, CH, S1);
+        const d1 = await tickAndDispatchId(b, 'image');
+        await dispatchEngine.cancelActiveDispatch(redis, b, CH, S1, 'image', 'scene_reset');
+        expect((await dispatchEngine.verifyDispatchIdentity(redis, b, CH, S1, 'image', d1)).valid).to.equal(false);
+        const r = await workerError(b, 'image', d1, 'stale_dispatch_result', { errorClass: 'transient' });
+        expect(r.policy.action).to.equal('ignored');
+        expect(timers).to.have.length(0);
+    });
+
+    it('hub stale_dispatch_result after the command was cancelled → no retry (command-gate)', async () => {
+        const b = book('stale-nocmd');
+        await setLayers(redis, b, {});
+        const task = await command(redis, b, 'image');
+        await scheduler.addSceneToActiveIndex(redis, b, CH, S1);
+        const d1 = await tickAndDispatchId(b, 'image');
+        await generationProgress.markCancelled(redis, b, task.task_id);
+        const r = await workerError(b, 'image', d1, 'stale_dispatch_result', { errorClass: 'transient' });
+        expect(r.policy.action).to.equal('no_command');
+        expect(timers).to.have.length(0);
     });
 
     // ── no command / late signals / wrapper ───────────────────────────

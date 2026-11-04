@@ -484,7 +484,7 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
                 requests.push({ url, method: opts.method });
                 return { ok: true, status: 200, json: async () => ({ ok: true, scope: { book_id: 'bk-n1' }, removed: {} }) };
             };
-            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, apiKey: 'k', fetchImpl, warn: () => {} });
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', allowBookSweep: true, hubUrl: HUB, apiKey: 'k', fetchImpl, warn: () => {} });
             expect(requests).to.have.lengthOf(1);
             expect(requests[0].method).to.equal('DELETE');
             expect(requests[0].url).to.equal(`${HUB}/queue/clear?book_id=bk-n1`);
@@ -493,20 +493,35 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
 
         it('a hub ERROR is reported honestly (failed, never cleared)', async () => {
             const fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({}) });
-            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', allowBookSweep: true, hubUrl: HUB, fetchImpl, warn: () => {} });
             expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
         });
 
         it('an UNREACHABLE hub counts as failed and never throws', async () => {
             const fetchImpl = async () => { throw new Error('ECONNREFUSED 127.0.0.1:1'); };
-            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', allowBookSweep: true, hubUrl: HUB, fetchImpl, warn: () => {} });
             expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
         });
 
         it('a hub that echoes a FOREIGN scope is a failure (never clears other books)', async () => {
             const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ ok: true, scope: { book_id: 'OTHER-book' }, removed: {} }) });
-            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: () => {} });
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', allowBookSweep: true, hubUrl: HUB, fetchImpl, warn: () => {} });
             expect(result).to.deep.equal({ requested: 1, cleared: 0, failed: 1 });
+        });
+
+        // 0.3.3 (reports/2026-11-04/regenerate-sweep-fix.md): the book-wide
+        // form is FAIL-CLOSED — only an explicit allowBookSweep issues it.
+        it('empty ids + book_id WITHOUT allowBookSweep issues NO request (fail-closed, 0.3.3)', async function () {
+            const installed = require(require('path').join(require('path').dirname(require.resolve('@animastor/orchestration')), '..', 'package.json')).version;
+            const [maj, min, pat] = installed.split('.').map(Number);
+            if (maj === 0 && (min < 3 || (min === 3 && pat < 3))) this.skip(); // npm still carries <0.3.3
+            const requests = [];
+            const warnings = [];
+            const fetchImpl = async (url) => { requests.push(url); return { ok: true, status: 200, json: async () => ({ ok: true, scope: { book_id: 'bk-n1' } }) }; };
+            const result = await clearHubDispatches()([], { book_id: 'bk-n1', hubUrl: HUB, fetchImpl, warn: (m) => warnings.push(m), context: 'REGENERATE' });
+            expect(requests).to.have.lengthOf(0);
+            expect(result).to.deep.equal({ requested: 0, cleared: 0, failed: 0, refused: 1 });
+            expect(warnings.join('\n')).to.include('REFUSED');
         });
 
         it('empty ids and NO book_id issues NO request at all (no fake HTTP)', async () => {

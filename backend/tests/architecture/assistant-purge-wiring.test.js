@@ -111,6 +111,10 @@ function buildComposition({ sessionRepo, order }) {
             // (cancel-worker / PUT layer-config) injected into routeDeps.
             case './services/stage-cancellation.cjs':
                 return { cancelStage: async () => ({}) };
+            // 2026-11-04: the /regenerate post-release hub sweep plan
+            // (scene-scoped, fail-closed) injected into routeDeps.
+            case './services/regenerate-hub-sweep.cjs':
+                return require('../../src/services/regenerate-hub-sweep.cjs');
             default:
                 throw new Error(`composition slice required an unexpected module: ${spec}`);
         }

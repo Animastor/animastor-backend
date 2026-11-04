@@ -46,6 +46,11 @@ const TEXT_RULES = [
     { cls: ErrorClass.DETERMINISTIC, code: 'comfy_rejected', re: /^\s*no prompt_id\b/i },
 
     // ── transient ─────────────────────────────────────
+    // Hub v0.2.9 (2026-11-04): the hub lost the running record of a claimed
+    // job (a queue cleanup removed it) and rejected its result/error 409
+    // no_running_record — the job itself did not fail; repeat it. Placed
+    // first among transient rules: the text may also carry "HTTP 409".
+    { cls: ErrorClass.TRANSIENT, code: 'stale_dispatch', re: /\bstale_dispatch_result\b/i },
     { cls: ErrorClass.TRANSIENT, code: 'worker_lost', re: /\bworker[_ ]timeout\b|worker (gone|lost|offline)|heartbeat (expired|lost|stale)/i },
     { cls: ErrorClass.TRANSIENT, code: 'execution_timeout', re: /timeout waiting result|timed? ?out|\btimeout\b|\betimedout\b/i },
     { cls: ErrorClass.TRANSIENT, code: 'network', re: /econnreset|econnrefused|ehostunreach|enetunreach|eai_again|socket hang up|fetch failed|network error|\baborted\b|invalid json from comfyui|\bhttp 5\d\d\b|\bstatus 5\d\d\b|\b50[234] (bad gateway|service unavailable|gateway timeout)/i },

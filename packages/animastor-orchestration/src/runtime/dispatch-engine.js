@@ -1623,8 +1623,11 @@ async function clearLeasesForScenes(redis, bookId, scenes) {
  *
  * The contract now is:
  *   - ids present        → one `?dispatch_id=` DELETE per id (unchanged);
- *   - no ids + book_id   → exactly ONE `?book_id=` DELETE (the whole-book sweep
+ *   - no ids + book_id + `allowBookSweep: true`
+ *                        → exactly ONE `?book_id=` DELETE (the whole-book sweep
  *                          the hub already supports and cache/delete paths use);
+ *   - no ids + book_id WITHOUT `allowBookSweep` (0.3.3, fail-closed)
+ *                        → NO request, a warning, `{requested:0, refused:1}`;
  *   - neither            → NO request at all (never a fake HTTP call).
  *
  * A book-scoped sweep is checked against the hub's echoed `scope.book_id`:
@@ -1659,6 +1662,19 @@ async function clearHubDispatches(dispatchIds, options = {}) {
     // ── Book-scoped sweep (no explicit dispatch ids) ──────────────────────
     // Exactly one request; the hub filters by record.book_id so only this
     // book's queue/running/result entries are removed.
+    //
+    // 0.3.3 FAIL-CLOSED (reports/2026-11-04/regenerate-sweep-fix.md): a
+    // book-wide sweep removes EVERY in-flight job of the book — incident
+    // 2026-11-04: a one-scene audio /regenerate swept a running image job
+    // of another scene (result rejected 409, lost) and a queued one (back
+    // only after 7 min of stale-lease recovery). It is issued ONLY when the
+    // caller states it explicitly (`allowBookSweep: true` — an explicit
+    // cancellation / full restart of the whole book / book deletion).
+    // Otherwise: no request at all, a warning, `refused: 1`.
+    if (ids.length === 0 && bookId && options.allowBookSweep !== true) {
+        reportWarning(`${context}: book-wide GPU hub sweep for ${bookId} REFUSED (no dispatch ids, allowBookSweep not set) — nothing swept`);
+        return { requested: 0, cleared: 0, failed: 0, refused: 1 };
+    }
     if (ids.length === 0 && bookId) {
         try {
             const response = await fetchImpl(
