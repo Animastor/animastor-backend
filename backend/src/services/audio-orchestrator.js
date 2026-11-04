@@ -369,6 +369,9 @@ async function completeChunk(redis, bookId, chapterId, sceneId, chunkIndex, buil
                 const outputPath = path.join(buildDir, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
                 if (!fs.existsSync(outputPath)) {
                     fs.copyFileSync(chunkPaths[0], outputPath);
+                    // a leftover sidecar of a removed placeholder must not
+                    // mark the published chunk as silence (integration A+B+C)
+                    require('../audio/placeholder-marker').clearPlaceholderMarker(outputPath);
                     mergeSuccess = true;
                 }
             }

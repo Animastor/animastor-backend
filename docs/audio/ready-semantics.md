@@ -52,6 +52,19 @@ the readiness check only asked “does the canonical file exist and parse”. It
    placeholder that predates the marker (no sidecar, no chunks) is therefore not real audio
    either (integration A+B, 2026-11-04; `reports/2026-11-04/integration-A-B-C.md`).
 
+7. **Publication clears the marker.** `audio/pipeline#buildSceneAudio` (merge / recovery from
+   chunks) and the single-chunk fallback of `services/audio-orchestrator` remove the sidecar when
+   real audio is written to the canonical path that held a placeholder. Without this, every scene
+   whose placeholder was created after this fix would read `placeholder_marker` forever
+   (integration A+B+C).
+
+**Dependency — chunk retention.** Invariant 2 takes the scene's chunks on disk as the commit
+proof. `buildSceneAudio` deletes merged chunks unless `KEEP_AUDIO_CHUNKS` is set (the code default
+is *off*). With chunk deletion the probe answers `no_committed_chunks` for real audio right after
+the merge. Production keeps chunks (all real `ready` scenes had chunks on 2026-11-04), but every
+environment that runs this backend must keep them too — see
+`reports/2026-11-04/integration-A-B-C.md` (open decision for the owner).
+
 The canonical copy of this document is animastor-docs `02-orchestration/AUDIO_READY_SEMANTICS.md`.
 
 ## Where each invariant lives

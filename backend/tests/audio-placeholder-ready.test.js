@@ -321,3 +321,64 @@ describe('placeholder service: no ready without a fenced commit', function () {
         expect(await service.hasRealAudio(BOOK, CHAPTER, SCENE, BUILD)).to.equal(false);
     });
 });
+
+// Integration A+B+C (reports/2026-11-04/integration-A-B-C.md): real audio
+// published over a silent placeholder at the SAME canonical path must drop the
+// placeholder sidecar — otherwise the scene reads `placeholder_marker` forever
+// and every completion fails "Audio not ready after completion".
+describe('publishing real audio over a placeholder clears its marker', function () {
+    this.timeout(15000);
+    let root;
+    let savedKeep;
+
+    beforeEach(() => {
+        root = tmpRoot();
+        savedKeep = process.env.KEEP_AUDIO_CHUNKS;
+        process.env.KEEP_AUDIO_CHUNKS = '1'; // committed chunks stay on disk (prod setting)
+    });
+    afterEach(() => {
+        if (savedKeep === undefined) delete process.env.KEEP_AUDIO_CHUNKS;
+        else process.env.KEEP_AUDIO_CHUNKS = savedKeep;
+        try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {}
+    });
+
+    function loadPipeline() {
+        const { validation, chunks } = harness(root);
+        const copy = async (from, to) => { fs.copyFileSync(from, to); };
+        const pipeline = proxyquire('../src/audio/pipeline', {
+            './helpers': helpersStub(root),
+            './validation': validation,
+            './chunks': chunks,
+            './placeholder-marker': marker,
+            './ffmpeg': {
+                runFFmpegTrim: async (input, output) => copy(input, output),
+                runFFmpegMerge: async (args) => {
+                    const out = args[args.indexOf('-y') - 1];
+                    fs.writeFileSync(out, Buffer.alloc(9000, 1));
+                },
+                probeDuration: async () => 1,
+            },
+        });
+        return { pipeline, validation };
+    }
+
+    for (const count of [1, 2]) {
+        it(`${count} chunk(s) merged over a marked placeholder → marker gone, scene committed`, async () => {
+            const { canonical, chunk } = paths(root);
+            writeSilentFile(canonical, 87021);
+            marker.writePlaceholderMarker(canonical, { durationSec: 10.848 });
+            const chunkPaths = [];
+            for (let i = 1; i <= count; i++) { writeSilentFile(chunk(i), 4096); chunkPaths.push(chunk(i)); }
+            const { pipeline, validation } = loadPipeline();
+            expect((await validation.isSceneAudioCommitted(BUILD, BOOK, CHAPTER, SCENE, count)).reason).to.equal('placeholder_marker');
+
+            const out = await pipeline.buildSceneAudio(chunkPaths, canonical, BUILD, true);
+
+            expect(out).to.equal(canonical);
+            expect(marker.isPlaceholderAudioFile(canonical)).to.equal(false);
+            const probe = await validation.isSceneAudioCommitted(BUILD, BOOK, CHAPTER, SCENE, count);
+            expect(probe.reason).to.equal('committed');
+            expect(probe.ready).to.equal(true);
+        });
+    }
+});
