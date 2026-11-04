@@ -24,6 +24,12 @@ const fs = require('fs');
 const config = require('../config/runtime-config');
 const sceneAssetsRepo = require('../storage/postgres/repositories/scene-assets-repo');
 const iuRepo = require('../storage/postgres/repositories/iu-repo');
+// 2026-11-04: silence is explicitly marked; a placeholder file never becomes
+// ready just because it sits on disk at the canonical path.
+const { isPlaceholderAudioFile } = require('../audio/placeholder-marker');
+// The committed-audio predicate — one definition for every "is the scene's
+// audio real" question (validation does not require this module: no cycle).
+const audioValidation = require('../audio/validation');
 
 const logPrefix = '[PLACEHOLDER-AUDIO]';
 
@@ -138,7 +144,17 @@ async function hasPlaceholderAudio(bookId, chapterId, sceneId, buildId) {
 async function hasRealAudio(bookId, chapterId, sceneId, buildId) {
     try {
         const asset = await sceneAssetsRepo.getAsset(bookId, chapterId, sceneId, 'audio', buildId);
-        return !!(asset && asset.status === 'ready');
+        if (!asset || asset.status !== 'ready') return false;
+        // Integration A+B (2026-11-04): the SAME predicate as the dispatch
+        // guards — `validation.isSceneAudioCommitted`: a canonical file
+        // without the placeholder marker, valid as audio, AND the scene's
+        // chunks on disk. A ready record over an old placeholder that has
+        // no sidecar (created before the marker existed) has no chunks and
+        // is not real audio (sc-4bb85e02: status=ready, 0 chunks).
+        // The canonical path is the authority; a NULL/stale `path` column is
+        // legacy drift, not "no audio".
+        const probe = await audioValidation.isSceneAudioCommitted(buildId, bookId, chapterId, sceneId, null);
+        return !!(probe && probe.ready === true);
     } catch {
         return false;
     }
@@ -163,11 +179,15 @@ async function ensurePlaceholderAudio(buildId, bookId, chapterId, sceneId) {
     // 1. Skip if real audio already exists AND file is on disk
     const existingAsset = await sceneAssetsRepo.getAsset(bookId, chapterId, sceneId, 'audio', buildId);
     if (existingAsset && existingAsset.status === 'ready') {
-        if (existingAsset.path && fs.existsSync(existingAsset.path)) {
+        if (existingAsset.path && fs.existsSync(existingAsset.path) && !isPlaceholderAudioFile(existingAsset.path)) {
             log(`Real audio already exists for ${bookId}/${chapterId}/${sceneId}, skipping placeholder`);
             return { created: false, path: existingAsset.path, durationSec: existingAsset.duration_sec, reason: 'real_audio_exists' };
         }
-        log(`Stale ready record for ${bookId}/${chapterId}/${sceneId} (file missing), regenerating placeholder`);
+        if (existingAsset.path && isPlaceholderAudioFile(existingAsset.path)) {
+            log(`Ready record points at a marked placeholder for ${bookId}/${chapterId}/${sceneId} — treating it as placeholder, not real audio`);
+        } else {
+            log(`Stale ready record for ${bookId}/${chapterId}/${sceneId} (file missing), regenerating placeholder`);
+        }
     }
 
     // If a placeholder already exists and is not stale, skip
@@ -179,41 +199,24 @@ async function ensurePlaceholderAudio(buildId, bookId, chapterId, sceneId) {
         log(`Placeholder file missing for ${bookId}/${chapterId}/${sceneId}, regenerating`);
     }
 
-    // 1.b Safety: if the audio file already exists on disk (real generated audio),
-    // DO NOT overwrite it — even if the DB record is missing or stale.
-    // This prevents data loss when Redis/PG is reset but files survive.
+    // 1.b Safety: never overwrite an existing canonical file — and never turn
+    // its mere existence into 'ready'. The removed "size > 8192 B → ready"
+    // branch was a data-integrity bug: a long silent placeholder is exactly
+    // such a file, and it was registered as real audio (sc-4bb85e02,
+    // 2026-11-04). 'ready' is written ONLY by the fenced-commit publication
+    // path (replacePlaceholderWithRealAudio with a commit proof).
     const audioPath = path.join(config.OUTPUT_DIR, buildId, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
     if (fs.existsSync(audioPath)) {
-        // Check if it's a real audio file (larger than max silent placeholder)
         const stats = fs.statSync(audioPath);
-        if (stats.size > 8192) {
-            log(`Safety: real audio file exists on disk for ${bookId}/${chapterId}/${sceneId} (${stats.size} bytes) — NOT overwriting with placeholder`);
-            // Register it in DB if missing, so subsequent checks find it
-            try {
-                const { generateSilentAudio } = require('../audio');
-                const dummyPath = audioPath + '.placeholder_check.mp3';
-                await generateSilentAudio(dummyPath, 2);
-                const placeholderSize = fs.statSync(dummyPath).size;
-                try { fs.unlinkSync(dummyPath); } catch (_) {}
-                if (stats.size > placeholderSize * 1.5) {
-                    // File is significantly larger than a 2s placeholder — it's real audio
-                    await sceneAssetsRepo.upsertAsset({
-                        book_id: bookId,
-                        chapter_id: chapterId,
-                        scene_id: sceneId,
-                        asset_type: 'audio',
-                        path: audioPath,
-                        duration_sec: 0,
-                        build_id: buildId,
-                        status: 'ready',
-                    });
-                    log(`Safety: registered existing real audio as ready: ${bookId}/${chapterId}/${sceneId}`);
-                }
-            } catch (_) {}
-            return { created: false, path: audioPath, durationSec: 0, reason: 'real_audio_protected' };
+        if (!isPlaceholderAudioFile(audioPath)) {
+            log(
+                `Existing audio file without a placeholder marker for ${bookId}/${chapterId}/${sceneId} ` +
+                `(${stats.size} bytes) — left untouched and NOT registered as ready ` +
+                `(ready requires a fenced GPU commit)`
+            );
+            return { created: false, path: audioPath, durationSec: existingAsset?.duration_sec || 0, reason: 'existing_file_untouched' };
         }
-        // Small file — it's likely a placeholder, not real audio
-        log(`Existing audio file is small (${stats.size} bytes), may be stale placeholder — will regenerate`);
+        log(`Existing audio is a marked placeholder (${stats.size} bytes) for ${bookId}/${chapterId}/${sceneId} — regenerating placeholder for this generation`);
     }
 
     // 2. Calculate scene estimated duration
@@ -231,7 +234,9 @@ async function ensurePlaceholderAudio(buildId, bookId, chapterId, sceneId) {
 
     try {
         const { generateSilentAudio } = require('../audio');
-        await generateSilentAudio(audioPath, effectiveDuration);
+        await generateSilentAudio(audioPath, effectiveDuration, {
+            bookId, chapterId, sceneId, reason: 'placeholder',
+        });
         log(`Silent audio generated: ${path.basename(audioPath)} (${effectiveDuration.toFixed(1)}s)`);
     } catch (err) {
         warn(`Failed to generate silent audio for ${bookId}/${chapterId}/${sceneId}: ${err.message}`);
@@ -323,8 +328,28 @@ async function getScenesNeedingPlaceholder(bookId) {
  * @param {number} realDuration - Duration of the real audio in seconds
  * @returns {Promise<{replaced: boolean, reason: string}>}
  */
-async function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, buildId, realAudioPath, realDuration) {
+async function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, buildId, realAudioPath, realDuration, options = {}) {
     try {
+        // INVARIANT (2026-11-04): a file on disk is not a GPU result. A marked
+        // placeholder must never be upgraded to 'ready' — whatever the caller
+        // or the DB believes. This is the exact step that flipped
+        // sc-4bb85e02 from `stale` to `ready` with silence in the file.
+        if (isPlaceholderAudioFile(realAudioPath)) {
+            warn(`Refusing to mark a placeholder as real audio: ${bookId}/${chapterId}/${sceneId} (${realAudioPath})`);
+            try {
+                await sceneAssetsRepo.upsertAsset({
+                    book_id: bookId,
+                    chapter_id: chapterId,
+                    scene_id: sceneId,
+                    asset_type: 'audio',
+                    path: realAudioPath,
+                    duration_sec: realDuration,
+                    build_id: buildId,
+                    status: 'placeholder',
+                });
+            } catch (_) {}
+            return { replaced: false, reason: 'placeholder_not_ready' };
+        }
         // R15: Query current scene version for version-based staleness tracking
         let currentContentVersion = null;
         let currentAudioConfigVersion = null;
@@ -361,6 +386,10 @@ async function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, build
         }
 
         if (existing.status === 'placeholder') {
+            if (options.committed !== true) {
+                warn(`Placeholder for ${bookId}/${chapterId}/${sceneId} has no fenced-commit proof — NOT upgrading to ready`);
+                return { replaced: false, reason: 'no_commit_proof' };
+            }
             log(`Replacing placeholder audio with real audio: ${bookId}/${chapterId}/${sceneId}`);
             await sceneAssetsRepo.upsertAsset({
                 book_id: bookId,
@@ -401,7 +430,13 @@ async function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, build
             return { replaced: false, reason: 'already_ready_updated' };
         }
 
-        log(`Audio in status ${existing.status} for ${bookId}/${chapterId}/${sceneId} — updating to ready`);
+        // Any other status (stale / pending / dirty) is NOT a real audio
+        // record: it may only be upgraded by a verified fenced commit.
+        if (options.committed !== true) {
+            warn(`Audio in status ${existing.status} for ${bookId}/${chapterId}/${sceneId} without fenced-commit proof — staying NOT ready`);
+            return { replaced: false, reason: `not_committed_from_${existing.status}` };
+        }
+        log(`Audio in status ${existing.status} for ${bookId}/${chapterId}/${sceneId} — fenced commit verified, updating to ready`);
         await sceneAssetsRepo.upsertAsset({
             book_id: bookId,
             chapter_id: chapterId,

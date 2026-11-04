@@ -263,23 +263,34 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
     }
 
     // ── Check if audio is already ready ──
-    let isReady = await validation.isSceneAudioReady(buildId, bookId, chapterId, sceneId);
+    // INVARIANT (2026-11-04, ba_1788172242081/ch-5e5a8c76/sc-4bb85e02):
+    // "already ready" must mean "a fenced GPU commit of THIS generation
+    // produced the chunks". It must never mean "a file exists": a silent
+    // placeholder is a valid 10.85 s MP3 and answered yes to that question,
+    // so the scene went READY with `worker_id = NULL` and every later
+    // "audio" command was skipped as already_ready.
+    const readiness = await validation.isSceneAudioCommitted(
+        buildId, bookId, chapterId, sceneId, expectedChunkCount
+    );
+    helpers.log(
+        `[AUDIO] READY_CHECK: ${bookId}/${chapterId}/${sceneId} ready=${readiness.ready} ` +
+        `reason=${readiness.reason} chunks=[${(readiness.chunks || []).join(',')}] ` +
+        `expected=${expectedChunkCount} canonical=${readiness.path ? path.basename(readiness.path) : '(none)'}`
+    );
+    let isReady = readiness.ready;
     if (isReady) {
         try {
             const sceneAssetsRepo = require('../storage/postgres/repositories/scene-assets-repo');
             const asset = await sceneAssetsRepo.getAsset(bookId, chapterId, sceneId, 'audio', buildId);
-            if (asset && asset.status === 'placeholder') {
-                helpers.log(`Audio is placeholder — will regenerate real audio: ${bookId}/${chapterId}/${sceneId}`);
+            // A committed chunk is necessary but not sufficient: the asset
+            // record must agree (placeholder/stale/pending mean "this content
+            // generation was never rendered").
+            if (!asset || asset.status !== 'ready') {
+                helpers.log(
+                    `[AUDIO] READY_REJECTED: ${bookId}/${chapterId}/${sceneId} — scene_assets.status=${asset ? asset.status : 'missing'} ` +
+                    `(committed chunks alone do not make an asset ready)`
+                );
                 isReady = false;
-                const mergedPath = helpers.getOutputPath(buildId, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
-                if (fs.existsSync(mergedPath)) {
-                    try {
-                        fs.unlinkSync(mergedPath);
-                        helpers.log(`  🗑 Deleted stale placeholder merged audio: ${mergedPath}`);
-                    } catch (e) {
-                        helpers.warn(`  ⚠️ Failed to delete stale placeholder merged audio: ${e.message}`);
-                    }
-                }
             }
         } catch (err) {
             helpers.warn(`Failed to check audio status: ${err.message}`);
@@ -290,8 +301,8 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
             try {
                 const state = require('../state');
                 const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);
-                if (assetStates && assetStates.audio === 'pending') {
-                    helpers.log(`Audio state is PENDING in Redis — will regenerate: ${bookId}/${chapterId}/${sceneId}`);
+                if (assetStates && ['pending', 'dirty'].includes(assetStates.audio)) {
+                    helpers.log(`Audio state is ${assetStates.audio} in Redis — will regenerate: ${bookId}/${chapterId}/${sceneId}`);
                     isReady = false;
                 }
             } catch (err) {
@@ -301,10 +312,21 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
     }
 
     if (isReady) {
-        helpers.log(`Audio already ready, no generation needed: ${bookId}/${chapterId}/${sceneId}`);
+        helpers.log(
+            `Audio already ready, no generation needed: ${bookId}/${chapterId}/${sceneId} ` +
+            `(source=fenced_commits chunks=[${(readiness.chunks || []).join(',')}] ` +
+            `canonical=${readiness.path ? path.basename(readiness.path) : '(none)'})`
+        );
         if (isPureDialogue) {
-            // Pure dialogue: ensure single merged chunk
-            await ensureMergedChunk(redis, buildId, bookId, chapterId, sceneId, sceneData.scene_type, 'ready');
+            // Pure dialogue: ensure single merged chunk. Status follows the
+            // artifact on disk — never a blanket 'ready'.
+            const mergedChunkPresent = fs.existsSync(
+                chunks.getChunkAudioPath(buildId, bookId, chapterId, sceneId, 1)
+            );
+            await ensureMergedChunk(
+                redis, buildId, bookId, chapterId, sceneId, sceneData.scene_type,
+                mergedChunkPresent ? 'ready' : 'pending'
+            );
         } else {
             for (let i = 0; i < segList.length; i++) {
                 const chunkIndex = i + 1;
@@ -317,13 +339,20 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
                     existing.padded_text = segment.padded || false;
                     existing.expected_chunk_count = expectedChunkCount;
                     existing.unit_id = segment.unit_id || existing.unit_id || null;
-                    if (existing.audio_status !== 'ready') {
-                        existing.audio = true;
-                        existing.audio_status = 'ready';
-                    }
+                    // The chunk record mirrors the file that actually exists.
+                    // Writing 'ready' without a chunk is exactly how the UI
+                    // showed audio progress that no GPU had produced.
+                    const chunkFileExists = fs.existsSync(
+                        chunks.getChunkAudioPath(buildId, bookId, chapterId, sceneId, chunkIndex)
+                    );
+                    existing.audio = chunkFileExists;
+                    existing.audio_status = chunkFileExists ? 'ready' : 'pending';
                     await redis.set(chunkKey, JSON.stringify(existing));
                 } else {
                     const segment = segList[i];
+                    const chunkFileExists = fs.existsSync(
+                        chunks.getChunkAudioPath(buildId, bookId, chapterId, sceneId, chunkIndex)
+                    );
                     const chunkData = {
                         build_id: buildId,
                         book_id: bookId,
@@ -332,8 +361,8 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
                         chunk_index: String(chunkIndex).padStart(4, '0'),
                         expected_chunk_count: expectedChunkCount,
                         scene_type: sceneData.scene_type,
-                        audio: true,
-                        audio_status: 'ready',
+                        audio: chunkFileExists,
+                        audio_status: chunkFileExists ? 'ready' : 'pending',
                         padded_text: segment.padded || false,
                         unit_id: segment.unit_id || null
                     };

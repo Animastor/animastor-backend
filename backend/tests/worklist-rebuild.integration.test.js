@@ -72,6 +72,13 @@ const MOCKED_PATHS = [
     'src/runtime/scene-window.js',
     'src/services/layer-config.js',
     'src/services/placeholder-audio.js',
+    // Integration A+B (2026-11-04): hasRealAudio → audio/validation →
+    // audio/helpers → utils/string-utils#getOutputPath, which captures the
+    // runtime-config instance at load time — purge the chain too, or it keeps
+    // reading a stale OUTPUT_DIR.
+    'src/audio/validation.js',
+    'src/audio/helpers.js',
+    'src/utils/string-utils.js',
     'src/config/runtime-config.js',
 ];
 function purgeMockedModules() {
@@ -174,11 +181,31 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
         return bookDir;
     }
 
+    // A parseable MP3 (20 MPEG-1 Layer III frames, ~0.52 s): "real audio"
+    // must pass validateCanonicalAudio (size ≥ 1 KB, duration > 0).
+    function mp3Bytes() {
+        const frame = Buffer.alloc(417);
+        frame.writeUInt32BE(0xFFFB9064, 0);
+        return Buffer.concat(Array(20).fill(frame));
+    }
+
+    // Integration A+B (2026-11-04): hasRealAudio is the committed-audio
+    // predicate — canonical file without a placeholder marker AND the
+    // scene's chunks on disk. Real audio therefore always comes with its
+    // chunk (that is what a fenced GPU commit leaves behind); `audio-nochunk`
+    // is the pre-marker placeholder shape (canonical file only).
     function writeArtifact(bookId, kind) {
         const buildDir = path.join(tmpOut, 'b1');
         fs.mkdirSync(buildDir, { recursive: true });
+        const canonicalAudio = `${bookId}_${CHAPTER}_${SCENE}.mp3`;
+        if (kind === 'audio' || kind === 'audio-nochunk') {
+            fs.writeFileSync(path.join(buildDir, canonicalAudio), mp3Bytes());
+            if (kind === 'audio') {
+                fs.writeFileSync(path.join(buildDir, `${bookId}_${CHAPTER}_${SCENE}_0001.mp3`), mp3Bytes());
+            }
+            return;
+        }
         const files = {
-            audio: `${bookId}_${CHAPTER}_${SCENE}.mp3`,
             image: `${bookId}_${CHAPTER}_${SCENE}_iu-000001.png`,
             video: `${bookId}_${CHAPTER}_${SCENE}.mp4`,
         };
@@ -207,6 +234,20 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
         expect(states.audio).to.equal('ready'); // valid on disk — fact restored
         expect(states.image).to.equal('new');   // missing — NOT queued
         expect(states.video).to.equal('new');
+    });
+
+    it('ready PG record over a canonical file WITHOUT chunks (old placeholder, no sidecar) is NOT restored READY', async () => {
+        writeBook('wl-half');
+        writeArtifact('wl-half', 'audio-nochunk');
+        await insertScene('wl-half');
+        await insertAsset('wl-half', 'audio', { status: 'ready' }); // the sc-4bb85e02 shape
+
+        const result = await reconciliation.reconcileCycle(redis, {}, { startup: true });
+
+        expect(result.ok).to.be.true;
+        expect(await activeScenes()).to.deep.equal([]); // command-only: still no work
+        const states = await assetStates('wl-half');
+        expect(states.audio).to.not.equal('ready');
     });
 
     it('C8 is idempotent — a second startup cycle changes nothing', async () => {

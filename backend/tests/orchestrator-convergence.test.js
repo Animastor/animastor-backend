@@ -183,19 +183,52 @@ describe('stage 50: DONE × DIRTY convergence', () => {
             expect(await assetState(redis, 'audio')).to.equal(state.AssetState.GENERATING);
         });
 
-        it('DONE + PLACEHOLDER audio → skipped as already_done (normal skip preserved)', async () => {
+        // 2026-11-04: DONE is authoritative only when a fenced GPU commit
+        // backs it. A DONE record over a placeholder with no committed chunk
+        // is exactly the state that swallowed the owner's "audio" commands
+        // (ba_1788172242081/sc-4bb85e02), so it must re-dispatch.
+        it('DONE + PLACEHOLDER audio without a committed chunk → re-dispatched (no already_done)', async () => {
             await putOrchState(redis, AUDIO_KEY, 'DONE');
             await state.setAssetState(redis, B, C, S, 'audio', state.AssetState.PLACEHOLDER);
 
-            const result = await dispatchEngine.dispatchStage(
-                redis, B, C, S, 'audio', makeBook(), 'build-1', {});
+            const audioMod = require('../src/audio');
+            const origProbe = audioMod.isSceneAudioCommitted;
+            const origGenerate = audioMod.generateSceneAudio;
+            audioMod.isSceneAudioCommitted = async () => ({ ready: false, reason: 'no_committed_chunks', chunks: [] });
+            audioMod.generateSceneAudio = async () => ({ generated: true, chunks: 1 });
+            try {
+                const result = await dispatchEngine.dispatchStage(
+                    redis, B, C, S, 'audio', makeBook(), 'build-1', {});
 
-            expect(result.dispatched).to.equal(false);
-            expect(result.reason).to.equal('already_done');
-            // dispatch-engine nests the executor result (the completed flag
-            // belongs to the executor envelope, not the engine envelope).
-            expect(result.result.completed).to.equal(true);
-            expect((await readOrchState(redis, AUDIO_KEY)).phase).to.equal('DONE');
+                expect(result.dispatched).to.equal(true);
+                expect(result.result.reason).to.not.equal('already_done');
+                expect((await readOrchState(redis, AUDIO_KEY)).phase).to.not.equal('DONE');
+            } finally {
+                audioMod.isSceneAudioCommitted = origProbe;
+                audioMod.generateSceneAudio = origGenerate;
+            }
+        });
+
+        it('DONE + committed audio → still skipped as already_done (normal skip preserved)', async () => {
+            await putOrchState(redis, AUDIO_KEY, 'DONE');
+            await state.setAssetState(redis, B, C, S, 'audio', state.AssetState.PLACEHOLDER);
+
+            const audioMod = require('../src/audio');
+            const origProbe = audioMod.isSceneAudioCommitted;
+            audioMod.isSceneAudioCommitted = async () => ({ ready: true, reason: 'committed', chunks: [1] });
+            try {
+                const result = await dispatchEngine.dispatchStage(
+                    redis, B, C, S, 'audio', makeBook(), 'build-1', {});
+
+                expect(result.dispatched).to.equal(false);
+                expect(result.reason).to.equal('already_done');
+                // dispatch-engine nests the executor result (the completed flag
+                // belongs to the executor envelope, not the engine envelope).
+                expect(result.result.completed).to.equal(true);
+                expect((await readOrchState(redis, AUDIO_KEY)).phase).to.equal('DONE');
+            } finally {
+                audioMod.isSceneAudioCommitted = origProbe;
+            }
         });
 
         it('anti-duplicate: a second dispatch while the first holds the lease does not regenerate twice', async () => {

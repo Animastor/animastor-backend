@@ -53,6 +53,28 @@ const orchestrator = require('./orchestrator');
 // S-2: media registry for executor dispatch
 const mediaRegistry = require('@animastor/generation').mediaRegistry;
 
+/**
+ * Fenced-commit probe for the audio FSM guards.
+ *
+ * A DONE record is only authoritative when a real GPU commit backs it. On
+ * 2026-11-04 the already_ready fast-track wrote DONE for a scene that had no
+ * committed chunk at all, and AUDIO_ALREADY_DONE then swallowed every later
+ * "audio" command. Returns false when the probe is unavailable (fail closed
+ * for the guard — regenerating is safe, skipping is not).
+ */
+async function hasCommittedAudio(buildId, bookId, chapterId, sceneId, expectedCount) {
+    try {
+        if (typeof audio.isSceneAudioCommitted === 'function') {
+            const probe = await audio.isSceneAudioCommitted(buildId, bookId, chapterId, sceneId, expectedCount || null);
+            return !!(probe && probe.ready === true);
+        }
+        return await audio.isSceneAudioReady(buildId, bookId, chapterId, sceneId);
+    } catch (err) {
+        warn(`AUDIO_READY_PROBE failed for ${bookId}/${chapterId}/${sceneId}: ${err.message}`);
+        return false;
+    }
+}
+
 // ======================================================
 // SCENE ORCHESTRATOR
 // ======================================================
@@ -211,8 +233,16 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
     const orchState = await audioFsmOp('getState')(redis, bookId, chapterId, sceneId);
     if (orchState) {
         if (orchState.phase === audioFsmPhases().DONE) {
-            log(`AUDIO_ALREADY_DONE: ${bookId}/${chapterId}/${sceneId} — skipping dispatch`);
-            return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+            // DONE is only authoritative with a committed chunk behind it.
+            if (await hasCommittedAudio(buildId, bookId, chapterId, sceneId, orchState.expected_count)) {
+                log(`AUDIO_ALREADY_DONE: ${bookId}/${chapterId}/${sceneId} — skipping dispatch`);
+                return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+            }
+            log(
+                `AUDIO_ALREADY_DONE rejected: ${bookId}/${chapterId}/${sceneId} — DONE without a committed audio chunk ` +
+                `(expected=${orchState.expected_count || '?'}), resetting state to regenerate`
+            );
+            await audioFsmOp('deleteState')(redis, bookId, chapterId, sceneId);
         }
     }
 
@@ -234,8 +264,11 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
         const stalePhase = transResult.from;
         // DONE — дополнительный safety net (выше уже должен был отсечься)
         if (stalePhase === audioFsmPhases().DONE) {
-            warn(`AUDIO_ORCH: DONE guard prevented stale reset for ${bookId}/${chapterId}/${sceneId}`);
-            return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+            if (await hasCommittedAudio(buildId, bookId, chapterId, sceneId, orchState && orchState.expected_count)) {
+                warn(`AUDIO_ORCH: DONE guard prevented stale reset for ${bookId}/${chapterId}/${sceneId}`);
+                return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+            }
+            warn(`AUDIO_ORCH: stale DONE without a committed chunk for ${bookId}/${chapterId}/${sceneId} — resetting to PLACEHOLDER_READY`);
         }
         // WAITING_CHUNKS / MERGING (stale recovery): с A2 timeout formula lease
         // переживает watchdog — если дошли до stale recovery, значит lease истёк

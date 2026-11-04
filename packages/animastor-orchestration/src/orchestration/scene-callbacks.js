@@ -109,9 +109,18 @@ async function handleAudioCompleted(redis, bookId, chapterId, sceneId, buildId) 
         return { ok: false, retryable: false, reason: 'invalid_asset_state' };
     }
 
-    const isReady = await audio.isSceneAudioReady(buildId, bookId, chapterId, sceneId, require('music-metadata'));
+    // Ready means "a fenced GPU commit of this generation produced the
+    // chunks" — NOT "a file exists at the canonical path". A silent
+    // placeholder is a valid 10.85 s MP3 and passed the old file-only check,
+    // which is how sc-4bb85e02 reached READY with silence on 2026-11-04.
+    // The legacy probe remains only for hosts that have not wired the
+    // committed-audio probe yet.
+    const committedProbe = typeof audio.isSceneAudioCommitted === 'function'
+        ? await audio.isSceneAudioCommitted(buildId, bookId, chapterId, sceneId, null)
+        : { ready: await audio.isSceneAudioReady(buildId, bookId, chapterId, sceneId, require('music-metadata')), reason: 'legacy_file_check', chunks: [] };
+    const isReady = !!(committedProbe && committedProbe.ready === true);
     if (!isReady) {
-        error(`Audio not ready after completion: ${bookId}/${chapterId}/${sceneId}`);
+        error(`Audio not ready after completion: ${bookId}/${chapterId}/${sceneId} (reason=${committedProbe && committedProbe.reason}, chunks=[${(committedProbe && committedProbe.chunks || []).join(',')}])`);
         const scene = { book_id: bookId, chapter_id: chapterId, scene_id: sceneId };
         await logEvent(redis, scene, 'AUDIO_FAILED', 'audio_ready', {
             reason: 'not_ready_validation'
@@ -149,8 +158,11 @@ async function handleAudioCompleted(redis, bookId, chapterId, sceneId, buildId) 
             const metadata = await mm.parseFile(audioPath);
             realDuration = metadata.format.duration || 0;
         } catch {}
+        // The commit proof travels down: the placeholder service refuses to
+        // upgrade a record to 'ready' without it (2026-11-04 regression).
         await placeholderAudioOp('replacePlaceholderWithRealAudio')(
-            bookId, chapterId, sceneId, buildId, audioPath, realDuration
+            bookId, chapterId, sceneId, buildId, audioPath, realDuration,
+            { committed: isReady }
         );
     } catch (err) {
         warn(`Failed to replace placeholder audio: ${err.message}`);

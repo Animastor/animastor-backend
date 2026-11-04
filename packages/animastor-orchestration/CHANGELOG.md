@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.3.3 (2026-11-04) — /regenerate не сносит чужие задачи на хабе
+## 0.3.4 (2026-11-04) — 0.3.3 + «ready» аудио только при коммите GPU
+
+Одна публикация вместо двух: 0.3.3 (уборка хаба при `/regenerate`, см. ниже) **не
+публиковался** в npm отдельно и входит в 0.3.4 целиком. Основание:
+`reports/2026-11-04/audio-placeholder-ready.md` (сцена `sc-4bb85e02` — тишина-заглушка
+стала `ready` без GPU), интеграция: `reports/2026-11-04/integration-A-B-C.md`.
+Описание инварианта: animastor-docs `02-orchestration/AUDIO_READY_SEMANTICS.md`.
+
+### Changed (поведение)
+
+- `scene-orchestrator.executeAudioDispatch`: `AUDIO_ALREADY_DONE` пропускает работу только
+  если хост подтверждает коммит (`audio.isSceneAudioCommitted(...).ready === true`:
+  канонический файл без маркера заглушки **и** чанки сцены на диске). Иначе — лог
+  `AUDIO_ALREADY_DONE rejected … DONE without a committed audio chunk`, FSM-состояние
+  удаляется, стадия идёт обычным путём (dispatch на GPU). То же — в safety-net ветке
+  «stale `DONE`». Пробник недоступен или упал → считается «не закоммичено» (fail-closed:
+  лишняя генерация безопасна, пропуск — нет).
+- `scene-callbacks.handleAudioCompleted`: проверка после завершения — `isSceneAudioCommitted`
+  (legacy `isSceneAudioReady` только если хост не дал нового пробника); в
+  `replacePlaceholderWithRealAudio` передаётся `{ committed: true }` — хост без этого
+  доказательства не поднимает запись в `ready`.
+
+### Host contract (новое, обратно совместимо)
+
+- `media.audio.isSceneAudioCommitted(buildId, bookId, chapterId, sceneId, expectedCount|null)`
+  → `{ ready, reason, chunks, path }`. Backend ≥ интеграции A+B его даёт; на старом хосте
+  пакет откатывается к file-only проверке.
+- `placeholderAudio.replacePlaceholderWithRealAudio(…, realDuration, options)` — 7-й аргумент
+  `options.committed`.
+
+Инварианты 0.3.3 (sweep только своих dispatch-id, fail-closed book-wide sweep) не менялись;
+fence, command-gate и retry-политика — тоже.
+
+## 0.3.3 (2026-11-04, не публиковался — вошёл в 0.3.4) — /regenerate не сносит чужие задачи на хабе
 
 Основание: `reports/2026-11-04/gpu-generation-stall.md` §5.3, §9.1 — `/regenerate`
 одной сцены (audio) закончился `clearHubDispatches([], { book_id })` →
