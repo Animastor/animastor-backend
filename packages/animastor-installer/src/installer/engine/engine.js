@@ -1165,8 +1165,25 @@ async function runInstallation(args) {
         if (options.startWorker && workerDir && !runtimeFatal) {
             const r = await log.step('start worker', async () => {
                 const bundleChanged = !!options.bundleRefreshedEarly || result.results.worker.some((x) => x.bundle && (x.bundle.files_installed || []).length > 0);
-                const res = worker.startWorker(io, { workerDir, nodeBin, graceMs: options.workerGraceMs || 3000, forceRestart: workerConfigChanged || bundleChanged });
+                // Installer 0.2.8: a running worker is restarted only when its
+                // configuration changed, and never in the middle of a task
+                // (worker.ensureWorker: wait up to --wait-job-ms, else deferred).
+                const configChanged = [];
+                if (workerConfigChanged) configChanged.push('.env changed by this run');
+                if (bundleChanged) configChanged.push('worker bundle updated by this run');
+                const res = await worker.ensureWorker(io, {
+                    workerDir, nodeBin, graceMs: options.workerGraceMs || 3000,
+                    configChanged,
+                    force: !!options.forceWorkerRestart,
+                    boot: !!options.boot,
+                    waitJobMs: options.waitJobMs !== undefined ? options.waitJobMs : worker.DEFAULT_WAIT_JOB_MS,
+                    pollMs: options.jobPollMs || 5000,
+                    sleep: options.sleep || null,
+                    log,
+                    tool: options.toolCommand || toolCommandFrom(result.results.management_tools),
+                });
                 workerStart = res;
+                if (res.deferred) throw new Error(res.reason);
                 if (!res.started || !res.alive) {
                     // An immediate exit is usually the fail-closed credential
                     // gate — say so (the fix is a new key, not a re-run).
@@ -1179,7 +1196,7 @@ async function runInstallation(args) {
                     }
                     throw new Error(res.reason || 'worker did not start');
                 }
-                if (res.already_running) log.info(`worker already running (pid ${res.pid}) — not spawning a second instance`);
+
                 // The 90 s "worker → ComfyUI ready" window opens only once
                 // ComfyUI itself answers (installer 0.2.3) — a ComfyUI that is
                 // still loading must not eat the worker's time.
@@ -1197,7 +1214,13 @@ async function runInstallation(args) {
                 return { ...res, ...ready };
             });
             const res = r.ok ? r.value : { ...(workerStart || {}), started: !!(workerStart && workerStart.started), alive: false, reason: String(r.error && r.error.message) };
-            result.results.worker.push({ id: 'worker-process', pid: res.pid || null, started: !!res.started, comfy_ready: !!(workerReady && workerReady.comfy_ready), reason: r.ok ? null : res.reason, log_file: res.logFile || null });
+            result.results.worker.push({
+                id: 'worker-process', pid: res.pid || null, started: !!res.started, comfy_ready: !!(workerReady && workerReady.comfy_ready), reason: r.ok ? null : res.reason, log_file: res.logFile || null,
+                action: workerStart ? workerStart.action || null : null,
+                restart_reasons: workerStart ? workerStart.restart_reasons || [] : [],
+                restart_pending: workerStart && workerStart.restart_pending ? workerStart.restart_pending : null,
+                deferred: !!(workerStart && workerStart.deferred),
+            });
             if (r.ok) {
                 startedWorkerPid = res.pid;
                 state.setArtifact(st, 'worker-process', 'installed', { pid: res.pid });
@@ -1216,6 +1239,12 @@ async function runInstallation(args) {
                 }));
                 workerReady = hb;
             }
+        }
+
+        // "current job: none|<id>" of the doctor result (installer 0.2.8) —
+        // read at the end of the step, from the running worker's own log.
+        if (workerDir && !dryRun) {
+            try { result.results.current_job = worker.currentJobLabel(io, { workerDir }); } catch (_) { result.results.current_job = 'unknown'; }
         }
 
         // 4.9 Verification --------------------------------------------------------------
@@ -1412,25 +1441,41 @@ async function endToEndChecks(io, { mode, comfyUrl, comfyPort, hubUrl, workerWan
         return checks;
     }
     const newKeyFix = `create a new Worker Key in Animastor → Settings → Workers, then run: ${tool} doctor --new-key`;
+    if (workerStart && workerStart.deferred) {
+        // Installer 0.2.8: the worker keeps running (and serving) on its old
+        // configuration; the needed restart was not done — FAILED, exit ≠ 0.
+        checks.push({
+            id: 'worker', ok: false, label: 'Worker restart',
+            detail: String(workerStart.reason || 'restart deferred').replace(/\s+/g, ' '),
+            fix: workerStart.busy_job
+                ? `re-run \`${tool} doctor\` when the task finishes (or \`${tool} doctor --wait-job-ms <ms>\` to wait longer); \`${tool} doctor --force\` restarts now and loses the task's result`
+                : `${tool} doctor --force (restarts the worker even if it is busy)`,
+        });
+        checks.push({ id: 'heartbeat', ok: null, label: 'Hub heartbeat (Online)', detail: `not re-checked — the worker (pid ${workerStart.pid}) keeps running on its previous configuration`, fix: null });
+        return checks;
+    }
     const r = workerReady || {};
+    // A running worker left as is (installer 0.2.8) is not restarted by
+    // another doctor run — the fix that restarts it is reboot-worker.
+    const rerun = workerStart && workerStart.action === 'left' ? `${tool} reboot-worker` : `${tool} doctor`;
     if (r.comfy_ready) {
         checks.push({ id: 'worker', ok: true, label: 'Worker → ComfyUI', detail: '"ComfyUI ready" in the worker log', fix: null });
     } else {
         const reason = (r.reason || (workerStart && workerStart.reason) || 'worker did not start').replace(/\s+/g, ' ');
         checks.push({
             id: 'worker', ok: false, label: 'Worker → ComfyUI', detail: reason,
-            fix: r.auth_failed ? newKeyFix : `${tool} doctor`,
+            fix: r.auth_failed ? newKeyFix : rerun,
         });
     }
     if (r.heartbeat) {
         checks.push({ id: 'heartbeat', ok: true, label: 'Hub heartbeat (Online)', detail: hubUrl || null, fix: null });
     } else if (!r.comfy_ready) {
-        checks.push({ id: 'heartbeat', ok: false, label: 'Hub heartbeat (Online)', detail: 'not reached — the worker sends heartbeats only after it reached ComfyUI', fix: r.auth_failed ? newKeyFix : `${tool} doctor` });
+        checks.push({ id: 'heartbeat', ok: false, label: 'Hub heartbeat (Online)', detail: 'not reached — the worker sends heartbeats only after it reached ComfyUI', fix: r.auth_failed ? newKeyFix : rerun });
     } else {
         checks.push({
             id: 'heartbeat', ok: false, label: 'Hub heartbeat (Online)',
             detail: (r.reason || 'no heartbeat confirmed').replace(/\s+/g, ' '),
-            fix: r.auth_failed ? newKeyFix : `check that this machine reaches ${hubUrl} (curl -fsS ${hubUrl}/health), then run: ${tool} doctor`,
+            fix: r.auth_failed ? newKeyFix : `check that this machine reaches ${hubUrl} (curl -fsS ${hubUrl}/health), then run: ${rerun}`,
         });
     }
     return checks;

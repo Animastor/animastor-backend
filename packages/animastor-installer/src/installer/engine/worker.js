@@ -239,7 +239,11 @@ function configureEnv(io, { workerDir, manifest, values = {}, overrides = {}, se
         if (text && !text.endsWith('\n')) text += '\n';
         text += additions.join('\n') + '\n';
     }
-    io.fs.writeFileSync(envPath, text);
+    // Installer 0.2.8: an unchanged .env is NOT rewritten. Its mtime is the
+    // "configuration changed after the worker started" marker
+    // (workerConfigNewer) — rewriting identical content made every doctor
+    // run restart a running (even busy) worker (04.11, 13:55/13:58 UTC).
+    if (envCreated || text !== existingText) io.fs.writeFileSync(envPath, text);
     io.fs.chmodSync(envPath, 0o600);
 
     if (log) log.info(`.env configured: ${preserved.length} key(s) preserved, ${additions.length} added, ${changed.length} updated${changed.length ? ` (${changed.join(', ')})` : ''}, ${missingAfter.length} still missing`);
@@ -414,20 +418,59 @@ function findRunningWorkerPid(io, workerDir, opts = {}) {
  */
 function workerEnvIsNewer(io, { workerDir, pid, platformAdapter = null }) {
     try {
-        const adapter = platformAdapter || adapterOf({});
         const envM = io.fs.statSync(path.join(workerDir, '.env')).mtimeMs;
-        // Most reliable marker: logs/worker.pid written at start (by this
-        // installer and by start-worker.sh) — its mtime IS the start time.
-        let procM = pidFileStartMs(io, workerDir, pid);
-        if (procM == null) procM = adapter.processStartMs(io, pid);
-        if (procM == null && typeof adapter.workerStartMarkerMs === 'function') {
-            procM = adapter.workerStartMarkerMs(io, workerDir);
-        }
+        const procM = workerProcessStartMs(io, { workerDir, pid, platformAdapter });
         if (procM == null) return false;
         return envM > procM + 1000; // 1s tolerance for same-second writes
     } catch (_) {
         return false;
     }
+}
+
+/**
+ * Start time of the running worker `pid` (ms) or null when unknown.
+ * Most reliable marker: logs/worker.pid written at start (by this installer
+ * and by start-worker.sh) — its mtime IS the start time; then the platform
+ * adapter (/proc/<pid> on Linux, the pid marker on Windows).
+ */
+function workerProcessStartMs(io, { workerDir, pid, platformAdapter = null }) {
+    try {
+        const adapter = platformAdapter || adapterOf({});
+        let procM = pidFileStartMs(io, workerDir, pid);
+        if (procM == null) procM = adapter.processStartMs(io, pid);
+        if (procM == null && typeof adapter.workerStartMarkerMs === 'function') {
+            procM = adapter.workerStartMarkerMs(io, workerDir);
+        }
+        return procM == null ? null : procM;
+    } catch (_) {
+        return null;
+    }
+}
+
+/** Files whose change requires a worker restart: .env and the bundle (installer 0.2.8). */
+const WORKER_CONFIG_FILES = Object.freeze(['.env', 'package.json', 'worker.cjs', 'worker-env.cjs',
+    'job-protocol-v2.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs']);
+
+/**
+ * Configuration files (.env, bundle files) modified AFTER the worker `pid`
+ * started — the running process holds the old configuration (env and code
+ * are fixed at process start). Persistent across runs: a restart deferred
+ * because the worker was busy is still required on the next run. Unknown
+ * start time → [] (never restart on a guess).
+ * @returns {string[]} changed file names
+ */
+function workerConfigNewer(io, { workerDir, pid, platformAdapter = null, files = WORKER_CONFIG_FILES }) {
+    const procM = workerProcessStartMs(io, { workerDir, pid, platformAdapter });
+    if (procM == null) return [];
+    const out = [];
+    for (const f of files) {
+        try {
+            const p = path.join(workerDir, f);
+            if (!io.fs.existsSync(p)) continue;
+            if (io.fs.statSync(p).mtimeMs > procM + 1000) out.push(f);
+        } catch (_) { /* unreadable → not counted */ }
+    }
+    return out;
 }
 
 /** Default worker log: <install base>/logs/worker.log (same file start-worker.sh uses). */
@@ -507,6 +550,18 @@ function startWorker(io, { workerDir, nodeBin = null, logFile = null, graceMs = 
     if (existing && !forceRestart && !workerEnvIsNewer(io, { workerDir, pid: existing, platformAdapter: adapter })) {
         return { started: true, already_running: true, pid: existing, alive: true, reason: null, logFile: log, logOffset: null };
     }
+    if (existing && !forceRestart) {
+        // Installer 0.2.8: a stale-config restart never kills a task in
+        // progress (`animastor start` path; doctor/install decide in
+        // ensureWorker, which waits for the task).
+        const act = readWorkerActivity(io, { workerDir, pid: existing, logFile: log });
+        if (act.known && act.current_job_id) {
+            return {
+                started: true, already_running: true, pid: existing, alive: true, reason: null, logFile: log, logOffset: null,
+                restart_pending: ['.env'], busy_job: act.current_job_id,
+            };
+        }
+    }
     if (existing) {
         // .env changed after this worker started — it is running on the OLD
         // configuration (its env is fixed at process start). Restart it so
@@ -575,6 +630,98 @@ function scanWorkerLog(text) {
         last_beacon_error: beaconErrIdx >= 0 ? (lines[beaconErrIdx + 1] || lines[beaconErrIdx]).trim() : null,
         last_lines: lines.filter(Boolean).slice(-8),
     };
+}
+
+// ── Worker activity (installer 0.2.8) ─────────────────────────────────────────
+// The hub's heartbeat record (current_job_id) lives in the hub's Redis and is
+// not readable from the node; the worker's OWN log carries the same facts:
+//   "[ts] [info] Task <job_id> (type=…"         — a task was taken
+//   "[ts] [info] Done <job_id>"                  — result delivered
+//   "[ts] [error] Failed <job_id>"               — task failed (error sent)
+//   "[ts] [error] Rejecting incompatible task…"  — the taken task was refused
+// Only the output of the CURRENT process counts (after its last
+// "Worker <type> started"). "Hub heartbeat accepted" is logged on the first
+// accepted beacon and again after every recovery; every failed beacon logs
+// "Beacon failed" — so "heartbeat fresh" = the latest beacon marker of this
+// process is an accepted one.
+const TASK_START_RE = /\] Task (\S+) \(type=/;
+const TASK_END_RE = /\] (?:Done|Failed) (\S+)\s*$/;
+const TASK_REJECT_RE = /\] Rejecting incompatible task/;
+const WORKER_LOG_TAIL_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Pure: classify the worker log (text of one or more runs).
+ * @returns {{ started: boolean, current_job_id: string|null, last_job_id: string|null,
+ *             comfy_ready: boolean, heartbeat: boolean, healthy: boolean, last_beacon_error: string|null }}
+ */
+function parseWorkerActivity(text) {
+    const all = String(text || '').split('\n');
+    let start = -1;
+    all.forEach((l, i) => { if (/\] Worker \S+ started/.test(l)) start = i; });
+    const lines = start >= 0 ? all.slice(start) : all;
+    let current = null;
+    let last = null;
+    for (const l of lines) {
+        let m = TASK_START_RE.exec(l);
+        if (m) { current = m[1]; last = m[1]; continue; }
+        m = TASK_END_RE.exec(l);
+        if (m) { if (current === m[1]) current = null; continue; }
+        if (TASK_REJECT_RE.test(l)) current = null;
+    }
+    const scan = scanWorkerLog(lines.join('\n'));
+    return {
+        started: start >= 0,
+        current_job_id: current,
+        last_job_id: last,
+        comfy_ready: scan.comfy_ready,
+        heartbeat: scan.heartbeat,
+        healthy: start >= 0 && scan.comfy_ready && scan.heartbeat && !scan.crashed && !scan.auth_failed,
+        last_beacon_error: scan.last_beacon_error,
+    };
+}
+
+/**
+ * Activity of the running worker `pid` from its log (tail of at most
+ * WORKER_LOG_TAIL_BYTES). known=false when there is no log, or the log was
+ * last written BEFORE this process started (it is some other process's log —
+ * busy/idle cannot be told).
+ * @returns {{ known: boolean, reason: string|null, current_job_id, last_job_id, comfy_ready, heartbeat, healthy, last_beacon_error, log_file }}
+ */
+function readWorkerActivity(io, { workerDir, pid = null, logFile = null, tailBytes = WORKER_LOG_TAIL_BYTES }) {
+    const log = logFile || workerLogPath(workerDir);
+    const unknown = (reason) => ({
+        known: false, reason, current_job_id: null, last_job_id: null, comfy_ready: false, heartbeat: false,
+        healthy: false, last_beacon_error: null, log_file: log,
+    });
+    let text;
+    try {
+        if (!io.fs.existsSync(log)) return unknown(`no worker log at ${log}`);
+        text = String(io.fs.readFileSync(log, 'utf8'));
+    } catch (err) {
+        return unknown(`worker log ${log} unreadable: ${err.message}`);
+    }
+    if (pid) {
+        // Only the pid file is a precise start marker here (/proc/<pid> mtime
+        // on Linux is the procfs inode time, not the start time).
+        const procM = pidFileStartMs(io, workerDir, pid);
+        let logM = null;
+        try { logM = io.fs.statSync(log).mtimeMs; } catch (_) { logM = null; }
+        if (procM != null && typeof logM === 'number' && logM + 1000 < procM) {
+            return unknown(`worker log ${log} was not written by the running worker (pid ${pid})`);
+        }
+    }
+    if (text.length > tailBytes) text = text.slice(text.length - tailBytes);
+    const a = parseWorkerActivity(text);
+    return { known: true, reason: null, ...a, log_file: log };
+}
+
+/** "none" | "<job_id>" | "unknown" for the `current job:` line of doctor/status. */
+function currentJobLabel(io, { workerDir, pid = undefined, platformAdapter = null, logFile = null }) {
+    const p = pid === undefined ? findRunningWorkerPid(io, workerDir, { platformAdapter }) : pid;
+    if (!p) return 'none';
+    const a = readWorkerActivity(io, { workerDir, pid: p, logFile });
+    if (!a.known) return 'unknown';
+    return a.current_job_id || 'none';
 }
 
 function readLogFrom(io, logFile, offset) {
@@ -735,6 +882,133 @@ async function restartManagedWorker(io, { workerDir, log = null, stopTimeoutMs =
     return { restarted: true, previously_running: previouslyRunning, pid: start.pid, alive: start.alive, reason: start.reason };
 }
 
+// ── ensureWorker (installer 0.2.8) ──────────────────────────────────────────
+// install/doctor/boot no longer restart a running worker by default
+// (04.11: doctor restarted the audio/image workers at 13:55:15 and 13:58:52,
+// between tasks only by chance — a result in flight would have been lost).
+//
+//   not running                          → start
+//   running, configuration unchanged     → left as is
+//   running, .env/bundle changed:
+//     boot (doctor --yes, no TTY)        → left as is, restart pending (warn)
+//     --force                            → restart now
+//     idle                               → restart
+//     busy (a task in progress)          → wait up to waitJobMs for the task
+//                                          to finish, then restart; still
+//                                          busy → DEFERRED (FAILED, exit ≠ 0)
+//     busy state unknown (no log of this
+//     process)                           → DEFERRED (FAILED; --force restarts)
+const DEFAULT_WAIT_JOB_MS = 600000;
+
+/**
+ * Pure decision for a running worker.
+ * @returns {{ action: 'start'|'leave'|'restart'|'wait'|'defer', reasons: string[] }}
+ */
+function decideWorkerAction({ pid = null, reasons = [], activity = null, force = false, boot = false }) {
+    if (!pid) return { action: 'start', reasons: [] };
+    if (reasons.length === 0) return { action: 'leave', reasons: [] };
+    if (force) return { action: 'restart', reasons };
+    if (boot) return { action: 'leave', reasons };
+    if (!activity || !activity.known) return { action: 'defer', reasons };
+    if (activity.current_job_id) return { action: 'wait', reasons };
+    return { action: 'restart', reasons };
+}
+
+/**
+ * Bring the worker of this installation up without ever killing a task in
+ * progress (see the table above). Returns the startWorker() shape plus
+ * { action, restart_reasons, current_job, busy_job, deferred, restart_pending }.
+ * @param {object} o
+ * @param {string[]} [o.configChanged] what THIS run changed (".env", "worker bundle 2.2.2 → 2.2.3")
+ */
+async function ensureWorker(io, {
+    workerDir, nodeBin = null, graceMs = 3000, platformAdapter = null, logFile = null,
+    configChanged = [], force = false, boot = false, waitJobMs = DEFAULT_WAIT_JOB_MS,
+    pollMs = 5000, progressMs = 30000, sleep = null, log = null, startFn = startWorker, tool = 'animastor',
+}) {
+    const adapter = platformAdapter || adapterOf({});
+    const lf = logFile || workerLogPath(workerDir);
+    const now = () => (io.now ? io.now() : Date.now());
+    const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const info = (m) => { if (log) log.info(m); };
+    const warn = (m) => { if (log) log.warn(m); };
+    const start = (forceRestart) => startFn(io, { workerDir, nodeBin, graceMs, platformAdapter: adapter, logFile: lf, forceRestart });
+
+    let pid = findRunningWorkerPid(io, workerDir, { platformAdapter: adapter });
+    if (!pid) {
+        const res = start(false);
+        return { ...res, action: 'started', restart_reasons: [], current_job: 'none' };
+    }
+    // What this run changed explains itself; otherwise the persistent marker
+    // (files newer than the process — e.g. a restart deferred by an earlier run).
+    const reasons = (configChanged || []).length > 0
+        ? Array.from(new Set(configChanged))
+        : workerConfigNewer(io, { workerDir, pid, platformAdapter: adapter }).map((f) => `${f} changed after the worker started`);
+    let activity = readWorkerActivity(io, { workerDir, pid, logFile: lf });
+    const decision = decideWorkerAction({ pid, reasons, activity, force, boot });
+    const jobOf = (a) => (a.known ? (a.current_job_id || 'none') : 'unknown');
+    const left = (extra = {}) => ({
+        started: true, already_running: true, pid, alive: true, reason: null, logFile: lf, logOffset: null,
+        action: 'left', restart_reasons: reasons, current_job: jobOf(activity), ...extra,
+    });
+    const deferred = (why) => ({
+        started: false, already_running: true, pid, alive: true, deferred: true, reason: why, logFile: lf, logOffset: null,
+        action: 'deferred', restart_reasons: reasons, current_job: jobOf(activity), busy_job: activity.current_job_id || null,
+    });
+
+    if (decision.action === 'leave' && reasons.length === 0) {
+        const health = activity.known && !activity.healthy
+            ? ` — ${activity.comfy_ready ? (activity.last_beacon_error ? `last beacon failed: ${activity.last_beacon_error}` : 'no heartbeat accepted yet') : 'it has not reached ComfyUI yet'}`
+            : '';
+        info(`worker already running (pid ${pid}), left as is${health}`);
+        return left();
+    }
+    if (decision.action === 'leave') {
+        warn(`worker already running (pid ${pid}), left as is — restart pending (${reasons.join('; ')}); the boot path never restarts a running worker: run \`${tool} doctor\``);
+        return left({ restart_pending: reasons });
+    }
+    if (decision.action === 'defer') {
+        const why = `cannot tell whether the worker (pid ${pid}) is busy (${activity.reason}) — restart for ${reasons.join('; ')} deferred; to restart anyway: ${tool} doctor --force`;
+        warn(why);
+        return deferred(why);
+    }
+    if (decision.action === 'wait') {
+        const deadline = now() + Math.max(0, Number(waitJobMs) || 0);
+        let nextProgress = now();
+        while (activity.known && activity.current_job_id && now() < deadline) {
+            if (now() >= nextProgress) {
+                info(`worker is busy with ${activity.current_job_id} (pid ${pid}) — waiting up to ${Math.round((deadline - now()) / 1000)} s for the task to finish before the restart (${reasons.join('; ')})`);
+                nextProgress = now() + progressMs;
+            }
+            await wait(Math.min(pollMs, Math.max(1, deadline - now())));
+            const still = findRunningWorkerPid(io, workerDir, { platformAdapter: adapter });
+            if (still !== pid) { pid = still; break; }
+            activity = readWorkerActivity(io, { workerDir, pid, logFile: lf });
+        }
+        if (!pid) {
+            info('the worker exited while waiting — starting it');
+            const res = start(false);
+            return { ...res, action: 'started', restart_reasons: reasons, current_job: 'none' };
+        }
+        if (!activity.known) {
+            const why = `cannot tell whether the worker (pid ${pid}) is busy (${activity.reason}) — restart for ${reasons.join('; ')} deferred; to restart anyway: ${tool} doctor --force`;
+            warn(why);
+            return deferred(why);
+        }
+        if (activity.current_job_id) {
+            const why = `worker is busy with ${activity.current_job_id} (pid ${pid}) — restart deferred (waited ${Math.round((Number(waitJobMs) || 0) / 1000)} s; needed for: ${reasons.join('; ')}); re-run \`${tool} doctor\` when the task finishes, or \`${tool} doctor --force\` to restart now (the task's result is lost)`;
+            warn(why);
+            return deferred(why);
+        }
+        info(`the worker (pid ${pid}) finished ${activity.last_job_id || 'its task'}`);
+    }
+    // restart: idle (or --force)
+    if (force && activity.current_job_id) warn(`--force: restarting the worker (pid ${pid}) while it is busy with ${activity.current_job_id} — the task's result is lost`);
+    info(`restarting the worker (pid ${pid}): ${reasons.join('; ')}`);
+    const res = start(true);
+    return { ...res, action: 'restarted', restarted_from: pid, restart_reasons: reasons, current_job: 'none' };
+}
+
 // ── node-classes.json (installer 0.2.7, worker bundle >= 2.2.2) ─────────────
 // GPU E2E 2026-11-02: a worker took tasks from a ComfyUI without its
 // profile's nodes. Bundle 2.2.2 asks for tasks only after ComfyUI's
@@ -820,6 +1094,15 @@ module.exports = {
     restartManagedWorker,
     findRunningWorkerPid,
     workerEnvIsNewer,
+    workerProcessStartMs,
+    workerConfigNewer,
+    WORKER_CONFIG_FILES,
+    parseWorkerActivity,
+    readWorkerActivity,
+    currentJobLabel,
+    decideWorkerAction,
+    ensureWorker,
+    DEFAULT_WAIT_JOB_MS,
     configureEnv,
     apiBaseFromHubUrl,
     verifyRegistration,

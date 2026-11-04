@@ -13,7 +13,7 @@
  *   animastor-installer verify     [--profile P[,P2]] [--root PATH] [--worker-dir PATH] [--hub-url URL]
  *   animastor-installer resume
  *   animastor-installer uninstall  [--all] [--yes] [--dry-run] [--state PATH] [--home PATH]
- *   animastor-installer start | stop | status | logs [-f] [--lines N] | doctor [--new-key]
+ *   animastor-installer start | stop | status | logs [-f] [--lines N] | doctor [--new-key] [--wait-job-ms N] [--force]
  *   animastor-installer boot       (node startup script: detaches `doctor --yes`, exits 0 at once)
  *                                  (what the `animastor` command in PATH runs)
  *
@@ -29,6 +29,11 @@
  *   --yes              Auto-confirm all prompts
  *   --dry-run          Show plan only; never perform real changes
  *   --all              uninstall: full uninstall (everything recorded in the manifest)
+ *   --wait-job-ms N    install/doctor: when the worker must be restarted (its .env or bundle
+ *                      changed) but is busy with a task, wait up to N ms for the task to
+ *                      finish (default 600000); still busy → FAILED, exit 1
+ *   --force            install/doctor: restart the worker for a changed configuration even
+ *                      when it is busy (the task's result is lost)
  */
 
 const fs = require('fs');
@@ -108,7 +113,7 @@ const DEFAULT_HUB_URL = 'https://animastor.org/gpu';
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy', 'accept-node-deps-overrides', 'help'];
+const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker', 'no-start-comfy', 'no-start-worker', 'all', 'accept-reference-runtime', 'accept-runtime-change', 'install-tools', 'no-tools', 'new-key', 'follow', 'no-fix', 'restart-platform-comfy', 'no-restart-platform-comfy', 'accept-node-deps-overrides', 'force', 'help'];
 
 /**
  * Every option that takes a value. Installer 0.2.5: an option that is in
@@ -117,7 +122,7 @@ const BOOLEAN_FLAGS = ['yes', 'dry-run', 'resume', 'start-comfy', 'start-worker'
  * doctor, which printed the same fix again (live E2E 02.11).
  */
 const VALUE_FLAGS = ['profile', 'mode', 'root', 'worker-dir', 'hub-url', 'repo-root', 'state', 'tools-dir',
-    'comfy-port', 'comfy-wait-ms', 'verify-timeout-ms', 'port', 'lines', 'history-max', 'home', 'boot-log'];
+    'comfy-port', 'comfy-wait-ms', 'verify-timeout-ms', 'port', 'lines', 'history-max', 'home', 'boot-log', 'wait-job-ms'];
 
 /** Commands main() dispatches. */
 const COMMANDS = ['detect', 'plan', 'install', 'verify', 'validate', 'resume', 'uninstall', 'start', 'stop', 'status',
@@ -167,6 +172,10 @@ function parseArgs(argv) {
         } else {
             positional.push(a);
         }
+    }
+    const wj = parsed.flags['wait-job-ms'];
+    if (wj !== undefined && wj !== '' && !(/^\d+$/.test(String(wj)))) {
+        parsed.errors.push(`option --wait-job-ms needs a number of milliseconds >= 0 (got ${wj})`);
     }
     parsed.command = positional[0] || null;
     if (positional.length > 1) parsed.errors.push(`unexpected argument(s): ${positional.slice(1).join(' ')}`);
@@ -1576,6 +1585,12 @@ function installOptions(flags, { doctor = false } = {}) {
         startWorker: flags['start-worker'] === true ? true
             : flags['no-start-worker'] === true ? false
                 : (doctor ? true : undefined),
+        // Installer 0.2.8: a running worker is restarted only for a changed
+        // .env/bundle and never in the middle of a task (engine/worker
+        // ensureWorker); the boot path only starts a stopped worker.
+        waitJobMs: flags['wait-job-ms'] !== undefined && flags['wait-job-ms'] !== '' ? Number(flags['wait-job-ms']) : undefined,
+        forceWorkerRestart: !!flags.force,
+        boot: isBootRun(flags, doctor),
     };
 }
 
@@ -1839,13 +1854,27 @@ function printOneLineSummary(result, { flags = {}, mode = null } = {}) {
     const what = [
         `mode ${mode || result.mode}`,
         owner && owner.url ? `ComfyUI ${owner.url}` : 'ComfyUI not reachable',
-        worker && worker.started ? `worker pid ${worker.pid}` : 'worker not started',
+        worker && worker.started ? `worker pid ${worker.pid}${worker.action === 'left' ? ' (left as is)' : ''}` : 'worker not started',
+        `current job: ${currentJobOf(result, flags)}`,
     ].join(', ');
     const head = summary.ok ? 'OK' : `FAILED — ${summary.failures.length} problem(s)`;
     console.log(`animastor doctor: ${head} — ${what} (${tool})`);
     if (!summary.ok) {
         for (const f of summary.failures) console.log(`  ✗ ${f.label}: ${f.detail || ''}${f.fix ? ` — fix: ${f.fix}` : ''}`);
         process.exitCode = 1;
+    }
+}
+
+/** "none" | "<job_id>" | "unknown" — the worker's task at the end of the run (installer 0.2.8). */
+function currentJobOf(result, flags = {}) {
+    const known = result && result.results && result.results.current_job;
+    if (known) return known;
+    // The engine did not run (e.g. the platform's ComfyUI never came up):
+    // read the running worker's log directly.
+    try {
+        return workerMod.currentJobLabel(createRealIo(), { workerDir: resolveWorkerDir(flags), platformAdapter: PLATFORM_ADAPTER });
+    } catch (_) {
+        return 'unknown';
     }
 }
 
@@ -1862,6 +1891,7 @@ function printResult(result, { flags = {}, mode = null, boot = false } = {}) {
     const extra = resultExtras(result, tool);
     const summary = renderFinalSummary({ verification: result.verification, e2e: result.e2e || [], extra, tool, mode: mode || result.mode });
     console.log(summary.text);
+    console.log(`current job: ${currentJobOf(result, flags)}`);
     // The full path is printed even when ~/.local/bin is already in PATH:
     // after a node reboot the PATH block is gone, and a copy-pasted relative
     // `animastor` must not be the only way to run the command.
@@ -2134,7 +2164,11 @@ async function cmdStart(flags) {
     if (stats) {
         start = workerMod.startWorker(io, { workerDir: targets.workerDir });
         if (start.started && start.alive) {
-            if (start.already_running) screen.print(`worker already running (pid ${start.pid})`);
+            if (start.already_running) {
+                screen.print(start.busy_job
+                    ? `worker already running (pid ${start.pid}), busy with ${start.busy_job} — its .env changed, restart deferred until the task finishes (run \`${toolCommand(flags)} doctor\`)`
+                    : `worker already running (pid ${start.pid})`);
+            }
             ready = await screen.withBusy('Waiting for the worker (ComfyUI ready → hub heartbeat)', () => workerMod.waitForWorkerReady(io, {
                 workerDir: targets.workerDir, pid: start.pid, logFile: start.logFile, logOffset: start.logOffset || 0,
             }));
@@ -2276,7 +2310,7 @@ async function main() {
             console.error('  a free port when 8188 is taken; opt out:');
             console.error('    --no-start-comfy  --no-start-worker  --comfy-port N');
             console.error('  management (the `animastor` command in PATH):');
-            console.error('    animastor start | stop | status | logs [-f] | doctor [--new-key] | boot');
+            console.error('    animastor start | stop | status | logs [-f] | doctor [--new-key] [--wait-job-ms N] [--force] | boot');
             console.error('    boot: node startup script — detaches `doctor --yes` (log ~/animastor/logs/bootstrap.log), exits 0');
             console.error('    --restart-platform-comfy / --no-restart-platform-comfy  restart the platform ComfyUI after node deps');
     console.error('    --accept-node-deps-overrides  consent: the node-deps overlay may replace a package another profile / ComfyUI core uses');
