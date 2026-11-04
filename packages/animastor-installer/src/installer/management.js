@@ -183,7 +183,11 @@ async function collectStatus(io, targets, opts = {}) {
         } catch (_) { /* queue is optional */ }
     }
     return {
-        worker: { running: !!workerPid, pid: workerPid || null },
+        // current job (installer 0.2.8): the running worker's task, from its own log.
+        worker: {
+            running: !!workerPid, pid: workerPid || null,
+            current_job: workerPid && targets.workerDir ? workerMod.currentJobLabel(io, { workerDir: targets.workerDir, pid: workerPid }) : 'none',
+        },
         comfyui: {
             running: comfyPids.length > 0, root_present: comfyRootPresent, port, pids: comfyPids, external, url: baseUrl,
             started_by: startedBy, foreign_pid: foreign ? foreign.pid : null,
@@ -222,6 +226,7 @@ function renderStatus(snapshot) {
     } else {
         lines.push('Queue:    — (API unreachable)');
     }
+    lines.push(`current job: ${snapshot.worker.current_job || 'none'}`);
     if (snapshot.hub) {
         lines.push(`Hub:      ${snapshot.hub.heartbeat ? `${ok} ONLINE (heartbeat accepted)` : `${bad} no heartbeat${snapshot.hub.last_error ? ` — ${snapshot.hub.last_error}` : (snapshot.hub.comfy_ready ? '' : ' — worker has not reached ComfyUI')}`}`);
     }

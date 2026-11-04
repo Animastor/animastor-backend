@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.2.7, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.8, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -176,6 +176,16 @@ bundle update and on every `doctor`/`boot` run — a node installed by an
 older installer gets it on its next doctor/boot. An identical file is left
 untouched; the file is registered for the uninstaller. Without the file the
 worker keeps the previous behaviour (ComfyUI API only) and logs one warning.
+
+A running worker is not restarted by `install`/`doctor` (0.2.8). It is left
+as is (`worker already running (pid N), left as is`) unless its configuration
+changed (`.env` or bundle files newer than the process). Then an idle worker
+is restarted; a busy one (a `Task <id>` in its own log without `Done`/`Failed`)
+is waited for up to `--wait-job-ms` (default 600000), else the run is FAILED
+(exit 1) and the worker keeps running. `--force` restarts it anyway. The boot
+path (`doctor --yes`, no TTY) only starts a stopped worker. An unchanged
+`.env` is no longer rewritten. `doctor` and `status` print
+`current job: none|<id>`.
 
 Every install/doctor run first brings the management tools (`animastor`,
 the persistent installer copy) and an installed worker bundle to its own
