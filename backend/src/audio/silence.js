@@ -7,6 +7,10 @@ const path = require('path');
 const { spawn } = require('child_process');
 const helpers = require('./helpers');
 const { isFFmpegAvailable } = require('./connector-utils');
+// Every silent file is explicitly marked as such. Readiness checks refuse a
+// marked file, so a placeholder can never be mistaken for real audio again
+// (2026-11-04: sc-4bb85e02 was "ready" with 10.85 s of silence).
+const { writePlaceholderMarker } = require('./placeholder-marker');
 
 /**
  * Write a minimal valid MP3 silence file using pure Node.js.
@@ -40,10 +44,18 @@ function writeSilentMP3Node(outputPath, durationSec) {
 /**
  * Generate a silent MP3 audio file.
  * Prefers ffmpeg for proper encoding, falls back to pure Node.js MP3 frame generation.
+ *
+ * The generated file is ALWAYS accompanied by a sidecar marker
+ * (`<path>.placeholder.json`): a valid silent MP3 is otherwise
+ * indistinguishable from real audio by size/duration alone.
+ *
+ * @param {string} outputPath
+ * @param {number} durationSec
+ * @param {{bookId?:string, chapterId?:string, sceneId?:string, reason?:string}} [info]
  */
-async function generateSilentAudio(outputPath, durationSec) {
+async function generateSilentAudio(outputPath, durationSec, info = {}) {
     if (isFFmpegAvailable()) {
-        return new Promise((resolve, reject) => {
+        await new Promise((resolve, reject) => {
             const args = [
                 '-f', 'lavfi',
                 '-i', 'anullsrc=r=24000:cl=mono',
@@ -73,6 +85,8 @@ async function generateSilentAudio(outputPath, durationSec) {
 
             ffmpeg.on('error', reject);
         });
+        writePlaceholderMarker(outputPath, { durationSec, ...info });
+        return outputPath;
     }
 
     helpers.log(`ffmpeg not found, generating silent MP3 with Node.js fallback: ${path.basename(outputPath)} (${durationSec.toFixed(1)}s)`);

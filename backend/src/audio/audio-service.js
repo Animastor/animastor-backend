@@ -52,6 +52,8 @@ module.exports = {
     // validation
     validateCanonicalAudio: validation.validateCanonicalAudio,
     isSceneAudioReady: validation.isSceneAudioReady,
+    // 2026-11-04: ready = a fenced GPU commit of this generation, never "a file exists"
+    isSceneAudioCommitted: validation.isSceneAudioCommitted,
     getAudioDuration: validation.getAudioDuration,
 
     // chunks

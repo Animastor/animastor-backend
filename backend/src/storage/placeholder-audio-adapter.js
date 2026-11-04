@@ -40,8 +40,8 @@ function ensurePlaceholderAudio(buildId, bookId, chapterId, sceneId) {
     return placeholderAudioService().ensurePlaceholderAudio(buildId, bookId, chapterId, sceneId);
 }
 
-function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, buildId, realAudioPath, realDuration) {
-    return placeholderAudioService().replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, buildId, realAudioPath, realDuration);
+function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, buildId, realAudioPath, realDuration, options = {}) {
+    return placeholderAudioService().replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, buildId, realAudioPath, realDuration, options);
 }
 
 module.exports = {
