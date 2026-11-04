@@ -10,6 +10,10 @@ const artifactNaming = require('@animastor/generation').artifactNaming;
 const ffmpeg = require('./ffmpeg');
 const validation = require('./validation');
 const chunks = require('./chunks');
+// 2026-11-04 (integration A+B+C): the canonical file built from fenced chunks
+// replaces a silent placeholder at the same path — its sidecar marker must go
+// with it, or real audio would read as `placeholder_marker` forever.
+const { clearPlaceholderMarker } = require('./placeholder-marker');
 
 // TEMPORARY (research): when set, source audio chunks are NOT deleted after merge
 // so their real durations can be measured while they are still on disk.
@@ -97,6 +101,9 @@ async function buildSceneAudio(chunkPaths, finalPath, buildId = null, force = fa
                 }
             }
 
+            if (clearPlaceholderMarker(finalPath)) {
+                helpers.log(`Placeholder marker cleared — real audio published: ${path.basename(finalPath)}`);
+            }
             return finalPath;
         } catch (err) {
             helpers.error(`Audio processing failed: ${err.message}`);
@@ -146,6 +153,9 @@ async function buildSceneAudio(chunkPaths, finalPath, buildId = null, force = fa
             fs.unlinkSync(concatPath);
         }
 
+        if (clearPlaceholderMarker(finalPath)) {
+            helpers.log(`Placeholder marker cleared — real audio published: ${path.basename(finalPath)}`);
+        }
         return finalPath;
     } catch (err) {
         helpers.error(`Audio merge failed: ${err.message}`);
