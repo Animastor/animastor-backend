@@ -23,6 +23,10 @@ const mediaRegistry = require('@animastor/generation').mediaRegistry;
 // (deps.stageCancellation, composition root) — contour-route requires are frozen.
 const commandGate = require('@animastor/orchestration').runtime.commandGate;
 
+// Task-registry statuses of a command that stopped without finishing
+// (generation-progress: blockSceneStage / failSceneStage / interruptActiveTasks).
+const STOPPED_TASK_STATUSES = new Set(['blocked', 'interrupted', 'failed']);
+
 module.exports = function(app, redis, deps) {
     // Stage 116 (D4): queue-idempotency port (injected by the composition root
     // — the contour-route require sets are frozen).
@@ -195,18 +199,49 @@ module.exports = function(app, redis, deps) {
 
             let resolvedType = type;
             let tasks = [];
+            let stoppedTask = null;
             if (taskId) {
                 const task = await generationProgress.getTask(redis, bookId, taskId);
                 if (!task) return res.status(404).json({ error: 'Generation task not found' });
                 resolvedType = task.type;
-                tasks = task.status === 'active' ? [task] : [];
+                // 2026-11-05 (задача K, «■ Снять» on a stopped row): a repeat
+                // cancel of an already cancelled task is idempotent — same
+                // answer, nothing touched again.
+                if (task.status === 'cancelled') {
+                    log(`[CANCEL-WORKER] ${bookId}: task=${taskId} already cancelled (idempotent)`);
+                    return res.json({
+                        ok: true, book_id: bookId, cancelled: [resolvedType], task_ids: [task.task_id || taskId],
+                    });
+                }
+                if (task.status === 'active') {
+                    tasks = [task];
+                } else if (STOPPED_TASK_STATUSES.has(task.status)) {
+                    // blocked / interrupted / failed: the command stopped
+                    // without finishing and stays visible until superseded or
+                    // removed by the user. «Снять» cancels ONLY this task
+                    // (registry + PG rows) and releases its leftovers through
+                    // the same task-scoped path as an active row — never a
+                    // book-wide flag / tombstone, never other tasks.
+                    tasks = [task];
+                    stoppedTask = task;
+                }
+                // completed: nothing to cancel, left untouched.
             } else if (cancelValidTypes.includes(type) && type !== 'cover' && type !== 'vbook') {
                 tasks = await generationProgress.getActiveTasksByType(redis, bookId, type);
             }
 
-            log(`[CANCEL-WORKER] ${bookId}: cancelling type=${resolvedType} task=${taskId || 'all'}`);
+            log(`[CANCEL-WORKER] ${bookId}: cancelling type=${resolvedType} task=${taskId || 'all'}${stoppedTask ? ` (stopped: ${stoppedTask.status})` : ''}`);
 
-            if (resolvedType === 'vbook') {
+            if (stoppedTask && !mediaRegistry.listMediaTypes().includes(resolvedType)) {
+                // A stopped non-media task (cover / vbook): registry + PG row
+                // only. The vbook / cover branches below act book-wide.
+                await generationProgress.markCancelled(redis, bookId, stoppedTask.task_id);
+                try {
+                    await taskRepo.updateTaskStatus(stoppedTask.task_id, 'cancelled', `cancel-worker:task:${taskId}`);
+                } catch (pgErr) {
+                    console.warn(`[CANCEL-WORKER] Failed to persist cancellation for ${stoppedTask.task_id}: ${pgErr.message}`);
+                }
+            } else if (resolvedType === 'vbook') {
                 // Cancel VBook/AI agent: VBook session cancellation goes
                 // through the AgentSessionControl port (S-1) — the
                 // agent_sessions status grammar stays VBook-owned.
