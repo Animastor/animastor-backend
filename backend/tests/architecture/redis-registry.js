@@ -194,7 +194,7 @@ const REDIS_OWNERSHIP = [
         readers: ['backend'],
         writers: ['backend'],
         crossModule: false,
-        note: 'Retry budget per scene/stage + global/type/worker aggregates (retry-budget-manager).',
+        note: 'Retry budget per scene/stage + global/type/worker aggregates (retry-budget-manager). Per-scene keys have no TTL — purged with the book by redis-helpers cleanBookRedisKeys (retry-budget:{book}:*:*:*).',
     },
     {
         pattern: 'animastor:circuit:*',
