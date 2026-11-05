@@ -488,6 +488,66 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
 }
 
 /**
+ * Build the ComfyUI workflow of ONE audio segment (narration or dialogue
+ * line) — the exact per-segment patching of the legacy dispatch path,
+ * extracted so orchestration v2 (backend/src/orchestration-v2/audio-ports)
+ * builds the SAME payload for an audio_chunk job. Pure apart from logging.
+ * @returns {object} workflow (ComfyUI prompt graph)
+ */
+function buildSegmentWorkflow(segment, sceneData, loadedBook, ctx = {}) {
+    const { bookId, chapterId, sceneId } = ctx;
+    const isDialogue = segment.segment_type === 'dialogue';
+    const workflowName = isDialogue ? WORKFLOW_DIALOGUE : WORKFLOW_NARRATION;
+    const wfAudio = provider.loadWorkflow(workflowName);
+
+    if (isDialogue) {
+        // Dialogue → Qwen3TTSAdvancedDialogue — all node patching via the
+        // provider's connector bindings (entity keys, no node ids here).
+        const defaultInstruct = resolveAudioAssembly().defaults.defaultInstruct || "";
+        provider.applyValue(wfAudio, workflowName, 'dialogueScript', segment.text);
+        provider.applyValue(wfAudio, workflowName, 'defaultInstruct', defaultInstruct);
+
+        // ⚡ Определяем speaker из segment.text (формат: "speaker: текст")
+        // speaker = character_id ИЛИ естественное обозначение эпизодического
+        // участника ("женщина в будочке") — он остаётся как есть, без
+        // принудительного snake_case id; голос по умолчанию = narrator.
+        const speakerMatch = segment.text.match(/^([^:\n]+?):\s/);
+        const speakerId = speakerMatch ? speakerMatch[1].trim() : null;
+
+        const speakerVoice = speakerId ? voiceForCharacter(speakerId, loadedBook) : "";
+        const narratorVi = segments.narratorVoice(sceneData.payload, loadedBook);
+
+        // ⚡ FALLBACK: если у speaker нет голоса — используем narrator голос.
+        // ComfyUI выдаёт ошибку "Voice instruction cannot be empty."
+        const c1Voice = speakerVoice || narratorVi || "";
+        const c2Voice = narratorVi || c1Voice || "";
+
+        if (!c1Voice) {
+            helpers.warn(`⚠️ EMPTY VOICE for ${speakerId || 'unknown'} in ${bookId}/${chapterId}/${sceneId} — using template default`);
+        }
+
+        if (c1Voice) provider.applyValue(wfAudio, workflowName, 'character1Voice', c1Voice);
+        if (c2Voice) provider.applyValue(wfAudio, workflowName, 'character2Voice', c2Voice);
+        provider.applyValue(wfAudio, workflowName, 'roleName1', speakerId || "speaker");
+        provider.applyValue(wfAudio, workflowName, 'roleName2', "narrator");
+
+    } else {
+        // Narration segment
+        const vi = segments.narratorVoice(sceneData.payload, loadedBook);
+
+        if (!vi) {
+            helpers.warn(`⚠️ EMPTY narrator voice for ${bookId}/${chapterId}/${sceneId} — using template default`);
+        }
+
+        provider.applyValue(wfAudio, workflowName, 'narrationText', segment.text);
+        if (vi) {
+            provider.applyValue(wfAudio, workflowName, 'voiceInstruction', vi);
+        }
+    }
+    return wfAudio;
+}
+
+/**
  * Send audio per-segment (for mixed scenes or fallback).
  * Each segment gets its own workflow with speaker-based voice.
  */
@@ -581,54 +641,7 @@ async function sendPerSegmentAudio(redis, segList, sceneData, loadedBook, buildI
             }
         }
 
-        const isDialogue = segment.segment_type === 'dialogue';
-        const workflowName = isDialogue ? WORKFLOW_DIALOGUE : WORKFLOW_NARRATION;
-        const wfAudio = provider.loadWorkflow(workflowName);
-
-        if (isDialogue) {
-            // Dialogue → Qwen3TTSAdvancedDialogue — all node patching via the
-            // provider's connector bindings (entity keys, no node ids here).
-            const defaultInstruct = resolveAudioAssembly().defaults.defaultInstruct || "";
-            provider.applyValue(wfAudio, workflowName, 'dialogueScript', segment.text);
-            provider.applyValue(wfAudio, workflowName, 'defaultInstruct', defaultInstruct);
-
-            // ⚡ Определяем speaker из segment.text (формат: "speaker: текст")
-            // speaker = character_id ИЛИ естественное обозначение эпизодического
-            // участника ("женщина в будочке") — он остаётся как есть, без
-            // принудительного snake_case id; голос по умолчанию = narrator.
-            const speakerMatch = segment.text.match(/^([^:\n]+?):\s/);
-            const speakerId = speakerMatch ? speakerMatch[1].trim() : null;
-
-            const speakerVoice = speakerId ? voiceForCharacter(speakerId, loadedBook) : "";
-            const narratorVi = segments.narratorVoice(sceneData.payload, loadedBook);
-
-            // ⚡ FALLBACK: если у speaker нет голоса — используем narrator голос.
-            // ComfyUI выдаёт ошибку "Voice instruction cannot be empty."
-            const c1Voice = speakerVoice || narratorVi || "";
-            const c2Voice = narratorVi || c1Voice || "";
-
-            if (!c1Voice) {
-                helpers.warn(`⚠️ EMPTY VOICE for ${speakerId || 'unknown'} in ${bookId}/${chapterId}/${sceneId} — using template default`);
-            }
-
-            if (c1Voice) provider.applyValue(wfAudio, workflowName, 'character1Voice', c1Voice);
-            if (c2Voice) provider.applyValue(wfAudio, workflowName, 'character2Voice', c2Voice);
-            provider.applyValue(wfAudio, workflowName, 'roleName1', speakerId || "speaker");
-            provider.applyValue(wfAudio, workflowName, 'roleName2', "narrator");
-
-        } else {
-            // Narration segment
-            const vi = segments.narratorVoice(sceneData.payload, loadedBook);
-
-            if (!vi) {
-                helpers.warn(`⚠️ EMPTY narrator voice for ${bookId}/${chapterId}/${sceneId} — using template default`);
-            }
-
-            provider.applyValue(wfAudio, workflowName, 'narrationText', segment.text);
-            if (vi) {
-                provider.applyValue(wfAudio, workflowName, 'voiceInstruction', vi);
-            }
-        }
+        const wfAudio = buildSegmentWorkflow(segment, sceneData, loadedBook, { bookId, chapterId, sceneId });
 
         let audioSend = await provider.generate({
             jobId: provider.buildJobId(id, 'audio'),
@@ -747,6 +760,7 @@ module.exports = {
     trimPaddedSceneAudio,
     trimPaddedAudioBuffer,
     buildMergedDialogueWorkflow,
+    buildSegmentWorkflow,
     resolveAudioAssembly,
     WORKFLOW_NARRATION,
     WORKFLOW_DIALOGUE,

@@ -1716,7 +1716,7 @@ describe('orch invariants — FAILED + DIRTY (stage 47)', () => {
             // While it is an OLDER release (clean clone before the owner
             // publishes 0.1.5) byte equality is meaningless — the byte-sync
             // requirement is the publish gate: same version ⇒ same bytes.
-            const npmCopy = path.resolve(__dirname, '../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine.js');
+            const npmCopy = path.resolve(__dirname, '../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine.js');
             if (!fs.existsSync(npmCopy)) this.skip(); // post-split checkout: only the packages copy exists
             const installedVersion = require('../node_modules/@animastor/orchestration/package.json').version;
             const sourceVersion = require('../../packages/animastor-orchestration/package.json').version;

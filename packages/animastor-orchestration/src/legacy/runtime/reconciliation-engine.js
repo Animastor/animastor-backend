@@ -31,6 +31,8 @@ const mediaRegistry = require('@animastor/generation').mediaRegistry;
 // audio-path composition are consumed as persistence OPERATIONS through the
 // same port (their implementations stay host-side).
 const persist = require('./persistence-port').persist;
+// Orchestration v2 (1b/E): every phase skips books with books.orchestration='v2'.
+const { isV2Book } = require('./persistence-port');
 const config = lazyHostBinding('config');
 // S-5: the event journal is an append-only observability sink (zero requires,
 // no orchestration policy) — the ONLY runtime→Generation dependency allowed
@@ -549,6 +551,7 @@ async function checkStalledAudioScenes(redis, deps) {
     let stalled = 0;
     for (const entry of allStates) {
         const { bookId, chapterId, sceneId, state: orchState } = entry;
+        if (await isV2Book(bookId)) continue; // orchestration v2: not legacy's
         if (orchState.phase !== PHASES.WAITING_CHUNKS) continue;
 
         const buildId = orchState.build_id || 'default';
@@ -671,6 +674,7 @@ async function checkStalledVideoScenes(redis, deps) {
     let stalled = 0;
     for (const entry of allStates) {
         const { bookId, chapterId, sceneId, state: orchState } = entry;
+        if (await isV2Book(bookId)) continue; // orchestration v2: not legacy's
         if (orchState.phase !== PHASES.WAITING_CHUNKS) continue;
 
         // ── ПЕРЕСМОТР ПОРОГА ЗАСТОЯ ──
@@ -1031,6 +1035,7 @@ async function checkStaleDispatchLeases(redis, bookId, chapterId, sceneId) {
  */
 async function reconcileScene(redis, bookId, chapterId, sceneId) {
     const report = new ReconciliationReport();
+    if (await isV2Book(bookId)) return report; // orchestration v2: not legacy's
 
     try {
         // Check orphan states
@@ -2055,6 +2060,10 @@ async function recoverResultKeys(redis, deps, scope) {
                 // marker or one from an older dispatch of the same job_id
                 // (audio/video regeneration within the TTL) is no proof — such
                 // a result goes through the fenced handler exactly as before.
+                {
+                    const pj = require('@animastor/contracts').jobProtocolV2.parseJobId(job_id);
+                    if (pj && await isV2Book(pj.bookId)) continue; // orchestration v2: key left untouched
+                }
                 const dedup = await readResultDedup(redis, job_id, buildId);
                 if (dedup.state === 'settled' && dedup.dispatchId === String(dispatchId)) {
                     await redis.del(key);
@@ -2116,6 +2125,7 @@ async function recoverResultKeys(redis, deps, scope) {
                 // Parse job_id to get stage and scene info
                 const jobSchema = require('@animastor/contracts').jobProtocolV2;
                 const parsed = jobSchema.parseJobId(job_id);
+                if (parsed && await isV2Book(parsed.bookId)) continue; // orchestration v2: key left untouched
                 if (parsed) {
                     const stageMap = { audio_chunk: 'audio', iu_image: 'image', scene_image: 'image', scene_video: 'video' };
                     const stage = stageMap[parsed.kind];
@@ -2159,6 +2169,7 @@ async function recoverAudioOrchStates(redis, deps) {
 
     for (const entry of allStates) {
         const { bookId, chapterId, sceneId, state: orchState } = entry;
+        if (await isV2Book(bookId)) continue; // orchestration v2: not legacy's
         const phase = orchState.phase;
         const buildId = orchState.build_id || 'default';
         const mergedPath = syncPath.join(OUTPUT_DIR, buildId, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
@@ -2260,6 +2271,7 @@ async function recoverVideoOrchStates(redis, deps) {
 
     for (const entry of allStates) {
         const { bookId, chapterId, sceneId, state: orchState } = entry;
+        if (await isV2Book(bookId)) continue; // orchestration v2: not legacy's
         const phase = orchState.phase;
         const buildId = orchState.build_id || 'default';
         const suffixes = videoOrch.groupSuffixes(orchState);
@@ -2367,6 +2379,7 @@ async function checkVersionStaleness(redis, deps) {
 
         let outdated = 0;
         for (const entry of sceneMap.values()) {
+            if (await isV2Book(entry.bookId)) continue; // orchestration v2
             if (entry.staleAssets.size === 0) continue;
 
             let assetStates;
@@ -2413,6 +2426,7 @@ async function reconcileMissingSceneState(redis, deps) {
         const bookResult = { rows: await persist('listBooks')() };
         let count = 0;
         for (const row of bookResult.rows) {
+            if (await isV2Book(row.book_id)) continue; // orchestration v2
             const totalKey = `animastor:book-scenes:${row.book_id}:total`;
             const totalRaw = await redis.get(totalKey);
             if (!totalRaw || parseInt(totalRaw, 10) === 0) {
@@ -2490,6 +2504,7 @@ const state = lazyHostBinding('state');
 
     let scenesAdded = 0;
     for (const bookId of books) {
+        if (await isV2Book(bookId)) { log(`[WORKLIST] ${bookId}: skipped (orchestration v2)`); continue; }
         if (cancelled.has(bookId)) {
             log(`[WORKLIST] ${bookId}: skipped (cancellation tombstone)`);
             continue;

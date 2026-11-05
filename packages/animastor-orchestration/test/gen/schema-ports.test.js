@@ -119,7 +119,8 @@ describe('gen v2 — ports (contract + validation)', () => {
         assert.deepEqual(rp('audio_chunk', 'timeout', 1), { retry: true, delay_ms: 30000 });       // sweeper class
         assert.deepEqual(rp('audio_chunk', 'worker_offline', 2), { retry: true, delay_ms: 120000 });
         assert.deepEqual(rp('audio_chunk', 'invalid_result', 1), { retry: true, delay_ms: 30000 });   // §7: one retry
-        assert.deepEqual(rp('audio_chunk', 'invalid_result', 2), { retry: false, delay_ms: 0 });
+        assert.deepEqual(rp('audio_chunk', 'invalid_result', 2, { previousErrorClass: 'invalid_result' }), { retry: false, delay_ms: 0 });
+        assert.deepEqual(rp('audio_chunk', 'invalid_result', 2, { previousErrorClass: 'worker_offline' }), { retry: true, delay_ms: 30000 }, 'counted per class');
         assert.equal(gen.defaults.maxAttemptsFor('audio_chunk'), 3);
         assert.equal(gen.defaults.timeoutFor('audio_chunk'), 30 * 60000);
         assert.equal(gen.defaults.timeoutFor('video_group'), 60 * 60000);

@@ -17,7 +17,7 @@
 //   laneFor(workspaceId, workerType) → Promise<{kind, workspace_id?, policy_id?}>
 //                                     (logic of gpu-dispatcher.js:213–222; default: makeLaneFor)
 //   timeoutFor(kind)               → ms               (deadline = claimed_at + timeout, §4.2)
-//   retryPolicy(kind, error_class, attempt) → {retry, delay_ms}
+//   retryPolicy(kind, error_class, attempt, {previousErrorClass}) → {retry, delay_ms}
 //                                     (values of gpu-retry-policy.cjs:50–53)
 // Optional:
 //   maxAttemptsFor(kind)           → int ≥ 1          (default: 1 + max retries of the policy)
@@ -59,9 +59,16 @@ function policyClass(errorClass) {
  * @param {string} _kind
  * @param {string} errorClass
  * @param {number} attempt the attempt that just failed (1-based)
+ * @param {{previousErrorClass?:string|null}} [ctx] error class of the attempt before
  */
-function defaultRetryPolicy(_kind, errorClass, attempt) {
-    const p = RETRY_POLICY[policyClass(errorClass)];
+function defaultRetryPolicy(_kind, errorClass, attempt, ctx = {}) {
+    const cls = policyClass(errorClass);
+    const p = RETRY_POLICY[cls];
+    // invalid_result: ONE retry per job (counted by class, not by attempt number —
+    // an earlier timeout must not eat it); a second invalid result → failed
+    if (cls === 'invalid_result') {
+        return ctx.previousErrorClass === 'invalid_result' ? { retry: false, delay_ms: 0 } : { retry: true, delay_ms: p.pausesMs[0] };
+    }
     const idx = Math.max(0, (Number(attempt) || 1) - 1);
     if (idx < p.retries) return { retry: true, delay_ms: p.pausesMs[idx] ?? p.pausesMs[p.pausesMs.length - 1] ?? 0 };
     return { retry: false, delay_ms: 0 };

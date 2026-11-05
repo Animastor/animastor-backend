@@ -19,7 +19,7 @@ const { migrate, MIGRATIONS } = require('./sql');
 const portsMod = require('./ports');
 const media = require('./validate-media');
 const util = require('./util');
-const { createCommands } = require('./commands');
+const { createCommands, purgeBookRows } = require('./commands');
 const { createClaim } = require('./claim');
 const { createAccept } = require('./accept');
 const { createSweeper } = require('./sweeper');
@@ -85,6 +85,8 @@ function createOrchestration(o = {}) {
 module.exports = Object.freeze({
     createOrchestration,
     migrate,
+    /** purgeBook(pool, bookId) — book deletion without an instance */
+    purgeBook: purgeBookRows,
     MIGRATIONS,
     validatePorts: portsMod.validatePorts,
     REQUIRED_PORTS: portsMod.REQUIRED_PORTS,

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.0 (не опубликован) — этап 1b: gen_command_jobs, build_id/layer, отмена по слою
+
+ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §4.2a, §6.3–6.4, §7, §13.6).
+
+- `sql/002-command-jobs` (поверх 001, идемпотентно): `gen_jobs.build_id` NOT NULL (из
+  `input.build_id`), `gen_jobs.layer` NOT NULL + CHECK, `gen_commands.summary`, таблица
+  `gen_command_jobs` (PK, FK, бэкфилл).
+- Присоединение — явной связью; прогресс и завершение команды — только по `gen_command_jobs`.
+- `cancel({bookId, layer})` (аудио снимает и `audio_merge`); отмена по executor удалена;
+  `cancel({commandId})` не трогает работы, нужные другой активной команде.
+- Ступени §6.3 — только при связанной активной команде со слоем; новая работа связывается со всеми такими.
+- `invalid_result` — один повтор на работу (считается по классу), затем failed.
+- `purgeBook(pool, bookId)`; `progress(bookId, {finishedWithinMs})`; опциональный порт
+  `onArtifactPlaced(job, path)`; `retryPolicy(kind, cls, attempt, {previousErrorClass})`.
+- legacy: единый предикат `persistence-port.isV2Book` (опциональная операция порта
+  `orchestration.isV2Book`, fail-closed) — command gate, reconcile, scheduler, scene window
+  пропускают v2-книги.
+
 ## 1.0.0 (2026-11-05) — оркестрация v2, этап 1a: ядро `gen` + схема PG
 
 ADR: animastor-docs `architecture/ORCHESTRATION_V2.md` (§3, §4, §6–§10, §13). Без

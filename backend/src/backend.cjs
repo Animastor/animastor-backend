@@ -516,6 +516,36 @@ const entityCleanup = require('./services/entity-cleanup.cjs')(redis, config, {
 //   log            — host logger
 // Guarded by tests/architecture/assistant-contour.test.js (A1–A7) and
 // assistant-package-boundary.test.js (PB1–PB4).
+// ── Orchestration v2 (ADR animastor-docs ORCHESTRATION_V2.md, этап 1: аудио,
+// книги books.orchestration='v2'). Master flag ORCH_V2_ENABLED; OFF → nothing
+// of v2 runs (no migration / sweeper / local runner / internal routes). The
+// v2/legacy split for a book is the single predicate orchestration-v2/book-flag.
+const { createOrchV2Host } = require('./orchestration-v2');
+const { createV2Routes } = require('./orchestration-v2/routes');
+const orchV2Host = createOrchV2Host({
+    env: process.env,
+    getPool: () => storage.postgres.getPool(),
+    gpuDispatcher: require('./runtime/gpu-dispatcher'),
+    redis,
+    layerConfig,
+    book,
+    publishProgress: require('./services/progress-pubsub.cjs').publishProgress,
+    outputDir: config.OUTPUT_DIR,
+    log: utils.log,
+});
+const orchV2 = createV2Routes({
+    host: orchV2Host,
+    config,
+    workerRepo: require('./storage/postgres/repositories/worker-repo'),
+    bookRepo: require('./storage/postgres/repositories/book-repo'),
+    layerConfig,
+    redis,
+    book,
+    sessionControl: require('./services/agent-session-control').createAgentSessionControl(),
+    log: utils.log,
+});
+orchV2.mountInternal(app);
+
 const assistantPorts = createAssistantPorts({
     bookModel, book, lazyBook,
     bundleValidator: require('./book/bundle-validator.cjs'),
@@ -681,6 +711,14 @@ const routeDeps = {
         },
     }),
 };
+
+// Orchestration v2 handlers for books.orchestration='v2' (legacy books never reach them):
+// the book routes read deps.orchV2; the deletion cascade purges gen_* and skips the hub.
+routeDeps.orchV2 = orchV2;
+routeDeps.bookDeletion.configureOrchV2({
+    isV2Book: (bookId) => orchV2.isV2Book(bookId),
+    purgeGenV2: (bookId) => orchV2.purgeBook(bookId, { getPool: () => storage.postgres.getPool(), outputDir: config.OUTPUT_DIR }),
+});
 
 require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, bookDiff, windowGenerator });
 // Player (playback) routes — registered through the @animastor/player
@@ -857,6 +895,13 @@ async function startServer() {
         log('[STARTUP] PostgreSQL initialized');
     } catch (pgErr) {
         console.error('[STARTUP] PostgreSQL initialization failed (non-fatal):', pgErr.message);
+    }
+
+    // Orchestration v2 (master flag ORCH_V2_ENABLED): migration + sweeper + local runner.
+    try {
+        await orchV2Host.start();
+    } catch (v2Err) {
+        console.error('[STARTUP] Orchestration v2 start failed — v2 stays disabled:', v2Err.message);
     }
 
     // Authentication MVP: periodic housekeeping for expired/revoked sessions
@@ -1105,6 +1150,9 @@ async function startServer() {
                     resolve();
                 }));
             } catch (_) {}
+
+            // 3.5 Orchestration v2: stop the sweeper / local runner / LISTEN client
+            try { await orchV2Host.stop(); log('[SHUTDOWN] Orchestration v2 stopped'); } catch (_) {}
 
             // 4. Close Redis & PG pools
             try { await redis.quit(); log('[SHUTDOWN] Redis closed'); } catch (_) {}

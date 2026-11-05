@@ -6,8 +6,8 @@
 // а не истёкшим dispatch-lease через 15–30 минут.
 
 const { expect } = require('chai');
-const orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
-const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+const orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
+const dispatchEngine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
 const state = require('../src/state');
 const { createMockRedis } = require('./mocks/redis-mock');
 

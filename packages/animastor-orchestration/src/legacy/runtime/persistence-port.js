@@ -154,6 +154,26 @@ function persist(op) {
     return fn;
 }
 
+// ── Orchestration v2 isolation (ADR ORCHESTRATION_V2 §12 этап 1; задача 1b/E) ──
+// A book with books.orchestration = 'v2' belongs to the v2 core (gen_*): the
+// legacy contour (command gate, reconcile, scheduler, retry policy, startup
+// resume) must not touch it. The ONE predicate every legacy leg asks. The host
+// adapter implements the OPTIONAL op orchestration.isV2Book(bookId) (not in
+// OPS: adapters/mocks without it keep the pre-v2 behaviour = "not v2").
+// Fail-closed: when the op exists but cannot answer, the book is treated as v2
+// (legacy keeps its hands off).
+async function isV2Book(bookId) {
+    if (!bookId || !impl) return false;
+    const fn = resolveOp(impl, 'orchestration.isV2Book');
+    if (typeof fn !== 'function') return false;
+    try {
+        return (await fn(bookId)) === true;
+    } catch (err) {
+        console.warn(`[PERSISTENCE-PORT] orchestration.isV2Book(${bookId}) failed: ${err && err.message} — treated as v2 (fail-closed)`);
+        return true;
+    }
+}
+
 function isPersistencePortWired() {
     return impl !== null;
 }
@@ -164,6 +184,7 @@ function _resetPersistencePort() {
 }
 
 module.exports = {
+    isV2Book,
     OPS,
     setPersistencePort,
     persistence,

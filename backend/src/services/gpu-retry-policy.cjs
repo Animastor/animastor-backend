@@ -78,6 +78,7 @@ function dep(name) {
         case 'scheduler': return require('@animastor/orchestration').runtime.scheduler;
         case 'state': return require('../state');
         case 'journal': return require('../state/event-journal');
+        case 'bookFlag': return require('../orchestration-v2/book-flag');
         case 'generationProgress': return require('./generation-progress');
         case 'taskRepo': return require('../storage/postgres/repositories/task-repo');
         case 'sceneAssetsRepo': return require('../storage/postgres/repositories/scene-assets-repo');
@@ -197,6 +198,8 @@ async function failCommand(redis, ctx, cls, attemptNo) {
  */
 async function handleStageFailure(redis, ctx) {
     const { bookId, chapterId, sceneId, stage, buildId, dispatchId } = ctx;
+    // Orchestration v2 (1b/E): retries of a v2 book belong to gen_jobs — legacy keeps out.
+    if (await dep('bookFlag').isV2BookFailClosed(bookId)) return { handled: false, reason: 'orchestration_v2' };
     const reason = ctx.reason || 'worker_error';
     const cls = classifyGpuError({
         reason,
@@ -305,6 +308,8 @@ async function fireRetry(redis, pKey) {
     if (!raw) return { retried: false, reason: 'no_record' };
     let rec;
     try { rec = JSON.parse(raw); } catch (_) { await redis.del(pKey); return { retried: false, reason: 'bad_record' }; }
+    // Orchestration v2 (1b/E): a v2 book's record is not legacy's — left untouched.
+    if (await dep('bookFlag').isV2BookFailClosed(rec.book_id)) return { retried: false, reason: 'orchestration_v2' };
     // Claim: exactly one executor (DEL returns 1 only once).
     if (Number(await redis.del(pKey)) !== 1) return { retried: false, reason: 'claimed' };
 

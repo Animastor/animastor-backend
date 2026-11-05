@@ -127,7 +127,7 @@ describe('S5-R5: runtime → orchestration cycle reduction', () => {
             }
         }
         // facade re-export identity: orchestrator.setX === stateOps.setX
-        const facade = require('../../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        const facade = require('../../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
         const ops = require('../../src/state/scene-state-ops');
         for (const name of ['markDirtyScene', 'setScenePending', 'setSceneGenerating', 'setSceneAllReady', 'setScenePlaceholder']) {
             expect(facade[name], `facade must re-export ${name} from the state layer`).to.equal(ops[name]);

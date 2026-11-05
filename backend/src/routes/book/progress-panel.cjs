@@ -405,6 +405,11 @@ module.exports = function(app, redis, deps) {
     app.get('/api/v1/book/:bookId/progress-panel', async (req, res) => {
         try {
             const { bookId } = req.params;
+            // Orchestration v2: the same response contract, built from gen_* (deps.orchV2)
+            if (deps.orchV2 && await deps.orchV2.isV2Book(bookId)) {
+                const bookData = (() => { try { return book.loadBook(bookId); } catch (_) { return null; } })();
+                return res.json(await deps.orchV2.progressPanel(bookId, (ch, sc) => resolveLabels(bookData, ch, sc)));
+            }
             // Only real registry tasks (no synthetic rows from the index).
             const tasks = await generationProgress.listTasks(redis, bookId);
 

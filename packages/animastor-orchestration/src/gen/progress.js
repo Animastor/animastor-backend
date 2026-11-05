@@ -12,27 +12,39 @@
 const { requireText, PROGRESS_CHANNEL } = require('./util');
 
 const STATUSES = ['queued', 'running', 'done', 'failed', 'cancelled'];
-const zero = () => ({ queued: 0, running: 0, done: 0, failed: 0, cancelled: 0, joined_queued: 0, joined_running: 0 });
+const zero = () => ({ queued: 0, running: 0, done: 0, failed: 0, cancelled: 0, joined_queued: 0, joined_running: 0, retrying: 0 });
 
 function createProgress({ pool }) {
     /** @returns {Promise<{book_id:string, totals:object, commands:object[]}>} */
-    async function progress(bookId) {
+    /**
+     * @param {string} bookId
+     * @param {{finishedWithinMs?:number}} [opts] also return commands finished within this window
+     *        (a panel shows the final 100% / failed row before it disappears)
+     */
+    async function progress(bookId, opts = {}) {
         requireText(bookId, 'bookId');
+        const within = Number(opts.finishedWithinMs) > 0 ? Number(opts.finishedWithinMs) : 0;
         const cmds = (await pool.query(
-            `SELECT command_id, kind, scope, layers, force, status, created_at, user_id
-             FROM gen_commands WHERE book_id = $1 AND status = 'active' ORDER BY created_at`, [bookId])).rows;
+            `SELECT command_id, kind, scope, layers, force, status, created_at, finished_at, error, summary, user_id
+             FROM gen_commands
+             WHERE book_id = $1 AND (status = 'active'
+                   OR ($2::numeric > 0 AND finished_at > now() - make_interval(secs => $2::numeric / 1000)))
+             ORDER BY created_at`, [bookId, within])).rows;
         const ids = cmds.map((c) => c.command_id);
         const rows = ids.length ? (await pool.query(
             `SELECT l.command_id, j.layer, j.chapter_id, j.scene_id, j.status,
-                    (j.command_id <> l.command_id) AS foreign, count(*)::int AS n
+                    (j.command_id <> l.command_id) AS foreign, count(*)::int AS n,
+                    count(*) FILTER (WHERE j.status = 'queued' AND j.attempt > 0)::int AS retrying,
+                    count(*) FILTER (WHERE j.kind IN ('audio_merge','video_merge'))::int AS merges
              FROM gen_command_jobs l JOIN gen_jobs j ON j.job_id = l.job_id
              WHERE l.command_id = ANY($1::uuid[])
              GROUP BY 1, 2, 3, 4, 5, 6`, [ids])).rows : [];
 
         const byCmd = new Map(cmds.map((c) => [c.command_id, {
             command_id: c.command_id, kind: c.kind, scope: c.scope, layers: c.layers, force: c.force,
-            status: c.status, user_id: c.user_id, created_at: c.created_at,
-            totals: zero(), by_layer: {}, scenes: new Map(),
+            status: c.status, user_id: c.user_id, created_at: c.created_at, finished_at: c.finished_at,
+            error: c.error, summary: c.summary,
+            totals: zero(), by_layer: {}, merges: {}, scenes: new Map(),
         }]));
         const add = (row, field) => {
             const c = byCmd.get(row.command_id);
@@ -46,6 +58,8 @@ function createProgress({ pool }) {
         };
         for (const r of rows) {
             if (STATUSES.includes(r.status)) add(r, r.status);
+            if (r.retrying) add({ ...r, n: r.retrying }, 'retrying');
+            if (r.merges) { const c = byCmd.get(r.command_id); if (c) c.merges[r.layer] = (c.merges[r.layer] || 0) + r.merges; }
             if (r.foreign && r.status === 'queued') add(r, 'joined_queued');
             if (r.foreign && r.status === 'running') add(r, 'joined_running');
         }

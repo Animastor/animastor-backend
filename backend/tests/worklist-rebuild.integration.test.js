@@ -29,8 +29,8 @@ const { createMockRedis } = require('./mocks/redis-mock');
 // rebuildWorkList uses, so config.BOOKS_DIR/OUTPUT_DIR mutations are visible.
 let config = require('../src/config/runtime-config');
 let postgres = require('../src/storage/postgres');
-let reconciliation = require('../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
-let runtimeScheduler = require('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler');
+let reconciliation = require('../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine');
+let runtimeScheduler = require('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler');
 let state = require('../src/state');
 let generationCancelRepo = require('../src/storage/postgres/repositories/generation-cancel-repo');
 
@@ -129,8 +129,8 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
         // will lazily require — see the top-of-file comment.
         config = require('../src/config/runtime-config');
         postgres = require('../src/storage/postgres');
-        reconciliation = require('../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
-        runtimeScheduler = require('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler');
+        reconciliation = require('../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine');
+        runtimeScheduler = require('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler');
         state = require('../src/state');
         generationCancelRepo = require('../src/storage/postgres/repositories/generation-cancel-repo');
         // Re-bind the booksRoot port to THIS (post-purge) config instance so

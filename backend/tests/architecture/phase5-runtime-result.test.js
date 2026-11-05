@@ -47,7 +47,7 @@ const ORCH_DIR = fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-orche
 const SERVICES_DIR = path.join(BACKEND_SRC, 'services');
 
 const contract = require('../../src/contracts/runtime-result');
-const emitter = require('../../node_modules/@animastor/orchestration/src/runtime/runtime-result-emitter');
+const emitter = require('../../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-result-emitter');
 
 // ── T1 — Runtime result contract ────────────────────────
 describe('Phase 5 T1: runtime result contract', () => {
@@ -182,7 +182,7 @@ describe('Phase 5 T3: orchestration consumes runtime result through the seam', (
     });
 
     it('orchestration ships a runtime result consumer adapter', () => {
-        const { createRuntimeResultConsumer } = require('../../node_modules/@animastor/orchestration/src/orchestration/runtime-result-consumer');
+        const { createRuntimeResultConsumer } = require('../../node_modules/@animastor/orchestration/src/legacy/orchestration/runtime-result-consumer');
         expect(createRuntimeResultConsumer).to.be.a('function');
         const consumer = createRuntimeResultConsumer({ log: () => {} });
         expect(consumer).to.be.a('function');

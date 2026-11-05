@@ -44,7 +44,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
 
     // ── shared: a failed attempt → retry with backoff or failed (§7 «Ошибка», §9 пп.1–2)
     async function failAttemptTx(client, job, errorClass, reason) {
-        const policy = ports.retryPolicy(job.kind, errorClass, job.attempt) || { retry: false, delay_ms: 0 };
+        const policy = ports.retryPolicy(job.kind, errorClass, job.attempt, { previousErrorClass: job.error_class || null }) || { retry: false, delay_ms: 0 };
         const retry = policy.retry === true && job.attempt < job.max_attempts;
         const delay = Math.max(0, Number(policy.delay_ms) || 0);
         const r = retry

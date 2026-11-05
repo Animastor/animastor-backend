@@ -53,6 +53,29 @@ function checkUnit(u, layer) {
 
 const unitKey = (u) => `${u.chapter_id}\u0000${u.scene_id}\u0000${u.kind}\u0000${u.unit_key}`;
 
+/**
+ * Book deletion: remove every gen_* row of the book (one transaction).
+ * Usable without an orchestration instance (master flag off).
+ * @returns {Promise<{commands:number, jobs:number, links:number, build_ids:string[], job_ids:string[]}>}
+ */
+async function purgeBookRows(pool, bookId) {
+    requireText(bookId, 'bookId');
+    return withTx(pool, async (client) => {
+        const jobsOf = (await client.query(
+            'SELECT job_id, build_id FROM gen_jobs WHERE book_id = $1', [bookId])).rows;
+        const links = await client.query(
+            `DELETE FROM gen_command_jobs l
+             WHERE l.command_id IN (SELECT command_id FROM gen_commands WHERE book_id = $1)
+                OR l.job_id IN (SELECT job_id FROM gen_jobs WHERE book_id = $1)`, [bookId]);
+        const jobs = await client.query('DELETE FROM gen_jobs WHERE book_id = $1', [bookId]);
+        const commands = await client.query('DELETE FROM gen_commands WHERE book_id = $1', [bookId]);
+        return {
+            commands: commands.rowCount, jobs: jobs.rowCount, links: links.rowCount,
+            build_ids: [...new Set(jobsOf.map((r) => r.build_id))], job_ids: jobsOf.map((r) => r.job_id),
+        };
+    });
+}
+
 function createCommands({ pool, ports }) {
     /**
      * ADR §6.1 — one transaction.
@@ -295,28 +318,9 @@ function createCommands({ pool, ports }) {
         });
     }
 
-    /**
-     * Book deletion: remove every gen_* row of the book (one transaction).
-     * @returns {Promise<{commands:number, jobs:number, links:number, build_ids:string[]}>}
-     */
-    async function purgeBook(bookId) {
-        requireText(bookId, 'bookId');
-        return withTx(pool, async (client) => {
-            const builds = (await client.query(
-                'SELECT DISTINCT build_id FROM gen_jobs WHERE book_id = $1', [bookId])).rows.map((r) => r.build_id);
-            const links = await client.query(
-                `DELETE FROM gen_command_jobs l USING gen_commands c
-                 WHERE c.command_id = l.command_id AND c.book_id = $1`, [bookId]);
-            const links2 = await client.query(
-                `DELETE FROM gen_command_jobs l USING gen_jobs j
-                 WHERE j.job_id = l.job_id AND j.book_id = $1`, [bookId]);
-            const jobs = await client.query('DELETE FROM gen_jobs WHERE book_id = $1', [bookId]);
-            const commands = await client.query('DELETE FROM gen_commands WHERE book_id = $1', [bookId]);
-            return { commands: commands.rowCount, jobs: jobs.rowCount, links: links.rowCount + links2.rowCount, build_ids: builds };
-        });
-    }
+    const purgeBook = (bookId) => purgeBookRows(pool, bookId);
 
     return { createCommand, cancel, purgeBook };
 }
 
-module.exports = { createCommands, normaliseScope };
+module.exports = { createCommands, normaliseScope, purgeBookRows };

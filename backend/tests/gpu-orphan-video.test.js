@@ -31,7 +31,7 @@ const { expect } = require('chai');
 const proxyquire = require('proxyquire').noCallThru();
 const path = require('path');
 
-const ORCH = path.join(__dirname, '../node_modules/@animastor/orchestration/src');
+const ORCH = path.join(__dirname, '../node_modules/@animastor/orchestration/src/legacy');
 const qidem = require('../src/helpers/queue-idempotency.cjs');
 const videoFsmPort = require(path.join(ORCH, 'runtime/video-fsm-port'));
 const { createMockRedis } = require('./mocks/redis-mock');

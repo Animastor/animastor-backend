@@ -93,6 +93,17 @@ async function getWorkspaceId(bookId) {
 }
 
 /**
+ * Orchestration v2 (ADR ORCHESTRATION_V2 §12): which orchestration owns the book.
+ * @returns {Promise<'legacy'|'v2'|null>} null — no such book. Throws on PG errors
+ *   (undefined_column 42703 = the v2 migration never ran — callers map it to 'legacy').
+ */
+async function getOrchestration(bookId) {
+    if (!bookId) return null;
+    const result = await query(`SELECT orchestration FROM books WHERE book_id = $1 LIMIT 1`, [bookId]);
+    return result.rows[0] ? result.rows[0].orchestration : null;
+}
+
+/**
  * Detached book recovery: attach a workspace to a book that has none
  * (ONLY when the row currently has workspace_id IS NULL).
  * Returns true when a row was attached. Never overwrites an existing workspace.
@@ -125,6 +136,7 @@ async function listBookIdsByWorkspace(workspaceId) {
 module.exports = {
     ensureBook,
     getWorkspaceId,
+    getOrchestration,
     attachWorkspaceIfMissing,
     listBookIdsByWorkspace,
     saveBookSnapshot,

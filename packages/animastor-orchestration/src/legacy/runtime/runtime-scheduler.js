@@ -386,7 +386,15 @@ async function tick(redis, loadedBooks = {}) {
             const parsed = parseSceneKey(sceneKey);
             if (parsed) activeBookIds.add(parsed.bookId);
         }
+        // Orchestration v2 (1b/E): a v2 book is skipped entirely — no read-modify-write
+        // of any legacy key (registry, asset-state, active index, leases).
+        const v2Books = new Set();
         for (const bookId of activeBookIds) {
+            if (await require('./persistence-port').isV2Book(bookId)) v2Books.add(bookId);
+        }
+        if (v2Books.size > 0) log(`V2_SKIP: ${[...v2Books].join(',')} (orchestration v2 — legacy scheduler keeps out)`);
+        for (const bookId of activeBookIds) {
+            if (v2Books.has(bookId)) continue;
             const completedTasks = await progressEventsOp('reconcileCompletedTasks')(
                 redis,
                 bookId,
@@ -417,6 +425,7 @@ async function tick(redis, loadedBooks = {}) {
             }
 
             const { bookId, chapterId, sceneId } = parsed;
+            if (v2Books.has(bookId)) { summary.skipped++; continue; }
 
             // Force applies only to the scene×stage pairs of the command.
             let bookForce = forceCache.get(bookId);
