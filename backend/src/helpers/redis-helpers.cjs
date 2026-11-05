@@ -400,6 +400,15 @@ module.exports = function(redis, deps = {}) {
                 `animastor:dispatch-meta:${bookId}:*`,
                 // Retry counters (per-scene)
                 `animastor:runtime:retry:${bookId}:*`,
+                // Per-scene/stage retry budget (orchestration
+                // retry-budget-manager: retry-budget:{book}:{ch}:{scene}:{stage}).
+                // Written WITHOUT a TTL, so before 2026-11-05 every deleted
+                // book that ever retried left these keys forever (task L
+                // smoke, reports/2026-11-05/release-L.md §6). Exactly three
+                // segments after the book id: the global / type:{t} /
+                // worker:{id} aggregates never match, even for a book id
+                // like "type" or "worker". Glob-escaped book id.
+                `animastor:retry-budget:${String(bookId).replace(/[*?[\]\\]/g, '\\$&')}:*:*:*`,
                 // Fairness engine
                 `animastor:fairness:starvation-boost:${bookId}:*`,
                 `animastor:fairness:book:${bookId}`,
