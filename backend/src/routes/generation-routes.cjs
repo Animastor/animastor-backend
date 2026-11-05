@@ -346,6 +346,9 @@ module.exports = function(app, redis, deps) {
                 available_active_video: avail.available_busy.video || 0,
             });
         } catch (err) {
+            // Do not hide the failure: the client still gets zeros, but the
+            // reason is in the log (reports/2026-11-05/release-J.md §6.6).
+            console.warn('[WORKER-COUNTS] failed: ' + (err && err.message));
             res.json({
                 audio: 0, image: 0, video: 0,
                 active_audio: 0, active_image: 0, active_video: 0,
