@@ -258,8 +258,19 @@ async function isAvailable(redis, type, workspaceId = null) {
     return countWhere(entries, (e) => isPrivateScopeOf(e, workspaceId)) > 0;
 }
 
+/**
+ * reconcile-quota-leak: number of fresh heartbeats of `type` in ANY scope
+ * (system, share, private of any workspace). 0 means no worker of this type
+ * exists at all — nothing anywhere can run the job, whatever the lane.
+ */
+async function getAnyAliveCount(redis, type) {
+    const entries = await scanFreshHeartbeats(redis, type);
+    return entries.filter(e => e && e.worker_id).length;
+}
+
 module.exports = {
     reportHeartbeat,
+    getAnyAliveCount,
     getAliveCount,
     getPrivateAliveCount,
     getBusyCount,

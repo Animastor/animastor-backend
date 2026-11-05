@@ -199,6 +199,72 @@ async function blockStageNoWorker(redis, bookId, chapterId, sceneId, stage) {
 }
 
 // ======================================================
+// NO PROGRESS → FAILED (reconcile-quota-leak, 2026-11-05)
+// ======================================================
+// A commanded scene×stage whose dispatches keep ending WITHOUT jobs and
+// WITHOUT completion (no_jobs_generated, already_done_rejected:*, executor
+// errors …) used to loop silently: the task stayed `active`, the progress
+// row kept its running timer. After NO_PROGRESS_FAIL_MS of such outcomes
+// (and at least NO_PROGRESS_MIN_ATTEMPTS attempts — a transient `locked`
+// must not fail a command) the command becomes `failed` with the reason;
+// the row stays visible with «Повторить». Any real dispatch or completion
+// resets the window.
+
+const NO_PROGRESS_KEY_PREFIX = 'animastor:dispatch-noprogress:';
+const NO_PROGRESS_FAIL_MS = 5 * 60 * 1000;
+const NO_PROGRESS_MIN_ATTEMPTS = 3;
+const NO_PROGRESS_TTL_S = 60 * 60;
+
+function noProgressKey(bookId, chapterId, sceneId, stage) {
+    return `${NO_PROGRESS_KEY_PREFIX}${bookId}:${chapterId}:${sceneId}:${stage}`;
+}
+
+async function clearNoProgress(redis, bookId, chapterId, sceneId, stage) {
+    try { await redis.del(noProgressKey(bookId, chapterId, sceneId, stage)); } catch (_) { /* best-effort */ }
+}
+
+/**
+ * Record one dispatch outcome without progress.
+ * @returns {Promise<{attempts:number, since:number, exceeded:boolean}>}
+ */
+async function noteNoProgress(redis, bookId, chapterId, sceneId, stage, reason, now = Date.now()) {
+    const key = noProgressKey(bookId, chapterId, sceneId, stage);
+    let rec = null;
+    try { rec = JSON.parse((await redis.get(key)) || 'null'); } catch (_) { rec = null; }
+    if (!rec || typeof rec.since !== 'number') rec = { since: now, attempts: 0 };
+    rec.attempts = (rec.attempts || 0) + 1;
+    rec.last_reason = reason || 'unknown';
+    rec.last_at = now;
+    await redis.set(key, JSON.stringify(rec), 'EX', NO_PROGRESS_TTL_S);
+    const exceeded = rec.attempts >= NO_PROGRESS_MIN_ATTEMPTS && (now - rec.since) >= NO_PROGRESS_FAIL_MS;
+    return { attempts: rec.attempts, since: rec.since, exceeded };
+}
+
+/**
+ * Terminal: the command for this scene×stage made no progress — registry
+ * task → failed (error_class «no_progress», error_code = last reason), PG
+ * legs host-side (ProgressEventsPort.failSceneStage).
+ */
+async function failStageNoProgress(redis, bookId, chapterId, sceneId, stage, reason, attempts) {
+    const info = {
+        error_class: 'no_progress',
+        error_code: String(reason || 'unknown').slice(0, 120),
+        error_message: `генерация не идёт: ${String(reason || 'unknown').slice(0, 200)}`,
+        attempts: attempts || null,
+    };
+    let result = { tasks: [] };
+    try {
+        result = (await progressEventsOp('failSceneStage')(redis, bookId, chapterId, sceneId, stage, info)) || result;
+    } catch (err) {
+        warn(`failSceneStage failed for ${bookId}/${chapterId}/${sceneId}:${stage}: ${err.message}`);
+    }
+    await clearNoProgress(redis, bookId, chapterId, sceneId, stage);
+    const ids = (result.tasks || []).map(t => t.task_id || t).join(',') || 'none';
+    log(`FAILED_NO_PROGRESS ${bookId}/${chapterId}/${sceneId}:${stage} — reason=${info.error_code} attempts=${attempts}; tasks=[${ids}] — a new command is required`);
+    return { ...info, ...result };
+}
+
+// ======================================================
 // FORCE — only for the scene×stage pairs of the command
 // ======================================================
 // The former `animastor:force-dispatch:<book>` flag bypassed the duplicate/
@@ -260,6 +326,12 @@ module.exports = {
     describeDenied,
     rollbackGeneratingToDirty,
     blockStageNoWorker,
+    NO_PROGRESS_FAIL_MS,
+    NO_PROGRESS_MIN_ATTEMPTS,
+    noProgressKey,
+    clearNoProgress,
+    noteNoProgress,
+    failStageNoProgress,
     FORCE_STAGES_KEY_PREFIX,
     forceStagesKey,
     forceMember,

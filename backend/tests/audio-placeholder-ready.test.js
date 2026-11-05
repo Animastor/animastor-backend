@@ -382,3 +382,78 @@ describe('publishing real audio over a placeholder clears its marker', function 
         });
     }
 });
+
+// ======================================================
+// reconcile-quota-leak (2026-11-05, BA) — decision §3
+// ======================================================
+// 13 BA scenes had audio committed by the current generation (fenced chunks
+// on disk) but scene_assets.status = stale (demoted by the stale-lease
+// recovery). READY_REJECTED sent them down the per-segment path, which was
+// a cache hit on every chunk → `no_jobs_generated` forever. Decision: a
+// committed scene is finished WITHOUT GPU through the already_ready
+// fast-track; completeStage's version gate stays the authority (tested in
+// orchestration). A placeholder row or a missing row is still rejected.
+describe('reconcile-quota-leak §3: stale scene with a fenced commit is restored without GPU', function () {
+    this.timeout(15000);
+    let root;
+    let redis;
+
+    beforeEach(() => {
+        root = tmpRoot();
+        redis = createMockRedis();
+        writeSilentFile(paths(root).canonical);
+        writeSilentFile(paths(root).chunk(1), 49530);
+    });
+
+    afterEach(() => {
+        try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {}
+    });
+
+    const run = (generation) => generation.generateSceneAudio(
+        redis, { chapter_id: CHAPTER, scene_id: SCENE, scene_type: 'narration', payload: {} },
+        {}, BUILD, BOOK, 'dispatch-live'
+    );
+
+    for (const status of ['stale', 'pending', 'dirty']) {
+        it(`scene_assets.status=${status} + committed chunk + Redis pending → already_ready, 0 GPU jobs`, async () => {
+            const spy = providerSpy(true);
+            const { generation } = harness(root, {
+                provider: spy.provider,
+                asset: { status, path: paths(root).canonical },
+                assetState: 'pending',
+            });
+            const result = await run(generation);
+            expect(spy.state.calls).to.equal(0);
+            expect(result.generated).to.equal(false);
+            expect(result.reason).to.equal('already_ready');
+        });
+    }
+
+    it('scene_assets.status=placeholder + chunk on disk → NOT already_ready (invariant B / задача G)', async () => {
+        const spy = providerSpy(true);
+        const { generation } = harness(root, {
+            provider: spy.provider,
+            asset: { status: 'placeholder', path: paths(root).canonical },
+        });
+        const result = await run(generation);
+        expect(result.reason).to.not.equal('already_ready');
+    });
+
+    it('no scene_assets row + chunk on disk → NOT already_ready', async () => {
+        const spy = providerSpy(true);
+        const { generation } = harness(root, { provider: spy.provider, asset: null });
+        const result = await run(generation);
+        expect(result.reason).to.not.equal('already_ready');
+    });
+
+    it('PG ready + Redis pending keeps the historic behavior (no change by this fix)', async () => {
+        const spy = providerSpy(true);
+        const { generation } = harness(root, {
+            provider: spy.provider,
+            asset: { status: 'ready', path: paths(root).canonical },
+            assetState: 'pending',
+        });
+        const result = await run(generation);
+        expect(result.reason).to.not.equal('already_ready');
+    });
+});

@@ -116,6 +116,31 @@ class ReconciliationReport {
 // ======================================================
 
 /**
+ * reconcile-quota-leak: «stage committed by the current generation» — the
+ * single readiness predicate the recovery may trust: PG scene_assets row of
+ * the book build is `ready` (the version gate already passed when it was
+ * written) AND the fenced-commit probe confirms the artifact (invariant B,
+ * media.audio.isSceneAudioCommitted — the same predicate the dispatch uses).
+ * Audio only: image/video keep the historic behavior. Any probe error → false
+ * (fail closed: demoting is recoverable, a false READY is not).
+ */
+async function isStageCommittedReady(bookId, chapterId, sceneId, stage) {
+    if (stage !== 'audio') return false;
+    try {
+        const buildId = resolveBookBuildId(bookId);
+        const asset = await persist('sceneAssets.getAsset')(bookId, chapterId, sceneId, stage, buildId);
+        if (!asset || asset.status !== 'ready') return false;
+        const audio = lazyHostBinding('media.audio');
+        if (typeof audio.isSceneAudioCommitted !== 'function') return false;
+        const probe = await audio.isSceneAudioCommitted(buildId, bookId, chapterId, sceneId, null);
+        return !!(probe && probe.ready === true);
+    } catch (err) {
+        warn(`isStageCommittedReady probe failed for ${bookId}/${chapterId}/${sceneId}:${stage}: ${err.message}`);
+        return false;
+    }
+}
+
+/**
  * Canonical build identity of a book (audit d9d67a3): the SAME source the
  * rest of the runtime uses (rebuildWorkList, generate-next, dispatch) —
  * book.json manifest.build_id. The former hardcoded 'default' produced
@@ -1445,9 +1470,25 @@ async function applyFix(redis, fix) {
                 // S-5: asset-state writer via the injected orchestration seam
                 const markDirtyScene = orchestrationSeams.getOrchestrationSeam('markDirtyScene');
                 const currentStates = await state.getAssetStates(redis, scene.bookId, scene.chapterId, scene.sceneId);
-                const redo = [...auth.stages].filter(stage =>
+                const inFlight = [...auth.stages].filter(stage =>
                     currentStates[stage] === state.AssetState.GENERATING ||
                     currentStates[stage] === state.AssetState.PENDING);
+                // reconcile-quota-leak (2026-11-05, BA): the lease of a dispatch
+                // that ended WITHOUT finalization (already_done & co) looked
+                // "stale in flight"; marking that stage DIRTY bumped the epoch
+                // and wrote PG stale over audio committed by the CURRENT
+                // generation (8 → 13 scenes demoted on BA). A stage whose
+                // commit is confirmed is only re-asserted READY here — the
+                // lease/quota release above stays.
+                const redo = [];
+                for (const stage of inFlight) {
+                    if (await isStageCommittedReady(scene.bookId, scene.chapterId, scene.sceneId, stage)) {
+                        await state.unsafeRestoreAssetState(redis, scene.bookId, scene.chapterId, scene.sceneId, stage, state.AssetState.READY);
+                        log(`STALE_LEASE_COMMITTED_KEEP: ${scene.bookId}/${scene.chapterId}/${scene.sceneId} ${stage} — committed + PG ready, not demoted`);
+                        continue;
+                    }
+                    redo.push(stage);
+                }
                 if (redo.length > 0) {
                     await markDirtyScene(redis, scene.bookId, scene.chapterId, scene.sceneId, redo);
                 }
@@ -2577,6 +2618,7 @@ const state = lazyHostBinding('state');
 // ======================================================
 
 module.exports = {
+    isStageCommittedReady,
     reconcileScene,
     reconcileBook,
     reconcileAll,

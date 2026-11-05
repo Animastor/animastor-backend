@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.3.5 (2026-11-05) — утечка квоты диспатча, reconcile не понижает закоммиченное
+
+Основание: `reports/2026-11-05/live-check-A-B-C.md` §6, §10 и
+`reports/2026-11-05/reconcile-quota-leak.md` (BA `ba_1788172242081`: «Вся книга» встала
+после 4 сцен, `animastor:runtime:active-audio` = 8/8 без единого job, 13 сцен с
+закоммиченным аудио сброшены в `stale`, строка в Генераторе пропала). Описание:
+animastor-docs `02-orchestration/DISPATCH_QUOTA_AND_RECONCILE.md`.
+
+### Fixed
+
+- `dispatch-engine.dispatchStage`: исход executor'а `completed` **без jobs**
+  (`already_done`, `recovered_via_completeChunk`, `cache_hit`, `scene_not_found`, …)
+  теперь финализируется (`finalizeDispatch` outcome `success`, reason
+  `completed_without_jobs:<reason>`) — meta + lease + занятый слот квоты снимаются одним
+  Lua-claim. Раньше они висели до stale-lease recovery (~31 мин). Повторная финализация
+  идемпотентна. Поле `completed` теперь возвращается наверх (планировщик считал такие
+  исходы ошибками).
+- `dispatch-engine`: после `dispatched:true` meta помечается `jobs_enqueued` (CAS-скрипт,
+  без воскрешения уже финализированной meta).
+- `scene-orchestrator`: `AUDIO_ALREADY_DONE` (DONE + коммит) завершает стадию через
+  `completeStage` под живым dispatch (handler → version gate → PG ready + asset READY),
+  а не просто «пропускает»; recovery `completeChunk` вызывается с живым `dispatchId`
+  (раньше литерал `'stale-recovery'` → `COMPLETE-STAGE Rejected … stale_dispatch`).
+- `reconciliation-engine` `RELEASE_STALE_LEASE`: стадия с подтверждённым коммитом
+  текущего поколения (PG `ready` + `isSceneAudioCommitted`) не помечается DIRTY (нет bump
+  эпохи и PG stale) — только освобождение lease/квоты и повтор READY в Redis.
+- `counter-reconciliation`: перед сверкой — поиск фантомных диспатчей (lease+meta без
+  `jobs_enqueued`, без job в хабе (`animastor:running` / `animastor:queue:*`), старше
+  2 мин, замечен на двух прогонах подряд) → `cancelActiveDispatch` (`phantom_dispatch`);
+  счётчик сверяется с оставшимися живыми lease.
+
+### Added
+
+- `runtime-scheduler`: backpressure при отсутствии живых воркеров типа в любом scope →
+  `blockStageNoWorker` (задача `blocked`, «нет воркера»); исходы без движения
+  (не dispatched / не completed / не capacity) копятся — ≥3 попыток и ≥5 мин →
+  `command-gate.failStageNoProgress` (задача `failed`, `error_class=no_progress`,
+  `error_code=<последняя причина>`).
+- `worker-health.getAnyAliveCount`; `command-gate.noteNoProgress / clearNoProgress /
+  failStageNoProgress`; `counter-reconciliation.sweepPhantomDispatches`;
+  `reconciliation-engine.isStageCommittedReady`; `dispatch-engine.markDispatchJobsEnqueued`.
+
+### Host contract (ломающее для хоста: новая обязательная операция порта)
+
+- `ProgressEventsPort.failSceneStage(redis, bookId, chapterId, sceneId, type, info)` —
+  объявлена в `OPS` (архитектурный guard O-5: каждая операция порта объявлена и живая);
+  `setProgressEventsPort` без неё падает при старте. Backend-адаптер
+  (`storage/progress-events-adapter.js`) её реализует в том же релизе — bump на 0.3.5
+  только вместе с ним.
+
 ## 0.3.4 (2026-11-04) — 0.3.3 + «ready» аудио только при коммите GPU
 
 Одна публикация вместо двух: 0.3.3 (уборка хаба при `/regenerate`, см. ниже) **не

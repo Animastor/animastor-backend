@@ -75,6 +75,36 @@ async function hasCommittedAudio(buildId, bookId, chapterId, sceneId, expectedCo
     }
 }
 
+/**
+ * reconcile-quota-leak (2026-11-05, BA): an audio stage that is DONE with a
+ * fenced commit behind it must END the dispatch as a completed stage — not
+ * just "skip". The former `already_done` return left the asset state of a
+ * commanded scene in PENDING/GENERATING (the command had reset it), so the
+ * periodic stale-lease recovery later saw an "in-flight" stage, marked it
+ * DIRTY (epoch bump + PG stale) and the committed audio was demoted.
+ *
+ * completeStage runs under the LIVE dispatch identity: the audio handler
+ * (committed probe), the version gate (content / audio-config versions of
+ * the current generation) and only then PG ready + asset READY; it also
+ * finalizes the dispatch (lease + meta + quota) in the same call. A
+ * version-stale commit is NOT promoted (gate → DIRTY) — invariant B holds.
+ */
+async function completeAlreadyDoneAudio(redis, bookId, chapterId, sceneId, buildId, dispatchId) {
+    let completion = { completed: false, reason: 'not_run' };
+    try {
+        completion = await completeStage(redis, bookId, chapterId, sceneId, 'audio', buildId, dispatchId);
+    } catch (err) {
+        warn(`AUDIO_ALREADY_DONE: completeStage failed for ${bookId}/${chapterId}/${sceneId}: ${err.message}`);
+        completion = { completed: false, reason: `completion_error:${err.message}` };
+    }
+    if (completion.completed) {
+        log(`AUDIO_ALREADY_DONE: ${bookId}/${chapterId}/${sceneId} — committed audio of the current generation restored to READY (no GPU)`);
+        return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+    }
+    warn(`AUDIO_ALREADY_DONE: ${bookId}/${chapterId}/${sceneId} — completion not accepted (${completion.reason})`);
+    return { dispatched: false, jobs: 0, completed: false, reason: `already_done_rejected:${completion.reason || 'unknown'}` };
+}
+
 // ======================================================
 // SCENE ORCHESTRATOR
 // ======================================================
@@ -236,7 +266,7 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
             // DONE is only authoritative with a committed chunk behind it.
             if (await hasCommittedAudio(buildId, bookId, chapterId, sceneId, orchState.expected_count)) {
                 log(`AUDIO_ALREADY_DONE: ${bookId}/${chapterId}/${sceneId} — skipping dispatch`);
-                return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+                return completeAlreadyDoneAudio(redis, bookId, chapterId, sceneId, buildId, dispatchId);
             }
             log(
                 `AUDIO_ALREADY_DONE rejected: ${bookId}/${chapterId}/${sceneId} — DONE without a committed audio chunk ` +
@@ -266,7 +296,7 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
         if (stalePhase === audioFsmPhases().DONE) {
             if (await hasCommittedAudio(buildId, bookId, chapterId, sceneId, orchState && orchState.expected_count)) {
                 warn(`AUDIO_ORCH: DONE guard prevented stale reset for ${bookId}/${chapterId}/${sceneId}`);
-                return { dispatched: false, jobs: 0, completed: true, reason: 'already_done' };
+                return completeAlreadyDoneAudio(redis, bookId, chapterId, sceneId, buildId, dispatchId);
             }
             warn(`AUDIO_ORCH: stale DONE without a committed chunk for ${bookId}/${chapterId}/${sceneId} — resetting to PLACEHOLDER_READY`);
         }
@@ -284,10 +314,14 @@ async function executeAudioDispatch(redis, scene, loadedBook, buildId, dispatchI
             if (presentChunks.length > 0) {
                 log(`  🔧 AUDIO_ORCH: ${presentChunks.length} chunks on disk for ${bookId}/${chapterId}/${sceneId} — calling completeChunk instead of reset`);
                 try {
+                    // reconcile-quota-leak: the LIVE dispatch id. The former
+                    // literal 'stale-recovery' made completeStage reject the
+                    // recovery as `stale_dispatch` — chunks went `ready`, the
+                    // asset stayed stale in PG, the lease/quota stayed held.
                     await audioFsmOp('completeChunk')(redis, bookId, chapterId, sceneId, 'recovery', buildId, {
                         audio,
                         orchestrator: require('./orchestrator'),
-                        dispatchId: 'stale-recovery',
+                        dispatchId,
                     });
                     return { dispatched: false, jobs: 0, completed: true, reason: 'recovered_via_completeChunk' };
                 } catch (recoverErr) {

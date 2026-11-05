@@ -607,12 +607,22 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
         }
         if (result.dispatched) {
             dispatched++;
+            await commandGate.clearNoProgress(redis, bookId, chapterId, sceneId, stage);
         } else if (result.reason === 'backpressure' || result.reason === 'throttled') {
             throttled++;
+            // reconcile-quota-leak: a full quota with NO worker of this type
+            // alive anywhere can never drain by itself — the command would hang
+            // with a running timer. Block it like the hub-side no_worker path.
+            if (await noWorkerOfTypeAlive(redis, stage)) {
+                await commandGate.blockStageNoWorker(redis, bookId, chapterId, sceneId, stage);
+                failures.push(`${stage}:blocked_no_worker`);
+                continue;
+            }
         } else if (result.completed) {
             // Stage finished inside the executor (already_done / cache_hit /
             // no_segments) — not a failure, nothing to dispatch.
             anyCompleted = true;
+            await commandGate.clearNoProgress(redis, bookId, chapterId, sceneId, stage);
         } else if (result.deferred) {
             // Stage 118 (M9): a bounded deferral is NOT an error — nothing
             // happened, the stage is waiting for capacity (or is already
@@ -625,6 +635,25 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
             // tick писал «undefined for <scene>» — ошибки исчезали из
             // observability. Теперь причина всплывает в tick-сводку.
             failures.push(`${stage}:${result.reason || 'unknown'}`);
+        }
+        // reconcile-quota-leak: «задача не висит молча» — an outcome that
+        // neither dispatched, completed nor waits for capacity is counted;
+        // a long run of them fails the command with the reason.
+        // A capacity outcome (duplicate_pending / ambiguous_post …) means the
+        // job IS waiting in the hub lane — that is progress-in-waiting, not a
+        // stall; no_worker_available is blocked above.
+        if (!result.dispatched && !result.completed
+            && result.reason !== 'backpressure' && result.reason !== 'throttled'
+            && result.reason !== 'no_worker_available'
+            && !require('./dispatch-outcomes').isCapacityOutcome(result.reason)) {
+            try {
+                const np = await commandGate.noteNoProgress(redis, bookId, chapterId, sceneId, stage, result.reason);
+                if (np.exceeded) {
+                    await commandGate.failStageNoProgress(redis, bookId, chapterId, sceneId, stage, result.reason, np.attempts);
+                }
+            } catch (npErr) {
+                warn(`NO_PROGRESS bookkeeping failed for ${sceneKey}:${stage}: ${npErr.message}`);
+            }
         }
     }
 
@@ -641,6 +670,21 @@ async function attemptDispatch(redis, bookId, chapterId, sceneId, loadedBook, fo
         return { dispatched: 0, throttled, completed: true, reason: 'stage_completed' };
     }
     return { dispatched: 0, throttled, stages: stages.length, success: true, reason: 'no_dispatch' };
+}
+
+/**
+ * reconcile-quota-leak: true when no fresh heartbeat of `stage`'s worker type
+ * exists in any scope. Fails OPEN (false) when the probe is unavailable — a
+ * probe error must never block a command.
+ */
+async function noWorkerOfTypeAlive(redis, stage) {
+    try {
+        const workerHealth = require('./worker-health');
+        if (typeof workerHealth.getAnyAliveCount !== 'function') return false;
+        return (await workerHealth.getAnyAliveCount(redis, stage)) === 0;
+    } catch (_) {
+        return false;
+    }
 }
 
 // ======================================================

@@ -278,6 +278,7 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
         `expected=${expectedChunkCount} canonical=${readiness.path ? path.basename(readiness.path) : '(none)'}`
     );
     let isReady = readiness.ready;
+    let restoreCommitted = false;
     if (isReady) {
         try {
             const sceneAssetsRepo = require('../storage/postgres/repositories/scene-assets-repo');
@@ -285,19 +286,37 @@ async function generateSceneAudio(redis, sceneData, loadedBook, buildId, bookId,
             // A committed chunk is necessary but not sufficient: the asset
             // record must agree (placeholder/stale/pending mean "this content
             // generation was never rendered").
-            if (!asset || asset.status !== 'ready') {
+            //
+            // reconcile-quota-leak (2026-11-05, BA, decision §3): `stale` /
+            // `pending` / `dirty` on a scene whose audio IS committed (fenced
+            // commits, predicate B above) mean "work was requested again" —
+            // NOT "this content was never rendered". With the chunks on disk
+            // the per-segment path is a cache hit and sends NO job, so the
+            // former rejection produced `no_jobs_generated` forever (13 BA
+            // scenes). The scene is finished WITHOUT GPU through the
+            // already_ready fast-track → completeStage, whose version gate
+            // (content + audio-config versions of the current generation) is
+            // the authority: a version-stale commit is NOT promoted. Only a
+            // missing row or a `placeholder` row is still rejected here.
+            if (!asset || asset.status === 'placeholder') {
                 helpers.log(
                     `[AUDIO] READY_REJECTED: ${bookId}/${chapterId}/${sceneId} — scene_assets.status=${asset ? asset.status : 'missing'} ` +
                     `(committed chunks alone do not make an asset ready)`
                 );
                 isReady = false;
+            } else if (asset.status !== 'ready') {
+                helpers.log(
+                    `[AUDIO] READY_RESTORE: ${bookId}/${chapterId}/${sceneId} — scene_assets.status=${asset.status} with committed chunks ` +
+                    `[${(readiness.chunks || []).join(',')}] — finishing without GPU, version gate decides`
+                );
+                restoreCommitted = true;
             }
         } catch (err) {
             helpers.warn(`Failed to check audio status: ${err.message}`);
             isReady = false;
         }
 
-        if (isReady) {
+        if (isReady && !restoreCommitted) {
             try {
                 const state = require('../state');
                 const assetStates = await state.getAssetStates(redis, bookId, chapterId, sceneId);

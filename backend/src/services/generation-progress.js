@@ -43,6 +43,13 @@ async function listTasks(redis, bookId) {
     for (const id of expiredIds) {
         await redis.hdel(key(bookId), id);
     }
+    // reconcile-quota-leak («задача не исчезает молча»): the registry TTL was
+    // refreshed only by writes — a task that stalled without writes vanished
+    // after TTL_SECONDS together with its row. While a non-terminal task
+    // (active / blocked / failed / interrupted) is listed, keep the hash alive.
+    if (tasks.some(t => !t.completed_at && !t.cancelled_at)) {
+        try { await redis.expire(key(bookId), TTL_SECONDS); } catch (_) { /* best-effort */ }
+    }
     return tasks;
 }
 

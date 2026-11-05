@@ -148,7 +148,19 @@ module.exports = function(app, redis, deps) {
 
             if (expected > 0) {
                 total += expected;
-                ready += sceneChunks.filter(chunk => chunk.audio_status === 'ready').length;
+                // reconcile-quota-leak (2026-11-05, BA): chunk records alone
+                // are NOT completion — completeChunk marked all 31 BA chunks
+                // `ready` while 13 stages stayed stale, the panel reported
+                // 31/31 done=true for an `active` task and the client hid the
+                // row («строка пропала»). A scene counts fully only when its
+                // audio stage is READY; until then its chunk progress is
+                // capped one below the scene total.
+                if (targetStates.get(key)?.audio === state.AssetState.READY) {
+                    ready += expected;
+                } else {
+                    const readyChunks = sceneChunks.filter(chunk => chunk.audio_status === 'ready').length;
+                    ready += Math.min(readyChunks, expected - 1);
+                }
             } else {
                 total += 1;
                 if (targetStates.get(key)?.audio === state.AssetState.READY) ready += 1;

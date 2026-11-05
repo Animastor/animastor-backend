@@ -104,6 +104,16 @@ function createMockRedis() {
             return ['0', entries];
         },
         eval: async (script, keysCount, ...args) => {
+            // reconcile-quota-leak: dispatch-engine.markDispatchJobsEnqueued
+            // compare-and-set (KEYS=[metaKey], ARGV=[expectedRaw, newRaw]).
+            if (script.includes('KEEPTTL') && script.includes('raw ~= ARGV[1]')) {
+                const key = args[0];
+                const [expected, next] = args.slice(keysCount);
+                const raw = store.get(key);
+                if (raw === undefined || raw !== expected) return 0;
+                store.set(key, next);
+                return 1;
+            }
             if (script.includes('local metadata') && script.includes("ARGV[5] == '1'")) {
                 const [metadataKey, completedKey, leaseKey, quotaKey] = args.slice(0, keysCount);
                 const [

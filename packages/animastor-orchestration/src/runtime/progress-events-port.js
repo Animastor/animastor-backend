@@ -39,6 +39,9 @@
 //                           pre-pass; the getAssetStates callback arrives
 //                           as an argument exactly as pre-O-5)
 //
+//   failSceneStage        — reconcile-quota-leak (2026-11-05): a commanded
+//                           scene×stage made no progress → its task is
+//                           failed with the reason (registry + PG host-side)
 //   blockSceneStage       — command-only generation (2026-10-31): no live
 //                           worker of a stage's type → block the command
 //                           that asked for it (registry + PG are host-side;
@@ -59,6 +62,7 @@ const OPS = [
     'hasActiveTasks',
     'reconcileCompletedTasks',
     'blockSceneStage',
+    'failSceneStage',
 ];
 
 let impl = null;
