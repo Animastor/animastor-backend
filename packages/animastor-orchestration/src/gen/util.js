@@ -105,32 +105,20 @@ async function notifyProgress(client, bookId, commandId) {
         JSON.stringify({ book_id: bookId, command_id: commandId || null })]);
 }
 
-// SQL: layer of a gen_jobs row (alias j) — mirrors LAYER_OF_KIND
-const JOB_LAYER_SQL = (j = 'j') => `(CASE ${j}.kind
-    WHEN 'audio_chunk' THEN 'audio' WHEN 'audio_merge' THEN 'audio'
-    WHEN 'iu_image' THEN 'image'
-    WHEN 'video_group' THEN 'video' WHEN 'video_merge' THEN 'video' END)`;
-
-// SQL: job j is a unit command c «joined» (§6.1 п.4, §9): inside c's scope and
-// layers and already existing when c was created (a later job of another
-// command is not something c waits for). Granularity for level=unit is the
-// scene (unit ids are host-defined).
-const IN_SCOPE_SQL = (j = 'j', c = 'c') => `(
-    ${j}.book_id = ${c}.book_id
-    AND ${j}.created_at <= ${c}.created_at
-    AND ${JOB_LAYER_SQL(j)} = ANY(${c}.layers)
-    AND (
-        ${c}.scope->>'level' = 'book'
-        OR (${c}.scope->>'level' = 'chapter' AND ${j}.chapter_id = ${c}.scope->>'chapter_id')
-        OR (${c}.scope->>'level' IN ('scene','unit') AND ${j}.scene_id = ${c}.scope->>'scene_id'
-            AND (${c}.scope->>'chapter_id' IS NULL OR ${j}.chapter_id = ${c}.scope->>'chapter_id'))
-    ))`;
+/** Link jobs to commands (§4.2a). Idempotent. */
+async function linkJobs(client, commandIds, jobIds) {
+    if (!commandIds.length || !jobIds.length) return 0;
+    const r = await client.query(
+        `INSERT INTO gen_command_jobs (command_id, job_id)
+         SELECT c, j FROM unnest($1::uuid[]) AS c CROSS JOIN unnest($2::uuid[]) AS j
+         ON CONFLICT DO NOTHING`, [commandIds, jobIds]);
+    return r.rowCount;
+}
 
 module.exports = {
     PROGRESS_CHANNEL,
     notifyProgress,
-    JOB_LAYER_SQL,
-    IN_SCOPE_SQL,
+    linkJobs,
     GenError,
     isUuid,
     requireUuid,

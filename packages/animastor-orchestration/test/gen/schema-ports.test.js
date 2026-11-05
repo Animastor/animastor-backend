@@ -43,8 +43,9 @@ describe('gen v2 — schema (ADR §4)', function () {
         await assert.rejects(ctx.q(`INSERT INTO gen_commands (workspace_id, user_id, book_id, kind, scope, layers) VALUES ($1, $1, 'b1', 'regenerate', '{"level":"x"}', '{audio}')`, [uuid()]), /gen_commands_scope_check/);
         await assert.rejects(ctx.q(`INSERT INTO gen_commands (workspace_id, user_id, book_id, kind, scope, layers) VALUES ($1, $1, 'b1', 'regenerate', '{"level":"book"}', '{music}')`, [uuid()]), /gen_commands_layers_check/);
         const job = (cols) => ctx.q(
-            `INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key, kind, executor, lane, status)
-             VALUES ($1, $2, $2, 'b1', 'c', 's', 'u', $3, $4, $5::jsonb, $6)`, [c, uuid(), cols.kind, cols.executor, cols.lane, cols.status || 'queued']);
+            `INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key, kind, executor, lane, status, build_id, layer)
+             VALUES ($1, $2, $2, 'b1', 'c', 's', 'u', $3, $4, $5::jsonb, $6, 'b', $7)`,
+            [c, uuid(), cols.kind, cols.executor, cols.lane, cols.status || 'queued', cols.layer || ({ audio_chunk: 'audio', audio_merge: 'audio' }[cols.kind] || 'audio')]);
         await job({ kind: 'audio_chunk', executor: 'gpu:audio', lane: '{"kind":"system"}' });
         await assert.rejects(job({ kind: 'audio_chunk', executor: 'gpu:audio', lane: '{"kind":"system"}', status: 'lost' }), /gen_jobs_status_check/);
         await assert.rejects(job({ kind: 'song', executor: 'gpu:audio', lane: '{"kind":"system"}' }), /gen_jobs_kind_check/);
@@ -52,10 +53,40 @@ describe('gen v2 — schema (ADR §4)', function () {
         await assert.rejects(job({ kind: 'audio_chunk', executor: 'cpu', lane: '{"kind":"system"}' }), /gen_jobs_executor_check/);
         await assert.rejects(job({ kind: 'audio_chunk', executor: 'gpu:audio', lane: '{"kind":"public"}' }), /gen_jobs_lane_check/);
         await assert.rejects(job({ kind: 'audio_merge', executor: 'local', lane: '{"kind":"system"}' }), /gen_jobs_lane_check/);
+        await assert.rejects(job({ kind: 'audio_merge', executor: 'local', lane: null, layer: 'video' }), /gen_jobs_layer_kind_check/);
+        await assert.rejects(job({ kind: 'audio_merge', executor: 'local', lane: null, layer: 'sound' }), /gen_jobs_layer_check|gen_jobs_layer_kind_check/);
         // a second LIVE row of the same unit is impossible
         await assert.rejects(job({ kind: 'audio_chunk', executor: 'gpu:audio', lane: '{"kind":"system"}' }), /uniq_gen_jobs_live_unit/);
         const cols = (await ctx.q(`SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'workers'`, [ctx.schema])).rows.map((r) => r.column_name);
         assert.ok(cols.includes('current_job_id'));
+    });
+});
+
+describe('gen v2 — migration 002 over 1a data (ADR §4.2, §4.2a)', function () {
+    this.timeout(20000);
+    let ctx;
+    beforeEach(async () => { ctx = await setupDb({ migrate: false }); });
+    afterEach(async () => { await ctx.teardown(); });
+
+    it('backfills build_id (from input), layer (from kind), gen_command_jobs (from command_id); NOT NULL afterwards', async () => {
+        for (const sql of gen.MIGRATIONS[0].statements) await ctx.q(sql);          // 1a schema only
+        const ws = uuid();
+        await ctx.q(`INSERT INTO books (book_id, workspace_id, orchestration) VALUES ('b1', $1, 'v2')`, [ws]);
+        const c = (await ctx.q(`INSERT INTO gen_commands (workspace_id, user_id, book_id, kind, scope, layers)
+                                VALUES ($1, $1, 'b1', 'regenerate', '{"level":"book"}', '{audio}') RETURNING command_id`, [ws])).rows[0].command_id;
+        await ctx.q(`INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key, kind, executor, lane, input)
+                     VALUES ($1, $2, $2, 'b1', 'c', 's', '0001', 'audio_chunk', 'gpu:audio', '{"kind":"system"}', '{"build_id":"bld-7"}'),
+                            ($1, $2, $2, 'b1', 'c', 's', 'scene', 'audio_merge', 'local', NULL, '{}')`, [c, ws]);
+        await gen.migrate(ctx.pool);
+        await gen.migrate(ctx.pool);
+        const rows = (await ctx.q(`SELECT kind, build_id, layer FROM gen_jobs ORDER BY kind`)).rows;
+        assert.deepEqual(rows, [{ kind: 'audio_chunk', build_id: 'bld-7', layer: 'audio' }, { kind: 'audio_merge', build_id: 'default', layer: 'audio' }]);
+        assert.equal(Number((await ctx.q(`SELECT count(*) AS n FROM gen_command_jobs WHERE command_id = $1`, [c])).rows[0].n), 2);
+        const nn = (await ctx.q(`SELECT column_name, is_nullable FROM information_schema.columns
+                                 WHERE table_schema = $1 AND table_name = 'gen_jobs' AND column_name IN ('build_id','layer') ORDER BY 1`, [ctx.schema])).rows;
+        assert.deepEqual(nn.map((r) => r.is_nullable), ['NO', 'NO']);
+        const sum = (await ctx.q(`SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'gen_commands' AND column_name = 'summary'`, [ctx.schema])).rows[0];
+        assert.equal(sum.data_type, 'jsonb');
     });
 });
 
@@ -76,7 +107,7 @@ describe('gen v2 — ports (contract + validation)', () => {
         assert.ok(gen.createOrchestration({ pool: fakePool, ports: base(), uploadSecret: SECRET }));
     });
 
-    it('default retry policy = gpu-retry-policy.cjs:50–53 (TRANSIENT 30/120 s, OOM 60 s, DETERMINISTIC/UNKNOWN 0)', () => {
+    it('default retry policy = gpu-retry-policy.cjs:50–53 (TRANSIENT 30/120 s, OOM 60 s, DETERMINISTIC/UNKNOWN 0) + invalid_result ×1', () => {
         const rp = gen.defaults.retryPolicy;
         assert.deepEqual(rp('audio_chunk', 'transient', 1), { retry: true, delay_ms: 30000 });
         assert.deepEqual(rp('audio_chunk', 'transient', 2), { retry: true, delay_ms: 120000 });
@@ -87,7 +118,8 @@ describe('gen v2 — ports (contract + validation)', () => {
         assert.deepEqual(rp('audio_chunk', 'unknown', 1), { retry: false, delay_ms: 0 });
         assert.deepEqual(rp('audio_chunk', 'timeout', 1), { retry: true, delay_ms: 30000 });       // sweeper class
         assert.deepEqual(rp('audio_chunk', 'worker_offline', 2), { retry: true, delay_ms: 120000 });
-        assert.deepEqual(rp('audio_chunk', 'invalid_result', 1), { retry: false, delay_ms: 0 });
+        assert.deepEqual(rp('audio_chunk', 'invalid_result', 1), { retry: true, delay_ms: 30000 });   // §7: one retry
+        assert.deepEqual(rp('audio_chunk', 'invalid_result', 2), { retry: false, delay_ms: 0 });
         assert.equal(gen.defaults.maxAttemptsFor('audio_chunk'), 3);
         assert.equal(gen.defaults.timeoutFor('audio_chunk'), 30 * 60000);
         assert.equal(gen.defaults.timeoutFor('video_group'), 60 * 60000);

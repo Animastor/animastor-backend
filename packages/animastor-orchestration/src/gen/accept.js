@@ -7,8 +7,9 @@
 //     anything else → 409 stale_attempt and the uploaded file is discarded.
 // I5: `ready` only after a real result with sha256 has been renamed into place.
 //
-// Lock order everywhere: gen_commands row (FOR SHARE / UPDATE) → gen_jobs row
-// (FOR UPDATE) → scene advisory lock. cancel() takes the same order.
+// Lock order everywhere: gen_commands rows linked to the job (FOR SHARE /
+// UPDATE) → gen_jobs row (FOR UPDATE) → scene advisory lock. cancel() takes
+// the same order. Stage transitions follow gen_command_jobs (§4.2a, §6.3).
 
 'use strict';
 
@@ -17,7 +18,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const {
-    GenError, withTx, isUuid, notifyProgress, verifyUploadToken,
+    GenError, withTx, isUuid, notifyProgress, verifyUploadToken, linkJobs,
     EXECUTOR_OF_KIND, LAYER_OF_KIND, LIVE,
 } = require('./util');
 const { checkLane } = require('./ports');
@@ -83,8 +84,8 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
 
     // ── scene_assets (§4.3: written only by acceptance) ──────────────────────
     async function upsertSceneAsset(client, job, finalPath, sha, bytes, validation) {
-        const assetType = LAYER_OF_KIND[job.kind];
-        const build = job.input.build_id;
+        const assetType = job.layer;
+        const build = job.build_id;
         const sceneHash = job.input.scene_hash || null;
         if (PART_KINDS.has(job.kind)) {
             // a part (chunk / IU / group) is recorded, the scene asset is not ready yet
@@ -117,85 +118,111 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
     }
 
     // ── stage transitions (§6.3) — same transaction as the finished job ─────
-    async function insertStageJobs(client, cmd, units) {
+    /** Insert (or join) next-stage jobs and link them to every qualifying command. */
+    async function insertStageJobs(client, cmds, units) {
         let created = 0;
+        const owner = cmds[0];
+        const ids = cmds.map((c) => c.command_id);
         for (const u of units) {
             const executor = EXECUTOR_OF_KIND[u.kind];
             let lane = null;
             if (executor !== 'local') {
-                lane = await ports.laneFor(cmd.workspace_id, executor.slice(4));
+                lane = await ports.laneFor(owner.workspace_id, executor.slice(4));
                 if (!checkLane(lane)) throw new GenError('bad_lane', 500, 'laneFor returned an invalid lane');
             }
             const r = await client.query(
                 `INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key,
-                                       kind, executor, lane, max_attempts, input, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12::jsonb, clock_timestamp())
+                                       kind, executor, layer, build_id, lane, max_attempts, input, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14::jsonb, clock_timestamp())
                  ON CONFLICT (book_id, chapter_id, scene_id, kind, unit_key) WHERE status IN ('queued','running')
                  DO NOTHING RETURNING job_id`,
-                [cmd.command_id, cmd.workspace_id, cmd.user_id, cmd.book_id, u.chapter_id, u.scene_id, u.unit_key,
-                    u.kind, executor, lane ? JSON.stringify(lane) : null, ports.maxAttemptsFor(u.kind), JSON.stringify(u.input)]);
+                [owner.command_id, owner.workspace_id, owner.user_id, owner.book_id, u.chapter_id, u.scene_id, u.unit_key,
+                    u.kind, executor, LAYER_OF_KIND[u.kind], u.build_id, lane ? JSON.stringify(lane) : null,
+                    ports.maxAttemptsFor(u.kind), JSON.stringify(u.input)]);
             created += r.rowCount;
+            const live = await client.query(
+                `SELECT job_id FROM gen_jobs WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND kind = $4
+                   AND unit_key = $5 AND status IN ('queued','running')`,
+                [owner.book_id, u.chapter_id, u.scene_id, u.kind, u.unit_key]);
+            await linkJobs(client, ids, live.rows.map((x) => x.job_id));
         }
         return created;
     }
 
-    /** Are all of this command's `kind` jobs of the scene done, with nothing of that kind live anywhere? */
-    async function sceneStageComplete(client, job, kind) {
+    /**
+     * Stage complete for the scene: nothing of `kind` live for the scene, and every unit of
+     * `kind` the qualifying commands wait for has its LATEST job (same build + content) done.
+     */
+    async function sceneStageComplete(client, job, kind, commandIds) {
         const live = await client.query(
             `SELECT 1 FROM gen_jobs WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND kind = $4
                AND status = ANY($5::text[]) LIMIT 1`,
             [job.book_id, job.chapter_id, job.scene_id, kind, LIVE]);
         if (live.rowCount) return false;
-        const own = await client.query(
-            `SELECT count(*) FILTER (WHERE status <> 'done')::int AS not_done FROM gen_jobs
-             WHERE command_id = $1 AND chapter_id = $2 AND scene_id = $3 AND kind = $4`,
-            [job.command_id, job.chapter_id, job.scene_id, kind]);
-        return own.rows[0].not_done === 0;
+        const r = await client.query(
+            `WITH units AS (
+                SELECT DISTINCT j.unit_key FROM gen_jobs j JOIN gen_command_jobs l ON l.job_id = j.job_id
+                WHERE l.command_id = ANY($6::uuid[]) AND j.book_id = $1 AND j.chapter_id = $2 AND j.scene_id = $3 AND j.kind = $4
+             ), latest AS (
+                SELECT DISTINCT ON (j.unit_key) j.unit_key, j.status FROM gen_jobs j JOIN units u ON u.unit_key = j.unit_key
+                WHERE j.book_id = $1 AND j.chapter_id = $2 AND j.scene_id = $3 AND j.kind = $4 AND j.build_id = $5
+                ORDER BY j.unit_key, j.created_at DESC
+             )
+             SELECT (SELECT count(*) FROM units)::int AS units,
+                    (SELECT count(*) FROM latest WHERE status = 'done')::int AS done`,
+            [job.book_id, job.chapter_id, job.scene_id, kind, job.build_id, commandIds]);
+        return r.rows[0].units > 0 && r.rows[0].units === r.rows[0].done;
     }
 
     /** Latest done part of every unit of the scene for this build/content (merge input snapshot). */
     async function doneParts(client, job, kind) {
         const r = await client.query(
-            `SELECT DISTINCT ON (unit_key) unit_key, job_id, result_path, result_sha256
+            `SELECT DISTINCT ON (unit_key) unit_key, job_id, result_path, result_sha256, input->'part_meta' AS meta
              FROM gen_jobs
              WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND kind = $4 AND status = 'done'
-               AND input->>'build_id' = $5 AND (input->>'scene_hash') IS NOT DISTINCT FROM $6
+               AND build_id = $5 AND (input->>'scene_hash') IS NOT DISTINCT FROM $6
              ORDER BY unit_key, finished_at DESC`,
-            [job.book_id, job.chapter_id, job.scene_id, kind, job.input.build_id, job.input.scene_hash ?? null]);
-        return r.rows.map((x) => ({ unit_key: x.unit_key, job_id: x.job_id, path: x.result_path, sha256: x.result_sha256 }));
+            [job.book_id, job.chapter_id, job.scene_id, kind, job.build_id, job.input.scene_hash ?? null]);
+        return r.rows.map((x) => ({ unit_key: x.unit_key, job_id: x.job_id, path: x.result_path, sha256: x.result_sha256, meta: x.meta || null }));
     }
 
-    async function transitions(client, cmd, job) {
-        if (!cmd || cmd.status !== 'active') return 0;           // §6.3: only inside an active command
+    /**
+     * §6.3: a next stage is created only if at least one command linked to the finished job is
+     * active, has the layer and the layer is enabled; the new job is linked to all such commands.
+     */
+    async function transitions(client, cmds, job) {
+        const nextLayer = job.kind === 'iu_image' ? 'video' : job.layer;
+        const qualifying = [];
+        for (const c of cmds) {
+            if (c.status === 'active' && c.layers.includes(nextLayer) && await ports.isLayerEnabled(c.book_id, nextLayer)) qualifying.push(c);
+        }
+        if (!qualifying.length) return 0;
+        const ids = qualifying.map((c) => c.command_id);
         const mergeInput = async (kind) => ({
-            build_id: job.input.build_id,
             scene_hash: job.input.scene_hash ?? null,
             parts: await doneParts(client, job, kind),
         });
-        const enabled = async (layer) => cmd.layers.includes(layer) && await ports.isLayerEnabled(cmd.book_id, layer);
-        const sceneUnit = (kind, input) => ({ chapter_id: job.chapter_id, scene_id: job.scene_id, kind, unit_key: 'scene', input });
+        const sceneUnit = (kind, input) => ({ chapter_id: job.chapter_id, scene_id: job.scene_id, kind, unit_key: 'scene', build_id: job.build_id, input });
 
-        if (job.kind === 'audio_chunk' && await enabled('audio')) {
+        if (job.kind === 'audio_chunk' || job.kind === 'video_group' || job.kind === 'iu_image') {
             await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
-            if (await sceneStageComplete(client, job, 'audio_chunk')) {
-                return insertStageJobs(client, cmd, [sceneUnit('audio_merge', await mergeInput('audio_chunk'))]);
-            }
-        } else if (job.kind === 'video_group' && await enabled('video')) {
-            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
-            if (await sceneStageComplete(client, job, 'video_group')) {
-                return insertStageJobs(client, cmd, [sceneUnit('video_merge', await mergeInput('video_group'))]);
-            }
-        } else if (job.kind === 'iu_image' && await enabled('video')) {
-            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
-            if (await sceneStageComplete(client, job, 'iu_image')) {
-                const planned = await ports.planUnits(
-                    { bookId: cmd.book_id, workspaceId: cmd.workspace_id, userId: cmd.user_id },
-                    { level: 'scene', chapter_id: job.chapter_id, scene_id: job.scene_id }, 'video');
-                const groups = (Array.isArray(planned) ? planned : []).filter((u) => u && u.kind === 'video_group'
-                    && u.chapter_id === job.chapter_id && u.scene_id === job.scene_id
-                    && typeof u.unit_key === 'string' && u.input && typeof u.input.build_id === 'string');
-                return insertStageJobs(client, cmd, groups.map((u) => ({ ...u, input: { ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null } })));
-            }
+            if (!(await sceneStageComplete(client, job, job.kind, ids))) return 0;
+        }
+        if (job.kind === 'audio_chunk') {
+            return insertStageJobs(client, qualifying, [sceneUnit('audio_merge', await mergeInput('audio_chunk'))]);
+        }
+        if (job.kind === 'video_group') {
+            return insertStageJobs(client, qualifying, [sceneUnit('video_merge', await mergeInput('video_group'))]);
+        }
+        if (job.kind === 'iu_image') {
+            const owner = qualifying[0];
+            const planned = await ports.planUnits(
+                { bookId: owner.book_id, workspaceId: owner.workspace_id, userId: owner.user_id },
+                { level: 'scene', chapter_id: job.chapter_id, scene_id: job.scene_id }, 'video');
+            const groups = (Array.isArray(planned) ? planned : []).filter((u) => u && u.kind === 'video_group'
+                && u.chapter_id === job.chapter_id && u.scene_id === job.scene_id
+                && typeof u.unit_key === 'string' && typeof u.build_id === 'string' && u.input && typeof u.input === 'object');
+            return insertStageJobs(client, qualifying, groups.map((u) => ({ ...u, input: { ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null } })));
         }
         return 0;
     }
@@ -229,8 +256,9 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         let renamed = false;
         try {
             return await withTx(pool, async (client) => {
-                const cmd = (await client.query(
-                    'SELECT * FROM gen_commands WHERE command_id = $1 FOR SHARE', [pre.command_id])).rows[0];
+                const cmds = (await client.query(
+                    `SELECT c.* FROM gen_commands c JOIN gen_command_jobs l ON l.command_id = c.command_id
+                     WHERE l.job_id = $1 ORDER BY c.created_at, c.command_id FOR SHARE OF c`, [pre.job_id])).rows;
                 const job = (await client.query('SELECT * FROM gen_jobs WHERE job_id = $1 FOR UPDATE', [pre.job_id])).rows[0];
                 if (job && job.status === 'done' && job.attempt === attempt && job.result_sha256 === sha) {
                     return { status: 200, idempotent: true, sha256: sha, job_status: 'done' };
@@ -241,6 +269,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
                 await fs.promises.rename(tmpPath, finalPath);           // §7 п.3 (atomic, same partition)
                 renamed = true;
+                if (ports.onArtifactPlaced) await ports.onArtifactPlaced(job, finalPath);   // e.g. drop the placeholder sidecar
                 await client.query(
                     `UPDATE gen_jobs SET status = 'done', result_path = $2, result_sha256 = $3, result_bytes = $4,
                             finished_at = now(), deadline = NULL
@@ -251,7 +280,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                         [job.worker_id, job.job_id]);
                 }
                 await upsertSceneAsset(client, job, finalPath, sha, bytes, validation);
-                const stage = await transitions(client, cmd, job);
+                const stage = await transitions(client, cmds, job);
                 await notifyProgress(client, job.book_id, job.command_id);
                 return { status: 200, sha256: sha, job_status: 'done', stage_jobs_created: stage };
             });

@@ -8,8 +8,8 @@
 //   planUnits(book, scope, layer)  → Promise<Unit[]>
 //        book  = {bookId, workspaceId, userId}
 //        scope = {level, chapter_id?, scene_id?, unit_id?}
-//        Unit  = {chapter_id, scene_id, kind, unit_key, input, scene_hash?}
-//        input MUST carry build_id (scene_assets is keyed by build, §4.3)
+//        Unit  = {chapter_id, scene_id, kind, unit_key, build_id, input, scene_hash?}
+//        build_id = the book build at command time (gen_jobs.build_id, §4.2)
 //   buildPayload(job)              → Promise<object>  ComfyUI params etc. (claim, §8.1)
 //   artifactPath(job)              → string           absolute final path (accept, §7 п.3)
 //   validateResult(job, tmpPath)   → Promise<{ok, reason?}>  (§7 п.1; default: validate-media)
@@ -22,6 +22,8 @@
 // Optional:
 //   maxAttemptsFor(kind)           → int ≥ 1          (default: 1 + max retries of the policy)
 //   isLayerEnabled(bookId, layer)  → Promise<boolean> (§6.3 «только если слой включён»; default true)
+//   onArtifactPlaced(job, finalPath) → called inside the acceptance transaction right after the
+//                                     rename (§7 п.3), e.g. to drop a placeholder sidecar marker
 
 'use strict';
 
@@ -31,7 +33,7 @@ const REQUIRED = Object.freeze([
     'planUnits', 'buildPayload', 'artifactPath', 'validateResult',
     'runLocal', 'laneFor', 'timeoutFor', 'retryPolicy',
 ]);
-const OPTIONAL = Object.freeze(['maxAttemptsFor', 'isLayerEnabled']);
+const OPTIONAL = Object.freeze(['maxAttemptsFor', 'isLayerEnabled', 'onArtifactPlaced']);
 
 // ── default retry policy: gpu-retry-policy.cjs:50–53 ─────────────────────
 const RETRY_POLICY = Object.freeze({
@@ -39,12 +41,13 @@ const RETRY_POLICY = Object.freeze({
     transient: Object.freeze({ retries: 2, pausesMs: Object.freeze([30_000, 120_000]) }),
     oom: Object.freeze({ retries: 1, pausesMs: Object.freeze([60_000]) }),
     unknown: Object.freeze({ retries: 0, pausesMs: Object.freeze([]) }),
+    // ADR §7 / §13.4 (редакция 06.11): silence / broken file — one retry, then failed
+    invalid_result: Object.freeze({ retries: 1, pausesMs: Object.freeze([30_000]) }),
 });
 /** v2 error classes produced by the core itself → policy class. */
 const CLASS_ALIASES = Object.freeze({
     timeout: 'transient',          // sweeper: deadline passed (§9 п.1)
     worker_offline: 'transient',   // sweeper: worker silent > 60 s (§9 п.2)
-    invalid_result: 'unknown',     // validateResult rejected the file (silence, bad magic)
 });
 
 function policyClass(errorClass) {
@@ -65,7 +68,7 @@ function defaultRetryPolicy(_kind, errorClass, attempt) {
 }
 
 function defaultMaxAttemptsFor(_kind) {
-    return 1 + Math.max(...Object.values(RETRY_POLICY).map((p) => p.retries));
+    return 1 + Math.max(...Object.values(RETRY_POLICY).map((p) => p.retries));   // 3 (TRANSIENT)
 }
 
 // ── default timeouts: media-registry jobMs (generation default-registrations) ──

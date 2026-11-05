@@ -59,7 +59,7 @@ describe('gen v2 — sweeper (ADR §9)', function () {
         assert.deepEqual(await o.acceptResult(t1.job_id, t1.attempt, t1.upload_token, streamOf(TONE)), { status: 409, code: 'stale_attempt' });
     });
 
-    it('command completion: done / partial / failed / cancelled; waits for joined units of other commands', async () => {
+    it('command completion over gen_command_jobs: done / partial / failed / cancelled', async () => {
         await setup({ ch: { s1: 1, s2: 1 } });
         // done (empty command — everything ready → done immediately)
         await ctx.q(`INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, build_id, scene_hash, status)
@@ -75,16 +75,17 @@ describe('gen v2 — sweeper (ADR §9)', function () {
         const a = await claim(); const b = await claim();
         await o.acceptResult(a.job_id, a.attempt, a.upload_token, streamOf(TONE));
         await o.acceptError(b.job_id, b.attempt, b.upload_token, { error_class: 'deterministic' });
-        // a scene-level command that joined p's live merge waits for it
-        const joiner = await o.createCommand({ ...book, scope: { level: 'scene', chapter_id: 'ch', scene_id: a.scene_id }, layers: ['audio'], force: true });
-        assert.equal(joiner.summary.jobs_created, 1, 'the chunk of that scene is done → new chunk for the joiner (force)');
+        // a later scene command: the scene is not ready yet (merge queued) → it plans its own chunk;
+        // p is not waiting for that chunk (not linked to p)
+        const later = await o.createCommand({ ...book, scope: { level: 'scene', chapter_id: 'ch', scene_id: a.scene_id }, layers: ['audio'] });
+        assert.deepEqual(later.summary, { jobs_created: 1, joined: 0, skipped_ready: 0 });
         await o.sweepOnce();
         assert.equal(await status(p.command_id), 'active', 'merge of p still queued');
         await o.runLocalOnce();
         await o.sweepOnce();
         assert.equal(await status(p.command_id), 'partial');
-        assert.equal(await status(joiner.command_id), 'active');
-        await o.cancel({ commandId: joiner.command_id });
+        assert.equal(await status(later.command_id), 'active');
+        await o.cancel({ commandId: later.command_id });
 
         // failed: every job failed
         const f = await command({ scope: { level: 'scene', chapter_id: 'ch', scene_id: 's1' }, force: true });
@@ -95,7 +96,7 @@ describe('gen v2 — sweeper (ADR §9)', function () {
 
         // cancelled by layer: command still active → finished as cancelled
         const c = await command({ scope: { level: 'scene', chapter_id: 'ch', scene_id: 's2' }, force: true });
-        await o.cancel({ bookId: book.bookId, executor: 'gpu:audio' });
+        await o.cancel({ bookId: book.bookId, layer: 'audio' });
         assert.equal(await status(c.command_id), 'active');
         await o.sweepOnce();
         assert.equal(await status(c.command_id), 'cancelled');
@@ -219,7 +220,8 @@ describe('gen v2 — progress (ADR §9)', function () {
             assert.deepEqual([p1.totals.queued, p1.totals.running, p1.totals.done], [2, 0, 1]);
             assert.deepEqual(p1.by_layer.audio.done, 1);
             assert.equal(p1.scenes.find((s) => s.scene_id === 's1').done, 1);
-            assert.deepEqual([p2.totals.queued, p2.totals.done, p2.totals.joined_queued], [0, 0, 1]);
+            // c2 joined both s1 chunks of c1: one done, one queued (both also counted as joined)
+            assert.deepEqual([p2.totals.queued, p2.totals.done, p2.totals.joined_queued], [1, 1, 1]);
             for (let i = 0; i < 20 && !events.some((e) => e.command_id === c2.command_id); i += 1) await new Promise((r) => setTimeout(r, 20));
             assert.ok(events.some((e) => e.book_id === book.bookId && e.command_id === c1.command_id));
             assert.ok(events.some((e) => e.command_id === c2.command_id));

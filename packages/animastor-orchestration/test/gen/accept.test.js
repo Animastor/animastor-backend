@@ -91,7 +91,7 @@ describe('gen v2 — acceptResult / acceptError (ADR §7) and transitions (§6.3
         const r = await put(t1);
         assert.deepEqual(r, { status: 409, code: 'stale_attempt' });
         assert.deepEqual(listTmp(ctx.outputDir), []);
-        assert.equal(fs.existsSync(ports.ports.artifactPath({ ...t1, input: { build_id: 'build-1' }, book_id: book.bookId })), false);
+        assert.equal(fs.existsSync(ports.ports.artifactPath({ ...t1, build_id: 'build-1', book_id: book.bookId })), false);
         // attempt-1 token cannot be replayed as attempt 2
         await assert.rejects(o.acceptResult(t1.job_id, 2, t1.upload_token, streamOf(TONE)), (e) => e.status === 401);
         assert.equal((await put(t2)).status, 200);
@@ -127,21 +127,30 @@ describe('gen v2 — acceptResult / acceptError (ADR §7) and transitions (§6.3
         assert.deepEqual(listTmp(ctx.outputDir), []);
     });
 
-    it('silence → rejected as an error (422 invalid_result → failed), never ready; bad token → 401', async () => {
+    it('silence → invalid_result: one retry (422, re-queued), second silence → failed; never ready; bad token → 401', async () => {
         await setup({ ch: { sc: 1 } });
         await command();
         const t = await claim();
         await assert.rejects(put(t, TONE, t.attempt, t.upload_token.replace(/.$/, (ch) => (ch === 'A' ? 'B' : 'A'))), (e) => e.status === 401);
         const r = await put(t, fixture('silence.mp3'));
         assert.equal(r.status, 422); assert.equal(r.code, 'invalid_result'); assert.equal(r.reason, 'silence');
-        const j = (await ctx.q(`SELECT status, error_class, error, result_path FROM gen_jobs WHERE job_id = $1`, [t.job_id])).rows[0];
-        assert.deepEqual([j.status, j.error_class, j.result_path], ['failed', 'invalid_result', null]);
+        assert.equal(r.job_status, 'queued');
+        let j = (await ctx.q(`SELECT status, error_class, error, result_path, extract(epoch from not_before - now()) AS wait FROM gen_jobs WHERE job_id = $1`, [t.job_id])).rows[0];
+        assert.deepEqual([j.status, j.error_class, j.result_path], ['queued', 'invalid_result', null]);
         assert.match(j.error, /silence/);
+        assert.ok(j.wait > 25 && j.wait <= 30, `wait ${j.wait}`);
+        assert.equal(r.status, 422);
+        assert.equal((await put(t, fixture('quiet.mp3'))).status, 409, 'the re-queued attempt accepts nothing');
+        await ctx.q(`UPDATE gen_jobs SET not_before = now()`);
+        const t2 = await claim();
+        assert.equal(t2.attempt, 2);
+        const r2 = await put(t2, fixture('quiet.mp3'));
+        assert.equal(r2.status, 422); assert.equal(r2.job_status, 'failed');
+        j = (await ctx.q(`SELECT status FROM gen_jobs WHERE job_id = $1`, [t.job_id])).rows[0];
+        assert.equal(j.status, 'failed');
         assert.equal(await count(ctx, `SELECT count(*) AS n FROM scene_assets WHERE status = 'ready'`), 0);
         assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_jobs WHERE kind = 'audio_merge'`), 0);
         assert.deepEqual(listTmp(ctx.outputDir), []);
-        const r2 = await put(t, fixture('quiet.mp3'));
-        assert.equal(r2.status, 409, 'a failed job accepts nothing');
     });
 
     it('acceptError: transient → queued with not_before +30 s then +120 s, then failed; deterministic → failed; stale → 409', async () => {

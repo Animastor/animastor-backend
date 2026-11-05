@@ -104,20 +104,58 @@ describe('gen v2 — createCommand / cancel / beacon (ADR §6)', function () {
         assert.equal(ws.current_job_id, t.task.job_id); assert.equal(ws.status, 'online'); assert.ok(Number(ws.last_seen) > 0);
     });
 
-    it('cancel by executor (layer) keeps the command active; cancel by command touches only that command', async () => {
+    it('cancel by layer stops every live job of the layer (commands stay active); executor API is gone', async () => {
         const a = await cmd({ scope: { level: 'chapter', chapter_id: 'ch-1' } });
         const b = await cmd({ scope: { level: 'chapter', chapter_id: 'ch-2' } });
-        const byLayer = await o.cancel({ bookId: book.bookId, executor: 'gpu:image' });
-        assert.equal(byLayer.jobs_cancelled, 0);
-        const r = await o.cancel({ commandId: a.command_id });
-        assert.equal(r.commands_cancelled, 1); assert.equal(r.jobs_cancelled, 5);
-        assert.equal((await ctx.q(`SELECT status FROM gen_commands WHERE command_id = $1`, [b.command_id])).rows[0].status, 'active');
-        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_jobs WHERE command_id = $1 AND status = 'queued'`, [b.command_id]), 2);
-        const audio = await o.cancel({ bookId: book.bookId, executor: 'gpu:audio' });
-        assert.equal(audio.jobs_cancelled, 2); assert.equal(audio.commands_cancelled, 0);
-        assert.equal((await ctx.q(`SELECT status FROM gen_commands WHERE command_id = $1`, [b.command_id])).rows[0].status, 'active');
+        assert.equal((await o.cancel({ bookId: book.bookId, layer: 'image' })).jobs_cancelled, 0);
+        await assert.rejects(o.cancel({ bookId: book.bookId, executor: 'gpu:audio' }), (e) => e.status === 400);
+        // an audio_merge (executor local) belongs to the audio layer too
+        await ctx.q(`INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key, kind, executor, layer, build_id)
+                     VALUES ($1, $2, $3, $4, 'ch-9', 'sc-9', 'scene', 'audio_merge', 'local', 'audio', 'build-1')`,
+        [a.command_id, book.workspaceId, book.userId, book.bookId]);
+        const audio = await o.cancel({ bookId: book.bookId, layer: 'audio' });
+        assert.equal(audio.jobs_cancelled, 8); assert.equal(audio.commands_cancelled, 0);
+        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_jobs WHERE kind = 'audio_merge' AND status = 'cancelled'`), 1);
+        for (const c of [a, b]) assert.equal((await ctx.q(`SELECT status FROM gen_commands WHERE command_id = $1`, [c.command_id])).rows[0].status, 'active');
         await assert.rejects(o.cancel({}), (e) => e.status === 400);
         await assert.rejects(o.cancel({ commandId: a.command_id, bookId: book.bookId }), (e) => e.status === 400);
+        await assert.rejects(o.cancel({ bookId: book.bookId, layer: 'music' }), (e) => e.status === 400);
+    });
+
+    it('gen_command_jobs: created AND joined jobs are linked; repeated click returns the stored summary', async () => {
+        const a = await cmd({ scope: { level: 'chapter', chapter_id: 'ch-1' }, clientActionId: 'x1' });
+        const b = await cmd({ scope: { level: 'scene', chapter_id: 'ch-1', scene_id: 'sc-2' } });
+        assert.deepEqual(b.summary, { jobs_created: 0, joined: 2, skipped_ready: 0 });
+        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_command_jobs WHERE command_id = $1`, [a.command_id]), 5);
+        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_command_jobs WHERE command_id = $1`, [b.command_id]), 2);
+        const again = await cmd({ scope: { level: 'chapter', chapter_id: 'ch-1' }, clientActionId: 'x1' });
+        assert.equal(again.command_id, a.command_id);
+        assert.deepEqual(again.summary, a.summary);
+        assert.deepEqual((await ctx.q(`SELECT summary FROM gen_commands WHERE command_id = $1`, [b.command_id])).rows[0].summary, b.summary);
+    });
+
+    it('stop of one of two commands sharing a unit: the shared unit runs on, B finishes done, A cancelled', async () => {
+        const w = await makeWorker(ctx, { workspaceId: book.workspaceId });
+        const a = await cmd({ scope: { level: 'chapter', chapter_id: 'ch-1' } });           // sc-1 ×3, sc-2 ×2
+        const b = await cmd({ scope: { level: 'scene', chapter_id: 'ch-1', scene_id: 'sc-2' } }); // joins sc-2 ×2
+        const r = await o.cancel({ commandId: a.command_id });
+        assert.equal(r.commands_cancelled, 1); assert.equal(r.jobs_cancelled, 3); assert.equal(r.kept_shared, 2);
+        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_jobs WHERE scene_id = 'sc-2' AND status = 'queued'`), 2);
+        const accept = async () => {
+            const t = (await o.claim({ workerId: w, workerType: 'audio', mode: 'private', workspaceId: book.workspaceId })).task;
+            assert.equal(t.scene_id, 'sc-2');
+            return o.acceptResult(t.job_id, t.attempt, t.upload_token, require('./helpers').streamOf(require('./helpers').fixture('tone.mp3')));
+        };
+        await accept();
+        const last = await accept();
+        assert.equal(last.stage_jobs_created, 1, 'B (active, audio) still gets the merge');
+        const merge = (await ctx.q(`SELECT job_id, command_id FROM gen_jobs WHERE kind = 'audio_merge'`)).rows[0];
+        assert.deepEqual((await ctx.q(`SELECT command_id FROM gen_command_jobs WHERE job_id = $1`, [merge.job_id])).rows.map((x) => x.command_id), [b.command_id]);
+        assert.equal(merge.command_id, b.command_id);
+        assert.equal((await o.runLocalOnce()).status, 200);
+        await o.sweepOnce();
+        assert.equal((await ctx.q(`SELECT status FROM gen_commands WHERE command_id = $1`, [b.command_id])).rows[0].status, 'done');
+        assert.equal((await ctx.q(`SELECT status FROM gen_commands WHERE command_id = $1`, [a.command_id])).rows[0].status, 'cancelled');
     });
 
     it('beacon: a reported job that is no longer running for this worker is in cancel; unknown worker → known=false', async () => {

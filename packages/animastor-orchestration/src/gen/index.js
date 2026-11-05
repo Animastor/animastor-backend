@@ -9,7 +9,7 @@
 //   const { gen } = require('@animastor/orchestration');
 //   await gen.migrate(pool);
 //   const orch = gen.createOrchestration({ pool, ports, uploadSecret, outputDir });
-//   orch.createCommand(...), orch.cancel(...), orch.claim(...), orch.acceptResult(...),
+//   orch.createCommand(...), orch.cancel(...), orch.purgeBook(bookId), orch.claim(...), orch.acceptResult(...),
 //   orch.acceptError(...), orch.beacon(...), orch.sweepOnce(), orch.startSweeper(ms),
 //   orch.stop(), orch.progress(bookId), orch.listenProgress(fn), orch.runLocalOnce()
 
@@ -64,6 +64,7 @@ function createOrchestration(o = {}) {
     return Object.freeze({
         createCommand: commands.createCommand,
         cancel: commands.cancel,
+        purgeBook: commands.purgeBook,
         claim: claim.claim,
         beacon: claim.beacon,
         acceptResult: accept.acceptResult,

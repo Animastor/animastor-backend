@@ -1,15 +1,17 @@
 // ======================================================
-// gen/commands — create / cancel a user command (ADR §6.1, §6.2, §6.4)
+// gen/commands — create / cancel a user command (ADR §6.1, §6.2, §6.4, §4.2a)
 // ======================================================
 // I1: gen_jobs rows are created ONLY here (first stage) and by stage
 // transitions inside acceptance (§6.3). Nothing else inserts work.
 // I7: every statement is filtered by book / command; there is no
 // "cancel everything" operation.
+// §4.2a: gen_command_jobs records every job a command waits for — the jobs it
+// created AND the live jobs it joined. Progress / completion read only it.
 
 'use strict';
 
 const {
-    GenError, withTx, requireUuid, requireText, isUuid, notifyProgress,
+    GenError, withTx, requireUuid, requireText, isUuid, notifyProgress, linkJobs,
     EXECUTOR_OF_KIND, LAYER_OF_KIND, FIRST_STAGE_KINDS, LAYERS,
 } = require('./util');
 const { checkLane } = require('./ports');
@@ -41,19 +43,21 @@ function checkUnit(u, layer) {
         && typeof u.chapter_id === 'string' && u.chapter_id
         && typeof u.scene_id === 'string' && u.scene_id
         && typeof u.unit_key === 'string' && u.unit_key
-        && u.input && typeof u.input === 'object'
-        && typeof u.input.build_id === 'string' && u.input.build_id;
+        && typeof u.build_id === 'string' && u.build_id
+        && u.input && typeof u.input === 'object';
     if (!ok) {
         throw new GenError('bad_plan', 500,
-            `planUnits(${layer}) returned an invalid unit: ${JSON.stringify(u && { kind: u.kind, chapter_id: u.chapter_id, scene_id: u.scene_id, unit_key: u.unit_key })}`);
+            `planUnits(${layer}) returned an invalid unit: ${JSON.stringify(u && { kind: u.kind, chapter_id: u.chapter_id, scene_id: u.scene_id, unit_key: u.unit_key, build_id: u.build_id })}`);
     }
 }
+
+const unitKey = (u) => `${u.chapter_id}\u0000${u.scene_id}\u0000${u.kind}\u0000${u.unit_key}`;
 
 function createCommands({ pool, ports }) {
     /**
      * ADR §6.1 — one transaction.
      * @returns {Promise<{command_id:string, created:boolean, existing:boolean, status:string, layers:string[],
-     *          summary:{jobs_created:number, joined:number|null, skipped_ready:number|null}}>}
+     *          summary:{jobs_created:number, joined:number, skipped_ready:number}}>}
      */
     async function createCommand(params = {}) {
         const workspaceId = requireUuid(params.workspaceId, 'workspaceId');
@@ -85,24 +89,18 @@ function createCommands({ pool, ports }) {
             if (book.workspace_id !== workspaceId) throw new GenError('forbidden', 403, 'book belongs to another workspace');
             if (book.orchestration !== 'v2') throw new GenError('book_not_v2', 409, `book ${bookId} is on legacy orchestration`);
 
-            const existingOf = async () => {
-                const r = await client.query(
-                    'SELECT * FROM gen_commands WHERE book_id = $1 AND client_action_id = $2', [bookId, clientActionId]);
-                return r.rows[0] || null;
-            };
-            const existingResponse = async (row) => {
+            const existingOf = async () => (await client.query(
+                'SELECT * FROM gen_commands WHERE book_id = $1 AND client_action_id = $2', [bookId, clientActionId])).rows[0] || null;
+            const existingResponse = (row) => {
                 if (row.workspace_id !== workspaceId) throw new GenError('conflict', 409, 'client_action_id taken');
-                const n = await client.query(
-                    `SELECT count(*)::int AS n FROM gen_jobs WHERE command_id = $1 AND kind = ANY($2::text[])`,
-                    [row.command_id, FIRST_STAGE_KINDS]);
                 return {
                     command_id: row.command_id, created: false, existing: true,
                     status: row.status, layers: row.layers,
-                    summary: { jobs_created: n.rows[0].n, joined: null, skipped_ready: null },
+                    summary: row.summary || { jobs_created: 0, joined: 0, skipped_ready: 0 },
                 };
             };
 
-            // §6.1 п.1: a repeated click returns the same command
+            // §6.1 п.1: a repeated click returns the same command (and the same summary)
             if (clientActionId) {
                 const prev = await existingOf();
                 if (prev) return existingResponse(prev);
@@ -127,22 +125,22 @@ function createCommands({ pool, ports }) {
                 if (!Array.isArray(planned)) throw new GenError('bad_plan', 500, `planUnits(${layer}) must return an array`);
                 for (const u of planned) {
                     checkUnit(u, layer);
-                    const key = `${u.chapter_id}\u0000${u.scene_id}\u0000${u.kind}\u0000${u.unit_key}`;
-                    if (seen.has(key)) continue; // video+image may both plan the same IU
-                    seen.add(key);
+                    if (seen.has(unitKey(u))) continue; // video+image may both plan the same IU
+                    seen.add(unitKey(u));
                     units.push(u);
                 }
             }
 
-            // §6.1 п.3: skip units whose scene asset is ready for the current content
+            // §6.1 п.3: skip units whose scene asset is ready for the current content (PG scene_assets only)
             let skipped = 0;
             let todo = units;
             if (!force && units.length) {
+                const k5 = (g) => `${g.chapter_id}\u0000${g.scene_id}\u0000${g.asset_type}\u0000${g.build_id}\u0000${g.scene_hash}`;
+                const gkey = (u) => k5({ ...u, asset_type: LAYER_OF_KIND[u.kind] });
                 const groups = new Map();
                 for (const u of units) {
                     if (typeof u.scene_hash !== 'string' || !u.scene_hash) continue; // readiness unprovable → do it
-                    const g = `${u.chapter_id}\u0000${u.scene_id}\u0000${LAYER_OF_KIND[u.kind]}\u0000${u.input.build_id}\u0000${u.scene_hash}`;
-                    if (!groups.has(g)) groups.set(g, { chapter_id: u.chapter_id, scene_id: u.scene_id, asset_type: LAYER_OF_KIND[u.kind], build_id: u.input.build_id, scene_hash: u.scene_hash });
+                    if (!groups.has(gkey(u))) groups.set(gkey(u), { chapter_id: u.chapter_id, scene_id: u.scene_id, asset_type: LAYER_OF_KIND[u.kind], build_id: u.build_id, scene_hash: u.scene_hash });
                 }
                 const readyKeys = new Set();
                 if (groups.size) {
@@ -156,15 +154,11 @@ function createCommands({ pool, ports }) {
                                          AND a.status = 'ready' AND a.scene_hash = g.scene_hash)`,
                         [bookId, list.map((x) => x.chapter_id), list.map((x) => x.scene_id), list.map((x) => x.asset_type),
                             list.map((x) => x.build_id), list.map((x) => x.scene_hash)]);
-                    for (const row of r.rows) {
-                        const x = list[Number(row.ord) - 1];
-                        readyKeys.add(`${x.chapter_id}\u0000${x.scene_id}\u0000${x.asset_type}\u0000${x.build_id}\u0000${x.scene_hash}`);
-                    }
+                    for (const row of r.rows) readyKeys.add(k5(list[Number(row.ord) - 1]));
                 }
                 todo = units.filter((u) => {
                     if (typeof u.scene_hash !== 'string' || !u.scene_hash) return true;
-                    const g = `${u.chapter_id}\u0000${u.scene_id}\u0000${LAYER_OF_KIND[u.kind]}\u0000${u.input.build_id}\u0000${u.scene_hash}`;
-                    if (readyKeys.has(g)) { skipped += 1; return false; }
+                    if (readyKeys.has(gkey(u))) { skipped += 1; return false; }
                     return true;
                 });
             }
@@ -185,99 +179,144 @@ function createCommands({ pool, ports }) {
                 return laneCache.get(type);
             };
 
-            // §6.1 п.4: insert; a unit live under another command → joined
+            // §6.1 п.4: insert; a unit live under another command → joined (link to the live job)
             let created = 0;
+            let joined = 0;
             if (todo.length) {
-                const cols = { ch: [], sc: [], uk: [], kind: [], ex: [], lane: [], max: [], input: [] };
+                const cols = { ch: [], sc: [], uk: [], kind: [], ex: [], layer: [], build: [], lane: [], max: [], input: [] };
                 for (const u of todo) {
                     const ex = EXECUTOR_OF_KIND[u.kind];
                     const lane = await laneOf(ex);
                     cols.ch.push(u.chapter_id); cols.sc.push(u.scene_id); cols.uk.push(u.unit_key);
-                    cols.kind.push(u.kind); cols.ex.push(ex);
+                    cols.kind.push(u.kind); cols.ex.push(ex); cols.layer.push(LAYER_OF_KIND[u.kind]); cols.build.push(u.build_id);
                     cols.lane.push(lane ? JSON.stringify(lane) : null);
                     cols.max.push(ports.maxAttemptsFor(u.kind));
                     cols.input.push(JSON.stringify({ ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null }));
                 }
-                const r = await client.query(
+                const ins2 = await client.query(
                     `INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key,
-                                           kind, executor, lane, max_attempts, input, created_at)
-                     SELECT $1, $2, $3, $4, t.ch, t.sc, t.uk, t.kind, t.ex, t.lane::jsonb, t.max, t.input::jsonb,
+                                           kind, executor, layer, build_id, lane, max_attempts, input, created_at)
+                     SELECT $1, $2, $3, $4, t.ch, t.sc, t.uk, t.kind, t.ex, t.layer, t.build, t.lane::jsonb, t.max, t.input::jsonb,
                             clock_timestamp()       -- strictly increasing in plan order → claim order = plan order
-                     FROM unnest($5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::int[], $12::text[])
-                          WITH ORDINALITY AS t(ch, sc, uk, kind, ex, lane, max, input, ord)
+                     FROM unnest($5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[],
+                                 $12::text[], $13::int[], $14::text[])
+                          WITH ORDINALITY AS t(ch, sc, uk, kind, ex, layer, build, lane, max, input, ord)
                      ORDER BY t.ord
                      ON CONFLICT (book_id, chapter_id, scene_id, kind, unit_key) WHERE status IN ('queued','running')
                      DO NOTHING
                      RETURNING job_id`,
                     [cmd.command_id, workspaceId, userId, bookId, cols.ch, cols.sc, cols.uk, cols.kind, cols.ex,
-                        cols.lane, cols.max, cols.input]);
-                created = r.rowCount;
+                        cols.layer, cols.build, cols.lane, cols.max, cols.input]);
+                created = ins2.rowCount;
+                // live jobs of the same units (ours just inserted + other commands' → joined)
+                const live = await client.query(
+                    `SELECT j.job_id, j.command_id FROM gen_jobs j
+                     JOIN unnest($2::text[], $3::text[], $4::text[], $5::text[]) AS t(ch, sc, kind, uk)
+                       ON j.chapter_id = t.ch AND j.scene_id = t.sc AND j.kind = t.kind AND j.unit_key = t.uk
+                     WHERE j.book_id = $1 AND j.status IN ('queued','running')`,
+                    [bookId, cols.ch, cols.sc, cols.kind, cols.uk]);
+                joined = live.rows.filter((r) => r.command_id !== cmd.command_id).length;
+                await linkJobs(client, [cmd.command_id], live.rows.map((r) => r.job_id));
             }
-            const joined = todo.length - created;
+            const summary = { jobs_created: created, joined, skipped_ready: skipped };
+            await client.query('UPDATE gen_commands SET summary = $2::jsonb WHERE command_id = $1', [cmd.command_id, JSON.stringify(summary)]);
             await notifyProgress(client, bookId, cmd.command_id);
             return {
                 command_id: cmd.command_id, created: true, existing: false,
-                status: cmd.status, layers: cmd.layers,
-                summary: { jobs_created: created, joined, skipped_ready: skipped },
+                status: cmd.status, layers: cmd.layers, summary,
             };
         });
     }
 
     /**
      * ADR §6.4. One transaction. Exactly one of:
-     *   {bookId}                — stop everything of the book's active commands
-     *   {bookId, executor}      — stop one executor (layer) of the book's active commands
-     *   {commandId}             — stop one command
+     *   {bookId}            — stop the book: every active command + every live job of the book
+     *   {bookId, layer}     — stop one layer of the book (audio also stops audio_merge); commands stay active
+     *   {commandId}         — stop one command; its jobs are cancelled only when no OTHER active
+     *                         command waits for them (gen_command_jobs) — shared jobs keep running
      * @param {object} target
      * @param {{cancelledBy?:string}} [opts]
-     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[]}>}
+     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number}>}
      */
     async function cancel(target = {}, opts = {}) {
         const by = opts.cancelledBy == null ? null : String(opts.cancelledBy).slice(0, 200);
-        const { bookId, executor, commandId } = target;
+        const { bookId, layer, commandId } = target;
+        if ('executor' in target) throw new GenError('bad_request', 400, 'cancel by executor was removed — use {bookId, layer}');
         if (commandId !== undefined) {
-            if (!isUuid(commandId) || bookId !== undefined || executor !== undefined) {
+            if (!isUuid(commandId) || bookId !== undefined || layer !== undefined) {
                 throw new GenError('bad_request', 400, 'cancel({commandId}) takes a UUID and nothing else');
             }
         } else {
             requireText(bookId, 'bookId');
-            if (executor !== undefined && !Object.values(EXECUTOR_OF_KIND).includes(executor)) {
-                throw new GenError('bad_request', 400, 'executor must be gpu:audio|gpu:image|gpu:video|local');
+            if (layer !== undefined && !LAYERS.includes(layer)) {
+                throw new GenError('bad_request', 400, 'layer must be audio|image|video');
             }
         }
         return withTx(pool, async (client) => {
             let commands = [];
             let jobs;
+            let keptShared = 0;
             if (commandId !== undefined) {
                 commands = (await client.query(
                     `UPDATE gen_commands SET status = 'cancelled', finished_at = now(), cancelled_by = $2
                      WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id`, [commandId, by])).rows;
                 jobs = await client.query(
-                    `UPDATE gen_jobs SET status = 'cancelled', finished_at = now()
-                     WHERE command_id = $1 AND status IN ('queued','running') RETURNING job_id, book_id`, [commandId]);
-            } else if (executor !== undefined) {
-                jobs = await client.query(
                     `UPDATE gen_jobs j SET status = 'cancelled', finished_at = now()
-                     FROM gen_commands c
-                     WHERE c.command_id = j.command_id AND c.book_id = $1 AND c.status = 'active'
-                       AND j.book_id = $1 AND j.executor = $2 AND j.status IN ('queued','running')
-                     RETURNING j.job_id, j.book_id`, [bookId, executor]);
+                     FROM gen_command_jobs l
+                     WHERE l.command_id = $1 AND l.job_id = j.job_id AND j.status IN ('queued','running')
+                       AND NOT EXISTS (SELECT 1 FROM gen_command_jobs o JOIN gen_commands oc ON oc.command_id = o.command_id
+                                        WHERE o.job_id = j.job_id AND o.command_id <> $1 AND oc.status = 'active')
+                     RETURNING j.job_id, j.book_id`, [commandId]);
+                keptShared = Number((await client.query(
+                    `SELECT count(*)::int AS n FROM gen_command_jobs l JOIN gen_jobs j ON j.job_id = l.job_id
+                     WHERE l.command_id = $1 AND j.status IN ('queued','running')`, [commandId])).rows[0].n);
+            } else if (layer !== undefined) {
+                jobs = await client.query(
+                    `UPDATE gen_jobs SET status = 'cancelled', finished_at = now()
+                     WHERE book_id = $1 AND layer = $2 AND status IN ('queued','running')
+                     RETURNING job_id, book_id`, [bookId, layer]);
             } else {
                 commands = (await client.query(
                     `UPDATE gen_commands SET status = 'cancelled', finished_at = now(), cancelled_by = $2
                      WHERE book_id = $1 AND status = 'active' RETURNING command_id, book_id`, [bookId, by])).rows;
                 jobs = await client.query(
                     `UPDATE gen_jobs SET status = 'cancelled', finished_at = now()
-                     WHERE book_id = $1 AND command_id = ANY($2::uuid[]) AND status IN ('queued','running')
-                     RETURNING job_id, book_id`, [bookId, commands.map((c) => c.command_id)]);
+                     WHERE book_id = $1 AND status IN ('queued','running')
+                     RETURNING job_id, book_id`, [bookId]);
             }
             const books = new Set([...commands.map((c) => c.book_id), ...jobs.rows.map((j) => j.book_id)]);
             for (const b of books) await notifyProgress(client, b, commandId || null);
-            return { commands_cancelled: commands.length, jobs_cancelled: jobs.rowCount, job_ids: jobs.rows.map((j) => j.job_id) };
+            return {
+                commands_cancelled: commands.length,
+                jobs_cancelled: jobs.rowCount,
+                job_ids: jobs.rows.map((j) => j.job_id),
+                kept_shared: keptShared,
+            };
         });
     }
 
-    return { createCommand, cancel };
+    /**
+     * Book deletion: remove every gen_* row of the book (one transaction).
+     * @returns {Promise<{commands:number, jobs:number, links:number, build_ids:string[]}>}
+     */
+    async function purgeBook(bookId) {
+        requireText(bookId, 'bookId');
+        return withTx(pool, async (client) => {
+            const builds = (await client.query(
+                'SELECT DISTINCT build_id FROM gen_jobs WHERE book_id = $1', [bookId])).rows.map((r) => r.build_id);
+            const links = await client.query(
+                `DELETE FROM gen_command_jobs l USING gen_commands c
+                 WHERE c.command_id = l.command_id AND c.book_id = $1`, [bookId]);
+            const links2 = await client.query(
+                `DELETE FROM gen_command_jobs l USING gen_jobs j
+                 WHERE j.job_id = l.job_id AND j.book_id = $1`, [bookId]);
+            const jobs = await client.query('DELETE FROM gen_jobs WHERE book_id = $1', [bookId]);
+            const commands = await client.query('DELETE FROM gen_commands WHERE book_id = $1', [bookId]);
+            return { commands: commands.rowCount, jobs: jobs.rowCount, links: links.rowCount + links2.rowCount, build_ids: builds };
+        });
+    }
+
+    return { createCommand, cancel, purgeBook };
 }
 
 module.exports = { createCommands, normaliseScope };

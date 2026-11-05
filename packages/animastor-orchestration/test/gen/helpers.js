@@ -128,24 +128,24 @@ function makePorts(ctx, plan, overrides = {}) {
                         for (let i = 1; i <= n; i += 1) {
                             units.push({
                                 chapter_id: ch, scene_id: sc, kind: 'audio_chunk', unit_key: String(i).padStart(4, '0'),
-                                scene_hash: `h-${sc}`, input: { build_id: 'build-1', text: `chunk ${i}` },
+                                scene_hash: `h-${sc}`, build_id: 'build-1', input: { text: `chunk ${i}` },
                             });
                         }
                     } else if (layer === 'image') {
-                        units.push({ chapter_id: ch, scene_id: sc, kind: 'iu_image', unit_key: 'iu-1', scene_hash: `h-${sc}`, input: { build_id: 'build-1' } });
+                        units.push({ chapter_id: ch, scene_id: sc, kind: 'iu_image', unit_key: 'iu-1', scene_hash: `h-${sc}`, build_id: 'build-1', input: {} });
                     }
                 }
             }
             return units;
         },
         buildPayload: async (job) => { calls.buildPayload.push(job.job_id); return { workflow: 'tts', text: job.input.text }; },
-        artifactPath: (job) => path.join(ctx.outputDir, job.input.build_id,
+        artifactPath: (job) => path.join(ctx.outputDir, job.build_id,
             job.kind === 'audio_merge' ? `${job.book_id}_${job.chapter_id}_${job.scene_id}.mp3`
                 : `${job.book_id}_${job.chapter_id}_${job.scene_id}_${job.unit_key}.mp3`),
         validateResult: media.createDefaultValidateResult({ decodePcm: fixtureDecodePcm, rmsThresholdDbfs: -60 }),
         runLocal: async (job) => {
             calls.runLocal.push(job.job_id);
-            const out = path.join(ctx.outputDir, job.input.build_id, `merge-${job.job_id}.tmp.mp3`);
+            const out = path.join(ctx.outputDir, job.build_id, `merge-${job.job_id}.tmp.mp3`);
             fs.mkdirSync(path.dirname(out), { recursive: true });
             fs.writeFileSync(out, fixture('tone.mp3'));
             return { path: out };

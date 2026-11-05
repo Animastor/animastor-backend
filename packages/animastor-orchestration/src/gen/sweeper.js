@@ -3,7 +3,8 @@
 // ======================================================
 //   1. running with deadline < now()             → error 'timeout'        (retry or failed)
 //   2. running on a worker silent > offlineAfter → error 'worker_offline' (retry or failed)
-//   3. active command with nothing live (own + joined units in scope) → done | partial | failed | cancelled
+//   3. active command with no live job in gen_command_jobs (created + joined + next stages)
+//      → done | partial | failed | cancelled
 //   4. .incoming/*.tmp older than incomingMaxAge → deleted
 // Idempotent. I1: it never INSERTs into gen_jobs — a retry re-queues the
 // SAME row (attempt is kept, the next claim increments it).
@@ -12,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { withTx, notifyProgress, IN_SCOPE_SQL } = require('./util');
+const { withTx, notifyProgress } = require('./util');
 
 const BATCH = 200;
 
@@ -29,8 +30,8 @@ function createSweeper({ pool, accept, outputDir = null, offlineAfterMs = 60_000
     }
 
     const NOTHING_LIVE_SQL = `
-        NOT EXISTS (SELECT 1 FROM gen_jobs j WHERE j.command_id = c.command_id AND j.status IN ('queued','running'))
-        AND NOT EXISTS (SELECT 1 FROM gen_jobs j WHERE j.status IN ('queued','running') AND ${IN_SCOPE_SQL('j', 'c')})`;
+        NOT EXISTS (SELECT 1 FROM gen_command_jobs l JOIN gen_jobs j ON j.job_id = l.job_id
+                    WHERE l.command_id = c.command_id AND j.status IN ('queued','running'))`;
 
     async function finishCommands() {
         const cand = await pool.query(
@@ -46,7 +47,8 @@ function createSweeper({ pool, accept, outputDir = null, offlineAfterMs = 60_000
                     `SELECT count(*) FILTER (WHERE status = 'done')::int AS done,
                             count(*) FILTER (WHERE status = 'failed')::int AS failed,
                             count(*) FILTER (WHERE status = 'cancelled')::int AS cancelled
-                     FROM gen_jobs WHERE command_id = $1`, [id])).rows[0];
+                     FROM gen_command_jobs l JOIN gen_jobs j ON j.job_id = l.job_id
+                     WHERE l.command_id = $1`, [id])).rows[0];
                 let status;
                 if (k.failed === 0 && k.cancelled === 0) status = 'done';
                 else if (k.done > 0) status = 'partial';
