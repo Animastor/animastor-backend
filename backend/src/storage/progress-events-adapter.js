@@ -78,10 +78,30 @@ async function blockSceneStage(redis, bookId, chapterId, sceneId, type, reason) 
     return result;
 }
 
+// reconcile-quota-leak (2026-11-05): a commanded scene×stage made no progress
+// (dispatches keep ending without jobs and without completion). The command
+// becomes `failed` with the reason in the task registry and PG
+// generation_tasks — the same stores and the same shape as the GPU-retry
+// terminal failure (services/gpu-retry-policy failCommand). PG is best-effort.
+async function failSceneStage(redis, bookId, chapterId, sceneId, type, info = {}) {
+    const result = await generationProgress().failSceneStage(redis, bookId, chapterId, sceneId, type, info);
+    const taskRepo = require('./postgres/repositories/task-repo');
+    const pgError = `${info.error_class || 'failed'}:${info.error_code || ''}`.slice(0, 500);
+    for (const task of result.tasks || []) {
+        try {
+            await taskRepo.updateTaskStatus(task.task_id, 'failed', pgError);
+        } catch (err) {
+            console.warn(`[PROGRESS-EVENTS] PG fail of task ${task.task_id} failed: ${err.message}`);
+        }
+    }
+    return result;
+}
+
 module.exports = {
     publishProgress,
     getSceneTaskState,
     hasActiveTasks,
     reconcileCompletedTasks,
     blockSceneStage,
+    failSceneStage,
 };

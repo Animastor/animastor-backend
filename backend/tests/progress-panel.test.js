@@ -235,3 +235,121 @@ describe('Progress panel independent generation tasks', () => {
         expect(res2.body.any_incomplete).to.equal(false);
     });
 });
+
+// ======================================================
+// reconcile-quota-leak (2026-11-05, BA) — «строка пропала молча»
+// ======================================================
+// On BA all 31 chunk records went `ready` (completeChunk recovery) while 13
+// stages stayed stale; the panel reported 31/31 done=true for an `active`
+// task, the client treated the row as an old finished one and hid it.
+describe('reconcile-quota-leak: audio progress follows READY stages, rows never vanish silently', () => {
+    async function whole(redis, bookId, scenes) {
+        const [task] = await generationProgress.createTasks(
+            redis, bookId, ['audio'], { scope: 'whole_book' },
+            scenes.map(s => ({ chapter_id: 'ch-1', scene_id: s, dirty_layers: ['audio'] }))
+        );
+        return task;
+    }
+    async function setAudio(redis, bookId, sceneId, st) {
+        await sceneState.unsafeRestoreAssetStates(redis, bookId, 'ch-1', sceneId, {
+            audio: st, image: sceneState.AssetState.NEW, video: sceneState.AssetState.NEW,
+        });
+    }
+
+    it('all chunks ready but stages not READY ⇒ NOT done, any_incomplete stays true', async () => {
+        const redis = createMockRedis();
+        const bookId = 'rql-false-done';
+        const chunks = new Map();
+        const chunkIds = [];
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-a', 1, { expected_chunk_count: 2, audio_status: 'ready' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-a', 2, { expected_chunk_count: 2, audio_status: 'ready' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-b', 1, { expected_chunk_count: 1, audio_status: 'ready' });
+        await setAudio(redis, bookId, 'sc-a', sceneState.AssetState.DIRTY);
+        await setAudio(redis, bookId, 'sc-b', sceneState.AssetState.PENDING);
+        await whole(redis, bookId, ['sc-a', 'sc-b']);
+
+        const res = await createHarness(redis, chunks, chunkIds)(bookId);
+        const [row] = res.body.tasks;
+        expect(row.total).to.equal(3);
+        expect(row.ready).to.equal(1);          // sc-a capped at 2-1, sc-b at 1-1
+        expect(row.done).to.equal(false);
+        expect(row.percent).to.be.below(100);
+        expect(res.body.any_incomplete).to.equal(true);
+    });
+
+    it('committed scenes (READY at start) count fully at once; the rest by chunks', async () => {
+        const redis = createMockRedis();
+        const bookId = 'rql-start';
+        const chunks = new Map();
+        const chunkIds = [];
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-ready', 1, { expected_chunk_count: 3, audio_status: 'ready' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-ready', 2, { expected_chunk_count: 3, audio_status: 'ready' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-ready', 3, { expected_chunk_count: 3, audio_status: 'ready' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-gen', 1, { expected_chunk_count: 2, audio_status: 'ready' });
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-gen', 2, { expected_chunk_count: 2, audio_status: 'pending' });
+        await setAudio(redis, bookId, 'sc-ready', sceneState.AssetState.READY);
+        await setAudio(redis, bookId, 'sc-gen', sceneState.AssetState.GENERATING);
+        await whole(redis, bookId, ['sc-ready', 'sc-gen']);
+
+        const [row] = (await createHarness(redis, chunks, chunkIds)(bookId)).body.tasks;
+        expect(row).to.include({ ready: 4, total: 5, done: false });
+    });
+
+    it('every stage READY ⇒ done 100%', async () => {
+        const redis = createMockRedis();
+        const bookId = 'rql-done';
+        const chunks = new Map();
+        const chunkIds = [];
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-a', 1, { expected_chunk_count: 1, audio_status: 'ready' });
+        await setAudio(redis, bookId, 'sc-a', sceneState.AssetState.READY);
+        await whole(redis, bookId, ['sc-a']);
+        const [row] = (await createHarness(redis, chunks, chunkIds)(bookId)).body.tasks;
+        expect(row).to.include({ ready: 1, total: 1, done: true, percent: 100 });
+    });
+
+    it('worker gone ⇒ blocked row stays with its reason; no-progress ⇒ failed row stays (not filtered)', async () => {
+        const redis = createMockRedis();
+        const bookId = 'rql-stopped';
+        const chunks = new Map();
+        const chunkIds = [];
+        addChunk(chunks, chunkIds, bookId, 'ch-1', 'sc-a', 1, { expected_chunk_count: 1, audio_status: 'pending' });
+        addChunk(chunks, chunkIds, bookId, 'ch-2', 'sc-b', 1, { expected_chunk_count: 1, audio_status: 'pending' });
+        await setAudio(redis, bookId, 'sc-a', sceneState.AssetState.PENDING);
+        const [t1] = await generationProgress.createTasks(redis, bookId, ['audio'],
+            { scope: 'current_scene', chapterId: 'ch-1', sceneId: 'sc-a' },
+            [{ chapter_id: 'ch-1', scene_id: 'sc-a', dirty_layers: ['audio'] }]);
+        const [t2] = await generationProgress.createTasks(redis, bookId, ['audio'],
+            { scope: 'current_scene', chapterId: 'ch-2', sceneId: 'sc-b' },
+            [{ chapter_id: 'ch-2', scene_id: 'sc-b', dirty_layers: ['audio'] }]);
+        await generationProgress.blockSceneStage(redis, bookId, 'ch-1', 'sc-a', 'audio', 'no_worker:audio');
+        await generationProgress.failSceneStage(redis, bookId, 'ch-2', 'sc-b', 'audio', {
+            error_class: 'no_progress', error_code: 'no_jobs_generated', error_message: 'генерация не идёт: no_jobs_generated',
+        });
+
+        const res = await createHarness(redis, chunks, chunkIds)(bookId);
+        const blocked = res.body.tasks.find(t => t.task_id === t1.task_id);
+        const failed = res.body.tasks.find(t => t.task_id === t2.task_id);
+        expect(blocked).to.include({ status: 'blocked', blocked: true, blocked_reason: 'no_worker:audio', done: false });
+        expect(failed).to.include({ status: 'failed', failed: true, done: false });
+        expect(failed.error_class).to.equal('no_progress');
+    });
+
+    it('the registry TTL is refreshed while a non-terminal task is listed', async () => {
+        const redis = createMockRedis();
+        const bookId = 'rql-ttl';
+        await whole(redis, bookId, ['sc-a']);
+        const key = `animastor:generation-progress:${bookId}`;
+        const expires = [];
+        const realExpire = redis.expire.bind(redis);
+        redis.expire = async (k, ttl) => { expires.push([k, ttl]); return realExpire(k, ttl); };
+        await generationProgress.listTasks(redis, bookId);
+        expect(expires).to.deep.include([key, generationProgress.TTL_SECONDS]);
+
+        // a registry with only terminal tasks is NOT kept alive
+        const [t] = (await generationProgress.listTasks(redis, bookId));
+        await generationProgress.markCompleted(redis, bookId, t.task_id);
+        expires.length = 0;
+        await generationProgress.listTasks(redis, bookId);
+        expect(expires).to.deep.equal([]);
+    });
+});

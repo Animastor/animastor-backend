@@ -307,6 +307,36 @@ async function verifyDispatchIdentity(redis, bookId, chapterId, sceneId, stage, 
     return { valid: true, reason: 'current_dispatch', metadata };
 }
 
+// reconcile-quota-leak: compare-and-set of the jobs flag. A plain get+set
+// could resurrect the metadata of a dispatch that a fast completion already
+// finalized (and the resurrected meta would hold its quota slot forever).
+const MARK_JOBS_ENQUEUED_SCRIPT = `
+    local raw = redis.call('GET', KEYS[1])
+    if not raw or raw ~= ARGV[1] then
+        return 0
+    end
+    redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+    return 1
+`;
+
+/**
+ * Flag the live dispatch metadata as "jobs really enqueued" (only while the
+ * metadata still belongs to `dispatchId` and was not changed meanwhile).
+ * @returns {Promise<boolean>} true when the flag was written.
+ */
+async function markDispatchJobsEnqueued(redis, bookId, chapterId, sceneId, stage, dispatchId, jobs) {
+    const key = getDispatchMetaKey(bookId, chapterId, sceneId, stage);
+    const raw = await redis.get(key);
+    if (!raw) return false;
+    let meta;
+    try { meta = JSON.parse(raw); } catch (_) { return false; }
+    if (!meta || meta.dispatch_id !== dispatchId) return false;
+    meta.jobs_enqueued = true;
+    meta.jobs = Number(jobs) || null;
+    const res = await redis.eval(MARK_JOBS_ENQUEUED_SCRIPT, 1, key, raw, JSON.stringify(meta));
+    return Number(res) === 1;
+}
+
 /**
  * Delete dispatch metadata (on completion/failure).
  */
@@ -1129,6 +1159,22 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
                     // The stage completed (cache hit / already done) — it is no
                     // longer waiting for capacity.
                     await clearStageDeferral(redis, bookId, chapterId, sceneId, stage);
+                    // reconcile-quota-leak (2026-11-05, BA): a completed outcome
+                    // WITHOUT jobs (already_done / recovered_via_completeChunk /
+                    // cache_hit / scene_not_found) used to return here with the
+                    // lease, the dispatch metadata and the owned quota slot still
+                    // held — nothing would ever finalize them (no job → no hub
+                    // result → no completion callback). 8 such dispatches held
+                    // animastor:runtime:active-audio at 8/8 with zero jobs.
+                    // Finalize atomically (one Lua claim: meta + lease + owned
+                    // quota). Idempotent: if the executor already completed the
+                    // stage through completeStage (already_ready path) the claim
+                    // reports already_finalized / no_active_dispatch.
+                    await finalizeDispatch(redis, bookId, chapterId, sceneId, stage, {
+                        outcome: 'success',
+                        dispatchId,
+                        reason: `completed_without_jobs:${result.reason || 'already_done'}`
+                    });
                 }
                 // Cancelled finalize does not touch the circuit breaker — release
                 // the test permit here so a half-open circuit can keep recovering.
@@ -1137,6 +1183,10 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
                     dispatched: false,
                     dispatchId,
                     reason: result.reason || 'already_done',
+                    // reconcile-quota-leak: the scheduler counts a completed
+                    // stage (anyCompleted) by THIS flag; it was never surfaced,
+                    // so every already_done tick was reported as an error.
+                    completed: result.completed === true,
                     retryable: isDeferrableOutcome(result.reason),
                     // Stage 118 (M9): the caller (scheduler) must be able to
                     // tell "nothing happened, try later" from a real error.
@@ -1152,6 +1202,16 @@ async function dispatchStage(redis, bookId, chapterId, sceneId, stage, loadedBoo
             // Only started after confirming dispatcher returned dispatched:true
             // (not for cache hits, backpressure, or empty executor results)
             startDispatchRenewal(redis, bookId, chapterId, sceneId, stage, lease.leaseKey, lease.token);
+
+            // reconcile-quota-leak: record that THIS dispatch really enqueued
+            // jobs — counter reconciliation treats a dispatch without the flag
+            // and without a hub job as a phantom (see counter-reconciliation).
+            // Best-effort: only touch the meta while it is still ours.
+            try {
+                await markDispatchJobsEnqueued(redis, bookId, chapterId, sceneId, stage, dispatchId, result.jobs);
+            } catch (metaErr) {
+                warn(`DISPATCH_META_JOBS_FLAG_FAILED: ${bookId}/${chapterId}/${sceneId}:${stage}: ${metaErr.message}`);
+            }
 
             // Set 3s debounce — task actually sent to GPU hub
             await redis.set(`animastor:runtime:last-active:${stage}`, '1', 'EX', 3);
@@ -2029,6 +2089,7 @@ module.exports = {
     createDispatchMetadata,
     setDispatchMetadata,
     getDispatchMetadata,
+    markDispatchJobsEnqueued,
     verifyDispatchIdentity,
     deleteDispatchMetadata,
 

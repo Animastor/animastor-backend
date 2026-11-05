@@ -129,6 +129,113 @@ async function getCounterWithDriftCheck(redis, stage) {
     };
 }
 
+// ======================================================
+// PHANTOM DISPATCH SWEEP (reconcile-quota-leak, 2026-11-05)
+// ======================================================
+// The former check compared the counter with the NUMBER OF LEASES. On BA the
+// counter leaked together with its leases: 8 dispatches that ended without
+// jobs kept lease + metadata (status=dispatched, quota_owned=true), so
+// counter 8 == leases 8 → "0 drift" while nothing ran on the GPU.
+//
+// A dispatch is LIVE when its lease is held by the metadata token AND one of:
+//   • the dispatch really enqueued jobs (meta.jobs_enqueued, set by
+//     dispatch-engine after dispatched:true) — result handling is in flight;
+//   • the hub holds a job of this dispatch (animastor:running or any
+//     animastor:queue:* lane) — legacy metadata without the flag;
+//   • it is younger than PHANTOM_GRACE_MS (the executor is still running).
+// Otherwise it is a PHANTOM candidate. A candidate seen on two consecutive
+// sweeps (marker with TTL) is cancelled through the canonical path
+// (dispatch-engine.cancelActiveDispatch: meta + lease + OWNED quota in one
+// claim). A lease without metadata keeps the historic semantics (counted,
+// ownership unknown). The counter is then corrected to the live leases.
+
+const META_PREFIX = 'animastor:dispatch-meta';
+const PHANTOM_GRACE_MS = 2 * 60 * 1000;
+const PHANTOM_SUSPECT_PREFIX = 'animastor:dispatch-phantom-suspect:';
+const PHANTOM_SUSPECT_TTL_S = 15 * 60;
+
+async function scanKeys(redis, pattern, limit = 10000) {
+    const keys = [];
+    let cursor = 0;
+    do {
+        const result = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
+        cursor = parseInt(result[0], 10);
+        keys.push(...result[1]);
+    } while (cursor !== 0 && keys.length < limit);
+    return keys;
+}
+
+function collectDispatchId(set, raw) {
+    if (!raw || typeof raw !== 'string') return;
+    try {
+        const v = JSON.parse(raw);
+        if (v && typeof v.dispatch_id === 'string') set.add(v.dispatch_id);
+    } catch (_) {
+        const m = raw.match(/"dispatch_id"\s*:\s*"([^"]+)"/);
+        if (m) set.add(m[1]);
+    }
+}
+
+/** dispatch_ids that have a job in the hub (running or queued, any lane). */
+async function collectHubDispatchIds(redis) {
+    const ids = new Set();
+    try {
+        const running = await redis.hgetall('animastor:running');
+        for (const v of Object.values(running || {})) collectDispatchId(ids, v);
+    } catch (_) { /* hash may not exist */ }
+    for (const qk of await scanKeys(redis, 'animastor:queue:*')) {
+        try {
+            const items = await redis.lrange(qk, 0, -1);
+            for (const v of items || []) collectDispatchId(ids, v);
+        } catch (_) { /* not a list (lane bookkeeping key) */ }
+    }
+    return ids;
+}
+
+/**
+ * Find and cancel phantom dispatches of `stage`.
+ * @returns {Promise<{scanned:number, suspects:number, cancelled:string[]}>}
+ */
+async function sweepPhantomDispatches(redis, stage, now = Date.now()) {
+    const out = { scanned: 0, suspects: 0, cancelled: [] };
+    const leaseKeys = await scanKeys(redis, getLeaseKeyPattern(stage));
+    if (leaseKeys.length === 0) return out;
+    let hubIds = null;
+    for (const leaseKey of leaseKeys) {
+        const parts = leaseKey.split(':');
+        // animastor:dispatch-lease:<book>:<chapter>:<scene>:<stage>
+        if (parts.length !== 6 || parts[5] !== stage) continue;
+        const [, , bookId, chapterId, sceneId] = parts;
+        out.scanned++;
+        const metaRaw = await redis.get(`${META_PREFIX}:${bookId}:${chapterId}:${sceneId}:${stage}`);
+        if (!metaRaw) continue;
+        let meta;
+        try { meta = JSON.parse(metaRaw); } catch (_) { continue; }
+        const leaseToken = await redis.get(leaseKey);
+        if (!meta || !meta.dispatch_id || !leaseToken || meta.lease_token !== leaseToken) continue;
+        if (meta.jobs_enqueued === true) continue;
+        if (typeof meta.started_at === 'number' && now - meta.started_at < PHANTOM_GRACE_MS) continue;
+        if (hubIds === null) hubIds = await collectHubDispatchIds(redis);
+        if (hubIds.has(meta.dispatch_id)) continue;
+
+        out.suspects++;
+        const suspectKey = `${PHANTOM_SUSPECT_PREFIX}${meta.dispatch_id}`;
+        const seen = await redis.get(suspectKey);
+        if (!seen) {
+            await redis.set(suspectKey, String(now), 'EX', PHANTOM_SUSPECT_TTL_S);
+            continue;
+        }
+        const dispatchEngine = require('./dispatch-engine');
+        const res = await dispatchEngine.cancelActiveDispatch(redis, bookId, chapterId, sceneId, stage, 'phantom_dispatch');
+        await redis.del(suspectKey);
+        if (res && res.cancelled) {
+            out.cancelled.push(`${bookId}/${chapterId}/${sceneId}`);
+            warn(`PHANTOM_DISPATCH_CANCELLED: ${bookId}/${chapterId}/${sceneId}:${stage} dispatch=${String(meta.dispatch_id).slice(0, 24)}... (no jobs, no hub job, quota_owned=${meta.quota_owned === true}, quotaReleased=${res.quotaReleased === true})`);
+        }
+    }
+    return out;
+}
+
 /**
  * Reconcile all counters.
  * Returns reconciliation report.
@@ -147,6 +254,14 @@ async function reconcileCounters(redis) {
 
     for (const stage of stages) {
         try {
+            try {
+                const sweep = await sweepPhantomDispatches(redis, stage);
+                if (sweep.cancelled.length > 0) {
+                    report.summary.phantomsCancelled = (report.summary.phantomsCancelled || 0) + sweep.cancelled.length;
+                }
+            } catch (sweepErr) {
+                warn(`PHANTOM_SWEEP failed for ${stage}: ${sweepErr.message}`);
+            }
             const data = await getCounterWithDriftCheck(redis, stage);
 
             if (!data.correct) {
@@ -195,7 +310,7 @@ async function reconcileCounters(redis) {
         }
     }
 
-    log(`COUNTER_RECONCILIATION_COMPLETE: ${report.summary.correctedCount} corrected, ${report.summary.totalDrift} total drift`);
+    log(`COUNTER_RECONCILIATION_COMPLETE: ${report.summary.correctedCount} corrected, ${report.summary.totalDrift} total drift${report.summary.phantomsCancelled ? `, ${report.summary.phantomsCancelled} phantom dispatch(es) cancelled` : ''}`);
 
     return report;
 }
@@ -283,6 +398,9 @@ async function incrementCounter(redis, stage) {
 // ======================================================
 
 module.exports = {
+    PHANTOM_GRACE_MS,
+    sweepPhantomDispatches,
+    collectHubDispatchIds,
     // Configuration
     COUNTER_PREFIX,
     LEASE_PREFIX,
