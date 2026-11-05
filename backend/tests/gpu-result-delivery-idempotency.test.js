@@ -33,7 +33,7 @@ const { computeIuReady } = require('../src/routes/book/iu-progress-utils.cjs');
 const dispatch = require('@animastor/orchestration').runtime.dispatch;
 const artifactNaming = require('@animastor/generation').artifactNaming;
 
-const RECONCILE_PATH = path.resolve(__dirname, '../../packages/animastor-orchestration/src/runtime/reconciliation-engine');
+const RECONCILE_PATH = path.resolve(__dirname, '../../packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine');
 
 const BOOK = 'book-p1';
 const CHAPTER = 'ch-p1';

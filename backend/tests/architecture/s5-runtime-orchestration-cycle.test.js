@@ -157,7 +157,7 @@ describe('S5-R5: runtime → orchestration cycle reduction', () => {
         // re-pointing so the services→orchestration bridge cannot return.
         const placeholder = readSource(path.join(BACKEND_SRC, 'services', 'placeholder-audio.js'));
         // §32.30: scene-restoration moved into the orchestration package
-        const restoration = readSource(path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'orchestration', 'scene-restoration.js'));
+        const restoration = readSource(path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy', 'orchestration', 'scene-restoration.js'));
         for (const [name, src] of [['placeholder-audio.js', placeholder], ['scene-restoration.js', restoration]]) {
             const specs = requireSpecifiers(src).filter((s) => /orchestration\/orchestrator/.test(s));
             expect(specs, `${name} must not require the orchestrator facade (use state/scene-state-ops.js)`).to.deep.equal([]);

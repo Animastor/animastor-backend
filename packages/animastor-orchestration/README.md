@@ -1,5 +1,36 @@
 # @animastor/orchestration
 
+## 1.0.0 — orchestration v2 (`gen`)
+
+ADR: animastor-docs `architecture/ORCHESTRATION_V2.md`. The new core lives in
+`src/gen/` and is exported as `gen`. The 0.3.x contour described below ships
+unchanged in `src/legacy/` (same root exports) until migration stage 4.
+
+```js
+const { gen } = require('@animastor/orchestration');
+await gen.migrate(pool);                       // idempotent; needs books/workers/scene_assets
+const orch = gen.createOrchestration({
+    pool,                                      // pg Pool supplied by the host
+    ports: { planUnits, buildPayload, artifactPath, validateResult, runLocal,
+             laneFor, timeoutFor, retryPolicy },   // see src/gen/ports.js
+    uploadSecret,                              // >= 32 bytes, HMAC of upload tokens
+    outputDir,                                 // {build}/.incoming cleanup
+    sharedLimit: null,                         // ADR §10; NULL = off
+});
+await orch.createCommand({ workspaceId, userId, bookId, kind: 'regenerate',
+                           scope: { level: 'scene', chapter_id, scene_id },
+                           layers: ['audio'], clientActionId });
+await orch.claim({ workerId, workerType: 'audio', mode: 'private', workspaceId });
+await orch.acceptResult(jobId, attempt, uploadToken, readableStream);
+orch.startSweeper(10_000);
+```
+
+`gen` requires only node builtins and its own files: no `src/legacy`, Redis,
+Express or ComfyUI. Tests: `npm run test:gen` (env `PG_*` of the animastor-test
+stack; refuses a DB not ending in `_test` or port 5432).
+
+## 0.3.x contour (`src/legacy/`)
+
 Generation orchestration and runtime contour of the Animastor backend,
 physically extracted from the host (`backend/src/orchestration/**` +
 `backend/src/runtime/**` — §32.30; recon:

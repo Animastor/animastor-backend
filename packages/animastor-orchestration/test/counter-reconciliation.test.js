@@ -4,7 +4,7 @@
 
 const { expect } = require('chai');
 const { createMockRedis } = require('./mocks/redis-mock');
-const counterReconciliation = require('../src/runtime/counter-reconciliation');
+const counterReconciliation = require('../src/legacy/runtime/counter-reconciliation');
 
 describe('Counter Reconciliation', () => {
     let redis;

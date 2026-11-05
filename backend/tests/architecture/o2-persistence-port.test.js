@@ -112,7 +112,7 @@ describe('§32.9 O-2 guards: persistence arrives only via the PersistencePort', 
     it('O2-G1: the two tiers require ZERO persistence implementations (static + dynamic)', () => {
         const offenders = [];
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/persistence-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/persistence-port.js') continue;
             if (TIER_STORAGE_ALLOWLIST.includes(rel(file))) continue;
             for (const s of staticPersistenceRequires(file)) {
                 offenders.push(`${rel(file)} -> ${s}`);
@@ -142,7 +142,7 @@ describe('§32.9 O-2 guards: persistence arrives only via the PersistencePort', 
         );
         const usedOps = new Set();
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/persistence-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/persistence-port.js') continue;
             for (const m of readSource(file).match(/persist\('([^']+)'\)/g) || []) {
                 usedOps.add(m.slice("persist('".length, -2));
             }

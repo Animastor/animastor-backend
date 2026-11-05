@@ -158,7 +158,7 @@ describe('§32.24 O-7 guards: the audio scene FSM is driven only via the AudioFs
         const usedOps = new Set();
         const handleRe = /(\w+)\s*=\s*require\([^)]*audio-fsm-port['"]?\)\.audioFsm\(\)/g;
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/audio-fsm-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/audio-fsm-port.js') continue;
             const src = codeOnly(readSource(file));
             for (const m of src.match(/audioFsmOp\('([^']+)'\)/g) || []) {
                 usedOps.add(m.slice("audioFsmOp('".length, -2));
@@ -200,7 +200,7 @@ describe('§32.24 O-7 guards: the audio scene FSM is driven only via the AudioFs
         // comparisons — the phase vocabulary is part of the contract.
         expect(codeOnly(portSrc), 'the port must expose the phase constants resolver').to.include('audioFsmPhases');
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/audio-fsm-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/audio-fsm-port.js') continue;
             const src = codeOnly(readSource(file));
             if (/audioFsm/.test(src)) {
                 // Any BARE `PHASES.<phase>` usage must be a local alias bound

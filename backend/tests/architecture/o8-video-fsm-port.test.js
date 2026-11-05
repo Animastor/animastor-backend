@@ -158,7 +158,7 @@ describe('§32.25 O-8 guards: the video scene FSM is driven only via the VideoFs
         const usedOps = new Set();
         const handleRe = /(\w+)\s*=\s*require\([^)]*video-fsm-port['"]?\)\.videoFsm\(\)/g;
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/video-fsm-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/video-fsm-port.js') continue;
             const src = codeOnly(readSource(file));
             for (const m of src.match(/videoFsmOp\('([^']+)'\)/g) || []) {
                 usedOps.add(m.slice("videoFsmOp('".length, -2));
@@ -202,7 +202,7 @@ describe('§32.25 O-8 guards: the video scene FSM is driven only via the VideoFs
         // comparisons — the phase vocabulary is part of the contract.
         expect(codeOnly(portSrc), 'the port must expose the phase constants resolver').to.include('videoFsmPhases');
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/video-fsm-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/video-fsm-port.js') continue;
             const src = codeOnly(readSource(file));
             if (/videoFsm/.test(src)) {
                 // Any BARE `PHASES.<phase>` usage must be a local alias bound

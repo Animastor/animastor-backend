@@ -43,8 +43,8 @@ const { createMockRedis } = require('./mocks/redis-mock');
 // without the B1–B4 code under test. Bare requires of the package files
 // resolve on a clean clone via tests/monorepo-source-bindings.cjs (loaded
 // through .mocharc.json).
-const sceneWindow = require('../../packages/animastor-orchestration/src/runtime/scene-window');
-const callbacks = require('../../packages/animastor-orchestration/src/orchestration/scene-callbacks');
+const sceneWindow = require('../../packages/animastor-orchestration/src/legacy/runtime/scene-window');
+const callbacks = require('../../packages/animastor-orchestration/src/legacy/orchestration/scene-callbacks');
 const iuMedia = require('../../packages/animastor-player/src/iu-media.cjs');
 
 const BOOK = 'b143a2a';

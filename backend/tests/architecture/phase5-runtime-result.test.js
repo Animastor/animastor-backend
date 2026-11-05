@@ -151,8 +151,8 @@ describe('Phase 5 T2: runtime does not import orchestration through the seam', (
         // seam (lazyHostBinding('journal')) — the former require(...) edges are
         // frozen as binding accesses in the two engines.
         const BASELINE = new Set([
-            'packages/animastor-orchestration/src/runtime/dispatch-engine.js:host-bindings-journal',
-            'packages/animastor-orchestration/src/runtime/reconciliation-engine.js:host-bindings-journal',
+            'packages/animastor-orchestration/src/legacy/runtime/dispatch-engine.js:host-bindings-journal',
+            'packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine.js:host-bindings-journal',
         ]);
         const edges = new Set();
         for (const file of listSourceFiles(RUNTIME_DIR)) {
@@ -460,7 +460,7 @@ describe('Phase 5 final audit: full runtime/** boundary', () => {
             }
         }
         expect(producers, 'only runtime/runtime-result-emitter.js may require the runtime-result contract').to.deep.equal([
-            'packages/animastor-orchestration/src/runtime/runtime-result-emitter.js',
+            'packages/animastor-orchestration/src/legacy/runtime/runtime-result-emitter.js',
         ]);
     });
 });

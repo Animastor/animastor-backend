@@ -23,12 +23,12 @@ const ORCH_PKG_DIR = fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-o
     ? path.join(REPO_ROOT, 'packages', 'animastor-orchestration')
     : null;
 const ORCH_PKG_SRC = ORCH_PKG_DIR
-    ? path.join(ORCH_PKG_DIR, 'src')
+    ? path.join(ORCH_PKG_DIR, 'src', 'legacy')
     : path.join(BACKEND_SRC, 'orchestration');
 const ORCH_PKG_RUNTIME_DIR = path.join(ORCH_PKG_SRC, 'runtime');
 const ORCH_PKG_ORCH_DIR = path.join(ORCH_PKG_SRC, 'orchestration');
-const ORCH_PKG_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src' : 'backend/src/orchestration';
-const ORCH_PKG_RUNTIME_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src/runtime' : 'backend/src/runtime';
+const ORCH_PKG_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src/legacy' : 'backend/src/orchestration';
+const ORCH_PKG_RUNTIME_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src/legacy/runtime' : 'backend/src/runtime';
 
 /** The two tier dirs at their CURRENT physical location (package first). */
 function tierDirs() {

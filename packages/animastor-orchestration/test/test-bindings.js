@@ -51,7 +51,7 @@ setGenerationConfig({
 // 2) host-bindings default: a fail-fast stub set — any host touch that a
 // package test does not explicitly re-wire must throw, never silently no-op
 // (matches the production unwired-seam semantics).
-const { bindHostModules } = require('../src/host/host-bindings');
+const { bindHostModules } = require('../src/legacy/host/host-bindings');
 
 bindHostModules({
     journal: () => {

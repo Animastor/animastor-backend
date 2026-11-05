@@ -29,7 +29,7 @@ const taskHandlerFactory = require('../src/services/task-handler.cjs');
 const { createMockRedis } = require('./mocks/redis-mock');
 const artifactNaming = require('@animastor/generation').artifactNaming;
 
-const PKG = path.resolve(__dirname, '../../packages/animastor-orchestration/src');
+const PKG = path.resolve(__dirname, '../../packages/animastor-orchestration/src/legacy');
 const dispatch = require(path.join(PKG, 'runtime/dispatch-engine'));
 
 const BOOK = 'book-e2e1102';
