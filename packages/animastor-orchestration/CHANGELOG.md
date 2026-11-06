@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0 (не опубликован) — этап 1c: scope `scenes`
+
+ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §11.1, §13 п.8).
+
+- `scope.level = 'scenes'` — `{level:'scenes', scene_ids:[…]}` (непустой список, порядок
+  сохраняется, дубли отбрасываются; `chapter_id` / `scene_id` к нему не применяются).
+  Так хост передаёт «с текущей сцены до конца», развёрнутое в порядке книги.
+- `sql/003-scope-scenes`: CHECK `gen_commands_scope_check` пересоздаётся под тем же именем
+  с уровнем `scenes` (NULL-безопасно); `ADD_CHECK` из 001 старое определение не возвращает.
+
 ## 1.0.0 (не опубликован) — этап 1b: gen_command_jobs, build_id/layer, отмена по слою
 
 ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §4.2a, §6.3–6.4, §7, §13.6).

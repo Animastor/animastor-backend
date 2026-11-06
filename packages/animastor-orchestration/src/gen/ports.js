@@ -7,7 +7,7 @@
 //
 //   planUnits(book, scope, layer)  → Promise<Unit[]>
 //        book  = {bookId, workspaceId, userId}
-//        scope = {level, chapter_id?, scene_id?, unit_id?}
+//        scope = {level, chapter_id?, scene_id?, unit_id?, scene_ids?}  (level 'scenes' → scene_ids, book order)
 //        Unit  = {chapter_id, scene_id, kind, unit_key, build_id, input, scene_hash?}
 //        build_id = the book build at command time (gen_jobs.build_id, §4.2)
 //   buildPayload(job)              → Promise<object>  ComfyUI params etc. (claim, §8.1)

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — orchestration v2, stage 1c: tails of 1b (scope `from_current_scene`, cache clear)
+
+ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§11.1, §13 п.8). Branch `orch-v2/1c`; not deployed.
+
+- `/regenerate` of a v2 book with `scope: from_current_scene` (+ `chapter_id`, `scene_id`) is expanded
+  in the route into `{level:'scenes', scene_ids}` — book order, from the current scene to the last one
+  (the legacy `services/gen-scope.scopeBounds`); unknown scene → 404 `scene_not_found`, missing ids → 400.
+  Core: `scope.level='scenes'` + migration `003-scope-scenes`.
+- `DELETE /api/v1/book/:id/cache` of a v2 book never calls the hub (no `/queue/clear`, no legacy claim
+  release): the book's gen commands / jobs are cancelled first (`orchV2.cancelBook`), then the cache is
+  wiped; answer `{cleared, orchestration:'v2', hub_skipped, commands_cancelled, jobs_cancelled}`.
+  Legacy books: unchanged.
+- Tests: from_current_scene and cache clear (integration), window-generator isolation (legacy-isolation).
+  The isolation test documents a pre-existing legacy bug (not fixed — legacy frozen): in
+  `services/window-generator.cjs` `let chunkCount = 0;` sits inside the comment line, so a legacy
+  book's next window throws after `saveChunk` (no placeholder, no scene counters).
+
 ## Unreleased — orchestration v2, stage 1b: audio on the gen core for `books.orchestration='v2'`
 
 ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (редакция 06.11). Branch `orch-v2/1b`; not

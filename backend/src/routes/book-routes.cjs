@@ -123,6 +123,9 @@ module.exports = function(app, redis, deps) {
         // Stage 118 (B4/M2): capacity-deferral port (injected — the deferral
         // key is owned by the orchestration package).
         clearDeferrals: deps.clearDeferrals,
+        // Orchestration v2 (stage 1c): a v2 book's cache teardown never calls
+        // the hub — its work is stopped through the gen core instead.
+        orchV2: deps.orchV2,
         log,
     });
 };

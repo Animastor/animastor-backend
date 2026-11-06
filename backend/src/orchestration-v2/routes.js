@@ -15,7 +15,10 @@
 const fs = require('fs');
 const path = require('path');
 
+const { scopeBounds } = require('../services/gen-scope');
+
 const LEGACY_TO_SCOPE = Object.freeze({ whole_book: 'book', current_chapter: 'chapter', current_scene: 'scene' });
+const FROM_CURRENT_SCENE = 'from_current_scene';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function sendGenError(res, err, context) {
@@ -123,6 +126,23 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         return null;
     }
 
+    /** from_current_scene → {level:'scenes', scene_ids:[current … last]} in book order (legacy scopeBounds). */
+    function expandFromCurrentScene(bookId, body) {
+        const chapterId = typeof body.chapter_id === 'string' ? body.chapter_id : null;
+        const sceneId = typeof body.scene_id === 'string' ? body.scene_id : null;
+        if (!chapterId || !sceneId) {
+            return { status: 400, error: { code: 'bad_request', error: 'chapter_id and scene_id are required for scope from_current_scene' } };
+        }
+        const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
+        if (!loaded) return { status: 404, error: { code: 'book_not_found', error: 'book not found' } };
+        const all = book.collectScenes(loaded).filter((s) => s.chapter_id && s.scene_id);
+        const { startIndex, endIndex } = scopeBounds({ scope: FROM_CURRENT_SCENE, chapter_id: chapterId, scene_id: sceneId }, all);
+        if (endIndex <= startIndex) {
+            return { status: 404, error: { code: 'scene_not_found', error: `scene ${chapterId}/${sceneId} is not in the book` } };
+        }
+        return { scope: { level: 'scenes', scene_ids: all.slice(startIndex, endIndex).map((s) => s.scene_id) } };
+    }
+
     async function regenerate(req, res) {
         const { bookId } = req.params;
         if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
@@ -136,11 +156,21 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             return res.status(409).json({ code: 'v2_layer_not_supported_yet', error: `orchestration v2 (stage 1) supports audio only`, worker_types: unsupported });
         }
         const legacyScope = body.scope || 'whole_book';
-        const level = LEGACY_TO_SCOPE[legacyScope];
-        if (!level) return res.status(409).json({ code: 'v2_scope_not_supported_yet', error: `scope ${legacyScope} is not supported on orchestration v2 yet` });
-        const scope = { level };
-        if (body.chapter_id) scope.chapter_id = String(body.chapter_id);
-        if (body.scene_id && level === 'scene') scope.scene_id = String(body.scene_id);
+        let scope;
+        if (legacyScope === FROM_CURRENT_SCENE) {
+            // ADR §11.1 / §13 п.8 (1c): «from the current scene to the end» is expanded
+            // HERE into an explicit list — book order, [current, last) exactly as the
+            // legacy gen-scope.scopeBounds; the command stores {level:'scenes', scene_ids}.
+            const r = expandFromCurrentScene(bookId, body);
+            if (r.error) return res.status(r.status).json(r.error);
+            scope = r.scope;
+        } else {
+            const level = LEGACY_TO_SCOPE[legacyScope];
+            if (!level) return res.status(409).json({ code: 'v2_scope_not_supported_yet', error: `scope ${legacyScope} is not supported on orchestration v2 yet` });
+            scope = { level };
+            if (body.chapter_id) scope.chapter_id = String(body.chapter_id);
+            if (body.scene_id && level === 'scene') scope.scene_id = String(body.scene_id);
+        }
         try {
             const workspaceId = await bookRepo.getWorkspaceId(bookId);
             if (!workspaceId) return res.status(409).json({ code: 'book_without_workspace', error: 'book has no workspace' });
@@ -160,7 +190,8 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 clientActionId, enabledLayers,
             });
             const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
-            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} scope=${legacyScope} summary=${JSON.stringify(r.summary)} client_action_id=${clientActionId || '-'}`);
+            const scopeLog = scope.level === 'scenes' ? `${legacyScope}→scenes[${scope.scene_ids.length}] from ${scope.scene_ids[0]}` : legacyScope;
+            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} scope=${scopeLog} summary=${JSON.stringify(r.summary)} client_action_id=${clientActionId || '-'}`);
             return res.json({
                 book_id: bookId,
                 orchestration: 'v2',
@@ -255,7 +286,16 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         return { ...r, incoming_removed: removed };
     }
 
-    return { mountInternal, regenerate, cancelGeneration, cancelWorker, onLayersDisabled, progressPanel, purgeBook, isV2Book: host.isV2Book };
+    /**
+     * Stop every v2 command / job of the book (DELETE /book/:id/cache — the v2
+     * counterpart of the hub queue clear). Master flag off → nothing runs → null.
+     */
+    async function cancelBook(bookId, cancelledBy) {
+        if (!host.isEnabled()) return null;
+        return host.orch().cancel({ bookId }, { cancelledBy: cancelledBy || 'cache-clear' });
+    }
+
+    return { mountInternal, regenerate, cancelGeneration, cancelWorker, onLayersDisabled, progressPanel, purgeBook, cancelBook, isV2Book: host.isV2Book };
 }
 
 module.exports = { createV2Routes, LEGACY_TO_SCOPE };

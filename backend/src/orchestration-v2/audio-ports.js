@@ -36,6 +36,7 @@ function deps(overrides = {}) {
 function inScope(scope, s) {
     if (!scope || scope.level === 'book') return true;
     if (scope.level === 'chapter') return s.chapter_id === scope.chapter_id;
+    if (scope.level === 'scenes') return Array.isArray(scope.scene_ids) && scope.scene_ids.includes(s.scene_id);
     return s.scene_id === scope.scene_id && (!scope.chapter_id || s.chapter_id === scope.chapter_id);
 }
 
@@ -105,7 +106,7 @@ function createAudioPorts(opts = {}) {
             if (!s.chapter_id || !s.scene_id || !inScope(scope, s)) continue;
             out.push(...sceneUnits(loadedBook, s, bookRef.bookId, buildId));
         }
-        log(`[ORCH-V2] planUnits ${bookRef.bookId} scope=${scope.level}${scope.chapter_id ? '/' + scope.chapter_id : ''}${scope.scene_id ? '/' + scope.scene_id : ''}: ${out.length} audio chunk(s)`);
+        log(`[ORCH-V2] planUnits ${bookRef.bookId} scope=${scope.level}${scope.level === 'scenes' ? `[${scope.scene_ids.length}]` : ''}${scope.chapter_id ? '/' + scope.chapter_id : ''}${scope.scene_id ? '/' + scope.scene_id : ''}: ${out.length} audio chunk(s)`);
         return out;
     }
 

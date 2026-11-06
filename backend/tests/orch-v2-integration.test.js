@@ -108,6 +108,11 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         };
         require('../src/routes/book/generation-routes.cjs')(a, redis, deps);
         require('../src/routes/book/progress-panel.cjs')(a, redis, deps);
+        require('../src/routes/book/cache-routes.cjs')(a, {
+            redis, config, storage: { postgres: { query } }, path, fs,
+            getAllChunks: async () => [], getChunk: async () => null, cleanBookRedisKeys: async () => {},
+            purgeAssistantForBook: async () => {}, orchV2: r, log: () => {},
+        });
     }
 
     async function wireApp() {
@@ -396,6 +401,57 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect(fs.existsSync(path.join(incoming, `${t.job_id}.1.dead.tmp`))).to.equal(false);
         expect(fs.existsSync(path.join(incoming, `00000000-0000-4000-8000-000000000000.1.other.tmp`))).to.equal(true, 'other books\' files stay');
         expect(fetchCalls.filter((u) => u.includes('/queue/clear'))).to.deep.equal([]);
+    });
+
+    it('from_current_scene → scope {level:scenes, scene_ids: current…end} в порядке книги; выдача в этом порядке; ошибки 400/404', async () => {
+        const r = await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-2' });
+        expect(r.status).to.equal(200);
+        expect(r.body.summary).to.deep.equal({ jobs_created: 2, joined: 0, skipped_ready: 0 });
+        expect(r.body.scope).to.equal('from_current_scene');
+        const stored = (await query(`SELECT scope FROM gen_commands WHERE command_id = $1`, [r.body.command_id])).rows[0].scope;
+        expect(stored).to.deep.equal({ level: 'scenes', scene_ids: ['sc-2', 'sc-3'] });
+        const order = [];
+        for (let i = 0; i < 2; i += 1) order.push((await worker.claim()).body.task.scene_id);
+        expect(order).to.deep.equal(['sc-2', 'sc-3']);
+        expect((await worker.claim()).body.task).to.equal(null, 'sc-1 (before the current scene) is not in the command');
+        // the same expansion as the legacy gen-scope.scopeBounds
+        const all = vbook.collectScenes(books.get(bookId));
+        const { startIndex, endIndex } = require('../src/services/gen-scope').scopeBounds({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-2' }, all);
+        expect(all.slice(startIndex, endIndex).map((x) => x.scene_id)).to.deep.equal(stored.scene_ids);
+        // the first scene of the book → the whole book
+        const first = await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-1', rebuild_all: false });
+        expect(first.body.summary).to.deep.equal({ jobs_created: 1, joined: 2, skipped_ready: 0 });
+        expect((await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'nope' })).body.code).to.equal('scene_not_found');
+        expect((await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'nope' })).status).to.equal(404);
+        expect((await regenerate({ scope: 'from_current_scene' })).status).to.equal(400);
+    });
+
+    it('DELETE /book/:id/cache для v2-книги: хаб не вызывается, работа книги отменена (до стирания); legacy-книга — хаб вызывается', async () => {
+        await regenerate({ scope: 'whole_book' });
+        const t = (await worker.claim()).body.task;
+        fetchCalls.length = 0;
+        const r = await api('DELETE', `/api/v1/book/${bookId}/cache`);
+        expect(r.status).to.equal(200);
+        expect(r.body).to.include({ cleared: true, orchestration: 'v2', hub_skipped: true, commands_cancelled: 1, jobs_cancelled: 3 });
+        expect(fetchCalls.filter((u) => u.includes('/queue/clear'))).to.deep.equal([], 'hub untouched for a v2 book');
+        expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND status IN ('queued','running')`, [bookId])).to.equal(0);
+        expect((await worker.beacon(t.job_id)).body.cancel).to.include(t.job_id);
+        expect((await worker.put(t)).status).to.equal(409, 'a late result cannot re-create the wiped asset');
+        expect(await count(`SELECT count(*) AS n FROM scene_assets WHERE book_id = $1`, [bookId])).to.equal(0);
+
+        // control: a legacy book still goes through the hub
+        const legacyId = `${bookId}-legacy`;
+        await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'legacy')`, [legacyId, workspaceId, userId]);
+        try {
+            bookFlag.invalidate();
+            fetchCalls.length = 0;
+            const l = await api('DELETE', `/api/v1/book/${legacyId}/cache`);
+            expect(l.status).to.equal(200);
+            expect(l.body.orchestration).to.equal(undefined);
+            expect(fetchCalls.filter((u) => u.includes(`/queue/clear?book_id=${legacyId}`))).to.have.length.greaterThan(0);
+        } finally {
+            await query(`DELETE FROM books WHERE book_id = $1`, [legacyId]);
+        }
     });
 
     it('payload аудио-чанка = workflow старого пути (тот же buildSegmentWorkflow, байт-в-байт)', async () => {

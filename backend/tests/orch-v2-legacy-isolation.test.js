@@ -191,4 +191,44 @@ describe('orchestration v2 — legacy isolation (one predicate, fail-closed)', f
         expect(res.code).to.equal(503);
         expect(res.body.code).to.equal('orch_v2_disabled');
     });
+    it('window-generator: the next window of a v2 book writes no legacy chunk / scene counters (placeholders only); legacy control writes them; PG error → v2', async () => {
+        async function runWindow(bookId) {
+            const { redis, writes } = trackingRedis();
+            const saved = [];
+            const placeholders = [];
+            const wg = require('../src/services/window-generator.cjs')({
+                redis,
+                txtImporter: { bootstrapNextWindow: async () => ({ all_done: false, added_scenes: 2, chapter: { chapter: 'ch-9', scenes: [{ scene_id: 'sc-a', type: 'narration' }, { scene_id: 'sc-b', type: 'narration' }] } }) },
+                genSessionRepo: { updateSession: async () => {}, getSessionsByStatus: async () => [], setBookCompletionStatus: async () => {} },
+                state: {}, activeScenes: {},
+                placeholderAudio: { ensureAllPlaceholderAudio: async (_b, _book, scenes) => { placeholders.push(...scenes); return { created: scenes.length, skipped: 0 }; } },
+                saveChunk: async (id, data) => { saved.push({ id, data }); },
+                config,
+            });
+            await wg.runBackgroundWindowGeneration(bookId, 'sess-1', { buildId: BUILD });
+            return { saved, placeholders, writes };
+        }
+        bookFlag.invalidate();
+        const v2 = await runWindow(V2);
+        expect(v2.saved).to.deep.equal([], 'no legacy chunk record for a v2 book');
+        expect(v2.writes.filter((w) => w.args.includes(V2))).to.deep.equal([], 'no scene counters / Redis writes for the v2 book');
+        expect(v2.placeholders.map((x) => x.scene_id)).to.deep.equal(['sc-a', 'sc-b'], 'placeholders are still created');
+
+        const leg = await runWindow(LEG);
+        expect(leg.saved.map((x) => x.data.scene_id)).to.deep.equal(['sc-a', 'sc-b'], 'legacy book: chunk records written');
+        // NOTE (found in 1c, NOT fixed — legacy is frozen): on main since 779cc3e
+        // `let chunkCount = 0;` sits inside the comment line «— 3. Create chunks…», so
+        // the legacy loop throws ReferenceError right after saveChunk → no placeholder
+        // and no scene counters for a legacy book's next window. When it is fixed this
+        // control flips: placeholders ['sc-a','sc-b'] + BOOK_SCENE_TOTAL written.
+        expect(leg.placeholders).to.deep.equal([], 'pre-existing legacy bug (chunkCount) — see the note');
+
+        // fail-closed: unknown answer (PG error) → treated as v2 → nothing legacy written
+        try {
+            bookFlag._setRepoForTest({ getOrchestration: async () => { throw new Error('connection reset'); } });
+            bookFlag.invalidate();
+            const err = await runWindow(LEG);
+            expect(err.saved).to.deep.equal([]);
+        } finally { bookFlag._setRepoForTest(null); bookFlag.invalidate(); }
+    });
 });

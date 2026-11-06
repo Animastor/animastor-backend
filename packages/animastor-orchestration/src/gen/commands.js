@@ -17,17 +17,29 @@ const {
 const { checkLane } = require('./ports');
 
 const COMMAND_KINDS = Object.freeze(['regenerate', 'generate_all']);
-const SCOPE_LEVELS = Object.freeze(['book', 'chapter', 'scene', 'unit']);
+const SCOPE_LEVELS = Object.freeze(['book', 'chapter', 'scenes', 'scene', 'unit']);
+const MAX_SCOPE_SCENES = 10_000;
 
 function normaliseScope(scope) {
     const s = scope && typeof scope === 'object' ? scope : null;
-    if (!s || !SCOPE_LEVELS.includes(s.level)) throw new GenError('bad_request', 400, 'scope.level must be book|chapter|scene|unit');
+    if (!s || !SCOPE_LEVELS.includes(s.level)) throw new GenError('bad_request', 400, 'scope.level must be book|chapter|scenes|scene|unit');
     const out = { level: s.level };
     const opt = (k) => { if (s[k] !== undefined && s[k] !== null) out[k] = requireText(s[k], `scope.${k}`); };
     opt('chapter_id'); opt('scene_id'); opt('unit_id');
     if (s.level === 'chapter' && !out.chapter_id) throw new GenError('bad_request', 400, 'scope.chapter_id required for level=chapter');
     if ((s.level === 'scene' || s.level === 'unit') && !out.scene_id) throw new GenError('bad_request', 400, `scope.scene_id required for level=${s.level}`);
     if (s.level === 'unit' && !out.unit_id) throw new GenError('bad_request', 400, 'scope.unit_id required for level=unit');
+    if (s.level === 'scenes') {
+        // ADR §11.1: an explicit, ordered list of scenes (e.g. «from the current
+        // scene to the end», expanded by the host in book order). Order kept,
+        // duplicates dropped; chapter_id / scene_id do not apply.
+        if (!Array.isArray(s.scene_ids) || s.scene_ids.length === 0) throw new GenError('bad_request', 400, 'scope.scene_ids (non-empty array) required for level=scenes');
+        if (s.scene_ids.length > MAX_SCOPE_SCENES) throw new GenError('bad_request', 400, `scope.scene_ids: at most ${MAX_SCOPE_SCENES}`);
+        out.scene_ids = [...new Set(s.scene_ids.map((x, i) => requireText(x, `scope.scene_ids[${i}]`)))];
+        delete out.chapter_id; delete out.scene_id; delete out.unit_id;
+    } else if (s.scene_ids !== undefined) {
+        throw new GenError('bad_request', 400, 'scope.scene_ids applies only to level=scenes');
+    }
     return out;
 }
 

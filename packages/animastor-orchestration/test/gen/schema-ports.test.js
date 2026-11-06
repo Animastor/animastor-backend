@@ -90,6 +90,34 @@ describe('gen v2 — migration 002 over 1a data (ADR §4.2, §4.2a)', function (
     });
 });
 
+describe('gen v2 — migration 003: scope level scenes (ADR §11.1, stage 1c)', function () {
+    this.timeout(20000);
+    let ctx;
+    beforeEach(async () => { ctx = await setupDb({ migrate: false }); });
+    afterEach(async () => { await ctx.teardown(); });
+
+    it('over 1b data: the old CHECK is replaced in place (same name), scenes needs a non-empty scene_ids array; rerun = no change', async () => {
+        for (const m of gen.MIGRATIONS.slice(0, 2)) for (const sql of m.statements) await ctx.q(sql);   // 1b schema
+        const ws = uuid();
+        await ctx.q(`INSERT INTO books (book_id, workspace_id, orchestration) VALUES ('b1', $1, 'v2')`, [ws]);
+        const ins = (scope) => ctx.q(`INSERT INTO gen_commands (workspace_id, user_id, book_id, kind, scope, layers) VALUES ($1, $1, 'b1', 'regenerate', $2::jsonb, '{audio}')`, [ws, scope]);
+        await ins('{"level":"chapter","chapter_id":"c"}');
+        await assert.rejects(ins('{"level":"scenes","scene_ids":["s1"]}'), /gen_commands_scope_check/, '1b CHECK has no scenes');
+        await gen.migrate(ctx.pool);
+        const def1 = (await ctx.q(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'gen_commands_scope_check' AND conrelid = 'gen_commands'::regclass`)).rows;
+        assert.equal(def1.length, 1);
+        assert.match(def1[0].d, /scenes/);
+        await ins('{"level":"scenes","scene_ids":["s1","s2"]}');
+        for (const bad of ['{"level":"scenes"}', '{"level":"scenes","scene_ids":[]}', '{"level":"scenes","scene_ids":"s1"}', '{"level":"x"}']) {
+            await assert.rejects(ins(bad), /gen_commands_scope_check/, bad);
+        }
+        await gen.migrate(ctx.pool);                       // 001's ADD_CHECK must NOT bring the old definition back
+        const def2 = (await ctx.q(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'gen_commands_scope_check' AND conrelid = 'gen_commands'::regclass`)).rows;
+        assert.deepEqual(def2, def1);
+        assert.equal(Number((await ctx.q(`SELECT count(*) AS n FROM gen_commands`)).rows[0].n), 2, 'existing rows kept');
+    });
+});
+
 describe('gen v2 — ports (contract + validation)', () => {
     const fakePool = { connect() {}, query() {} };
     const base = () => makePorts({ outputDir: '/tmp' }, {}).ports;

@@ -31,6 +31,20 @@ describe('gen v2 — createCommand / cancel / beacon (ADR §6)', function () {
         }
     });
 
+    it("scope level 'scenes': only the listed scenes, stored as given (order kept, duplicates dropped); bad shapes → 400", async () => {
+        const r = await cmd({ scope: { level: 'scenes', scene_ids: ['sc-2', 'sc-3', 'sc-2'] } });
+        assert.deepEqual(r.summary, { jobs_created: 4, joined: 0, skipped_ready: 0 });
+        const scenes = (await ctx.q(`SELECT DISTINCT scene_id FROM gen_jobs ORDER BY scene_id`)).rows.map((x) => x.scene_id);
+        assert.deepEqual(scenes, ['sc-2', 'sc-3']);
+        const stored = (await ctx.q(`SELECT scope FROM gen_commands WHERE command_id = $1`, [r.command_id])).rows[0].scope;
+        assert.deepEqual(stored, { level: 'scenes', scene_ids: ['sc-2', 'sc-3'] });
+        assert.deepEqual(require('../../src/gen/commands').normaliseScope({ level: 'scenes', scene_ids: ['a'], chapter_id: 'ch-1', scene_id: 'x' }), { level: 'scenes', scene_ids: ['a'] });
+        for (const bad of [{ level: 'scenes' }, { level: 'scenes', scene_ids: [] }, { level: 'scenes', scene_ids: [''] }, { level: 'scenes', scene_ids: 'sc-1' },
+            { level: 'book', scene_ids: ['sc-1'] }]) {
+            await assert.rejects(cmd({ scope: bad }), (e) => e.status === 400, JSON.stringify(bad));
+        }
+    });
+
     it('double createCommand with the same client_action_id → ONE command, no duplicate jobs (sequential and concurrent)', async () => {
         const a = await cmd({ clientActionId: 'click-1' });
         const b = await cmd({ clientActionId: 'click-1' });

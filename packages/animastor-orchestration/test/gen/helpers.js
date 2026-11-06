@@ -124,6 +124,7 @@ function makePorts(ctx, plan, overrides = {}) {
                 if (scope.level === 'chapter' && scope.chapter_id !== ch) continue;
                 for (const [sc, n] of Object.entries(scenes)) {
                     if ((scope.level === 'scene' || scope.level === 'unit') && scope.scene_id !== sc) continue;
+                    if (scope.level === 'scenes' && !scope.scene_ids.includes(sc)) continue;
                     if (layer === 'audio') {
                         for (let i = 1; i <= n; i += 1) {
                             units.push({
