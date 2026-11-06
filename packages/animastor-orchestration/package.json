@@ -18,7 +18,6 @@
     },
     "files": [
         "src/",
-        "test/",
         "README.md",
         "LICENSE",
         "CHANGELOG.md"

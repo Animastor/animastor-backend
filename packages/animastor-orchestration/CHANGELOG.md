@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.0.0 (не опубликован) — этап 1c: scope `scenes`
+## 1.0.0 (2026-11-06) — первая публикация: оркестрация v2, ядро `gen` (этапы 1a–1c)
+
+Опубликованный пакет: `src/` (`src/gen` с миграциями `sql/001–003`, `src/legacy` — код 0.3.x),
+README, LICENSE, CHANGELOG; `test/` и фикстуры в пакет не входят. Ниже — по этапам.
+
+### Этап 1c: scope `scenes`
 
 ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §11.1, §13 п.8).
 
@@ -10,7 +15,7 @@ ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §11.1, §13 п.
 - `sql/003-scope-scenes`: CHECK `gen_commands_scope_check` пересоздаётся под тем же именем
   с уровнем `scenes` (NULL-безопасно); `ADD_CHECK` из 001 старое определение не возвращает.
 
-## 1.0.0 (не опубликован) — этап 1b: gen_command_jobs, build_id/layer, отмена по слою
+### Этап 1b: gen_command_jobs, build_id/layer, отмена по слою
 
 ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §4.2a, §6.3–6.4, §7, §13.6).
 
@@ -28,12 +33,12 @@ ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §4.2a, §6.3–
   `orchestration.isV2Book`, fail-closed) — command gate, reconcile, scheduler, scene window
   пропускают v2-книги.
 
-## 1.0.0 (2026-11-05) — оркестрация v2, этап 1a: ядро `gen` + схема PG
+### Этап 1a (2026-11-05): ядро `gen` + схема PG
 
 ADR: animastor-docs `architecture/ORCHESTRATION_V2.md` (§3, §4, §6–§10, §13). Без
 подключения к роутам backend, без выкатки.
 
-### Changed (breaking только по раскладке файлов)
+#### Changed (breaking только по раскладке файлов)
 
 - Весь код 0.3.x перенесён без изменений логики в `src/legacy/`
   (`legacy/host`, `legacy/orchestration`, `legacy/runtime`, `legacy/index.js`).
@@ -41,7 +46,7 @@ ADR: animastor-docs `architecture/ORCHESTRATION_V2.md` (§3, §4, §6–§10, §
   геттеры сохранены), плюс новое пространство `gen`. Глубокие импорты
   `src/runtime/*` / `src/orchestration/*` → `src/legacy/runtime/*` / `src/legacy/orchestration/*`.
 
-### Added — `gen` (src/gen/)
+#### Added — `gen` (src/gen/)
 
 - `migrate(pool)` — идемпотентная миграция (`sql/001-gen-core.js`): `gen_commands`,
   `gen_jobs` (ADR §4.1–4.2; CHECK по статусам / kind / executor / связке kind↔executor /
@@ -60,7 +65,7 @@ ADR: animastor-docs `architecture/ORCHESTRATION_V2.md` (§3, §4, §6–§10, §
   кадрам + RMS-тишина через ffmpeg, порог параметром; png / mp4 magic).
 - Зависимостей не добавлено: pg-клиент передаёт хост (`pg` — только devDependency тестов).
 
-### Tests
+#### Tests
 
 - `npm run test:gen` — 43 теста на стеке animastor-test (чистая схема на тест; 1 тест реального ffmpeg-декодера пропускается без ffmpeg). Legacy-набор
   `npm test` без изменений (59).
