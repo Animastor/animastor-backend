@@ -281,6 +281,13 @@ CREATE TABLE IF NOT EXISTS workers (
     last_seen       BIGINT,
     version         TEXT,
     metadata        JSONB,
+    -- Fresh worker logs (§8.5): opt-in per worker. TRUE only for
+    -- platform-operated workers — mode='system' or a workspace owned by an
+    -- admin. The repository computes the initial value from ownership
+    -- (NOTE: runMigrations splits SCHEMA_SQL on the semicolon character,
+    -- so comments in this table must never contain one) and the WLOG-1
+    -- migration backfills pre-existing rows ONCE.
+    log_shipping    BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
     -- FAIL CLOSED ownership anchor: only Animastor-operated workers may be
     -- workspace-less — private/share workers ALWAYS belong to a workspace.
@@ -1875,6 +1882,30 @@ async function runMigrations() {
         console.log('[PG] WL-2: workers.revoked_at seconds check ensured');
     } catch (err) {
         console.error('[PG] WL-2 workers.revoked_at normalization failed:', err.message);
+    }
+
+    // ── WLOG-1: workers.log_shipping opt-in (§8.5, fresh worker logs) ────
+    // The column is added ONCE. Platform-operated workers (mode='system' or
+    // a workspace whose owner has role='admin') ship logs by default; tenant
+    // workers stay opt-out. The backfill runs only on the migration that
+    // introduces the column, so a value changed later is never re-flipped.
+    try {
+        const col = await query(`SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'workers' AND column_name = 'log_shipping'`);
+        if (!col.rows[0]) {
+            await query(`ALTER TABLE workers ADD COLUMN log_shipping BOOLEAN NOT NULL DEFAULT FALSE`);
+            const backfill = await query(`
+                UPDATE workers w SET log_shipping = TRUE
+                 WHERE w.mode = 'system'
+                    OR EXISTS (
+                        SELECT 1 FROM workspaces ws
+                        JOIN users u ON u.user_id = ws.owner_user_id
+                        WHERE ws.id = w.workspace_id AND u.role = 'admin'
+                    )`);
+            console.log(`[PG] WLOG-1: workers.log_shipping added (platform default true on ${backfill.rowCount} row(s))`);
+        }
+    } catch (err) {
+        console.error('[PG] WLOG-1 workers.log_shipping migration failed:', err.message);
     }
 
     // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
