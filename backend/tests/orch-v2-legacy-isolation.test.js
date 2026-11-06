@@ -216,12 +216,10 @@ describe('orchestration v2 — legacy isolation (one predicate, fail-closed)', f
 
         const leg = await runWindow(LEG);
         expect(leg.saved.map((x) => x.data.scene_id)).to.deep.equal(['sc-a', 'sc-b'], 'legacy book: chunk records written');
-        // NOTE (found in 1c, NOT fixed — legacy is frozen): on main since 779cc3e
-        // `let chunkCount = 0;` sits inside the comment line «— 3. Create chunks…», so
-        // the legacy loop throws ReferenceError right after saveChunk → no placeholder
-        // and no scene counters for a legacy book's next window. When it is fixed this
-        // control flips: placeholders ['sc-a','sc-b'] + BOOK_SCENE_TOTAL written.
-        expect(leg.placeholders).to.deep.equal([], 'pre-existing legacy bug (chunkCount) — see the note');
+        // 1d: `let chunkCount = 0;` no longer sits inside the comment line (bug since 779cc3e) —
+        // the legacy window now gets its placeholders and scene counters again.
+        expect(leg.placeholders.map((x) => x.scene_id)).to.deep.equal(['sc-a', 'sc-b'], 'legacy book: placeholders created');
+        expect(leg.writes.some((w) => w.cmd === 'set' && w.args.startsWith(config.BOOK_SCENE_TOTAL(LEG)))).to.equal(true, 'legacy book: scene counters written');
 
         // fail-closed: unknown answer (PG error) → treated as v2 → nothing legacy written
         try {

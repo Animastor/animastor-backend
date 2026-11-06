@@ -66,7 +66,8 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                 const sceneCount = result.added_scenes || 0;
                 await progress(`⟳ Creating ${sceneCount} scenes...`);
 
-                // — 3. Create chunks for each new scene in Redis —                    let chunkCount = 0;
+                // — 3. Create chunks for each new scene in Redis —
+                let chunkCount = 0;
                 if (result.chapter && result.chapter.scenes) {
                     const phScenes = [];
                     // Orchestration v2 (1b/E): a v2 book gets no legacy Redis chunk

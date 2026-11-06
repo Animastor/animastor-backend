@@ -13,9 +13,10 @@ ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§11.1, §13 п.8). Branc
   wiped; answer `{cleared, orchestration:'v2', hub_skipped, commands_cancelled, jobs_cancelled}`.
   Legacy books: unchanged.
 - Tests: from_current_scene and cache clear (integration), window-generator isolation (legacy-isolation).
-  The isolation test documents a pre-existing legacy bug (not fixed — legacy frozen): in
-  `services/window-generator.cjs` `let chunkCount = 0;` sits inside the comment line, so a legacy
-  book's next window throws after `saveChunk` (no placeholder, no scene counters).
+- Fix (legacy, stage 1d, owner decision): `services/window-generator.cjs` — `let chunkCount = 0;` was
+  inside the comment line «— 3. Create chunks…» since 779cc3e, so a legacy book's next window threw
+  ReferenceError right after `saveChunk` (no placeholder, no scene counters). Split into two lines; the
+  isolation test's legacy control now expects the placeholders and the counters.
 
 ## Unreleased — orchestration v2, stage 1b: audio on the gen core for `books.orchestration='v2'`
 
