@@ -16,9 +16,9 @@
 
 const { expect } = require('chai');
 const { createMockRedis } = require('./mocks/redis-mock');
-const { bindHostModules, clearHostBindings } = require('../src/host/host-bindings');
-const persistencePort = require('../src/runtime/persistence-port');
-const progressEventsPort = require('../src/runtime/progress-events-port');
+const { bindHostModules, clearHostBindings } = require('../src/legacy/host/host-bindings');
+const persistencePort = require('../src/legacy/runtime/persistence-port');
+const progressEventsPort = require('../src/legacy/runtime/progress-events-port');
 
 const BOOK = 'ba_test_quota_leak';
 const CH = 'ch-q1';
@@ -64,12 +64,12 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
 
     function freshModules() {
         for (const rel of [
-            '../src/runtime/dispatch-engine',
-            '../src/runtime/counter-reconciliation',
-            '../src/runtime/reconciliation-engine',
-            '../src/runtime/runtime-scheduler',
-            '../src/runtime/command-gate',
-            '../src/runtime/worker-health',
+            '../src/legacy/runtime/dispatch-engine',
+            '../src/legacy/runtime/counter-reconciliation',
+            '../src/legacy/runtime/reconciliation-engine',
+            '../src/legacy/runtime/runtime-scheduler',
+            '../src/legacy/runtime/command-gate',
+            '../src/legacy/runtime/worker-health',
         ]) {
             delete require.cache[require.resolve(rel)];
         }
@@ -145,7 +145,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
         progressEventsPort._resetProgressEventsPort();
     });
 
-    const dispatch = (sc, stage = 'audio') => require('../src/runtime/dispatch-engine')
+    const dispatch = (sc, stage = 'audio') => require('../src/legacy/runtime/dispatch-engine')
         .dispatchStage(redis, BOOK, CH, sc, stage, { book_id: BOOK }, BUILD);
 
     // ── (а) ─────────────────────────────────────────────
@@ -181,7 +181,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
             expect(meta.jobs_enqueued).to.equal(true);
             expect(meta.jobs).to.equal(7);
             expect(meta.quota_owned).to.equal(true);
-            require('../src/runtime/dispatch-engine').stopDispatchRenewal?.(BOOK, CH, 'sc-c', 'audio');
+            require('../src/legacy/runtime/dispatch-engine').stopDispatchRenewal?.(BOOK, CH, 'sc-c', 'audio');
         });
     });
 
@@ -193,7 +193,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
                 { dispatched: false, jobs: 0, completed: true, reason: 'recovered_via_completeChunk' },
                 { dispatched: false, jobs: 0, reason: 'no_jobs_generated', retryable: true },
             ];
-            const engine = require('../src/runtime/dispatch-engine');
+            const engine = require('../src/legacy/runtime/dispatch-engine');
             let backpressure = 0;
             for (let tick = 0; tick < 6; tick++) {
                 for (let i = 0; i < 17; i++) {
@@ -226,7 +226,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
             assetStates['sc-r'] = { audio: AssetState.PENDING };
             pgAssets['sc-r:audio'] = { status: 'ready' };
             committed['sc-r'] = true;
-            const rec = require('../src/runtime/reconciliation-engine');
+            const rec = require('../src/legacy/runtime/reconciliation-engine');
             const out = await rec.applyFix(redis, { action: 'RELEASE_STALE_LEASE', scene: { bookId: BOOK, chapterId: CH, sceneId: 'sc-r' } });
             expect(out.success).to.equal(true);
             expect(markDirtyCalls).to.deep.equal([]);
@@ -240,13 +240,13 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
             assetStates['sc-n'] = { audio: AssetState.GENERATING };
             pgAssets['sc-n:audio'] = { status: 'ready' };
             committed['sc-n'] = false;
-            const rec = require('../src/runtime/reconciliation-engine');
+            const rec = require('../src/legacy/runtime/reconciliation-engine');
             await rec.applyFix(redis, { action: 'RELEASE_STALE_LEASE', scene: { bookId: BOOK, chapterId: CH, sceneId: 'sc-n' } });
             expect(markDirtyCalls).to.deep.equal([{ s: 'sc-n', assets: ['audio'] }]);
         });
 
         it('committed but PG stale ⇒ not trusted here (left to the dispatch path + version gate)', async () => {
-            const rec = require('../src/runtime/reconciliation-engine');
+            const rec = require('../src/legacy/runtime/reconciliation-engine');
             pgAssets['sc-s:audio'] = { status: 'stale' };
             committed['sc-s'] = true;
             expect(await rec.isStageCommittedReady(BOOK, CH, 'sc-s', 'audio')).to.equal(false);
@@ -270,7 +270,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
         it('BA snapshot: 8 phantom dispatches, counter 8/8 ⇒ cancelled on the 2nd sweep, counter 0', async () => {
             for (let i = 0; i < 8; i++) await phantom(`sc-p${i}`);
             await redis.set(COUNTER, '8');
-            const cr = require('../src/runtime/counter-reconciliation');
+            const cr = require('../src/legacy/runtime/counter-reconciliation');
 
             const first = await cr.reconcileCounters(redis);
             // first sweep only marks suspects (no cancel on a single observation)
@@ -295,7 +295,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
             await redis.hset('animastor:running', 'job-1', JSON.stringify({ dispatch_id: 'dispatch-sc-live-running', job_type: 'audio' }));
             await redis.rpush('animastor:queue:audio', JSON.stringify({ job_id: 'job-2', dispatch_id: 'dispatch-sc-live-queue' }));
             await redis.set(COUNTER, '5');
-            const cr = require('../src/runtime/counter-reconciliation');
+            const cr = require('../src/legacy/runtime/counter-reconciliation');
             await cr.reconcileCounters(redis);
             await cr.reconcileCounters(redis);
             expect(await redis.get(metaKey('sc-dead'))).to.equal(null);
@@ -308,7 +308,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
         it('a lease without metadata keeps the historic semantics (counted, never cancelled)', async () => {
             await redis.set(leaseKey('sc-bare'), 'tok');
             await redis.set(COUNTER, '3');
-            const cr = require('../src/runtime/counter-reconciliation');
+            const cr = require('../src/legacy/runtime/counter-reconciliation');
             await cr.reconcileCounters(redis);
             await cr.reconcileCounters(redis);
             expect(await redis.get(leaseKey('sc-bare'))).to.equal('tok');
@@ -320,16 +320,16 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
     describe('(е) a command without movement does not hang silently', () => {
         it('backpressure with NO worker of the type alive anywhere ⇒ blocked no_worker', async () => {
             await redis.set(COUNTER, '8'); // full quota
-            const gate = require('../src/runtime/command-gate');
+            const gate = require('../src/legacy/runtime/command-gate');
             // simulate the scheduler branch: no heartbeat keys exist in the mock
-            const wh = require('../src/runtime/worker-health');
+            const wh = require('../src/legacy/runtime/worker-health');
             expect(await wh.getAnyAliveCount(redis, 'audio')).to.equal(0);
             await gate.blockStageNoWorker(redis, BOOK, CH, 'sc-x', 'audio');
             expect(blockedStages).to.deep.equal([{ s: 'sc-x', type: 'audio', reason: 'no_worker:audio' }]);
         });
 
         it('a fresh heartbeat of the type (any scope) counts as alive — no block', async () => {
-            const wh = require('../src/runtime/worker-health');
+            const wh = require('../src/legacy/runtime/worker-health');
             await redis.set('animastor:worker:heartbeat:audio:w1', JSON.stringify({ worker_id: 'w1', ts: Date.now(), mode: 'private', workspace_id: 'ws-1' }));
             expect(await wh.getAnyAliveCount(redis, 'audio')).to.equal(1);
             await redis.set('animastor:worker:heartbeat:audio:w2', JSON.stringify({ worker_id: 'w2', ts: Date.now() - 120000 }));
@@ -337,7 +337,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
         });
 
         it('no-progress outcomes fail the command only after the time window AND ≥3 attempts', async () => {
-            const gate = require('../src/runtime/command-gate');
+            const gate = require('../src/legacy/runtime/command-gate');
             const t0 = 1_000_000;
             let np = await gate.noteNoProgress(redis, BOOK, CH, 'sc-np', 'audio', 'no_jobs_generated', t0);
             expect(np.exceeded).to.equal(false);
@@ -355,7 +355,7 @@ describe('reconcile-quota-leak (BA 2026-11-05)', function () {
         });
 
         it('progress resets the window', async () => {
-            const gate = require('../src/runtime/command-gate');
+            const gate = require('../src/legacy/runtime/command-gate');
             await gate.noteNoProgress(redis, BOOK, CH, 'sc-rs', 'audio', 'no_jobs_generated', 1);
             await gate.clearNoProgress(redis, BOOK, CH, 'sc-rs', 'audio');
             const np = await gate.noteNoProgress(redis, BOOK, CH, 'sc-rs', 'audio', 'no_jobs_generated', 2 + gate.NO_PROGRESS_FAIL_MS);

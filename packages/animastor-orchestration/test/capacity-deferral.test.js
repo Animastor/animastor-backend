@@ -19,7 +19,7 @@
 
 const { expect } = require('chai');
 const { createMockRedis } = require('./mocks/redis-mock');
-const { bindHostModules, clearHostBindings } = require('../src/host/host-bindings');
+const { bindHostModules, clearHostBindings } = require('../src/legacy/host/host-bindings');
 
 const BOOK = 'test-stage116-book';
 const CHAPTER = 'ch-stage116';
@@ -68,7 +68,7 @@ describe('Stage 116 (D3): capacity deferral (bounded retry/backoff)', () => {
             }),
         });
 
-        dispatchEngine = require('../src/runtime/dispatch-engine');
+        dispatchEngine = require('../src/legacy/runtime/dispatch-engine');
     });
 
     afterEach(() => {
@@ -253,7 +253,7 @@ describe('Stage 116 (D3): capacity deferral (bounded retry/backoff)', () => {
         });
 
         it('M3: several deferrable reasons are classified (the dominant one is reported)', () => {
-            const { classifyNotSentReasons } = require('../src/runtime/dispatch-outcomes');
+            const { classifyNotSentReasons } = require('../src/legacy/runtime/dispatch-outcomes');
             expect(classifyNotSentReasons(new Map([['no_worker_available', 3], ['duplicate_pending', 1]])))
                 .to.equal('no_worker_available');
             // a real failure keeps the historic semantics

@@ -20,15 +20,15 @@
 // ======================================================
 
 const { expect } = require('chai');
-const { bindHostModules } = require('../src/host/host-bindings');
+const { bindHostModules } = require('../src/legacy/host/host-bindings');
 const {
     OPS, setPersistencePort, _resetPersistencePort,
-} = require('../src/runtime/persistence-port');
+} = require('../src/legacy/runtime/persistence-port');
 const { createMockRedis } = require('./mocks/redis-mock');
 
-const ORCH = require.resolve('../src/orchestration/orchestrator');
-const CALLBACKS = require.resolve('../src/orchestration/scene-callbacks');
-const DISPATCH = require.resolve('../src/runtime/dispatch-engine');
+const ORCH = require.resolve('../src/legacy/orchestration/orchestrator');
+const CALLBACKS = require.resolve('../src/legacy/orchestration/scene-callbacks');
+const DISPATCH = require.resolve('../src/legacy/runtime/dispatch-engine');
 
 const BOOK = 'book-a1';
 const CHAPTER = 'ch-a1';
@@ -188,7 +188,7 @@ describe('Stage 147 — A1: version-gate fallback на строку build_id IS 
     });
 
     it('5. ошибка PG при основном чтении → fail-closed', async () => {
-        const adapter = require('../src/runtime/persistence-port').persistence();
+        const adapter = require('../src/legacy/runtime/persistence-port').persistence();
         adapter.sceneAssets.getAsset = async () => { throw new Error('pg down'); };
         calls.nullRow = { build_id: null, scene_content_version: 5, scene_audio_config_version: 5 };
 

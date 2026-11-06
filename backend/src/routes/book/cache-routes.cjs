@@ -4,7 +4,12 @@
 //
 // ctx fields used here:
 //   { redis, config, storage, path, fs, getAllChunks, getChunk,
-//     cleanBookRedisKeys, purgeAssistantForBook, log }
+//     cleanBookRedisKeys, purgeAssistantForBook, orchV2, log }
+//
+// Orchestration v2 (ADR §13 п.8, stage 1c): for a books.orchestration='v2'
+// book the teardown never calls the hub (no /queue/clear, no legacy claim
+// release) — the book's gen commands / jobs are cancelled in the gen core.
+// The predicate is the fail-closed one (unknown → v2 → hub untouched).
 //
 // Assistant boundary: Assistant data (chat sessions) is purged through the
 // purgeAssistantForBook port — this route must not know the Assistant's
@@ -42,6 +47,20 @@ module.exports = function registerCacheRoutes(app, ctx) {
     app.delete('/api/v1/book/:bookId/cache', async (req, res) => {
         try {
             const { bookId } = req.params;
+            const orchV2 = ctx.orchV2 || null;
+            // decided BEFORE anything is wiped (fail-closed predicate)
+            const isV2 = !!(orchV2 && await orchV2.isV2Book(bookId));
+            // v2: stop the book's work FIRST (the hub holds no state of it), so no
+            // acceptance can re-create an asset row after the wipe below.
+            let v2Stopped = null;
+            if (isV2) {
+                try {
+                    v2Stopped = await orchV2.cancelBook(bookId, 'cache-clear');
+                } catch (cancelErr) {
+                    console.warn(`[CACHE] orchestration v2 cancel failed for ${bookId}: ${cancelErr.message}`);
+                    return res.status(500).json({ cleared: false, orchestration: 'v2', book_id: bookId, error: 'orch_v2_cancel_failed' });
+                }
+            }
 
             // Get build IDs from chunks
             const chunkIds = await getAllChunks(bookId);
@@ -122,6 +141,15 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 await purgeAssistantForBook(bookId);
             } catch (assistantErr) {
                 console.warn(`[CACHE] Assistant data cleanup failed: ${assistantErr.message}`);
+            }
+
+            if (isV2) {
+                log('[CACHE] Cache cleared for', bookId, '(orchestration v2, hub not called;',
+                    v2Stopped ? `${v2Stopped.commands_cancelled} command(s), ${v2Stopped.jobs_cancelled} job(s) cancelled)` : 'v2 disabled — nothing running)');
+                return res.json({
+                    cleared: true, orchestration: 'v2', hub_cleared: false, hub_skipped: true, book_id: bookId, builds_removed: buildIds.size,
+                    commands_cancelled: v2Stopped ? v2Stopped.commands_cancelled : 0, jobs_cancelled: v2Stopped ? v2Stopped.jobs_cancelled : 0,
+                });
             }
 
             // ── Clear gpu-hub queue ──

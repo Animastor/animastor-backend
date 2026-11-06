@@ -26,13 +26,13 @@
 const { expect } = require('chai');
 const path = require('path');
 const state = require('../src/state');
-const orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
-const sceneOrchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/scene-orchestrator');
-const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
-const runtimeScheduler = require('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler');
-const engine = require('../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
+const orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
+const sceneOrchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-orchestrator');
+const dispatchEngine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
+const runtimeScheduler = require('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler');
+const engine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine');
 const { wireProductionSeams, seams } = require('./helpers/wire-seams');
-const persistencePort = require('../node_modules/@animastor/orchestration/src/runtime/persistence-port');
+const persistencePort = require('../node_modules/@animastor/orchestration/src/legacy/runtime/persistence-port');
 const realPersistAdapter = require('../src/storage/runtime-persistence-adapter');
 // NOTE: deliberately NO top-level require of ../src/services/audio-orchestrator
 // or video-orchestrator here — audio/video-orchestrator.test.js stub-swap the
@@ -88,9 +88,9 @@ function makePersistStub(overrides = {}) {
 
 // ── dispatch-engine stub for attemptDispatch-level tests ──
 const DISPATCH_ENGINE_PATH = path.resolve(
-    __dirname, '../node_modules/@animastor/orchestration/src/runtime/dispatch-engine.js');
+    __dirname, '../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine.js');
 const SCHEDULER_PATH = path.resolve(
-    __dirname, '../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler.js');
+    __dirname, '../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler.js');
 
 function withStubbedDispatchEngine(stub, fn) {
     return (async () => {

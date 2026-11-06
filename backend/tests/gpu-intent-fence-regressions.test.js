@@ -21,8 +21,8 @@ const {
     isDeferrableOutcome,
     isFenceRejectedOutcome,
     CAPACITY_OUTCOMES,
-} = require('../../packages/animastor-orchestration/src/runtime/dispatch-outcomes');
-const { deferralWindowFor, DEFERRED_IDEMPOTENT_TTL_S } = require('../../packages/animastor-orchestration/src/runtime/dispatch-engine');
+} = require('../../packages/animastor-orchestration/src/legacy/runtime/dispatch-outcomes');
+const { deferralWindowFor, DEFERRED_IDEMPOTENT_TTL_S } = require('../../packages/animastor-orchestration/src/legacy/runtime/dispatch-engine');
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 

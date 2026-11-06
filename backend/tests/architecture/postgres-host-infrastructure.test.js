@@ -47,7 +47,7 @@ const BARREL_SQL_WHITELIST = [
     'backend/src/routes/book/cache-routes.cjs',      // purge loop only — host purge composition (audit L5)
     'backend/src/services/book-deletion.cjs',        // purge loop only — host deletion cascade (audit L5)
     'backend/src/services/entity-cleanup.cjs',       // editor purge port impl; PG seam is the contract the editor seam test verifies (audit L5)
-    // (O-2 removed packages/animastor-orchestration/src/runtime/reconciliation-engine.js — its
+    // (O-2 removed packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine.js — its
     // fail-closed PG seams moved behind the PersistencePort; the SQL lives in
     // storage/runtime-persistence-adapter.js.)
 ].sort();
@@ -63,6 +63,21 @@ const PG_ENV_RE = /process\.env\.PG_/;
 const BARREL_SQL_RE = /postgres\.query\s*\(/;
 // DDL statements (any form, incl. template literals)
 const DDL_RE = /\b(CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|CREATE\s+(UNIQUE\s+)?INDEX|DROP\s+INDEX|ADD\s+COLUMN|DROP\s+COLUMN)\b/i;
+
+// ── Orchestration v2 carve-out (ADR animastor-docs architecture/ORCHESTRATION_V2.md
+// §2, §4, §5, §8.1; decision D15, owner-approved 2026-11-05) ──────────────
+// PG (gen_commands / gen_jobs) IS the v2 orchestration: claim is one SQL
+// statement (FOR UPDATE SKIP LOCKED), acceptance is one transaction, the
+// migration ships with the package (src/gen/sql). The carve-out is EXACTLY
+// packages/animastor-orchestration/src/gen/** for PG-2 (SQL / table names) and
+// PG-5 (DDL); the pool is still injected by the host (gen never requires the pg
+// driver — PG-1 and the guard below stay strict), and PG_* is read only by the
+// package's own test helper (test stack, *_test DB enforced there).
+const ORCH_V2_GEN_PREFIX = 'packages/animastor-orchestration/src/gen/';
+const ORCH_V2_TEST_HELPER = 'packages/animastor-orchestration/test/gen/helpers.js';
+function isOrchV2Gen(filePath) {
+    return rel(filePath).startsWith(ORCH_V2_GEN_PREFIX);
+}
 
 function isBackendStorage(filePath) {
     return rel(filePath).startsWith('backend/src/storage/');
@@ -132,6 +147,7 @@ describe('architecture: PostgreSQL stays host-side infrastructure', () => {
         // block-comment prose do not match — real SQL statements do.
         const SQL_RE = /\bSELECT\s+[A-Za-z_*,\s]+\s+FROM\s+\w+|\bINSERT\s+INTO\s+\w+\s*\(|\bINSERT\s+INTO\s+\w+\s+\w|\bUPDATE\s+\w+\s+SET\s|\bDELETE\s+FROM\s+\w+|\bON\s+CONFLICT\s*\(/;
         for (const file of packageSourceFiles()) {
+            if (isOrchV2Gen(file)) continue; // ADR ORCHESTRATION_V2 carve-out (see top)
             const src = readSource(file);
             for (const line of src.split('\n')) {
                 const code = line.replace(/(^|\s)\/\/.*$/, '').replace(/^\s*\*.*$/, ''); // strip line + block-comment prose
@@ -164,6 +180,7 @@ describe('architecture: PostgreSQL stays host-side infrastructure', () => {
         );
         const offenders = [];
         for (const file of packageSourceFiles()) {
+            if (isOrchV2Gen(file)) continue; // ADR ORCHESTRATION_V2 carve-out (see top)
             const src = readSource(file);
             for (const line of src.split('\n')) {
                 const code = line.replace(/(^|\s)\/\/.*$/, '').replace(/^\s*\*.*$/, '');
@@ -187,6 +204,7 @@ describe('architecture: PostgreSQL stays host-side infrastructure', () => {
             if (!fs.existsSync(root)) continue;
             for (const file of listSourceFiles(root, ['.js', '.cjs', '.mjs', '.ts', '.tsx', '.kt'])) {
                 if (rel(file) === 'backend/src/storage/postgres/database.js') continue;
+                if (rel(file) === ORCH_V2_TEST_HELPER) continue; // v2 package tests (test stack only)
                 if (PG_ENV_RE.test(readSource(file))) offenders.push(rel(file));
             }
         }
@@ -225,6 +243,7 @@ describe('architecture: PostgreSQL stays host-side infrastructure', () => {
         const offenders = [];
         for (const file of [...listSourceFiles(BACKEND_SRC), ...packageSourceFiles()]) {
             if (isSchemaJs(file)) continue;
+            if (isOrchV2Gen(file)) continue; // ADR ORCHESTRATION_V2: gen/sql migrations (see top)
             const src = readSource(file);
             for (const line of src.split('\n')) {
                 const code = line.replace(/(^|\s)\/\/.*$/, '');
@@ -232,5 +251,18 @@ describe('architecture: PostgreSQL stays host-side infrastructure', () => {
             }
         }
         expect(offenders, 'schema.js is the ONLY DDL/migrations owner (audit §2.1)').to.deep.equal([]);
+    });
+
+    // ── PG-6 — the v2 carve-out stays narrow ─────────────────────────
+    it('PG-6: orchestration v2 gen/** never requires the pg driver / host storage (pool is injected); carve-out dirs exist', () => {
+        const genDir = path.join(REPO_ROOT, ORCH_V2_GEN_PREFIX);
+        expect(fs.existsSync(genDir), 'carve-out must point at a real dir').to.equal(true);
+        expect(fs.existsSync(path.join(REPO_ROOT, ORCH_V2_TEST_HELPER))).to.equal(true);
+        const offenders = [];
+        for (const file of listSourceFiles(genDir, ['.js', '.cjs', '.mjs'])) {
+            const src = readSource(file);
+            if (/require\(\s*['"](pg|postgres|pg-pool)['"]\s*\)|storage\/postgres|process\.env\.PG_/.test(src)) offenders.push(rel(file));
+        }
+        expect(offenders).to.deep.equal([]);
     });
 });

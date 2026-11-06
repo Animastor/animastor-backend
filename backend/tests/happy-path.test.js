@@ -425,7 +425,7 @@ class FakeRedis {
 // IMPORTS (real modules, tested directly with FakeRedis)
 // ======================================================
 
-const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+const dispatchEngine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
 const sceneState = require('../src/state/scene-state');
 
 // ======================================================
@@ -1026,7 +1026,7 @@ describe('Happy Path: Scene Callbacks (with mocks)', () => {
             removeSceneFromActiveIndex: async () => {},
             addSceneToActiveIndex: async () => {},
         };
-        const schedulerPath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler');
+        const schedulerPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler');
         require.cache[schedulerPath] = { exports: mockScheduler, loaded: true };
 
         // Mock placeholder audio
@@ -1057,7 +1057,7 @@ describe('Happy Path: Scene Callbacks (with mocks)', () => {
         };
 
         // Mock scene-utils
-        const utilsPath = require.resolve('../node_modules/@animastor/orchestration/src/orchestration/scene-utils');
+        const utilsPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils');
         require.cache[utilsPath] = {
             exports: {
                 log: () => {},
@@ -1069,7 +1069,7 @@ describe('Happy Path: Scene Callbacks (with mocks)', () => {
         };
 
         // Mock scene-window (required inline in handleVideoCompleted)
-        const sceneWindowPath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        const sceneWindowPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
         require.cache[sceneWindowPath] = {
             exports: {
                 trySlideWindowOnComplete: async () => ({ started: 0, remaining: 0 }),
@@ -1094,8 +1094,8 @@ describe('Happy Path: Scene Callbacks (with mocks)', () => {
         };
 
         // Now load the callbacks module fresh
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks')];
-        callbacks = require('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks')];
+        callbacks = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks');
     });
 
     afterEach(() => {
@@ -1105,13 +1105,13 @@ describe('Happy Path: Scene Callbacks (with mocks)', () => {
             '../src/image',
             '../src/video',
             '../src/storage',
-            '../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler',
+            '../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler',
             '../src/services/placeholder-audio',
             '../src/book',
-            '../node_modules/@animastor/orchestration/src/orchestration/scene-utils',
-            '../node_modules/@animastor/orchestration/src/runtime/scene-window',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils',
+            '../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window',
             '../src/storage/postgres/repositories/scene-assets-repo',
-            '../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks',
         ];
         for (const p of paths) {
             delete require.cache[require.resolve(p)];
@@ -1325,7 +1325,7 @@ describe('Happy Path: Orchestrator facade — planScene', () => {
 
     beforeEach(() => {
         redis = new FakeRedis();
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
     });
 
     it('planScene delegates to shouldScheduleAssets and returns {stages, allDone}', async () => {
@@ -1356,7 +1356,7 @@ describe('Happy Path: Orchestrator facade — markDirty', () => {
 
     beforeEach(() => {
         redis = new FakeRedis();
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
     });
 
     it('markDirty delegates to deps.bookDiff.markDirtyScenes with same args', async () => {
@@ -1404,7 +1404,7 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
         calls = { handler: [], markComplete: [] };
 
         // Stub scene-callbacks: T1 — handlers MUST return { ok: true, artifact } for success
-        const cbPath = require.resolve('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
+        const cbPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks');
         require.cache[cbPath] = {
             exports: {
                 handleAudioCompleted: async (...a) => { calls.handler.push(['audio', a]); return { ok: true, artifact: { buildId: BUILD_ID, path: '/test.mp3' } }; },
@@ -1415,7 +1415,7 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
         };
 
         // Stub dispatch-engine: T2 — record finalizeDispatch calls
-        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
         require.cache[dePath] = {
             exports: {
                 verifyDispatchIdentity: async () => ({
@@ -1434,7 +1434,7 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
         };
 
         // Stub scene-utils (warn used in finally)
-        const utilsPath = require.resolve('../node_modules/@animastor/orchestration/src/orchestration/scene-utils');
+        const utilsPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils');
         require.cache[utilsPath] = {
             exports: { log: () => {}, warn: () => {}, error: () => {}, logEvent: async () => {} },
             loaded: true,
@@ -1466,16 +1466,16 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
             loaded: true,
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
     });
 
     afterEach(() => {
         for (const p of [
-            '../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks',
-            '../node_modules/@animastor/orchestration/src/runtime/dispatch-engine',
-            '../node_modules/@animastor/orchestration/src/orchestration/scene-utils',
-            '../node_modules/@animastor/orchestration/src/orchestration/orchestrator',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks',
+            '../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator',
             '../src/storage/postgres/database',
             '../src/storage/postgres/repositories/scene-assets-repo',
         ]) {
@@ -1503,8 +1503,8 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
         const dbPath = require.resolve('../src/storage/postgres/database');
         require.cache[dbPath].exports.query = async () => ({ rows: [] });
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         const result = await orchestrator.completeStage(
             redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'video', BUILD_ID, 'dispatch-test'
@@ -1529,8 +1529,8 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
             scene_audio_config_version: 1,
         });
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         const result = await orchestrator.completeStage(
             redis, BOOK_ID, CHAPTER_ID, SCENE_ID, 'video', BUILD_ID, 'dispatch-test'
@@ -1543,7 +1543,7 @@ describe('Happy Path: Orchestrator facade — completeStage', () => {
     });
 
     it('completeStage finalizes as failure when handler returns ok:false', async () => {
-        const cbPath = require.resolve('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
+        const cbPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks');
         require.cache[cbPath].exports.handleImageCompleted = async () => {
             calls.handler.push(['image', []]);
             return { ok: false, retryable: true, reason: 'test_error' };
@@ -1582,7 +1582,7 @@ describe('Happy Path: Orchestrator facade — beginStage', () => {
         redis = new FakeRedis();
 
         // Stub dispatch-engine: record calls and return controlled results
-        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
         require.cache[dePath] = {
             exports: {
                 acquireStageLease: async () => ({ acquired: true, token: 'test-token', leaseKey: 'lease:test' }),
@@ -1622,21 +1622,21 @@ describe('Happy Path: Orchestrator facade — beginStage', () => {
         };
 
         // Stub scene-utils (used by dispatch-engine internally)
-        const utilsPath = require.resolve('../node_modules/@animastor/orchestration/src/orchestration/scene-utils');
+        const utilsPath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils');
         require.cache[utilsPath] = {
             exports: { log: () => {}, warn: () => {}, error: () => {}, logEvent: async () => {} },
             loaded: true,
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
     });
 
     afterEach(() => {
         for (const p of [
-            '../node_modules/@animastor/orchestration/src/runtime/dispatch-engine',
-            '../node_modules/@animastor/orchestration/src/orchestration/scene-utils',
-            '../node_modules/@animastor/orchestration/src/orchestration/orchestrator',
+            '../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator',
         ]) {
             delete require.cache[require.resolve(p)];
         }
@@ -1644,14 +1644,14 @@ describe('Happy Path: Orchestrator facade — beginStage', () => {
 
     it('beginStage calls dispatchEngine.dispatchStage with correct params', async () => {
         let captured = null;
-        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
         require.cache[dePath].exports.dispatchStage = async (r, b, c, s, stage, lb, bid) => {
             captured = { r, b, c, s, stage, lb, bid };
             return { dispatched: true, stage };
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         const scene = { book_id: BOOK_ID, chapter_id: CHAPTER_ID, scene_id: SCENE_ID };
         const result = await orchestrator.beginStage(redis, scene, null, BUILD_ID, 'audio');
@@ -1669,14 +1669,14 @@ describe('Happy Path: Orchestrator facade — beginStage', () => {
 
     it('beginStage extracts book/chapter/scene from scene object', async () => {
         let captured = null;
-        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
         require.cache[dePath].exports.dispatchStage = async (r, b, c, s) => {
             captured = { b, c, s };
             return { dispatched: true };
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         const scene = { book_id: 'b1', chapter_id: 'ch2', scene_id: 's3' };
         await orchestrator.beginStage(redis, scene, {}, 'build-42', 'image');
@@ -1687,11 +1687,11 @@ describe('Happy Path: Orchestrator facade — beginStage', () => {
     });
 
     it('beginStage propagates errors from dispatchStage', async () => {
-        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+        const dePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
         require.cache[dePath].exports.dispatchStage = async () => { throw new Error('dispatch failed'); };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         const scene = { book_id: BOOK_ID, chapter_id: CHAPTER_ID, scene_id: SCENE_ID };
         let threw = false;
@@ -1713,7 +1713,7 @@ describe('Happy Path: Orchestrator facade — reconcile', () => {
         redis = new FakeRedis();
 
         // Stub reconciliation-engine
-        const rePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
+        const rePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine');
         require.cache[rePath] = {
             exports: {
                 reconcileScene: async (r, b, c, s) => ({
@@ -1739,14 +1739,14 @@ describe('Happy Path: Orchestrator facade — reconcile', () => {
             loaded: true,
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
     });
 
     afterEach(() => {
         for (const p of [
-            '../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine',
-            '../node_modules/@animastor/orchestration/src/orchestration/orchestrator',
+            '../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine',
+            '../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator',
         ]) {
             delete require.cache[require.resolve(p)];
         }
@@ -1754,14 +1754,14 @@ describe('Happy Path: Orchestrator facade — reconcile', () => {
 
     it('reconcile calls reconciliationEngine.reconcileScene with correct params', async () => {
         let captured = null;
-        const rePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
+        const rePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine');
         require.cache[rePath].exports.reconcileScene = async (r, b, c, s) => {
             captured = { r, b, c, s };
             return { toSummary: () => ({ totalInconsistent: 0 }) };
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         await orchestrator.reconcile(redis, BOOK_ID, CHAPTER_ID, SCENE_ID);
 
@@ -1793,11 +1793,11 @@ describe('Happy Path: Orchestrator facade — reconcile', () => {
     });
 
     it('reconcile propagates errors from reconciliationEngine', async () => {
-        const rePath = require.resolve('../node_modules/@animastor/orchestration/src/runtime/reconciliation-engine');
+        const rePath = require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/reconciliation-engine');
         require.cache[rePath].exports.reconcileScene = async () => { throw new Error('reconcile boom'); };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/orchestration/orchestrator')];
-        orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator')];
+        orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
 
         let threw = false;
         try {
@@ -1823,7 +1823,7 @@ describe('Happy Path: Д.2 — shouldScheduleAssets is a pure decision', () => {
         // S-5: markVersionStaleDirty writes DIRTY through the injected
         // orchestration seam — wire the production facade for this suite.
         require('./helpers/wire-seams').wireProductionSeams();
-        scheduler = require('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler');
+        scheduler = require('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler');
     });
 
     it('shouldScheduleAssets does NOT mutate per-asset state (pure read)', async () => {
@@ -2011,8 +2011,8 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
         };
 
         // Clear scene-window cache so it re-loads with mocks
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window')];
-        sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window')];
+        sceneWindow = require('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
     });
 
     afterEach(() => {
@@ -2021,7 +2021,7 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
             require.cache[originalConfigPath] = originalConfigCache;
         }
         for (const p of [
-            '../node_modules/@animastor/orchestration/src/runtime/scene-window',
+            '../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window',
             '../src/storage/postgres/database',
             '../src/storage/postgres/repositories/scene-assets-repo',
             '../src/services/placeholder-audio',
@@ -2041,8 +2041,8 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
             return { scene_content_version: 2, scene_audio_config_version: 1 };
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window')];
-        sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window')];
+        sceneWindow = require('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
 
         await sceneWindow.restoreChunkStatusForScene(redis, D3_BUILD, D3_BOOK, D3_CH, D3_SC);
 
@@ -2069,8 +2069,8 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
             return null;
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window')];
-        sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window')];
+        sceneWindow = require('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
 
         await sceneWindow.restoreChunkStatusForScene(redis, D3_BUILD, D3_BOOK, D3_CH, D3_SC);
 
@@ -2099,8 +2099,8 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
             return null;
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window')];
-        sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window')];
+        sceneWindow = require('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
 
         await sceneWindow.restoreChunkStatusForScene(redis, D3_BUILD, D3_BOOK, D3_CH, D3_SC);
 
@@ -2138,8 +2138,8 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
             return { scene_content_version: 2, scene_audio_config_version: 1 };
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window')];
-        sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window')];
+        sceneWindow = require('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
 
         const result = await sceneWindow.reconcileWindowStatuses(redis, D3_BOOK, D3_BUILD);
 
@@ -2162,8 +2162,8 @@ describe('Happy Path: Д.3 — Disk as fact, not decision (M3)', () => {
             return { scene_content_version: 2, scene_audio_config_version: 1 };
         };
 
-        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/runtime/scene-window')];
-        sceneWindow = require('../node_modules/@animastor/orchestration/src/runtime/scene-window');
+        delete require.cache[require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window')];
+        sceneWindow = require('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window');
 
         const result = await sceneWindow.reconcileWindowStatuses(redis, D3_BOOK, D3_BUILD);
 

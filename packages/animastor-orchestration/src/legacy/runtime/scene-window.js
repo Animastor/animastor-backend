@@ -683,6 +683,10 @@ async function reconcileWindowStatuses(redis, bookId, buildId) {
 }
 
 async function startScene(redis, s, buildId, bookId) {
+    if (await require('./persistence-port').isV2Book(bookId)) {
+        log(`startScene skipped: ${bookId} is on orchestration v2`);
+        return false;
+    }
     if (await isCancelled(redis, bookId)) {
         log(`startScene skipped: generation cancelled for ${bookId}`);
         return false;

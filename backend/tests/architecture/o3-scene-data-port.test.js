@@ -148,7 +148,7 @@ describe('§32.14 O-3 guards: scene content arrives only via the SceneDataPort',
         );
         const usedOps = new Set();
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/scene-data-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/scene-data-port.js') continue;
             const src = codeOnly(readSource(file));
             // Consumers bind the resolver under either local name:
             // sceneData(...) (scene-callbacks, scene-window,

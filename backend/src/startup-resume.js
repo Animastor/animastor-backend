@@ -74,7 +74,10 @@ async function interruptActiveGenerationTasks(redis, deps = {}) {
     const out = { books: 0, tasks: 0, pgRows: 0, removedFromIndex: 0 };
 
     try {
+        const bookFlag = deps.bookFlag || require('./orchestration-v2/book-flag');
         for (const bookId of await generationProgress.listBooksWithTasks(redis)) {
+            // Orchestration v2 (1b/E): a v2 book keeps no legacy task to interrupt.
+            if (await bookFlag.isV2BookFailClosed(bookId)) continue;
             const interrupted = await generationProgress.interruptActiveTasks(redis, bookId);
             if (interrupted.length > 0) {
                 out.books++;
@@ -99,6 +102,7 @@ async function interruptActiveGenerationTasks(redis, deps = {}) {
         for (const sceneKey of await scheduler.getActiveSceneKeys(redis)) {
             const parsed = scheduler.parseSceneKey(sceneKey);
             if (!parsed) continue;
+            if (await (deps.bookFlag || require('./orchestration-v2/book-flag')).isV2BookFailClosed(parsed.bookId)) continue;
             const auth = await commandGate.getAuthorizedStages(redis, parsed.bookId, parsed.chapterId, parsed.sceneId);
             if (auth.stages.size > 0) continue;
             const r = await scheduler.removeSceneFromActiveIndex(redis, parsed.bookId, parsed.chapterId, parsed.sceneId);

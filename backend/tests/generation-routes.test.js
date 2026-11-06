@@ -23,8 +23,8 @@ describe('Generation routes independent commands', () => {
         '../src/storage/postgres/repositories/scene-assets-repo',
         '../src/storage/postgres/repositories/task-repo',
         '../src/storage/postgres/repositories/generation-cancel-repo',
-        '../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler',
-        '../node_modules/@animastor/orchestration/src/runtime/scene-window',
+        '../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler',
+        '../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window',
     ];
     const savedCache = new Map();
 
@@ -79,13 +79,13 @@ describe('Generation routes independent commands', () => {
             },
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async (_redis, _bookId, chapterId, sceneId) => {
                 events.push(`activate:${chapterId}/${sceneId}`);
             },
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -213,11 +213,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -322,11 +322,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -417,11 +417,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -526,11 +526,11 @@ describe('Generation routes independent commands', () => {
             updateTaskStatus: async () => {},
             cancelActiveTasksForBook: async () => 0,
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             setCancelFlag: async () => {},
             clearCancelFlag: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             clearBookFromActiveIndex: async () => {},
             addSceneToActiveIndex: async () => {},
         });
@@ -584,10 +584,10 @@ describe('Generation routes independent commands', () => {
             },
             isCancelled: async () => false,
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
@@ -657,11 +657,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -741,11 +741,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -816,11 +816,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -900,11 +900,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -983,11 +983,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 
@@ -1052,11 +1052,11 @@ describe('Generation routes independent commands', () => {
             createTask: async () => {},
             updateTaskStatus: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             addSceneToActiveIndex: async () => {},
             clearBookFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             clearCancelFlag: async () => {},
         });
 

@@ -21,12 +21,12 @@ const { expect } = require('chai');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { bindHostModules } = require('../src/host/host-bindings');
-const { setHubCancelPort, _resetHubCancelPort } = require('../src/runtime/hub-cancel-port');
+const { bindHostModules } = require('../src/legacy/host/host-bindings');
+const { setHubCancelPort, _resetHubCancelPort } = require('../src/legacy/runtime/hub-cancel-port');
 const { createMockRedis } = require('./mocks/redis-mock');
 const artifactNaming = require('@animastor/generation').artifactNaming;
 
-const orchestrator = require('../src/orchestration/orchestrator');
+const orchestrator = require('../src/legacy/orchestration/orchestrator');
 
 const BOOK = 'b1';
 const CHAPTER = 'ch1';

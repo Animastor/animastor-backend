@@ -24,10 +24,10 @@
 const { expect } = require('chai');
 const { createMockRedis } = require('./mocks/redis-mock');
 
-const ORCH = '../node_modules/@animastor/orchestration/src/orchestration/orchestrator';
-const CALLBACKS = '../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks';
-const SCENE_UTILS = '../node_modules/@animastor/orchestration/src/orchestration/scene-utils';
-const DISPATCH = '../node_modules/@animastor/orchestration/src/runtime/dispatch-engine';
+const ORCH = '../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator';
+const CALLBACKS = '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks';
+const SCENE_UTILS = '../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-utils';
+const DISPATCH = '../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine';
 const DB = '../src/storage/postgres/database';
 const REPO = '../src/storage/postgres/repositories/scene-assets-repo';
 

@@ -47,7 +47,7 @@ const ORCH_DIR = fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-orche
 const SERVICES_DIR = path.join(BACKEND_SRC, 'services');
 
 const contract = require('../../src/contracts/runtime-result');
-const emitter = require('../../node_modules/@animastor/orchestration/src/runtime/runtime-result-emitter');
+const emitter = require('../../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-result-emitter');
 
 // ── T1 — Runtime result contract ────────────────────────
 describe('Phase 5 T1: runtime result contract', () => {
@@ -151,8 +151,8 @@ describe('Phase 5 T2: runtime does not import orchestration through the seam', (
         // seam (lazyHostBinding('journal')) — the former require(...) edges are
         // frozen as binding accesses in the two engines.
         const BASELINE = new Set([
-            'packages/animastor-orchestration/src/runtime/dispatch-engine.js:host-bindings-journal',
-            'packages/animastor-orchestration/src/runtime/reconciliation-engine.js:host-bindings-journal',
+            'packages/animastor-orchestration/src/legacy/runtime/dispatch-engine.js:host-bindings-journal',
+            'packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine.js:host-bindings-journal',
         ]);
         const edges = new Set();
         for (const file of listSourceFiles(RUNTIME_DIR)) {
@@ -182,7 +182,7 @@ describe('Phase 5 T3: orchestration consumes runtime result through the seam', (
     });
 
     it('orchestration ships a runtime result consumer adapter', () => {
-        const { createRuntimeResultConsumer } = require('../../node_modules/@animastor/orchestration/src/orchestration/runtime-result-consumer');
+        const { createRuntimeResultConsumer } = require('../../node_modules/@animastor/orchestration/src/legacy/orchestration/runtime-result-consumer');
         expect(createRuntimeResultConsumer).to.be.a('function');
         const consumer = createRuntimeResultConsumer({ log: () => {} });
         expect(consumer).to.be.a('function');
@@ -460,7 +460,7 @@ describe('Phase 5 final audit: full runtime/** boundary', () => {
             }
         }
         expect(producers, 'only runtime/runtime-result-emitter.js may require the runtime-result contract').to.deep.equal([
-            'packages/animastor-orchestration/src/runtime/runtime-result-emitter.js',
+            'packages/animastor-orchestration/src/legacy/runtime/runtime-result-emitter.js',
         ]);
     });
 });

@@ -46,6 +46,12 @@ module.exports = function(app, redis, deps) {
 
     const sessionControl = agentSessionControl || createAgentSessionControl();
 
+    // Orchestration v2 (books.orchestration='v2'): handlers arrive through deps
+    // (composition root). Legacy books never reach them; without deps.orchV2
+    // (tests) every book is legacy.
+    const orchV2 = deps.orchV2 || null;
+    const isV2 = async (bookId) => !!(orchV2 && await orchV2.isV2Book(bookId));
+
     // 2026-11-04 (reports/2026-11-04/regenerate-sweep-fix.md): the
     // /regenerate post-release hub sweep plan arrives through deps
     // (composition root) — contour-route requires are frozen. Without it the
@@ -144,7 +150,11 @@ module.exports = function(app, redis, deps) {
             // PG pending rows (a disabled layer must not keep running, incident
             // 2026-10-30 BA). Idempotent: repeating it is harmless.
             const cancelledStages = [];
-            for (const stage of mediaRegistry.listMediaTypes()) {
+            if (await isV2(bookId)) {
+                const off = ['audio', 'image', 'video'].filter((stage) =>
+                    (req.body || {})[`${stage}_enabled`] === false && cfg[`${stage}_enabled`] === false);
+                cancelledStages.push(...await orchV2.onLayersDisabled(bookId, off));
+            } else for (const stage of mediaRegistry.listMediaTypes()) {
                 if ((req.body || {})[`${stage}_enabled`] !== false || cfg[`${stage}_enabled`] !== false) continue;
                 try {
                     await cancelStage({
@@ -187,6 +197,10 @@ module.exports = function(app, redis, deps) {
         try {
             const { bookId } = req.params;
             const { type, task_id: taskId } = req.body || {};
+            if (await isV2(bookId)) {
+                const handled = await orchV2.cancelWorker(req, res);
+                if (handled !== false) return undefined;          // vbook / cover → legacy branch below
+            }
 
             // S-2: valid cancel types derived from registry with fallback
             // S-2 COMPLETION: valid types always from registry (no hardcoded fallback)
@@ -303,6 +317,7 @@ module.exports = function(app, redis, deps) {
     app.post('/api/v1/book/:bookId/cancel-generation', async (req, res) => {
         try {
             const { bookId } = req.params;
+            if (await isV2(bookId)) return orchV2.cancelGeneration(req, res);
             log(`[CANCEL-GENERATION] ${bookId}: cancelling generation`);
 
             await runtime.sceneWindow.setCancelFlag(redis, bookId);
@@ -466,6 +481,12 @@ module.exports = function(app, redis, deps) {
     // SELECTIVE REGENERATION
     // ======================================================
     app.post('/api/v1/book/:bookId/regenerate', async (req, res) => {
+        try {
+            if (await isV2(req.params.bookId)) return orchV2.regenerate(req, res);
+        } catch (v2Err) {
+            console.error('[REGENERATE] orchestration v2 check failed:', v2Err.message);
+            return res.status(500).json({ error: v2Err.message });
+        }
         const REGENERATE_LOCK_PREFIX = 'animastor:regenerate-lock';
         const LOCK_TTL = 120;
         const lockKey = `${REGENERATE_LOCK_PREFIX}:${req.params.bookId}`;

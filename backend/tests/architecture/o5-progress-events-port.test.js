@@ -120,7 +120,7 @@ describe('§32.7 O-5 guards: progress events arrive only via the ProgressEventsP
     it('O5-G1: the two tiers require ZERO progress host-service modules (static scan)', () => {
         const offenders = [];
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/progress-events-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/progress-events-port.js') continue;
             for (const s of staticProgressRequires(file)) {
                 offenders.push(`${rel(file)} -> ${s}`);
             }
@@ -148,7 +148,7 @@ describe('§32.7 O-5 guards: progress events arrive only via the ProgressEventsP
         );
         const usedOps = new Set();
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/progress-events-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/progress-events-port.js') continue;
             const src = codeOnly(readSource(file));
             for (const m of src.match(/progressEventsOp\('([^']+)'\)/g) || []) {
                 usedOps.add(m.slice("progressEventsOp('".length, -2));
@@ -250,7 +250,7 @@ describe('§32.7 O-5 guards: progress events arrive only via the ProgressEventsP
         // host services by any channel except the port.
         const offenders = [];
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/progress-events-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/progress-events-port.js') continue;
             for (const d of dynamicProgressRequires(file)) {
                 offenders.push(`${rel(file)} -> dynamic ${d}`);
             }

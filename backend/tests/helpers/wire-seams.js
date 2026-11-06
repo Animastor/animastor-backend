@@ -18,8 +18,8 @@ function wireProductionSeams() {
     // earlier suites may have replaced/reloaded the facade modules, leaving a
     // stale spread (partial stubs) in cache. Purge the facade pair so the
     // seams always bind to the REAL implementations.
-    delete require.cache[require.resolve('../../node_modules/@animastor/orchestration/src/orchestration/index.js')];
-    delete require.cache[require.resolve('../../node_modules/@animastor/orchestration/src/orchestration/orchestrator.js')];
+    delete require.cache[require.resolve('../../node_modules/@animastor/orchestration/src/legacy/orchestration/index.js')];
+    delete require.cache[require.resolve('../../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator.js')];
     const orchestration = require('@animastor/orchestration');
     seams.registerOrchestrationSeams({
         dispatchStage: orchestration.dispatchStage,

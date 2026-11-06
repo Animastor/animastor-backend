@@ -135,7 +135,7 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         // resolver at a real tier call site.
         const liveOps = new Set();
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/layer-config-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/layer-config-port.js') continue;
             const src = codeOnly(readSource(file));
             for (const m of src.match(/layerConfigOp\(\s*'([^']+)'\s*\)/g) || []) {
                 liveOps.add(m.match(/layerConfigOp\(\s*'([^']+)'/)[1]);
@@ -145,7 +145,7 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         // And no undeclared op may be resolved through the port.
         const offenders = [];
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/layer-config-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/layer-config-port.js') continue;
             const src = codeOnly(readSource(file));
             for (const m of src.match(/layerConfigOp\(\s*'([^']+)'\s*\)/g) || []) {
                 const op = m.match(/layerConfigOp\(\s*'([^']+)'/)[1];
@@ -270,9 +270,9 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
             // Command-only generation (2026-10-31): the scheduler's single
             // raw read MOVED into the command gate (same read, same count) —
             // runtime-scheduler.getLayerConfig now delegates to it.
-            'packages/animastor-orchestration/src/runtime/command-gate.js x1',
-            'packages/animastor-orchestration/src/runtime/reconciliation-engine.js x1',
-            'packages/animastor-orchestration/src/runtime/scene-window.js x3',
+            'packages/animastor-orchestration/src/legacy/runtime/command-gate.js x1',
+            'packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine.js x1',
+            'packages/animastor-orchestration/src/legacy/runtime/scene-window.js x3',
         ]);
 
         // The adapter resolves the host channel via a lazy call-time

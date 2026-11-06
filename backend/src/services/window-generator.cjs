@@ -66,12 +66,21 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                 const sceneCount = result.added_scenes || 0;
                 await progress(`⟳ Creating ${sceneCount} scenes...`);
 
-                // — 3. Create chunks for each new scene in Redis —                    let chunkCount = 0;
+                // — 3. Create chunks for each new scene in Redis —
+                let chunkCount = 0;
                 if (result.chapter && result.chapter.scenes) {
                     const phScenes = [];
+                    // Orchestration v2 (1b/E): a v2 book gets no legacy Redis chunk
+                    // records / scene counters — only the placeholder (ADR §4.3).
+                    const isV2 = await require('../orchestration-v2/book-flag').isV2BookFailClosed(bookId);
+                    if (isV2) bgLog(`orchestration v2: legacy chunk records and scene counters skipped`);
                     bgLog(`📦 Creating ${result.chapter.scenes.length} chunks for chapter ${result.chapter.chapter}...`);
                     for (const scene of result.chapter.scenes) {
                         const chunkId = artifactNaming.sceneChunkAudioName(bookId, result.chapter.chapter, scene.scene_id, 1).replace(/\.mp3$/, '');
+                        if (isV2) {
+                            phScenes.push({ chapter_id: result.chapter.chapter, scene_id: scene.scene_id });
+                            continue;
+                        }
                         try {
                             await saveChunk(chunkId, {
                                 build_id: buildId,
@@ -112,7 +121,7 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                     bgLog(`⏭️ ${phScenes.length} scene(s) NOT registered for GPU — generation starts only by an explicit command`);
 
                         // Update scene indices
-                        try {
+                        if (!isV2) try {
                             const totalScenes = parseInt(await redis.get(config.BOOK_SCENE_TOTAL(bookId)) || '0', 10);
                             const nextIdx = parseInt(await redis.get(config.BOOK_SCENE_NEXT(bookId)) || '0', 10);
                             await redis.set(config.BOOK_SCENE_TOTAL(bookId), totalScenes + phScenes.length);

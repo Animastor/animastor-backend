@@ -33,8 +33,8 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
         '../src/storage/postgres/repositories/scene-assets-repo',
         '../src/storage/postgres/repositories/task-repo',
         '../src/storage/postgres/repositories/generation-cancel-repo',
-        '../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler',
-        '../node_modules/@animastor/orchestration/src/runtime/scene-window',
+        '../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler',
+        '../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window',
     ];
     const savedCache = new Map();
 
@@ -93,12 +93,12 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
             isCancelled: async () => false,
             getAllCancelled: async () => [],
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler', {
             clearBookFromActiveIndex: async () => {},
             addSceneToActiveIndex: async () => {},
             removeScenesFromActiveIndex: async () => {},
         });
-        stub('../node_modules/@animastor/orchestration/src/runtime/scene-window', {
+        stub('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window', {
             setCancelFlag: async () => {},
             clearCancelFlag: async () => {},
         });

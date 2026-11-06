@@ -133,15 +133,15 @@ describe('§32.26 O-9 guards: hub-queue cleanup happens only via the HubCancelPo
         // through the port resolver.
         const consumers = [];
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/hub-cancel-port.js') continue;
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/hub-cancel-port.js') continue;
             const src = codeOnly(readSource(file));
             if (/hubCancelOp\(\s*'clearHubDispatches'\s*\)/.test(src)) {
                 consumers.push(rel(file));
             }
         }
         expect(consumers.sort(), 'the port op must have live tier consumers').to.deep.equal([
-            'packages/animastor-orchestration/src/orchestration/orchestrator.js',
-            'packages/animastor-orchestration/src/runtime/reconciliation-engine.js',
+            'packages/animastor-orchestration/src/legacy/orchestration/orchestrator.js',
+            'packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine.js',
         ]);
         // And no undeclared op may be resolved through the port.
         const offenders = [];
@@ -242,7 +242,7 @@ describe('§32.26 O-9 guards: hub-queue cleanup happens only via the HubCancelPo
         // require(identifier) whose surrounding text mentions hub cleanup.
         const offenders = [];
         for (const file of allTierFiles()) {
-            if (rel(file) === 'packages/animastor-orchestration/src/runtime/dispatch-engine.js') continue; // host channel itself
+            if (rel(file) === 'packages/animastor-orchestration/src/legacy/runtime/dispatch-engine.js') continue; // host channel itself
             const src = readSource(file);
             const dyn = src.match(/require\(\s*[A-Za-z_$][\w$.]*\s*\)/g) || [];
             for (const call of dyn) {

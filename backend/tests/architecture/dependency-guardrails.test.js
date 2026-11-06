@@ -203,7 +203,7 @@ describe('architecture: orchestration ↔ runtime cycle freeze (S-5 reduced)', (
         const edges = [];
         const scanDirs = [
             path.join(BACKEND_SRC, 'runtime'),
-            path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'runtime'),
+            path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy', 'runtime'),
         ];
         for (const dir of scanDirs) {
             for (const file of listSourceFiles(dir)) {
@@ -231,7 +231,7 @@ describe('architecture: orchestration ↔ runtime cycle freeze (S-5 reduced)', (
         expect(fs.existsSync(path.join(BACKEND_SRC, 'orchestration', 'event-journal.js')),
             'orchestration/event-journal.js was deleted at O-1 — canonical owner is state/event-journal.js')
             .to.equal(false);
-        expect(fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'orchestration', 'event-journal.js')),
+        expect(fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy', 'orchestration', 'event-journal.js')),
             'the deleted O-1 shim must not reappear inside the package')
             .to.equal(false);
         const journal = readSource(path.join(BACKEND_SRC, 'state', 'event-journal.js'));
@@ -239,7 +239,7 @@ describe('architecture: orchestration ↔ runtime cycle freeze (S-5 reduced)', (
         // §32.30: the moved tier files consume the journal through the
         // composition-root host-binding (lazyHostBinding('journal')) — never
         // through a direct require of the canonical owner or a re-export.
-        const pkgRuntime = path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'runtime');
+        const pkgRuntime = path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy', 'runtime');
         for (const f of ['dispatch-engine.js', 'reconciliation-engine.js']) {
             const src = readSource(path.join(pkgRuntime, f));
             expect(requireSpecifiers(src).filter((s) => /event-journal$/.test(s)), `${f} must not require the journal directly (use the host-binding seam)`).to.deep.equal([]);

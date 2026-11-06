@@ -283,5 +283,10 @@ module.exports = {
     filesystem: {
         getSceneAudioPath,
     },
+    // Orchestration v2 isolation (optional port op; ADR ORCHESTRATION_V2 §12).
+    // Throws on PG errors → the package treats the book as v2 (fail-closed).
+    orchestration: {
+        isV2Book: (bookId) => require('../orchestration-v2/book-flag').isV2Book(bookId),
+    },
     listBooks,
 };

@@ -17,11 +17,11 @@
 
 const { expect } = require('chai');
 const state = require('../src/state');
-const orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
-const sceneOrchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/scene-orchestrator');
-const callbacks = require('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
-const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
-const runtimeScheduler = require('../node_modules/@animastor/orchestration/src/runtime/runtime-scheduler');
+const orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
+const sceneOrchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-orchestrator');
+const callbacks = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks');
+const dispatchEngine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
+const runtimeScheduler = require('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler');
 const videoService = require('../src/video/video-service');
 const { createMockRedis } = require('./mocks/redis-mock');
 

@@ -16,11 +16,11 @@ const { expect } = require('chai');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { bindHostModules } = require('../src/host/host-bindings');
+const { bindHostModules } = require('../src/legacy/host/host-bindings');
 const { createMockRedis } = require('./mocks/redis-mock');
 
-const engine = require('../src/runtime/reconciliation-engine');
-const callbacks = require('../src/orchestration/scene-callbacks');
+const engine = require('../src/legacy/runtime/reconciliation-engine');
+const callbacks = require('../src/legacy/orchestration/scene-callbacks');
 
 const BOOK = 'b1';
 const CHAPTER = 'ch1';

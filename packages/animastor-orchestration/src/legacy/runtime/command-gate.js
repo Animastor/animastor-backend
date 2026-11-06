@@ -33,6 +33,7 @@ const { lazyHostBinding } = require('../host/host-bindings');
 const state = lazyHostBinding('state');
 const progressEventsOp = require('./progress-events-port').progressEventsOp;
 const persist = require('./persistence-port').persist;
+const { isV2Book } = require('./persistence-port');
 
 const logPrefix = '[COMMAND-GATE]';
 
@@ -95,11 +96,12 @@ async function isBookCancelled(redis, bookId) {
 
 /** Per-pass memo (one scheduler tick / one reconcile pass). */
 function createGateCache() {
-    return { layer: new Map(), cancelled: new Map() };
+    return { layer: new Map(), cancelled: new Map(), v2: new Map() };
 }
 
 async function memo(cache, bucket, bookId, fn) {
     if (!cache) return fn();
+    if (!cache[bucket]) cache[bucket] = new Map();
     if (cache[bucket].has(bookId)) return cache[bucket].get(bookId);
     const value = await fn();
     cache[bucket].set(bookId, value);
@@ -113,9 +115,16 @@ const EMPTY_TASK_STATE = Object.freeze({ managed: false, activeTypes: new Set() 
  *
  * @returns {Promise<{stages:Set<string>, denied:Object<string,string>,
  *   cancelled:boolean, layerCfg:object, taskState:{managed:boolean, activeTypes:Set<string>}}>}
- *   `denied[stage]` ∈ 'cancelled' | 'no_active_task' | 'layer_disabled'.
+ *   `denied[stage]` ∈ 'cancelled' | 'no_active_task' | 'layer_disabled' | 'orchestration_v2'.
  */
 async function getAuthorizedStages(redis, bookId, chapterId, sceneId, cache = null) {
+    // Orchestration v2 (1b/E): a v2 book is never authorized for a legacy stage —
+    // the gen core owns it (fail-closed inside isV2Book).
+    if (await memo(cache, 'v2', bookId, () => isV2Book(bookId))) {
+        const denied = {};
+        for (const stage of mediaRegistry.listMediaTypes()) denied[stage] = 'orchestration_v2';
+        return { stages: new Set(), denied, cancelled: false, layerCfg: null, taskState: EMPTY_TASK_STATE, v2: true };
+    }
     const cancelled = await memo(cache, 'cancelled', bookId, () => isBookCancelled(redis, bookId));
     const layerCfg = await memo(cache, 'layer', bookId, () => getLayerConfig(redis, bookId));
 

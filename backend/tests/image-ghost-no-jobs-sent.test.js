@@ -32,8 +32,8 @@
 
 const { expect } = require('chai');
 const state = require('../src/state');
-const orchestrator = require('../node_modules/@animastor/orchestration/src/orchestration/orchestrator');
-const dispatchEngine = require('../node_modules/@animastor/orchestration/src/runtime/dispatch-engine');
+const orchestrator = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/orchestrator');
+const dispatchEngine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
 // S-5: production seam wiring (dispatch-engine resolves the executor via seams)
 const { wireProductionSeams } = require('./helpers/wire-seams');
 const provider = require('@animastor/generation').comfyuiProvider;
@@ -42,7 +42,7 @@ const path = require('path');
 const config = require('../src/config/runtime-config');
 const iuProcessor = require('../src/image/iu-processor');
 const imageModule = require('../src/image');
-const callbacks = require('../node_modules/@animastor/orchestration/src/orchestration/scene-callbacks');
+const callbacks = require('../node_modules/@animastor/orchestration/src/legacy/orchestration/scene-callbacks');
 const { createMockRedis } = require('./mocks/redis-mock');
 const { query } = require('../src/storage/postgres/database');
 

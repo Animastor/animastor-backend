@@ -161,10 +161,10 @@ describe('§32 runtime/orchestration extraction reconnaissance guards', () => {
         const pkgDir = path.join(REPO_ROOT, 'packages', 'animastor-orchestration');
         expect(fs.existsSync(pkgDir), 'the orchestration package must exist (§32.30)')
             .to.equal(true);
-        expect(fs.existsSync(path.join(pkgDir, 'src', 'runtime', 'dispatch-engine.js')),
+        expect(fs.existsSync(path.join(pkgDir, 'src', 'legacy', 'runtime', 'dispatch-engine.js')),
             'runtime/** moved into the package')
             .to.equal(true);
-        expect(fs.existsSync(path.join(pkgDir, 'src', 'orchestration', 'scene-orchestrator.js')),
+        expect(fs.existsSync(path.join(pkgDir, 'src', 'legacy', 'orchestration', 'scene-orchestrator.js')),
             'orchestration/** moved into the package')
             .to.equal(true);
         expect(fs.existsSync(path.join(BACKEND_SRC, 'orchestration')),

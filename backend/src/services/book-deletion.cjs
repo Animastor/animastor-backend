@@ -74,8 +74,20 @@ function createBookDeletion(deps) {
      *   cascade step is best-effort (warn + continue), matching the
      *   historical route behavior.
      */
+    // Orchestration v2 hooks (composition root, after routeDeps): {isV2Book, purgeGenV2}
+    const v2 = { isV2Book: deps.isV2Book || null, purgeGenV2: deps.purgeGenV2 || null };
+    function configureOrchV2(hooks = {}) {
+        if (typeof hooks.isV2Book === 'function') v2.isV2Book = hooks.isV2Book;
+        if (typeof hooks.purgeGenV2 === 'function') v2.purgeGenV2 = hooks.purgeGenV2;
+    }
+
     async function deleteBook(bookId, options = {}) {
         const onEvent = typeof options.onEvent === 'function' ? options.onEvent : null;
+        // Orchestration v2: decided BEFORE the books row goes (the flag lives there).
+        let isV2 = false;
+        if (typeof v2.isV2Book === 'function') {
+            try { isV2 = await v2.isV2Book(bookId); } catch (_) { isV2 = true; }
+        }
 
         // ── 1. Cancellation signal FIRST — before ANY canonical/runtime
         //    state is deleted. КРИТИЧЕСКИ важно: сначала ОТМЕНИТЬ активные
@@ -190,6 +202,15 @@ function createBookDeletion(deps) {
             // books LAST (may have FK cascades)
             'books',
         ];
+        // Orchestration v2: gen_command_jobs / gen_jobs / gen_commands + this book's .incoming files
+        if (typeof v2.purgeGenV2 === 'function') {
+            try {
+                const g = await v2.purgeGenV2(bookId);
+                if (g && !g.skipped) log(`[DELETE-BOOK] ${bookId}: orchestration v2 rows removed — commands=${g.commands} jobs=${g.jobs} links=${g.links} incoming=${g.incoming_removed}`);
+            } catch (genErr) {
+                console.warn(`[DELETE-BOOK] orchestration v2 cleanup failed for ${bookId}: ${genErr.message}`);
+            }
+        }
         for (const table of pgTables) {
             try {
                 await storage.postgres.query(`DELETE FROM ${table} WHERE book_id = $1`, [bookId]);
@@ -218,6 +239,12 @@ function createBookDeletion(deps) {
         // copy of a task that was still queued. On a hub failure the claims
         // are kept — the safe direction (no duplicates).
         let hubCleared = false;
+        if (isV2) {
+            // a v2 book has no hub queues (ADR §8.4) — the hub is not touched
+            log(`[DELETE-BOOK] Book completely deleted: ${bookId} (orchestration v2)`);
+            if (onEvent) onEvent(`Book completely deleted: ${bookId}`);
+            return { deleted: true, book_id: bookId };
+        }
         try {
             const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
             const hubHeaders = { method: 'DELETE' };
@@ -271,7 +298,7 @@ function createBookDeletion(deps) {
         return { deleted: true, book_id: bookId };
     }
 
-    return { deleteBook };
+    return { deleteBook, configureOrchV2 };
 }
 
 module.exports = { createBookDeletion };

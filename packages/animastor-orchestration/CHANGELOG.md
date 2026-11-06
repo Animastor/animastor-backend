@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.0.0 (2026-11-06) — первая публикация: оркестрация v2, ядро `gen` (этапы 1a–1c)
+
+Опубликованный пакет: `src/` (`src/gen` с миграциями `sql/001–003`, `src/legacy` — код 0.3.x),
+README, LICENSE, CHANGELOG; `test/` и фикстуры в пакет не входят. Ниже — по этапам.
+
+### Этап 1c: scope `scenes`
+
+ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §11.1, §13 п.8).
+
+- `scope.level = 'scenes'` — `{level:'scenes', scene_ids:[…]}` (непустой список, порядок
+  сохраняется, дубли отбрасываются; `chapter_id` / `scene_id` к нему не применяются).
+  Так хост передаёт «с текущей сцены до конца», развёрнутое в порядке книги.
+- `sql/003-scope-scenes`: CHECK `gen_commands_scope_check` пересоздаётся под тем же именем
+  с уровнем `scenes` (NULL-безопасно); `ADD_CHECK` из 001 старое определение не возвращает.
+
+### Этап 1b: gen_command_jobs, build_id/layer, отмена по слою
+
+ADR `architecture/ORCHESTRATION_V2.md` (редакция 06.11, §4.2a, §6.3–6.4, §7, §13.6).
+
+- `sql/002-command-jobs` (поверх 001, идемпотентно): `gen_jobs.build_id` NOT NULL (из
+  `input.build_id`), `gen_jobs.layer` NOT NULL + CHECK, `gen_commands.summary`, таблица
+  `gen_command_jobs` (PK, FK, бэкфилл).
+- Присоединение — явной связью; прогресс и завершение команды — только по `gen_command_jobs`.
+- `cancel({bookId, layer})` (аудио снимает и `audio_merge`); отмена по executor удалена;
+  `cancel({commandId})` не трогает работы, нужные другой активной команде.
+- Ступени §6.3 — только при связанной активной команде со слоем; новая работа связывается со всеми такими.
+- `invalid_result` — один повтор на работу (считается по классу), затем failed.
+- `purgeBook(pool, bookId)`; `progress(bookId, {finishedWithinMs})`; опциональный порт
+  `onArtifactPlaced(job, path)`; `retryPolicy(kind, cls, attempt, {previousErrorClass})`.
+- legacy: единый предикат `persistence-port.isV2Book` (опциональная операция порта
+  `orchestration.isV2Book`, fail-closed) — command gate, reconcile, scheduler, scene window
+  пропускают v2-книги.
+
+### Этап 1a (2026-11-05): ядро `gen` + схема PG
+
+ADR: animastor-docs `architecture/ORCHESTRATION_V2.md` (§3, §4, §6–§10, §13). Без
+подключения к роутам backend, без выкатки.
+
+#### Changed (breaking только по раскладке файлов)
+
+- Весь код 0.3.x перенесён без изменений логики в `src/legacy/`
+  (`legacy/host`, `legacy/orchestration`, `legacy/runtime`, `legacy/index.js`).
+  Корень `src/index.js` экспортирует тот же API, что 0.3.5 (дескрипторы свойств, ленивые
+  геттеры сохранены), плюс новое пространство `gen`. Глубокие импорты
+  `src/runtime/*` / `src/orchestration/*` → `src/legacy/runtime/*` / `src/legacy/orchestration/*`.
+
+#### Added — `gen` (src/gen/)
+
+- `migrate(pool)` — идемпотентная миграция (`sql/001-gen-core.js`): `gen_commands`,
+  `gen_jobs` (ADR §4.1–4.2; CHECK по статусам / kind / executor / связке kind↔executor /
+  lane; partial UNIQUE «одна живая работа на юнит»; `UNIQUE(book_id, client_action_id)`;
+  индексы выдачи, сторожа, прогресса), `books.orchestration` (`legacy`|`v2`, default
+  `legacy`), `workers.current_job_id`, `scene_assets.job_id` / `sha256`.
+- `createOrchestration({pool, ports, uploadSecret, outputDir, sharedLimit, …})`:
+  `createCommand`, `cancel`, `claim`, `beacon`, `acceptResult`, `acceptError`,
+  `sweepOnce` / `startSweeper` / `stopSweeper`, `runLocalOnce` (executor `local`),
+  `progress`, `listenProgress` (`LISTEN gen_progress`).
+- Порты (`ports.js`, проверка при инициализации): `planUnits`, `buildPayload`,
+  `artifactPath`, `validateResult`, `runLocal`, `laneFor`, `timeoutFor`, `retryPolicy`;
+  опционально `maxAttemptsFor`, `isLayerEnabled`. Значения по умолчанию: политика повторов
+  = `gpu-retry-policy.cjs:50–53`, таймауты = media-registry, `makeLaneFor` = логика
+  `gpu-dispatcher.js:213–222`, `createDefaultValidateResult` (mp3 magic + длительность по
+  кадрам + RMS-тишина через ffmpeg, порог параметром; png / mp4 magic).
+- Зависимостей не добавлено: pg-клиент передаёт хост (`pg` — только devDependency тестов).
+
+#### Tests
+
+- `npm run test:gen` — 43 теста на стеке animastor-test (чистая схема на тест; 1 тест реального ffmpeg-декодера пропускается без ffmpeg). Legacy-набор
+  `npm test` без изменений (59).
+
 ## 0.3.5 (2026-11-05) — утечка квоты диспатча, reconcile не понижает закоммиченное
 
 Основание: `reports/2026-11-05/live-check-A-B-C.md` §6, §10 и
