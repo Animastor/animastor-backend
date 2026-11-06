@@ -54,30 +54,50 @@ function identityOf(req) {
  * auto-provisioned guest. Any lookup failure degrades downward instead of
  * 500-ing every request during a transient PG outage.
  */
+/** Every value of a cookie name, in header order (compat: single-value parser). */
+function readAllCookies(req, name) {
+    if (authService.parseCookieHeaders) {
+        return authService.parseCookieHeaders(req.headers && req.headers.cookie, name);
+    }
+    const one = authService.readCookie ? authService.readCookie(req, name) : null;
+    return one ? [one] : [];
+}
+
 async function authContext(req, res, next) {
     req.user = null;
     req.guest = null;
     req.workspace = null;
     req.auth = { kind: 'none' };
     try {
-        const sessionToken = authService.parseCookieHeader
-            ? authService.parseCookieHeader(req.headers && req.headers.cookie, authService.SESSION_COOKIE_NAME)
-            : authService.readCookie(req, authService.SESSION_COOKIE_NAME);
-        if (sessionToken) {
-            const resolved = await authService.resolveSession(sessionToken);
-            if (resolved) {
-                req.user = resolved.user;
-                req.workspace = resolved.workspace;
-                req.auth = { kind: 'user' };
-                return next();
-            }
+        const sessionTokens = readAllCookies(req, authService.SESSION_COOKIE_NAME);
+        const guestTokens = readAllCookies(req, authService.GUEST_COOKIE_NAME);
+        // RFC 6265: a host-only cookie and a Domain= cookie with the same name
+        // are separate records and both arrive in one Cookie header. The first
+        // value may be a stale/revoked session (leftover from before
+        // COOKIE_DOMAIN), so try every duplicate and take the first LIVE one.
+        // One warning per request — a log line per duplicate would flood.
+        if (sessionTokens.length > 1 || guestTokens.length > 1) {
+            console.warn(`[AUTH-CONTEXT] duplicate session cookies (sid=${sessionTokens.length}, gid=${guestTokens.length}) — using the first valid one`);
+        }
+        let session = null;
+        for (const token of sessionTokens) {
+            session = await authService.resolveSession(token);
+            if (session) break;
+        }
+        if (session) {
+            req.user = session.user;
+            req.workspace = session.workspace;
+            req.auth = { kind: 'user' };
+            return next();
         }
 
-        const guestToken = authService.parseCookieHeader
-            ? authService.parseCookieHeader(req.headers && req.headers.cookie, authService.GUEST_COOKIE_NAME)
-            : authService.readCookie(req, authService.GUEST_COOKIE_NAME);
-        if (guestToken) {
-            const resolved = await authService.resolveGuest(guestToken);
+        let guest = null;
+        for (const token of guestTokens) {
+            guest = await authService.resolveGuest(token);
+            if (guest) break;
+        }
+        if (guest) {
+            const resolved = guest;
             if (resolved) {
                 req.guest = resolved.guest;
                 req.workspace = resolved.workspace; // includes status/expiresAt

@@ -35,6 +35,12 @@ function cookieOf(setCookieHeader) {
     return first.split(';')[0]; // "name=value"
 }
 
+/** ALL Set-Cookie headers of a fetch response (Node 22 getSetCookie). */
+function setCookiesOf(res) {
+    if (res.headers && typeof res.headers.getSetCookie === 'function') return res.headers.getSetCookie();
+    return (res.headers.get('set-cookie') || '').split(/,\s*(?=animastor_)/).filter(Boolean);
+}
+
 async function registerUser(app, username, password, email) {
     const res = await fetch(`http://127.0.0.1:${app.__port}/api/v1/auth/register`, {
         method: 'POST',
@@ -499,6 +505,91 @@ describe('Authentication MVP', () => {
                 process.env.COOKIE_DOMAIN = bad;
                 expect(authService.sessionCookieHeader('tok', { secure: true })).to.not.contain('Domain=');
             }
+        });
+    });
+
+    // ── Sticky-cookie hardening (reports/2026-11-06/web-auth-sticky-recon.md) ──
+
+    describe('Sticky cookie hardening', () => {
+        const savedDomain = process.env.COOKIE_DOMAIN;
+        afterEach(() => {
+            if (savedDomain === undefined) delete process.env.COOKIE_DOMAIN;
+            else process.env.COOKIE_DOMAIN = savedDomain;
+        });
+
+        function rawLogin(username, pwd) {
+            return fetch(`http://127.0.0.1:${app.__port}/api/v1/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password: pwd }),
+            });
+        }
+
+        it('login with COOKIE_DOMAIN set: Domain= session + host-only clears for sid and gid', async () => {
+            process.env.COOKIE_DOMAIN = 'animastor.org';
+            const res = await rawLogin(aliceUname, password);
+            expect(res.status).to.equal(200);
+            const list = setCookiesOf(res);
+
+            const sid = list.filter((c) => c.startsWith('animastor_sid='));
+            expect(sid.length, JSON.stringify(list)).to.equal(2);
+            expect(sid.some((c) => c.includes('Domain=animastor.org') && !c.includes('Max-Age=0'))).to.equal(true);
+            const sidClear = sid.find((c) => !c.includes('Domain='));
+            expect(sidClear).to.match(/^animastor_sid=;.*Max-Age=0/);
+            expect(sidClear).to.contain('HttpOnly');
+            expect(sidClear).to.contain('SameSite=Lax');
+
+            const gid = list.filter((c) => c.startsWith('animastor_gid='));
+            expect(gid).to.have.length(1);
+            expect(gid[0]).to.match(/^animastor_gid=;.*Max-Age=0/);
+            expect(gid[0]).to.not.contain('Domain=');
+        });
+
+        it('logout with COOKIE_DOMAIN set clears BOTH the Domain= and host-only records', async () => {
+            process.env.COOKIE_DOMAIN = 'animastor.org';
+            const login = await rawLogin(aliceUname, password);
+            const fresh = setCookiesOf(login).find((c) => c.startsWith('animastor_sid=') && !c.includes('Max-Age=0'));
+            const res = await fetch(`http://127.0.0.1:${app.__port}/api/v1/auth/logout`, {
+                method: 'POST',
+                headers: { Cookie: fresh.split(';')[0] },
+            });
+            expect(res.status).to.equal(200);
+            const clears = setCookiesOf(res);
+            for (const name of ['animastor_sid', 'animastor_gid']) {
+                const own = clears.filter((c) => c.startsWith(`${name}=`));
+                expect(own.some((c) => c.includes('Domain=animastor.org')), `${name}: domain clear`).to.equal(true);
+                expect(own.some((c) => !c.includes('Domain=')), `${name}: host-only clear`).to.equal(true);
+            }
+        });
+
+        it('without COOKIE_DOMAIN login emits a single host-only variant (unchanged)', async () => {
+            delete process.env.COOKIE_DOMAIN;
+            const res = await rawLogin(aliceUname, password);
+            const sid = setCookiesOf(res).filter((c) => c.startsWith('animastor_sid='));
+            expect(sid).to.have.length(1);
+            expect(sid[0]).to.not.contain('Domain=');
+        });
+
+        it('two animastor_sid cookies (first revoked) → the live second one is used', async () => {
+            const { rows } = await query(`SELECT user_id FROM users WHERE username = $1`, [aliceUname]);
+            const revoked = await sessionRepo.createSession(rows[0].user_id, Date.now() + 60_000);
+            await sessionRepo.revokeByToken(revoked.token);
+            const live = await sessionRepo.createSession(rows[0].user_id, Date.now() + 60_000);
+            const res = await fetch(`http://127.0.0.1:${app.__port}/api/v1/auth/me`, {
+                headers: { Cookie: `animastor_sid=${revoked.token}; animastor_sid=${live.token}` },
+            });
+            const body = await res.json();
+            expect(body.authenticated).to.equal(true);
+            expect(body.user).to.include({ id: alice.id, username: aliceUname });
+        });
+
+        it('/api/v1/auth/* and /api/v1/books answer Cache-Control: no-store', async () => {
+            const me = await fetch(`http://127.0.0.1:${app.__port}/api/v1/auth/me`, { headers: { Cookie: aliceCookie } });
+            expect(me.headers.get('cache-control')).to.equal('no-store');
+            const books = await fetch(`http://127.0.0.1:${app.__port}/api/v1/books`, { headers: { Cookie: aliceCookie } });
+            expect(books.headers.get('cache-control')).to.equal('no-store');
+            const login = await rawLogin(aliceUname, password);
+            expect(login.headers.get('cache-control')).to.equal('no-store');
         });
     });
 });

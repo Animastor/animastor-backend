@@ -205,6 +205,9 @@ module.exports = function registerRecentBooksRoutes(app, _redis, deps) {
         || require('../../middleware/workspace-ownership');
 
     app.get('/api/v1/books', async (req, res) => {
+        // The recent-books list is identity-scoped (workspace-filtered) and must
+        // never be replayed from the browser HTTP cache after logout/login.
+        res.setHeader('Cache-Control', 'no-store');
         try {
             // Pre-auth: req.workspace is always null → all books. Once auth
             // lands, req.workspace.id restricts the list to the caller.

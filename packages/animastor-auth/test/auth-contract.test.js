@@ -260,6 +260,25 @@ describe('auth contract: cookie grammar', () => {
         expect(cookies.parseCookieHeader(null, 'animastor_sid')).to.equal(null);
         expect(cookies.parseCookieHeader('nonsense', 'animastor_sid')).to.equal(null);
     });
+
+    it('parseCookieHeaders returns EVERY duplicate value in header order', () => {
+        expect(cookies.parseCookieHeaders('a=1; animastor_sid=old; b=2; animastor_sid=new', 'animastor_sid'))
+            .to.deep.equal(['old', 'new']);
+        expect(cookies.parseCookieHeaders('animastor_gid=abc%20d', 'animastor_gid')).to.deep.equal(['abc d']);
+        expect(cookies.parseCookieHeaders(null, 'animastor_sid')).to.deep.equal([]);
+        expect(cookies.parseCookieHeaders('nonsense', 'animastor_sid')).to.deep.equal([]);
+    });
+
+    it('host-only clearing pair is emitted only with a configured domain', () => {
+        expect(cookies.clearHostOnlyCookieHeaders(base, {})).to.deep.equal([]);
+        expect(cookies.clearHostOnlyCookieHeaders(base)).to.deep.equal([]);
+        const list = cookies.clearHostOnlyCookieHeaders(base, { cookieDomain: 'animastor.org' });
+        expect(list).to.have.length(2);
+        expect(list[0]).to.match(/^animastor_sid=; Path=\/; Max-Age=0; HttpOnly; SameSite=Lax; Secure$/);
+        expect(list[0]).to.not.contain('Domain=');
+        expect(list[1]).to.match(/^animastor_gid=; Path=\/; Max-Age=0; HttpOnly; SameSite=Lax; Secure$/);
+        expect(list[1]).to.not.contain('Domain=');
+    });
 });
 
 describe('auth contract: bookAccessDecision (canonical decision layer)', () => {
