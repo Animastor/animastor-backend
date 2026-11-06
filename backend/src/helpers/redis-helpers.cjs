@@ -500,7 +500,16 @@ module.exports = function(redis, deps = {}) {
                 //                      animastor:dispatch-completed:{book}:{ch}:
                 //                      {sc}:{stage}[:{dispatch_id}]
                 //   cancellation       animastor:cancelled-workers:{book}
-                // Every pattern carries THIS book id; none is global.
+                // Every pattern carries THIS book id; none is global. For the
+                // families whose key starts with a foreign segment (hub dedup,
+                // result dedup, dispatch receipt) the book is anchored to the
+                // `_` boundary of the job_id segment — the same convention as
+                // the existing chunk/result patterns. A book id that is itself
+                // a prefix of another book id followed by '_' would still
+                // collide; the id grammar (bookId may contain '_', chapter and
+                // scene may not) makes an exact parse of the legacy variants
+                // unsafe (they are not all parseJobId-shaped), so coverage
+                // wins over a filter that could miss keys.
                 `animastor:assets:${bookEsc}:*`,
                 `animastor:artifact-manifest:${encBookEsc}:*`,
                 `animastor:fence-journal:${encBookEsc}:*`,
