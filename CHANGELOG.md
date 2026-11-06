@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — orchestration v2, stage 1d: `@animastor/orchestration` 1.0.0 from the registry
+
+- `backend/package.json`: `"@animastor/orchestration": "^1.0.0"` (published 2026-11-06, shasum
+  `780370157265e203c84c8903f8d7e6ee3832ac18`); `backend/.npmrc` (`install-links`) removed; the lockfile
+  resolves the registry tarball with its integrity. The image builds from the `./backend` context again.
+
 ## Unreleased — orchestration v2, stage 1c: tails of 1b (scope `from_current_scene`, cache clear)
 
 ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§11.1, §13 п.8). Branch `orch-v2/1c`; not deployed.
