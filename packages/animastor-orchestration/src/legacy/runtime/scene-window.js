@@ -75,7 +75,19 @@ function error(msg) {
     console.error(`${logPrefix} ❌ ${msg}`);
 }
 
+// Orchestration v2 (2a): the window / read-repair functions below rewrite legacy
+// chunk statuses and asset-state from the files on disk («file exists → image
+// ready»). A v2 book's files are written by the gen core, its readiness lives in
+// PG scene_assets — legacy keeps its hands off ALL its layers (one predicate,
+// fail-closed inside isV2Book).
+async function isV2(bookId, what) {
+    if (!(await require('./persistence-port').isV2Book(bookId))) return false;
+    log(`${what} skipped: ${bookId} is on orchestration v2`);
+    return true;
+}
+
 async function initSceneWindow(redis, scenes, loadedBook, buildId, bookId, scopeInfo) {
+    if (await isV2(bookId, 'initSceneWindow')) return 0;
     const scope = scopeInfo || (await genScope.getScope(redis, bookId));
     const bounds = genScope.scopeBounds(scope, scenes);
     const totalScenes = bounds.endIndex;
@@ -340,6 +352,7 @@ async function _checkAssetVersionStale(bookId, chapterId, sceneId, buildId) {
  * do NOT override the pending state — the scene stays pending for regeneration.
  */
 async function restoreChunkStatusForScene(redis, buildId, bookId, chapterId, sceneId) {
+    if (await isV2(bookId, 'restoreChunkStatusForScene')) return;
     const buildDir = path.join(OUTPUT_DIR, buildId);
     if (!fs.existsSync(buildDir)) return;
 
@@ -477,6 +490,7 @@ async function isWindowComplete(redis, bookId) {
  * Try to slide window forward if all current window scenes have audio + image complete.
  */
 async function trySlideWindowOnComplete(redis, bookId, loadedBook, buildId) {
+    if (await isV2(bookId, 'trySlideWindowOnComplete')) return { started: 0, remaining: 0, reason: 'orchestration_v2' };
     // Command-only generation: sliding the window forward after its scenes
     // complete is an automatic start of the next scenes. Behind the
     // WINDOW_AUTO_NEXT_ENABLED flag, default OFF (owner decision pending).
@@ -516,6 +530,7 @@ async function trySlideWindowOnComplete(redis, bookId, loadedBook, buildId) {
 }
 
 async function slideWindow(redis, bookId, loadedBook, buildId) {
+    if (await isV2(bookId, 'slideWindow')) return { started: 0, remaining: 0, reason: 'orchestration_v2' };
     if (await isCancelled(redis, bookId)) {
         log(`Slide skipped: generation cancelled for ${bookId}`);
         return { started: 0, remaining: 0, reason: 'cancelled' };
@@ -603,6 +618,7 @@ async function slideWindow(redis, bookId, loadedBook, buildId) {
  * were missed (e.g. after Cancel→Generate cycles).
  */
 async function reconcileWindowStatuses(redis, bookId, buildId) {
+    if (await isV2(bookId, 'reconcileWindowStatuses')) return { reconciled: 0, reason: 'orchestration_v2' };
     const buildDir = path.join(OUTPUT_DIR, buildId);
     if (!fs.existsSync(buildDir)) return { reconciled: 0 };
 
@@ -683,10 +699,7 @@ async function reconcileWindowStatuses(redis, bookId, buildId) {
 }
 
 async function startScene(redis, s, buildId, bookId) {
-    if (await require('./persistence-port').isV2Book(bookId)) {
-        log(`startScene skipped: ${bookId} is on orchestration v2`);
-        return false;
-    }
+    if (await isV2(bookId, 'startScene')) return false;
     if (await isCancelled(redis, bookId)) {
         log(`startScene skipped: generation cancelled for ${bookId}`);
         return false;

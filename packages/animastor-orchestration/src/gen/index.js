@@ -1,5 +1,5 @@
 // ======================================================
-// @animastor/orchestration · gen — orchestration v2 core (1.0.0)
+// @animastor/orchestration · gen — orchestration v2 core (1.1.0)
 // ======================================================
 // ADR: animastor-docs architecture/ORCHESTRATION_V2.md. The single source of
 // truth is PG (gen_commands, gen_jobs). This namespace depends ONLY on the
@@ -95,12 +95,15 @@ module.exports = Object.freeze({
         ...portsMod.defaults,
         createDefaultValidateResult: media.createDefaultValidateResult,
         createAudioValidator: media.createAudioValidator,
+        createPngValidator: media.createPngValidator,
     }),
     media: Object.freeze({
         inspectMp3: media.inspectMp3,
         rmsDbfs: media.rmsDbfs,
         ffmpegDecodePcm: media.ffmpegDecodePcm,
         DEFAULT_RMS_THRESHOLD_DBFS: media.DEFAULT_RMS_THRESHOLD_DBFS,
+        inspectPng: media.inspectPng,
+        DEFAULT_MIN_LUMA_STDDEV: media.DEFAULT_MIN_LUMA_STDDEV,
     }),
     GenError: util.GenError,
     PROGRESS_CHANNEL: util.PROGRESS_CHANNEL,

@@ -25,6 +25,18 @@ const { checkLane } = require('./ports');
 
 const PART_KINDS = new Set(['audio_chunk', 'iu_image', 'video_group']);
 const FINAL_FORMAT = { audio_merge: 'mp3', video_merge: 'mp4' };
+const PART_FORMAT = { iu_image: 'png' };
+
+/** input.scene_parts → [{unit_key, part_hash}] (non-empty, string fields) or null. */
+function partsManifest(v) {
+    if (!Array.isArray(v) || v.length === 0) return null;
+    const out = [];
+    for (const p of v) {
+        if (!p || typeof p.unit_key !== 'string' || !p.unit_key || typeof p.part_hash !== 'string' || !p.part_hash) return null;
+        out.push({ unit_key: p.unit_key, part_hash: p.part_hash });
+    }
+    return out;
+}
 const DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 function epochS() { return Math.floor(Date.now() / 1000); }
@@ -89,7 +101,50 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         const sceneHash = job.input.scene_hash || null;
         if (PART_KINDS.has(job.kind)) {
             // a part (chunk / IU / group) is recorded, the scene asset is not ready yet
-            const part = { [job.unit_key]: { kind: job.kind, path: finalPath, sha256: sha, bytes, job_id: job.job_id, attempt: job.attempt } };
+            const entry = { kind: job.kind, path: finalPath, sha256: sha, bytes, job_id: job.job_id, attempt: job.attempt };
+            if (typeof job.input.part_hash === 'string' && job.input.part_hash) entry.part_hash = job.input.part_hash;
+            const part = { [job.unit_key]: entry };
+            const sceneParts = partsManifest(job.input.scene_parts);
+            if (sceneParts) {
+                // 1.1.0 — a part kind WITHOUT a merge stage (iu_image): the scene asset is
+                // `ready` exactly when every part the planner listed for the scene
+                // (input.scene_parts = [{unit_key, part_hash}] in scene order) has an
+                // accepted entry with that part_hash; the acceptance that completes the
+                // set writes ready + sha256 (of the parts manifest «unit_key:sha256» per
+                // line, scene order) + job_id + path (the first part's file). Not complete
+                // → 'pending' (a half-regenerated scene is not ready for the new content).
+                // The row lock taken by the upsert serialises two IUs of one scene accepted
+                // in parallel; the second one sees the first one's part (READ COMMITTED
+                // re-reads the committed row on conflict).
+                const up = (await client.query(
+                    `INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, build_id, scene_hash, status, metadata, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, 'pending', jsonb_build_object('gen_parts', $7::jsonb), $8)
+                     ON CONFLICT (book_id, chapter_id, scene_id, asset_type, build_id) DO UPDATE SET
+                         metadata = jsonb_set(
+                             CASE WHEN jsonb_typeof(scene_assets.metadata) = 'object' THEN scene_assets.metadata ELSE '{}'::jsonb END,
+                             '{gen_parts}',
+                             COALESCE(CASE WHEN jsonb_typeof(scene_assets.metadata->'gen_parts') = 'object'
+                                           THEN scene_assets.metadata->'gen_parts' END, '{}'::jsonb) || $7::jsonb),
+                         updated_at = EXCLUDED.updated_at
+                     RETURNING id, metadata->'gen_parts' AS parts`,
+                    [job.book_id, job.chapter_id, job.scene_id, assetType, build, sceneHash, JSON.stringify(part), epochS()])).rows[0];
+                const parts = up.parts && typeof up.parts === 'object' ? up.parts : {};
+                const complete = sceneParts.every((p) => parts[p.unit_key] && parts[p.unit_key].part_hash === p.part_hash);
+                if (complete) {
+                    const manifest = sceneParts.map((p) => `${p.unit_key}:${parts[p.unit_key].sha256 || ''}`).join('\n');
+                    await client.query(
+                        `UPDATE scene_assets SET scene_hash = $2, status = 'ready', error = NULL, sha256 = $3, job_id = $4,
+                                path = $5, format = $6
+                         WHERE id = $1`,
+                        [up.id, sceneHash, crypto.createHash('sha256').update(manifest).digest('hex'), job.job_id,
+                            parts[sceneParts[0].unit_key].path || finalPath, PART_FORMAT[job.kind] || null]);
+                } else {
+                    await client.query(
+                        `UPDATE scene_assets SET scene_hash = $2, status = 'pending', sha256 = NULL, job_id = NULL WHERE id = $1`,
+                        [up.id, sceneHash]);
+                }
+                return;
+            }
             await client.query(
                 `INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, build_id, scene_hash, status, metadata, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, 'pending', jsonb_build_object('gen_parts', $7::jsonb), $8)
