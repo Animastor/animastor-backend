@@ -21,7 +21,8 @@ registry and the image layer of a v2 book answers 409 `v2_image_unavailable` (fa
 - `/regenerate` of a v2 book: `worker_types` ⊂ {audio, image, video}; video → no work,
   `summary.skipped_unsupported` + `skipped_worker_types`; only video → 409
   `v2_layer_not_supported_yet`; image unavailable → 409 `v2_image_unavailable`; unknown type → 400;
-  `tasks[]` one row per layer; `layer_disabled` lists the requested layers.
+  `tasks[]` one row per layer; `skipped_worker_types` = requested layers the command does not run
+  (video + disabled in layer-config); `layer_disabled` lists the requested layers.
   `cancel-worker {task_id}` → `cancelled` = the command's layers.
 - `progress-adapter`: the image layer has no merge — `total` = planned IUs.
 - Tests: `orch-v2-image.test.js` (fake image worker over HTTP + player read routes),

@@ -223,7 +223,8 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 scope: legacyScope,
                 build_id: (loaded && loaded.manifest && loaded.manifest.build_id) || 'default',
                 dirty_scenes: [],
-                skipped_worker_types: unsupported,
+                // not run by this command: unsupported on v2 (video) + disabled in layer-config
+                skipped_worker_types: requested.filter((t) => !r.layers.includes(t)),
                 tasks: r.layers.map((type) => ({ task_id: r.command_id, type, target_count: layerCount(type) })),
             });
         } catch (err) {
