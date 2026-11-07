@@ -234,10 +234,10 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
 
     after(async () => {
         global.fetch = origFetch;
-        await new Promise((r) => server.close(r));
-        await query(`DELETE FROM workers WHERE worker_id = ANY($1)`, [[workerId, audioWorkerId]]);
-        await query(`DELETE FROM workspaces WHERE id = $1`, [workspaceId]);
-        await query(`DELETE FROM users WHERE user_id = $1`, [userId]);
+        if (server) await new Promise((r) => server.close(r));
+        if (workerId) await query(`DELETE FROM workers WHERE worker_id = ANY($1)`, [[workerId, audioWorkerId]]);
+        if (workspaceId) await query(`DELETE FROM workspaces WHERE id = $1`, [workspaceId]);
+        if (userId) await query(`DELETE FROM users WHERE user_id = $1`, [userId]);
     });
 
     it('«картинки» сцены: claim (тип image) → PUT PNG → gen_parts → сцена ready; все эндпоинты чтения отдают картинку; превью инвалидируется', async () => {
