@@ -1,11 +1,24 @@
 # Changelog
 
-## Unreleased — stage166: worker logs always reach the owner (WLOG-2)
+## Unreleased — stage166: worker logs always reach the owner (WLOG-2) + workflow model names follow the manifests
 
 Owner decision 2026-11-07; ADR `animastor-docs architecture/ORCHESTRATION_V2.md` §8.5.
-Branch `feat/worker-logs-owner`; **not merged, not deployed** (backend release + migration WLOG-2
-happen in a separate step).
+Branch `feat/worker-logs-owner` merged via `release/stage166` into `main`; deployed in the stage166
+release (migration WLOG-2 runs at backend start).
 
+- **stage166 (A):** `backend/ai/workflows` model names follow the install manifests — `img-qwen-image`
+  node `1010 LoraLoaderModelOnly.lora_name` → `Wuli-Qwen-Image-2512-Turbo-LoRA-4steps-V3.0-bf16.safetensors`;
+  `video-ltx-{1,2,3,4}p` node `141 UnetLoaderGGUF.unet_name` → `LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf`
+  (HF API tree: `size 17763015328`, sha256 `cfebeb7ac973230d61f6f51ba668c236587571461a4f57c72bb6d71ce1f75fbd`
+  = manifest `video/ltx-2.3.json`). Guarantee test `tests/workflow-model-names-manifest.test.js`: every
+  model-file `*_name` of a manifested workflow must be a `filename` dependency of that manifest;
+  manifest-less `old_*` workflows are an explicit list; known exceptions are `KNOWN_EXCEPTIONS`
+  (TODO + report link), never a skipped suite. Manifests: only derived fields — `baseline_sha256`
+  recomputed for 5 artifacts, `revision` `2026.08.27-r1` → `2026.11.07-r1`; `@animastor/installer`
+  0.2.8 → **0.2.9** (registry `dist.shasum 5ebe25137e91365ebb209effb7b9e900dbfeab0c`).
+- **stage166:** `backend/package.json` → `"@animastor/installer": "^0.2.9"` + lockfile
+  (`integrity sha512-PM29ECk8H4r9Ahu165rLLlheXLptBjXyThYKk6EpWcEIQF0WXH2u5Olqe6g6tUu4TwnlUxhmweH6ouNB/J0Tqw==`);
+  `npm ci` installs 0.2.9 from the registry (no local copy).
 - `storage/postgres/schema.js`: **WLOG-2** — `workers.log_shipping` default → `TRUE`, plus a one-time
   `UPDATE … WHERE revoked_at IS NULL AND log_shipping = FALSE` (logged with the row count). The
   update runs only while the column default is still `FALSE`, so an operator's later `false` is
