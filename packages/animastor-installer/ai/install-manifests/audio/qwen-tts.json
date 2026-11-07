@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "revision": "2026.10.30-r1",
+  "revision": "2026.11.07-r1",
   "status": "ready",
   "profile": {
     "id": "audio/qwen-tts",
@@ -338,6 +338,7 @@
       "worker-cleanup.cjs",
       "worker-cleanup-journal.cjs",
       "job-protocol-v2.cjs",
+      "worker-logs.cjs",
       "package.json",
       "package-lock.json",
       ".env.example"
