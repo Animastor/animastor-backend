@@ -14,10 +14,13 @@
 const fs = require('fs');
 const path = require('path');
 const { withTx, notifyProgress } = require('./util');
+const { msBetween } = require('./log');
 
 const BATCH = 200;
 
-function createSweeper({ pool, accept, outputDir = null, offlineAfterMs = 60_000, incomingMaxAgeMs = 60 * 60_000, logger = console }) {
+const NOOP_LOG = Object.freeze({ event() {} });
+
+function createSweeper({ pool, accept, outputDir = null, offlineAfterMs = 60_000, incomingMaxAgeMs = 60 * 60_000, logger = null, genLog = NOOP_LOG }) {
     const offlineAfterS = Math.max(1, Math.round(offlineAfterMs / 1000));
 
     async function failMany(rows, cls, reason) {
@@ -59,9 +62,15 @@ function createSweeper({ pool, accept, outputDir = null, offlineAfterMs = 60_000
                     `UPDATE gen_commands SET status = $2, finished_at = now(), error = $3 WHERE command_id = $1`,
                     [id, status, err]);
                 await notifyProgress(client, c.book_id, id);
-                return true;
+                return { book_id: c.book_id, status, k, run_ms: msBetween(c.created_at) };
             });
-            if (done) n += 1;
+            if (done) {
+                n += 1;
+                genLog.event('command-finished', {
+                    book_id: done.book_id, command_id: id, status: done.status,
+                    done: done.k.done, failed: done.k.failed, cancelled: done.k.cancelled, run_ms: done.run_ms,
+                });
+            }
         }
         return n;
     }
@@ -121,7 +130,7 @@ function createSweeper({ pool, accept, outputDir = null, offlineAfterMs = 60_000
             if (!busy) {
                 busy = true;
                 try { await sweepOnce(); } catch (err) {
-                    logger.error && logger.error(`[gen-v2] sweeper: ${err && err.message}`);
+                    logger && logger.error && logger.error(`[gen-v2] sweeper: ${err && err.message}`);
                 } finally { busy = false; }
             }
             if (!stopped) { timer = setTimeout(tick, intervalMs); if (timer.unref) timer.unref(); }

@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0 (2026-11-07) — наблюдаемость v2 (О3)
+
+Основание: `reports/2026-11-07/orch-v2-image-scene-run.md` О3 и «мелочи». Minor: только
+добавления, контракт портов 1.0.0 не меняется.
+
+- **Строки `[gen-v2]`** через порт логгера (`createOrchestration({ logger })`, метод `info`,
+  иначе `log`; без логгера — молча): `command-created` (book, command, layers, scope,
+  jobs_created/joined/skipped_ready, existing для повторного клика), `claim` (job, kind,
+  unit_key, attempt/max_attempts, worker_id, ms), `accept` (sha256, bytes, width/height,
+  idempotent, stage_jobs_created, ms приёма, run_ms от claim), `error` (каждая неудачная
+  попытка: error_class, job_status, retry; 409 — `code=stale_attempt`), `requeue`
+  (возврат в очередь, delay_ms), `command-finished` (status, done/failed/cancelled, run_ms).
+  Печатаются только поля из белого списка (`gen/log.js` `FIELDS`): токены загрузки, пути
+  файлов и параметры задач в строки не попадают. Форматер — `gen.formatGenEvent`.
+- Ядро `src/gen` больше не вызывает `console` само: `sweeper`/`local runner` пишут ошибки
+  через тот же порт (по умолчанию `createOrchestration` по-прежнему берёт `console`).
+- **`scene_assets.width/height`** для изображений: размеры из PNG-валидатора сохраняются в
+  `gen_parts[unit_key]` и в строке сцены при `ready` (размер файла `path`, т. е. первой
+  части); для финальных видов — `COALESCE` из результата проверки, если он их знает.
+- **Права принятых файлов 0644** (как у legacy); временный файл в `.incoming` — 0640.
+
 ## 1.1.0 (2026-11-07) — этап 2a: изображения (`iu_image`)
 
 ADR `architecture/ORCHESTRATION_V2.md` (§4.3, §7, §12 «2a», §13 п.9). Minor: только
