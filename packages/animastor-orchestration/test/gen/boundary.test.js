@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 
 const GEN = path.resolve(__dirname, '../../src/gen');
-const BUILTINS = new Set(['fs', 'path', 'crypto', 'child_process', 'stream']);
+const BUILTINS = new Set(['fs', 'path', 'crypto', 'child_process', 'stream', 'zlib']);
 
 function files(dir) {
     return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {

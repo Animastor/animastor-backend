@@ -10,6 +10,12 @@
 //        scope = {level, chapter_id?, scene_id?, unit_id?, scene_ids?}  (level 'scenes' → scene_ids, book order)
 //        Unit  = {chapter_id, scene_id, kind, unit_key, build_id, input, scene_hash?}
 //        build_id = the book build at command time (gen_jobs.build_id, §4.2)
+//        input.part_hash?   (1.1.0) snapshot hash of THIS part: without force the unit is
+//                           skipped when scene_assets.metadata.gen_parts[unit_key].part_hash
+//                           of the same build equals it (row not 'stale'); acceptance stores it
+//        input.scene_parts? (1.1.0) [{unit_key, part_hash}] — every part of the scene in scene
+//                           order, for a part kind WITHOUT a merge stage (iu_image): the
+//                           acceptance that completes the set marks the scene asset ready
 //   buildPayload(job)              → Promise<object>  ComfyUI params etc. (claim, §8.1)
 //   artifactPath(job)              → string           absolute final path (accept, §7 п.3)
 //   validateResult(job, tmpPath)   → Promise<{ok, reason?}>  (§7 п.1; default: validate-media)

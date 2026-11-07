@@ -1,7 +1,7 @@
 {
     "name": "@animastor/orchestration",
-    "version": "1.0.0",
-    "description": "Animastor Orchestration 1.0.0 — generation orchestration v2 (ADR ORCHESTRATION_V2): `gen` namespace — PG is the single source of truth (gen_commands, gen_jobs), commands / claim (FOR UPDATE SKIP LOCKED) / one-transaction acceptance / sweeper / progress over a host-supplied pg pool and host ports; no Redis, no Express, no ComfyUI. The 0.3.x orchestration (dispatch/reconcile/lease/FSM, O-2..O-10 ports, host bindings) ships unchanged under src/legacy/ with the same root exports until migration stage 4.",
+    "version": "1.1.0",
+    "description": "Animastor Orchestration 1.1.0 — generation orchestration v2 (ADR ORCHESTRATION_V2): `gen` namespace — PG is the single source of truth (gen_commands, gen_jobs), commands / claim (FOR UPDATE SKIP LOCKED) / one-transaction acceptance / sweeper / progress over a host-supplied pg pool and host ports; no Redis, no Express, no ComfyUI. The 0.3.x orchestration (dispatch/reconcile/lease/FSM, O-2..O-10 ports, host bindings) ships unchanged under src/legacy/ with the same root exports until migration stage 4.",
     "keywords": [
         "animastor",
         "dispatch",

@@ -196,6 +196,32 @@ function createCommands({ pool, ports }) {
                     if (readyKeys.has(gkey(u))) { skipped += 1; return false; }
                     return true;
                 });
+                // 1.1.0 — part-level readiness (opt-in: the unit carries input.part_hash).
+                // A part (e.g. one IU picture) whose accepted snapshot hash is recorded in
+                // scene_assets.metadata.gen_parts[unit_key].part_hash for the same build is
+                // already done for the current content — skip it even if its scene is not
+                // complete («сгенерировать недостающее» = only the missing / changed parts).
+                // A row the host marked 'stale' proves nothing. Units without part_hash
+                // (audio) keep the scene-level rule above unchanged.
+                const parted = todo.filter((u) => typeof u.input.part_hash === 'string' && u.input.part_hash);
+                if (parted.length) {
+                    const r = await client.query(
+                        `SELECT t.ord FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+                                WITH ORDINALITY AS t(chapter_id, scene_id, asset_type, build_id, unit_key, part_hash, ord)
+                         WHERE EXISTS (SELECT 1 FROM scene_assets a
+                                       WHERE a.book_id = $1 AND a.chapter_id = t.chapter_id AND a.scene_id = t.scene_id
+                                         AND a.asset_type = t.asset_type AND a.build_id = t.build_id
+                                         AND a.status IN ('pending', 'ready')
+                                         AND jsonb_typeof(a.metadata->'gen_parts') = 'object'
+                                         AND a.metadata->'gen_parts'->t.unit_key->>'part_hash' = t.part_hash)`,
+                        [bookId, parted.map((u) => u.chapter_id), parted.map((u) => u.scene_id), parted.map((u) => LAYER_OF_KIND[u.kind]),
+                            parted.map((u) => u.build_id), parted.map((u) => u.unit_key), parted.map((u) => u.input.part_hash)]);
+                    const done = new Set(r.rows.map((row) => parted[Number(row.ord) - 1]));
+                    if (done.size) {
+                        skipped += done.size;
+                        todo = todo.filter((u) => !done.has(u));
+                    }
+                }
             }
 
             // lanes, one lookup per worker type (§4.2: computed at creation)

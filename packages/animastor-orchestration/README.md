@@ -1,6 +1,6 @@
 # @animastor/orchestration
 
-## 1.0.0 — orchestration v2 (`gen`)
+## 1.x — orchestration v2 (`gen`)
 
 ADR: animastor-docs `architecture/ORCHESTRATION_V2.md`. The new core lives in
 `src/gen/` and is exported as `gen`. The 0.3.x contour described below ships
@@ -24,6 +24,12 @@ await orch.claim({ workerId, workerType: 'audio', mode: 'private', workspaceId }
 await orch.acceptResult(jobId, attempt, uploadToken, readableStream);
 orch.startSweeper(10_000);
 ```
+
+**1.1.0 (images, stage 2a).** `iu_image` results are checked by `inspectPng`
+(structure + CRC, dimensions > 0, pixel data, not a blank frame — luma stddev ≥
+`minLumaStddev`, default 2.0); a unit may carry `input.part_hash` (part-level
+«already done» skip) and `input.scene_parts` (scene asset `ready` once every
+listed part is accepted — for part kinds without a merge stage).
 
 `gen` requires only node builtins and its own files: no `src/legacy`, Redis,
 Express or ComfyUI. Tests: `npm run test:gen` (env `PG_*` of the animastor-test
