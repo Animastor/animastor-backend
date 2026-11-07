@@ -14,7 +14,7 @@ published to npm as `@animastor/installer`.
 
 ```
 packages/animastor-installer/
-├── package.json            @animastor/installer 0.2.9, Node >=20, zero runtime deps
+├── package.json            @animastor/installer 0.2.10, Node >=20, zero runtime deps
 ├── src/installer/
 │   ├── cli.js              CLI entry (detect/plan/install/verify/resume/uninstall)
 │   ├── index.js            Public API entry (10 exports, incl. setupContract)
@@ -186,6 +186,17 @@ is waited for up to `--wait-job-ms` (default 600000), else the run is FAILED
 path (`doctor --yes`, no TTY) only starts a stopped worker. An unchanged
 `.env` is no longer rewritten. `doctor` and `status` print
 `current job: none|<id>`.
+
+The worker bundle is deployed WHOLE (0.2.10): every file of the source — the
+hub bundle or the installer's bundled copy — is copied, not only
+`manifest.worker_bundle.files` (that list is the minimal presence check; `.env`
+and `.env.*` other than `.env.example`, `node_modules/`, `.git/`, `logs/` are
+never copied). The deployed file list is recorded in install-state
+(`components.worker.bundle_files`); the next update removes the files of the
+old version the new bundle no longer ships (only recorded files, never `.env`
+or `node-classes.json`; a 0.2.9 state falls back to `files_installed`). Before
+a start every local `require('./…')` reachable from `worker.cjs` must exist,
+otherwise the start is FAILED naming the file and the worker is not spawned.
 
 Every install/doctor run first brings the management tools (`animastor`,
 the persistent installer copy) and an installed worker bundle to its own

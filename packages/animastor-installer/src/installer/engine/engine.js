@@ -978,6 +978,7 @@ async function runInstallation(args) {
                             httpFetchText: null, log,
                             update: decisions.apply_fixes !== false,
                             nodeBin,
+                            previousBundleFiles: previousBundleFilesOf(st.components.worker, workerDir),
                         }));
                     } finally {
                         if (bundleTmp) {
@@ -989,12 +990,19 @@ async function runInstallation(args) {
                 if (bundleRes.ok && bundleRes.value.status === 'installed') {
                     // Ownership is per-file: a pre-existing worker dir keeps its
                     // own files; only what the installer copied is registered.
+                    const prevW = st.components.worker && st.components.worker.dir
+                        && path.resolve(st.components.worker.dir) === path.resolve(workerDir) ? st.components.worker : null;
+                    const removedSet = new Set(bundleRes.value.files_removed || []);
                     st.components.worker = {
-                        owned: bundleRes.value.dir_created === true,
+                        // a re-run over the installer's own dir keeps its ownership and earlier files
+                        owned: bundleRes.value.dir_created === true || (prevW ? prevW.owned === true : false),
                         dir: workerDir,
-                        files_installed: bundleRes.value.files_installed || [],
+                        files_installed: [...new Set([...(prevW ? prevW.files_installed || [] : []), ...(bundleRes.value.files_installed || [])])]
+                            .filter((f) => !removedSet.has(f)),
                         files_kept: bundleRes.value.files_kept || [],
-                        env_created: null, // finalized by the .env step below
+                        // installer 0.2.10: the deployed bundle's file list — the next update removes what it no longer ships
+                        bundle_files: bundleRes.value.bundle_files || [],
+                        env_created: prevW ? (prevW.env_created ?? null) : null, // finalized by the .env step below
                     };
                 }
                 state.setArtifact(st, w.id, bundleRes.ok && bundleRes.value.status === 'installed' ? 'installed' : 'failed');
@@ -1315,7 +1323,20 @@ async function runInstallation(args) {
  * behind). A missing installation is left to the regular install step.
  * @returns {Promise<{ status: 'absent'|'current'|'unknown'|'updated'|'failed', have: string|null, want: string|null, files_installed?: string[], reason?: string }>}
  */
-async function refreshInstalledWorkerBundle(io, { workerDir, manifest, repoRoot = null, hubUrl = null, log = null, nodeBin = null }) {
+/**
+ * installer 0.2.10: the file list of the bundle version on disk, as recorded in
+ * install-state (worker.bundle_files). Installs by 0.2.9 and older recorded only
+ * files_installed (manifest files they copied) — that list is the fallback.
+ * null when the state does not describe THIS worker dir.
+ */
+function previousBundleFilesOf(w, workerDir) {
+    if (!w || !w.dir || !workerDir || path.resolve(w.dir) !== path.resolve(workerDir)) return null;
+    if (Array.isArray(w.bundle_files)) return w.bundle_files.slice();
+    if (Array.isArray(w.files_installed)) return w.files_installed.filter((f) => f !== worker.NODE_CLASSES_FILE);
+    return null;
+}
+
+async function refreshInstalledWorkerBundle(io, { workerDir, manifest, repoRoot = null, hubUrl = null, log = null, nodeBin = null, previousBundleFiles = null }) {
     if (!workerDir || !manifest || !io.fs.existsSync(path.join(workerDir, 'worker.cjs'))) return { status: 'absent', have: null, want: null };
     const srcDir = repoBundleSource.resolveRepoBundleDir(io.fs, repoRoot);
     const have = worker.readPkgVersion(io, workerDir);
@@ -1338,11 +1359,11 @@ async function refreshInstalledWorkerBundle(io, { workerDir, manifest, repoRoot 
             if (fetched.bundleDir) { bundleDir = fetched.bundleDir; bundleTmp = fetched.tmpDir; }
             else return { status: 'failed', have, want, reason: `worker bundle fetch failed: ${fetched.reason}` };
         }
-        const r = worker.installWorkerBundle(io, { workerDir, manifest, repoRoot, bundleDir, hubUrl, httpFetchText: null, log, update: true, nodeBin });
+        const r = worker.installWorkerBundle(io, { workerDir, manifest, repoRoot, bundleDir, hubUrl, httpFetchText: null, log, update: true, nodeBin, previousBundleFiles });
         if (r.status !== 'installed') return { status: 'failed', have, want, reason: r.reason || r.status };
         const now = worker.readPkgVersion(io, workerDir);
         if (now !== want) return { status: 'failed', have, want, reason: `bundle is ${now} after the update, expected ${want}` };
-        return { status: 'updated', have, want, files_installed: r.files_installed || [] };
+        return { status: 'updated', have, want, files_installed: r.files_installed || [], bundle_files: r.bundle_files || [], files_removed: r.files_removed || [] };
     } catch (err) {
         return { status: 'failed', have, want, reason: err.message };
     } finally {
@@ -1712,6 +1733,7 @@ module.exports = {
     autoPickComfyPort,
     platformComfyMissingChecks,
     refreshInstalledWorkerBundle,
+    previousBundleFilesOf,
     writeNodeClasses: worker.writeNodeClasses,
     desiredEnvWiring,
     endToEndChecks,
