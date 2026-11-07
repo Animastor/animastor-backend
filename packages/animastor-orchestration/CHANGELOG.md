@@ -23,6 +23,7 @@ ADR `architecture/ORCHESTRATION_V2.md` (§4.3, §7, §12 «2a», §13 п.9). Min
   «unit_key:sha256» по порядку) + `job_id` + `path` (файл первой части) + `format`
   (`png`); незакрытый набор → `pending`, `sha256`/`job_id` = NULL. Параллельный приём
   двух частей одной сцены сериализуется блокировкой строки.
+- `cancel({commandId})` дополнительно возвращает `layers` остановленной команды.
 - `src/gen` может использовать встроенный `zlib` (граница зависимостей).
 - **legacy** (`src/legacy/runtime/scene-window`): `initSceneWindow`, `slideWindow`,
   `trySlideWindowOnComplete`, `reconcileWindowStatuses`, `restoreChunkStatusForScene` для

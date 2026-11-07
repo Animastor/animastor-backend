@@ -297,7 +297,8 @@ function createCommands({ pool, ports }) {
      *                         command waits for them (gen_command_jobs) — shared jobs keep running
      * @param {object} target
      * @param {{cancelledBy?:string}} [opts]
-     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number}>}
+     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number, layers?:string[]}>}
+     *          layers (1.1.0, {commandId} only): the layers of the command that was stopped
      */
     async function cancel(target = {}, opts = {}) {
         const by = opts.cancelledBy == null ? null : String(opts.cancelledBy).slice(0, 200);
@@ -320,7 +321,7 @@ function createCommands({ pool, ports }) {
             if (commandId !== undefined) {
                 commands = (await client.query(
                     `UPDATE gen_commands SET status = 'cancelled', finished_at = now(), cancelled_by = $2
-                     WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id`, [commandId, by])).rows;
+                     WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id, layers`, [commandId, by])).rows;
                 jobs = await client.query(
                     `UPDATE gen_jobs j SET status = 'cancelled', finished_at = now()
                      FROM gen_command_jobs l
@@ -347,12 +348,14 @@ function createCommands({ pool, ports }) {
             }
             const books = new Set([...commands.map((c) => c.book_id), ...jobs.rows.map((j) => j.book_id)]);
             for (const b of books) await notifyProgress(client, b, commandId || null);
-            return {
+            const out = {
                 commands_cancelled: commands.length,
                 jobs_cancelled: jobs.rowCount,
                 job_ids: jobs.rows.map((j) => j.job_id),
                 kept_shared: keptShared,
             };
+            if (commandId !== undefined) out.layers = commands.length ? commands[0].layers : [];   // 1.1.0
+            return out;
         });
     }
 

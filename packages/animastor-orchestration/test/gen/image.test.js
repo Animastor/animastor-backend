@@ -215,6 +215,7 @@ describe('gen v2 — iu_image end to end (ADR §6–§7, 2a)', function () {
         assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_jobs WHERE unit_key = 'iu-b'`), 1);
         const stop = await o.cancel({ commandId: a.command_id });
         assert.equal(stop.jobs_cancelled, 1); assert.equal(stop.kept_shared, 1);
+        assert.deepEqual(stop.layers, ['image'], '1.1.0: cancel({commandId}) reports the layers of the command');
         const t = await claimImg();
         assert.equal(t.unit_key, 'iu-b');
         assert.equal(await claimImg(), null);
