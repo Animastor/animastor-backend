@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "revision": "2026.11.07-r1",
+  "revision": "2026.11.07-r2",
   "status": "ready",
   "profile": {
     "id": "image/qwen-image",
@@ -21,10 +21,10 @@
     "note": "Workflows are the single source of truth for 'required'. Connectors are backend-only execution metadata and are NOT installed. Runtime audits are reference only, never the source of truth. Legacy old_img-qwen-image.json is excluded by the workflow loader and must not influence this manifest (it references a different CLIP quant — Q4_K_M instead of Q8_0)."
   },
   "hardware": {
-    "gpu_min_vram_gb": null,
-    "basis": "unknown",
+    "gpu_min_vram_gb": 14,
+    "basis": "minimum_supported",
     "reference_gpu": "NVIDIA L40S (46068 MiB)",
-    "todo": "Open question 12: minimum VRAM is not documented anywhere; needs measurement."
+    "derivation": "Estimate, not a measured floor (installer 0.2.10): img-qwen-image samples with the GGUF UNet qwen-image-2512-Q4_K_M (12.33 GiB) and the 4-step LoRA (1.10 GiB) resident together, plus activations at 768x1024; ComfyUI moves the Qwen2.5-VL-7B Q8_0 text encoder (7.54 GiB) out of VRAM after encoding. 14 GB keeps 16 GB cards (15.6-16 GiB as reported) in; 12 GB cards are below. Known to run on L40S 46 GB. Lower it only after a measured run on a smaller card."
   },
   "runtime_requirements": {
     "comfyui": {
@@ -329,6 +329,7 @@
       "worker-cleanup.cjs",
       "worker-cleanup-journal.cjs",
       "job-protocol-v2.cjs",
+      "worker-logs.cjs",
       "package.json",
       "package-lock.json",
       ".env.example"

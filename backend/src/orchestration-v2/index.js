@@ -114,7 +114,10 @@ function createOrchV2Host(o) {
         state.progress = createProgressAdapter({ orch: state.orch, book: o.book });
         if (o.publishProgress && o.redis) {
             state.listener = await state.orch.listenProgress((evt) => {
-                state.progress.onNotify(evt, (bookId, payload) => o.publishProgress(o.redis, bookId, payload)).catch(() => {});
+                // О3: a failed NOTIFY→SSE hop is visible (was a silent .catch(() => {}))
+                state.progress.onNotify(evt, (bookId, payload) => o.publishProgress(o.redis, bookId, payload)).catch((err) => {
+                    console.warn(`[ORCH-V2] progress NOTIFY→SSE failed book=${evt && evt.book_id} command=${evt && evt.command_id}: ${err && err.message}`);
+                });
             });
         }
         if (o.timers !== false) {

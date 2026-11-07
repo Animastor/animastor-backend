@@ -22,6 +22,12 @@ const {
     EXECUTOR_OF_KIND, LAYER_OF_KIND, LIVE,
 } = require('./util');
 const { checkLane } = require('./ports');
+const { msBetween } = require('./log');
+
+const NOOP_LOG = Object.freeze({ event() {} });
+/** Mode of an accepted artifact: world-readable like the legacy outputs (О3; the tmp file is 0640). */
+const ARTIFACT_MODE = 0o644;
+const dim = (v) => (Number.isInteger(v) && v > 0 ? v : null);
 
 const PART_KINDS = new Set(['audio_chunk', 'iu_image', 'video_group']);
 const FINAL_FORMAT = { audio_merge: 'mp3', video_merge: 'mp4' };
@@ -51,7 +57,7 @@ async function drain(stream) {
     try { stream.resume(); } catch (_) { /* ignore */ }
 }
 
-function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES }) {
+function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES, genLog = NOOP_LOG }) {
     const sceneLockKey = (j) => `animastor:gen-v2:scene:${JSON.stringify([j.book_id, j.chapter_id, j.scene_id])}`;
 
     // ── shared: a failed attempt → retry with backoff or failed (§7 «Ошибка», §9 пп.1–2)
@@ -75,7 +81,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 [job.worker_id, job.job_id]);
         }
         await notifyProgress(client, job.book_id, job.command_id);
-        return { status: r.rows[0].status, not_before: r.rows[0].not_before, retry };
+        return { status: r.rows[0].status, not_before: r.rows[0].not_before, retry, delay_ms: retry ? delay : undefined };
     }
 
     /**
@@ -85,13 +91,30 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
     async function failAttempt(jobId, attempt, errorClass, reason) {
         const cls = typeof errorClass === 'string' && errorClass ? errorClass.slice(0, 64) : 'unknown';
         const why = reason == null ? null : String(reason).slice(0, 2000);
-        return withTx(pool, async (client) => {
-            const job = (await client.query('SELECT * FROM gen_jobs WHERE job_id = $1 FOR UPDATE', [jobId])).rows[0];
+        let job = null;
+        let out = null;
+        const r = await withTx(pool, async (client) => {
+            job = (await client.query('SELECT * FROM gen_jobs WHERE job_id = $1 FOR UPDATE', [jobId])).rows[0];
             if (!job) return { status: 404, code: 'not_found' };
             if (job.status !== 'running' || job.attempt !== attempt) return { status: 409, code: 'stale_attempt' };
-            const out = await failAttemptTx(client, job, cls, why);
+            out = await failAttemptTx(client, job, cls, why);
             return { status: 200, job_status: out.status, retry: out.retry };
         });
+        // О3, after commit: `error` for every failed attempt, `requeue` when it goes back to the queue
+        const ids = job ? {
+            book_id: job.book_id, command_id: job.command_id, job_id: job.job_id, kind: job.kind, unit_key: job.unit_key,
+            worker_id: job.worker_id,
+        } : { job_id: jobId };
+        if (r.status !== 200) {
+            genLog.event('error', { ...ids, attempt, error_class: cls, code: r.code });
+        } else {
+            genLog.event('error', {
+                ...ids, attempt, max_attempts: job.max_attempts, error_class: cls, job_status: out.status, retry: out.retry,
+                run_ms: msBetween(job.claimed_at),
+            });
+            if (out.retry) genLog.event('requeue', { ...ids, attempt, max_attempts: job.max_attempts, error_class: cls, delay_ms: out.delay_ms });
+        }
+        return r;
     }
 
     // ── scene_assets (§4.3: written only by acceptance) ──────────────────────
@@ -102,6 +125,8 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         if (PART_KINDS.has(job.kind)) {
             // a part (chunk / IU / group) is recorded, the scene asset is not ready yet
             const entry = { kind: job.kind, path: finalPath, sha256: sha, bytes, job_id: job.job_id, attempt: job.attempt };
+            // О3: the PNG validator knows the size — keep it with the part (scene_assets.width/height below)
+            if (validation && dim(validation.width) && dim(validation.height)) { entry.width = validation.width; entry.height = validation.height; }
             if (typeof job.input.part_hash === 'string' && job.input.part_hash) entry.part_hash = job.input.part_hash;
             const part = { [job.unit_key]: entry };
             const sceneParts = partsManifest(job.input.scene_parts);
@@ -132,12 +157,14 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 const complete = sceneParts.every((p) => parts[p.unit_key] && parts[p.unit_key].part_hash === p.part_hash);
                 if (complete) {
                     const manifest = sceneParts.map((p) => `${p.unit_key}:${parts[p.unit_key].sha256 || ''}`).join('\n');
+                    const first = parts[sceneParts[0].unit_key];
+                    // width/height = those of the file `path` points at (the first part)
                     await client.query(
                         `UPDATE scene_assets SET scene_hash = $2, status = 'ready', error = NULL, sha256 = $3, job_id = $4,
-                                path = $5, format = $6
+                                path = $5, format = $6, width = $7, height = $8
                          WHERE id = $1`,
                         [up.id, sceneHash, crypto.createHash('sha256').update(manifest).digest('hex'), job.job_id,
-                            parts[sceneParts[0].unit_key].path || finalPath, PART_FORMAT[job.kind] || null]);
+                            first.path || finalPath, PART_FORMAT[job.kind] || null, dim(first.width), dim(first.height)]);
                 } else {
                     await client.query(
                         `UPDATE scene_assets SET scene_hash = $2, status = 'pending', sha256 = NULL, job_id = NULL WHERE id = $1`,
@@ -159,17 +186,21 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
             return;
         }
         const duration = validation && Number.isFinite(validation.durationSec) ? validation.durationSec : null;
+        const width = validation ? dim(validation.width) : null;
+        const height = validation ? dim(validation.height) : null;
         await client.query(
             `INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, path, build_id, scene_hash, status,
-                                       job_id, sha256, duration_sec, format, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9, $10, $11, $12)
+                                       job_id, sha256, duration_sec, format, updated_at, width, height)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (book_id, chapter_id, scene_id, asset_type, build_id) DO UPDATE SET
                  path = EXCLUDED.path, scene_hash = EXCLUDED.scene_hash, status = 'ready', error = NULL,
                  job_id = EXCLUDED.job_id, sha256 = EXCLUDED.sha256,
                  duration_sec = COALESCE(EXCLUDED.duration_sec, scene_assets.duration_sec),
+                 width = COALESCE(EXCLUDED.width, scene_assets.width),
+                 height = COALESCE(EXCLUDED.height, scene_assets.height),
                  format = EXCLUDED.format, updated_at = EXCLUDED.updated_at`,
             [job.book_id, job.chapter_id, job.scene_id, assetType, finalPath, build, sceneHash,
-                job.job_id, sha, duration, FINAL_FORMAT[job.kind], epochS()]);
+                job.job_id, sha, duration, FINAL_FORMAT[job.kind], epochS(), width, height]);
     }
 
     // ── stage transitions (§6.3) — same transaction as the finished job ─────
@@ -286,7 +317,27 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
      * Steps 1(validate)–5 of §7 for a file already on disk at tmpPath.
      * @returns {Promise<{status:number, code?:string, reason?:string, idempotent?:boolean, sha256?:string, job_status?:string, stage_jobs_created?:number}>}
      */
-    async function finishAccept(pre, attempt, tmpPath, sha, bytes) {
+    async function finishAccept(pre, attempt, tmpPath, sha, bytes, t0 = Date.now()) {
+        const r = await finishAcceptInner(pre, attempt, tmpPath, sha, bytes, t0);
+        // О3: `accept` for a committed result (or its idempotent replay); a stale
+        // attempt is an `error` line (code stale_attempt); invalid_result is logged by failAttempt.
+        const ids = {
+            book_id: pre.book_id, command_id: pre.command_id, job_id: pre.job_id, kind: pre.kind, unit_key: pre.unit_key,
+            attempt, worker_id: pre.worker_id,
+        };
+        if (r && r.status === 200) {
+            genLog.event('accept', {
+                ...ids, sha256: sha, bytes, width: r.width, height: r.height, idempotent: r.idempotent === true ? true : undefined,
+                stage_jobs_created: r.stage_jobs_created, ms: Date.now() - t0, run_ms: msBetween(pre.claimed_at),
+            });
+        } else if (r && r.code === 'stale_attempt') {
+            genLog.event('error', { ...ids, code: 'stale_attempt', sha256: sha, bytes });
+        }
+        if (r) { delete r.width; delete r.height; }
+        return r;
+    }
+
+    async function finishAcceptInner(pre, attempt, tmpPath, sha, bytes) {
         const finalPath = ports.artifactPath(pre);
         if (typeof finalPath !== 'string' || !path.isAbsolute(finalPath)) {
             await unlinkQuiet(tmpPath);
@@ -324,6 +375,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
                 await fs.promises.rename(tmpPath, finalPath);           // §7 п.3 (atomic, same partition)
                 renamed = true;
+                await fs.promises.chmod(finalPath, ARTIFACT_MODE).catch(() => {});   // О3: 0644 like legacy outputs
                 if (ports.onArtifactPlaced) await ports.onArtifactPlaced(job, finalPath);   // e.g. drop the placeholder sidecar
                 await client.query(
                     `UPDATE gen_jobs SET status = 'done', result_path = $2, result_sha256 = $3, result_bytes = $4,
@@ -337,7 +389,10 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 await upsertSceneAsset(client, job, finalPath, sha, bytes, validation);
                 const stage = await transitions(client, cmds, job);
                 await notifyProgress(client, job.book_id, job.command_id);
-                return { status: 200, sha256: sha, job_status: 'done', stage_jobs_created: stage };
+                return {
+                    status: 200, sha256: sha, job_status: 'done', stage_jobs_created: stage,
+                    width: validation ? dim(validation.width) : null, height: validation ? dim(validation.height) : null,
+                };
             });
         } finally {
             if (!renamed) await unlinkQuiet(tmpPath);              // rejected / failed before rename → discard
@@ -361,6 +416,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
      * @param {AsyncIterable<Buffer>} stream raw file body
      */
     async function acceptResult(jobId, attempt, token, stream) {
+        const t0 = Date.now();
         checkIds(jobId, attempt);
         if (!verifyUploadToken(uploadSecret, token, jobId, attempt)) {
             await drain(stream);
@@ -369,7 +425,11 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         const pre = await readJob(jobId);
         if (!pre) { await drain(stream); throw new GenError('not_found', 404, 'unknown job'); }
         const current = (pre.status === 'running' || pre.status === 'done') && pre.attempt === attempt;
-        if (!current) { await drain(stream); return { status: 409, code: 'stale_attempt' }; }
+        if (!current) {
+            await drain(stream);
+            genLog.event('error', { book_id: pre.book_id, command_id: pre.command_id, job_id: jobId, kind: pre.kind, unit_key: pre.unit_key, attempt, code: 'stale_attempt' });
+            return { status: 409, code: 'stale_attempt' };
+        }
 
         const finalPath = ports.artifactPath(pre);
         if (typeof finalPath !== 'string' || !path.isAbsolute(finalPath)) {
@@ -398,7 +458,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
             throw err;
         }
         await fh.close();
-        return finishAccept(pre, attempt, tmpPath, hash.digest('hex'), bytes);
+        return finishAccept(pre, attempt, tmpPath, hash.digest('hex'), bytes, t0);
     }
 
     /**

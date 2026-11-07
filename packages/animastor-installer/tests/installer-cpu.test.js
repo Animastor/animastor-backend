@@ -693,6 +693,7 @@ function createRealManifestEngineIo(overrides = {}) {
             '/tmp/repo/packages/animastor-worker/worker/worker-cleanup.cjs': '// cleanup',
             '/tmp/repo/packages/animastor-worker/worker/worker-cleanup-journal.cjs': '// journal',
             '/tmp/repo/packages/animastor-worker/worker/job-protocol-v2.cjs': '// generated job protocol v2',
+            '/tmp/repo/packages/animastor-worker/worker/worker-logs.cjs': '// worker logs (bundle 2.4.1)',
             '/tmp/repo/packages/animastor-worker/worker/package.json': '{"name":"animastor-worker"}',
             '/tmp/repo/packages/animastor-worker/worker/package-lock.json': '{}',
             '/tmp/repo/packages/animastor-worker/worker/.env.example': 'HUB_URL=\nANIMASTOR_WORKER_TOKEN=\nWORKER_TYPE=\nWORKER_ID=\n',
@@ -979,7 +980,7 @@ collectAsync('18a. fetchHubWorkerBundle downloads, verifies sha256, and extracts
             const extractDir = args[3] || '/tmp/bundle-test';
             const workerDir = `${extractDir}/animastor-worker`;
             fs.mkdirSync(workerDir, { recursive: true });
-            for (const f of ['worker.cjs', 'worker-env.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'job-protocol-v2.cjs', 'package.json', 'package-lock.json', '.env.example']) {
+            for (const f of ['worker.cjs', 'worker-env.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'job-protocol-v2.cjs', 'worker-logs.cjs', 'package.json', 'package-lock.json', '.env.example']) {
                 fs.writeFileSync(`${workerDir}/${f}`, `// ${f}`);
             }
             return { code: 0, stdout: '', stderr: '' };
@@ -1443,6 +1444,7 @@ collectAsync('24. engine: adopt partial root + COMFY_PORT + worker start (end-to
             '/tmp/repo/packages/animastor-worker/worker/worker-cleanup.cjs': '// cleanup',
             '/tmp/repo/packages/animastor-worker/worker/worker-cleanup-journal.cjs': '// journal',
             '/tmp/repo/packages/animastor-worker/worker/job-protocol-v2.cjs': '// generated job protocol v2',
+            '/tmp/repo/packages/animastor-worker/worker/worker-logs.cjs': '// worker logs (bundle 2.4.1)',
             '/tmp/repo/packages/animastor-worker/worker/package.json': '{"name":"animastor-worker"}',
             '/tmp/repo/packages/animastor-worker/worker/package-lock.json': '{}',
             '/tmp/repo/packages/animastor-worker/worker/.env.example': 'HUB_URL=\nANIMASTOR_WORKER_TOKEN=\nWORKER_TYPE=\nWORKER_ID=\n',

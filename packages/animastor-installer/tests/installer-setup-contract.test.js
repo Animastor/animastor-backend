@@ -104,7 +104,7 @@ describe('Setup contract — projections (unit)', () => {
             expect(image.worker_type).to.equal('image');
             expect(image.status).to.equal('ready');
             expect(image.supported_install_modes).to.include.members(['managed', 'existing', 'shared', 'isolated']);
-            expect(image.gpu.min_vram_gb).to.equal(null); // unknown — not invented
+            expect(image.gpu.min_vram_gb).to.equal(14); // installer 0.2.10: estimate from the manifest (hardware.derivation)
             expect(image.gpu.reference_gpu).to.be.a('string');
             expect(image.disk_budget_bytes_approx).to.be.a('number');
             expect(image.workflows).to.deep.equal(['img-qwen-image']);

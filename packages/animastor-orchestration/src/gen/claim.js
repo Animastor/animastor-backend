@@ -17,7 +17,9 @@ const {
 
 const MODES = Object.freeze(['private', 'share', 'system']);
 
-function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, tokenGraceMs = 15 * 60_000 }) {
+const NOOP_LOG = Object.freeze({ event() {} });
+
+function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, tokenGraceMs = 15 * 60_000, genLog = NOOP_LOG }) {
     const timeoutsJson = JSON.stringify(Object.fromEntries(KINDS.map((k) => [k, ports.timeoutFor(k)])));
 
     /**
@@ -32,6 +34,7 @@ function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, to
      * @returns {Promise<{task:null}|{task:object}>}
      */
     async function claim(p = {}) {
+        const t0 = Date.now();
         const workerId = requireUuid(p.workerId, 'workerId');
         if (!WORKER_TYPES.includes(p.workerType)) throw new GenError('bad_request', 400, 'workerType must be audio|image|video');
         if (!MODES.includes(p.mode)) throw new GenError('bad_request', 400, 'mode must be private|share|system');
@@ -108,6 +111,10 @@ function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, to
         }
         const deadlineMs = new Date(job.deadline).getTime();
         const exp = deadlineMs + tokenGraceMs;
+        genLog.event('claim', {
+            book_id: job.book_id, command_id: job.command_id, job_id: job.job_id, kind: job.kind, unit_key: job.unit_key,
+            attempt: job.attempt, max_attempts: job.max_attempts, worker_id: workerId, ms: Date.now() - t0,
+        });
         return {
             task: {
                 job_id: job.job_id,

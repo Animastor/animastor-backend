@@ -497,10 +497,24 @@ async function markPlaceholderStale(redis, bookId, chapterId, sceneId, buildId) 
  *
  * @param {string} buildId - Build directory (usually 'default')
  * @param {string} bookId  - Book ID
- * @returns {Promise<{checked: number, created: number, skipped: number, errors: string[]}>}
+ * @returns {Promise<{checked: number, created: number, skipped: number, errors: string[], skipped_v2?: true}>}
  */
 async function recoverMissingPlaceholders(buildId, bookId) {
     const result = { checked: 0, created: 0, skipped: 0, errors: [] };
+
+    // О2 (reports/2026-11-07/orch-v2-image-scene-run.md): this read-repair is
+    // a LEGACY leg (it writes placeholder mp3 + scene_assets(audio) outside
+    // the v2 acceptance — ADR ORCHESTRATION_V2 I2: on a v2 book scene_assets
+    // is written only by the acceptance). It runs on every GET /book
+    // (@animastor/editor editor-routes) and POST recover, so the gate lives
+    // HERE, in the one legacy isolation predicate the scheduler, reconcile and
+    // scene window ask (PersistencePort orchestration.isV2Book, fail-closed:
+    // an unknown answer = v2 = hands off).
+    if (await require('@animastor/orchestration').ports.persistence.isV2Book(bookId)) {
+        result.skipped_v2 = true;
+        log(`[RECOVER] ${bookId}: orchestration v2 book — legacy placeholder read-repair skipped`);
+        return result;
+    }
 
     try {
         const lazyBook = require('../book/lazy-book');
