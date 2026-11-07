@@ -108,12 +108,7 @@ async function createWorker({ workspaceId, name, workerType, mode = 'private', c
     const { token, secretHash, tokenPrefix } = generateCredential(workerId);
     const { rows } = await query(`
         INSERT INTO workers (worker_id, workspace_id, name, worker_type, mode, token_hash, token_prefix, created_by, log_shipping)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                EXISTS (
-                    SELECT 1 FROM workspaces ws
-                    JOIN users u ON u.user_id = ws.owner_user_id
-                    WHERE ws.id = $2 AND u.role = 'admin'
-                ))
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
         RETURNING worker_id, workspace_id, name, worker_type, capabilities, mode, status,
                   token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
     `, [workerId, workspaceId, name, workerType, mode, secretHash, tokenPrefix, createdBy || null]);

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — stage166: worker logs always reach the owner (WLOG-2)
+
+Owner decision 2026-11-07; ADR `animastor-docs architecture/ORCHESTRATION_V2.md` §8.5.
+Branch `feat/worker-logs-owner`; **not merged, not deployed** (backend release + migration WLOG-2
+happen in a separate step).
+
+- `storage/postgres/schema.js`: **WLOG-2** — `workers.log_shipping` default → `TRUE`, plus a one-time
+  `UPDATE … WHERE revoked_at IS NULL AND log_shipping = FALSE` (logged with the row count). The
+  update runs only while the column default is still `FALSE`, so an operator's later `false` is
+  never re-flipped on restart. The column stays as the kill switch: `false` → ingest answers `204`
+  without writing a byte.
+- `repositories/worker-repo.js`: `createWorker` no longer derives the initial value from the
+  workspace owner's `role` — every new worker starts with `log_shipping = TRUE`.
+- `tests/worker-logs.test.js`: defaults are `TRUE` for tenant, admin-owned and system workers; the
+  kill switch is exercised explicitly (set `false` → `204` + nothing on disk); the WLOG-2 column
+  default is pinned; the access matrix is pinned — workspace owner `200`, platform admin `200`,
+  `users`-grant holder `404`, `public`-policy participant `404`, anonymous `401`, both for
+  `GET /api/v1/workers/:id/log` and `POST /api/v1/workers/:id/request-log`.
+
 ## Unreleased — orchestration v2, stage 2a: images (IU) on the gen core for `books.orchestration='v2'`
 
 ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§12 «2a», §13 п.9); recon

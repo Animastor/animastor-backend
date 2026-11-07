@@ -36,7 +36,7 @@ const AUDIO = () => manifestLoader.loadManifest('audio/qwen-tts');
 const IMAGE = () => manifestLoader.loadManifest('image/qwen-image');
 const VIDEO = () => manifestLoader.loadManifest('video/ltx-2.3');
 
-const IMAGE_WF_HASH = 'fb4c25e52bbb2f75270367d2696b4b7469617d6557cd0bcc634a6a6fc03a5816';
+const IMAGE_WF_HASH = 'd2cb4c4edead909b7358e1353fdd0e0e4d5efc231abfcad28749f1c0bc99d5be';
 
 function entry(report, id) {
     return report.entries.find((e) => e.id === id);
