@@ -8,6 +8,10 @@ ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§12 «2a», §13 п.9); 
 `backend/package.json` to `^1.1.0` + lockfile — until then the backend keeps 1.0.0 from the
 registry and the image layer of a v2 book answers 409 `v2_image_unavailable` (fail-closed).
 
+- **stage165:** `backend/package.json` → `"^1.1.0"` (registry shasum `40722394495eb15f313af9acac8ac7e36589c6d5`),
+  lockfile resolves the 1.1.0 tarball with the registry integrity; the image layer of a v2 book
+  runs on the gen core.
+
 - `orchestration-v2/image-ports.js`: `planUnits(image)` — one `iu_image` per scene unit
   (`units[]` + `dialogue_blocks[].units[]`, legacy order), `unit_key` = unit id, payload = the
   workflow of `image/iu-processor.buildIUWorkflow` (extracted from `processSingleIU`, no behaviour
