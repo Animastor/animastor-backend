@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased — orchestration v2, stage 2a: images (IU) on the gen core for `books.orchestration='v2'`
+
+ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§12 «2a», §13 п.9); recon
+`ORCHESTRATION_V2_RECON_IMAGE.md`. Branch `orch-v2/2a-image`; not deployed. **Needs
+`@animastor/orchestration` 1.1.0** (this repo, `packages/`): publish it, then bump
+`backend/package.json` to `^1.1.0` + lockfile — until then the backend keeps 1.0.0 from the
+registry and the image layer of a v2 book answers 409 `v2_image_unavailable` (fail-closed).
+
+- **stage165:** `backend/package.json` → `"^1.1.0"` (registry shasum `40722394495eb15f313af9acac8ac7e36589c6d5`),
+  lockfile resolves the 1.1.0 tarball with the registry integrity; the image layer of a v2 book
+  runs on the gen core.
+
+- `orchestration-v2/image-ports.js`: `planUnits(image)` — one `iu_image` per scene unit
+  (`units[]` + `dialogue_blocks[].units[]`, legacy order), `unit_key` = unit id, payload = the
+  workflow of `image/iu-processor.buildIUWorkflow` (extracted from `processSingleIU`, no behaviour
+  change; same bytes as the legacy dispatch), `input.part_hash` = sha256 of that workflow,
+  `input.scene_parts`; `artifactPath` = `{OUTPUT_DIR}/{build}/{book}_{ch}_{sc}_{unit}.png` (the
+  canonical IU file every reader serves); `onArtifactPlaced` drops the stale preview `…_pr…png`.
+  No side effects at planning (no `image_units`, no Redis).
+- `orchestration-v2/index.js`: audio + image ports by kind; PNG check threshold
+  `ORCH_V2_MIN_LUMA_STDDEV` (default 2.0); `imageUnsupportedReason()` — `IU_IMAGE_VERSIONED` on, or
+  a core without `inspectPng` → image refused.
+- `/regenerate` of a v2 book: `worker_types` ⊂ {audio, image, video}; video → no work,
+  `summary.skipped_unsupported` + `skipped_worker_types`; only video → 409
+  `v2_layer_not_supported_yet`; image unavailable → 409 `v2_image_unavailable`; unknown type → 400;
+  `tasks[]` one row per layer; `skipped_worker_types` = requested layers the command does not run
+  (video + disabled in layer-config); `layer_disabled` lists the requested layers.
+  `cancel-worker {task_id}` → `cancelled` = the command's layers.
+- `progress-adapter`: the image layer has no merge — `total` = planned IUs.
+- Tests: `orch-v2-image.test.js` (fake image worker over HTTP + player read routes),
+  `orch-v2-image-isolation.test.js` (every legacy image point), `orch-v2-integration` (video → 409).
+
+## Unreleased — fix (legacy): `cleanBookRedisKeys` covers the legacy key families of a book
+
+reports/2026-11-06/orch-v2-1d-release.md §18: after `DELETE /api/v1/book/<id>` a book generated
+through the legacy path kept 35 Redis keys — `artifact-manifest` (TTL −1), `assets` (TTL −1),
+`fence-journal`, `fence-publish`, `intent`, `dispatch-intent`, `idempotency:ref`,
+`idempotency:stage-epoch`, `job`, `result-processed`, `dispatch-completed`, `cancelled-workers`.
+`helpers/redis-helpers.cjs` now has a MATCH pattern for each family, scoped to THIS book id
+(formats taken from the writers; book id glob-escaped, percent-encoded where the writer encodes it):
+
+- `animastor:assets:{book}:*` (asset-registry, no TTL);
+- `animastor:artifact-manifest|fence-journal|fence-publish|fence-unrecoverable:{enc(book)}:*`
+  (`fence-unrecoverable` has the same durable shape as the manifest and was unreachable too);
+- `animastor:intent:{enc(book)}:*`, `animastor:dispatch-intent:*:{enc(book)}_*`
+  (the receipt is keyed by `dispatch_id` first, the book lives inside the encoded job id);
+- `animastor:idempotency:stage-epoch:{enc(book)}:*`;
+- `animastor:job:*:{book}_*` — the hub dedup key is `job:{dispatch_id}:{job_id}`, so the old
+  `job:{book}_*` pattern could never match (that is why the §18 `job` keys survived);
+- `animastor:result-processed:{book}_*`, `animastor:dispatch-completed:{book}:*`,
+  `animastor:cancelled-workers:{book}`.
+
+`animastor:idempotency:ref` is **not** a raw pattern: the ref is the ownership index of the
+7-day completion marker (Stage 118 · B1), so it is released together with claim + marker by
+`queue-idempotency.releaseClaimsForBook` — via the new `options.releaseClaims` of the helper,
+passed only by `services/book-deletion.cjs` (the book is gone). The cache-clear route keeps the
+default: it releases claims only AFTER the hub lane clear (Stage 116/118 ordering).
+
+`book-deletion.cjs` re-arms `cancelled-workers:{book}` (1 h TTL) right after the purge, so the
+cancellation signal still reaches a running VBook agent. Tests:
+`tests/book-cleanup-legacy-key-families.test.js` (two books + a prefix-neighbour book; only the
+deleted book reaches 0; no global pattern; glob escaping; paired ref/claim/marker release).
+
 ## Unreleased — orchestration v2, stage 1d: `@animastor/orchestration` 1.0.0 from the registry
 
 - `backend/package.json`: `"@animastor/orchestration": "^1.0.0"` (published 2026-11-06, shasum

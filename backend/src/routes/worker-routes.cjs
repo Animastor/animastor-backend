@@ -43,6 +43,8 @@ const workerAuth = require('../services/worker-auth');
 const workspaceRepo = require('../storage/postgres/repositories/workspace-repo');
 const userRepo = require('../storage/postgres/repositories/user-repo');
 const shareEvents = require('../services/share-events');
+const workerLogsStore = require('../services/worker-logs-store');
+const workerLogTail = require('../services/worker-log-tail');
 const { requireWorkerAuth } = require('../middleware/worker-auth-middleware');
 const config = require('../config/runtime-config');
 
@@ -81,6 +83,64 @@ function userWorkspaceGuard(req, res) {
         return null;
     }
     return req.workspace.id;
+}
+
+/**
+ * Admin predicate — role='admin' OR the ADMIN_USERNAMES allowlist, the same
+ * notion requireAdmin uses (auth-context.js). Kept local so the worker-log
+ * routes do not depend on middleware order.
+ */
+function isAdminRequest(req) {
+    if (!req.user) return false;
+    if (req.user.role === 'admin') return true;
+    const allowlist = (process.env.ADMIN_USERNAMES || '')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+    return allowlist.includes(String(req.user.username || '').toLowerCase());
+}
+
+/**
+ * Fresh worker logs (§8.5) are visible to the WORKSPACE OWNER or an ADMIN —
+ * stricter than the generic membership guard used by the lifecycle routes:
+ * log lines may contain prompts and local paths, so a mere editor/viewer
+ * membership is not enough. A foreign worker answers 404 indistinctly; a
+ * same-workspace non-owner answers 403 (the worker id is already known to
+ * them). SYSTEM workers (workspace_id NULL) are admin-only.
+ * @returns {Promise<boolean>} true when the caller may read/request logs
+ */
+async function workerLogAccessGuard(req, res, workerRow) {
+    if (!req.user) {
+        res.status(401).json({ error: 'Authentication required', code: 'auth_required' });
+        return false;
+    }
+    if (req.guest) {
+        res.status(403).json({ error: 'Guests cannot access worker logs', code: 'guest_forbidden' });
+        return false;
+    }
+    if (isAdminRequest(req)) return true;
+    const workspaceId = req.workspace && req.workspace.id;
+    if (!workspaceId) {
+        res.status(401).json({ error: 'Workspace not resolved', code: 'workspace_unresolved' });
+        return false;
+    }
+    if (!workerRow || workerRow.workspace_id !== workspaceId) {
+        res.status(404).json({ error: 'Worker not found' });
+        return false;
+    }
+    let workspace = null;
+    try {
+        workspace = await workspaceRepo.findById(workspaceId);
+    } catch (err) {
+        console.error('[WORKERS] log owner check failed:', err.message);
+        res.status(500).json({ error: 'Failed to authorize worker log access' });
+        return false;
+    }
+    if (!workspace || workspace.owner_user_id !== req.user.userId) {
+        res.status(403).json({ error: 'Only the workspace owner can access worker logs', code: 'owner_required' });
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -307,6 +367,61 @@ module.exports = function(app, redis) {
         } catch (err) {
             console.error('[WORKERS] detail failed:', err.message);
             res.status(500).json({ error: 'Failed to load worker' });
+        }
+    });
+
+    // ── POST request a fresh log tail (workspace owner / admin, §8.5) ────
+    // Sets a ONE-SHOT in-memory flag; the worker receives send_log_tail:true
+    // on its next /v3/beacon and flushes its whole ring buffer. No table and
+    // no Redis write: losing the beacon just delivers it later.
+    app.post('/api/v1/workers/:workerId/request-log', async (req, res) => {
+        if (!UUID_RE.test(req.params.workerId)) {
+            return res.status(404).json({ error: 'Worker not found' });
+        }
+        try {
+            const row = await workerRepo.findById(req.params.workerId);
+            if (!row) {
+                return res.status(404).json({ error: 'Worker not found' });
+            }
+            if (!(await workerLogAccessGuard(req, res, row))) return;
+            workerLogTail.request(row.worker_id);
+            res.json({ requested: true, worker_id: row.worker_id });
+        } catch (err) {
+            console.error('[WORKERS] request-log failed:', err.message);
+            res.status(500).json({ error: 'Failed to request worker log' });
+        }
+    });
+
+    // ── GET worker log tail (workspace owner / admin, §8.5) ──────────────
+    // ?lines=N — N defaults to 200 and is capped at 2000 (the ring size).
+    // Newest lines first in file order: the response returns them oldest →
+    // newest, exactly like `tail -n N`.
+    app.get('/api/v1/workers/:workerId/log', async (req, res) => {
+        if (!UUID_RE.test(req.params.workerId)) {
+            return res.status(404).json({ error: 'Worker not found' });
+        }
+        let lineCount = workerLogsStore.DEFAULT_TAIL;
+        if (req.query.lines !== undefined) {
+            const n = Number(req.query.lines);
+            if (!Number.isInteger(n) || n < 1 || n > workerLogsStore.MAX_TAIL) {
+                return res.status(400).json({
+                    error: `lines must be an integer between 1 and ${workerLogsStore.MAX_TAIL}`,
+                    code: 'invalid_lines',
+                });
+            }
+            lineCount = n;
+        }
+        try {
+            const row = await workerRepo.findById(req.params.workerId);
+            if (!row) {
+                return res.status(404).json({ error: 'Worker not found' });
+            }
+            if (!(await workerLogAccessGuard(req, res, row))) return;
+            const lines = await workerLogsStore.readTail(row.worker_id, lineCount);
+            res.json({ worker_id: row.worker_id, count: lines.length, lines });
+        } catch (err) {
+            console.error('[WORKERS] log read failed:', err.message);
+            res.status(500).json({ error: 'Failed to read worker log' });
         }
     });
 

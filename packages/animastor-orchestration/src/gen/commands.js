@@ -196,6 +196,32 @@ function createCommands({ pool, ports }) {
                     if (readyKeys.has(gkey(u))) { skipped += 1; return false; }
                     return true;
                 });
+                // 1.1.0 — part-level readiness (opt-in: the unit carries input.part_hash).
+                // A part (e.g. one IU picture) whose accepted snapshot hash is recorded in
+                // scene_assets.metadata.gen_parts[unit_key].part_hash for the same build is
+                // already done for the current content — skip it even if its scene is not
+                // complete («сгенерировать недостающее» = only the missing / changed parts).
+                // A row the host marked 'stale' proves nothing. Units without part_hash
+                // (audio) keep the scene-level rule above unchanged.
+                const parted = todo.filter((u) => typeof u.input.part_hash === 'string' && u.input.part_hash);
+                if (parted.length) {
+                    const r = await client.query(
+                        `SELECT t.ord FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+                                WITH ORDINALITY AS t(chapter_id, scene_id, asset_type, build_id, unit_key, part_hash, ord)
+                         WHERE EXISTS (SELECT 1 FROM scene_assets a
+                                       WHERE a.book_id = $1 AND a.chapter_id = t.chapter_id AND a.scene_id = t.scene_id
+                                         AND a.asset_type = t.asset_type AND a.build_id = t.build_id
+                                         AND a.status IN ('pending', 'ready')
+                                         AND jsonb_typeof(a.metadata->'gen_parts') = 'object'
+                                         AND a.metadata->'gen_parts'->t.unit_key->>'part_hash' = t.part_hash)`,
+                        [bookId, parted.map((u) => u.chapter_id), parted.map((u) => u.scene_id), parted.map((u) => LAYER_OF_KIND[u.kind]),
+                            parted.map((u) => u.build_id), parted.map((u) => u.unit_key), parted.map((u) => u.input.part_hash)]);
+                    const done = new Set(r.rows.map((row) => parted[Number(row.ord) - 1]));
+                    if (done.size) {
+                        skipped += done.size;
+                        todo = todo.filter((u) => !done.has(u));
+                    }
+                }
             }
 
             // lanes, one lookup per worker type (§4.2: computed at creation)
@@ -271,7 +297,8 @@ function createCommands({ pool, ports }) {
      *                         command waits for them (gen_command_jobs) — shared jobs keep running
      * @param {object} target
      * @param {{cancelledBy?:string}} [opts]
-     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number}>}
+     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number, layers?:string[]}>}
+     *          layers (1.1.0, {commandId} only): the layers of the command that was stopped
      */
     async function cancel(target = {}, opts = {}) {
         const by = opts.cancelledBy == null ? null : String(opts.cancelledBy).slice(0, 200);
@@ -294,7 +321,7 @@ function createCommands({ pool, ports }) {
             if (commandId !== undefined) {
                 commands = (await client.query(
                     `UPDATE gen_commands SET status = 'cancelled', finished_at = now(), cancelled_by = $2
-                     WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id`, [commandId, by])).rows;
+                     WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id, layers`, [commandId, by])).rows;
                 jobs = await client.query(
                     `UPDATE gen_jobs j SET status = 'cancelled', finished_at = now()
                      FROM gen_command_jobs l
@@ -321,12 +348,14 @@ function createCommands({ pool, ports }) {
             }
             const books = new Set([...commands.map((c) => c.book_id), ...jobs.rows.map((j) => j.book_id)]);
             for (const b of books) await notifyProgress(client, b, commandId || null);
-            return {
+            const out = {
                 commands_cancelled: commands.length,
                 jobs_cancelled: jobs.rowCount,
                 job_ids: jobs.rows.map((j) => j.job_id),
                 kept_shared: keptShared,
             };
+            if (commandId !== undefined) out.layers = commands.length ? commands[0].layers : [];   // 1.1.0
+            return out;
         });
     }
 

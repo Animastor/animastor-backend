@@ -374,9 +374,22 @@ module.exports = function(redis, deps = {}) {
          * @param {Object} [options]
          * @param {boolean} [options.skipChunks=false]  — preserve chunk/chunks keys
          * @param {boolean} [options.skipSceneStates=false] — preserve scene state keys
+         * @param {boolean} [options.releaseClaims=false] — also release this book's
+         *        idempotency ownership refs (ref + claim + completion marker) via
+         *        the owner module. Only for a book that is GONE (book deletion):
+         *        the cache-clear caller must release AFTER the hub lane clear
+         *        (Stage 116/118 ordering), so it keeps the default here.
          */
         cleanBookRedisKeys: async function cleanBookRedisKeys(redis, bookId, options = {}) {
             const log = (...args) => console.log(new Date().toISOString(), ...args);
+
+            // Glob-escaped book id for MATCH patterns (a book id containing
+            // '*', '?' or '[' must never reach another book's key space) and
+            // the percent-encoded form used by the idempotency/fence families
+            // (queue-idempotency.cjs `encodeKeyComponent`); the encoded form is
+            // glob-escaped too, because encodeURIComponent leaves '*' literal.
+            const bookEsc = String(bookId).replace(/[*?[\]\\]/g, '\\$&');
+            const encBookEsc = encodeURIComponent(String(bookId)).replace(/[*?[\]\\]/g, '\\$&');
 
             const patterns = [
                 // Core data
@@ -428,8 +441,16 @@ module.exports = function(redis, deps = {}) {
                 `animastor:video-lock:${bookId}:*`,
                 // Snapshot
                 `animastor:snapshot:${bookId}`,
-                // GPU hub job queue
-                `animastor:job:${bookId}_*`,
+                // GPU hub enqueue dedup. The hub writes
+                // `animastor:job:{dispatch_id}:{job_id}` (gpu-hub.js
+                // jobDedupKey) — the dispatch_id comes FIRST, so the old
+                // `animastor:job:{bookId}_*` pattern could never match and a
+                // deleted book left its dedup keys behind (§18 of
+                // reports/2026-11-06/orch-v2-1d-release.md: 3 `job` keys).
+                // job_id = `{bookId}_{chapter}_{scene}[_...]:{type}`
+                // (contracts job-protocol-v2), so the book is anchored to the
+                // job_id segment boundary (`_`), never to a bare prefix.
+                `animastor:job:*:${bookEsc}_*`,
                 // GPU hub results (stale result blobs)
                 `animastor:result:${bookId}_*`,
                 // Scene audio status (used by cleanup-service)
@@ -445,17 +466,64 @@ module.exports = function(redis, deps = {}) {
                 // so the encoded book id cannot reach into another book's
                 // key space.
                 //
-                // NOTE: the `animastor:idempotency:ref:*` family is
-                // deliberately NOT deleted here — the ref is the OWNERSHIP
-                // INDEX of the completion marker (Stage 118 · B1): it must
-                // live as long as the marker, and only the release paths
+                // NOTE: the `animastor:idempotency:ref:*` family is not a raw
+                // pattern here — the ref is the OWNERSHIP INDEX of the
+                // completion marker (Stage 118 · B1): it must live as long as
+                // the marker, and only the release paths
                 // (`releaseClaimsForScene/Book`) remove ref + claim + marker
-                // TOGETHER. A raw ref delete here would orphan every done
-                // marker (7 days of `already_completed` with no way out) and
-                // reopen audit B4.
+                // TOGETHER. A raw ref delete would orphan every done marker
+                // (7 days of `already_completed` with no way out) and reopen
+                // audit B4. For a book that is GONE the caller asks for the
+                // paired release via `options.releaseClaims` (below).
                 // (encodeURIComponent leaves '*' literal, so it is glob-escaped
                 // here — a book id containing '*' must not match other books.)
                 `animastor:idempotency:job-epoch:${encodeURIComponent(bookId).replace(/[*?[\]]/g, '\\$&')}:*`,
+                // ── Legacy-book key families (reports/2026-11-06/
+                //    orch-v2-1d-release.md §18) ────────────────────────────
+                // A book generated through the legacy path left 35 keys of
+                // these families after DELETE /book. Formats are copied from
+                // the writers, not guessed:
+                //   asset registry     storage/asset-registry.js
+                //                      animastor:assets:{book}:{ch}:{sc}
+                //   manifest/journal/  helpers/queue-idempotency.cjs
+                //   publish/intent       encodeKeyComponent(book) is the FIRST
+                //                        component
+                //   dispatch receipt   animastor:dispatch-intent:{enc(dispatch)}:
+                //                      {enc(job_id)} — the book lives inside the
+                //                        encoded job_id, so it is anchored after
+                //                        the second separator
+                //   stage epoch        animastor:idempotency:stage-epoch:{enc(book)}:
+                //                      {enc(ch)}:{enc(sc)}:{enc(stage)}
+                //   result dedup       animastor:result-processed:{job_id}:
+                //                      {build_id}, job_id starts with {book}_
+                //   dispatch-completed runtime/dispatch-engine.js
+                //                      animastor:dispatch-completed:{book}:{ch}:
+                //                      {sc}:{stage}[:{dispatch_id}]
+                //   cancellation       animastor:cancelled-workers:{book}
+                // Every pattern carries THIS book id; none is global. For the
+                // families whose key starts with a foreign segment (hub dedup,
+                // result dedup, dispatch receipt) the book is anchored to the
+                // `_` boundary of the job_id segment — the same convention as
+                // the existing chunk/result patterns. A book id that is itself
+                // a prefix of another book id followed by '_' would still
+                // collide; the id grammar (bookId may contain '_', chapter and
+                // scene may not) makes an exact parse of the legacy variants
+                // unsafe (they are not all parseJobId-shaped), so coverage
+                // wins over a filter that could miss keys.
+                `animastor:assets:${bookEsc}:*`,
+                `animastor:artifact-manifest:${encBookEsc}:*`,
+                `animastor:fence-journal:${encBookEsc}:*`,
+                `animastor:fence-publish:${encBookEsc}:*`,
+                // Same durable shape as the manifest (no TTL, bound to a
+                // fence): a deleted book must not keep an "unrecoverable"
+                // record either.
+                `animastor:fence-unrecoverable:${encBookEsc}:*`,
+                `animastor:intent:${encBookEsc}:*`,
+                `animastor:dispatch-intent:*:${encBookEsc}_*`,
+                `animastor:idempotency:stage-epoch:${encBookEsc}:*`,
+                `animastor:result-processed:${bookEsc}_*`,
+                `animastor:dispatch-completed:${bookEsc}:*`,
+                `animastor:cancelled-workers:${bookEsc}`,
                 // Legacy patterns (catch-all)
                 `animastor:book:${bookId}:*`,
                 `animastor:scope:${bookId}`,
@@ -479,6 +547,27 @@ module.exports = function(redis, deps = {}) {
                     } while (cursor !== 0);
                 } catch (err) {
                     console.warn('[CLEAN] Scan failed for pattern', pattern, ':', err.message);
+                }
+            }
+
+            // ── Idempotency ownership refs (Stage 118 · B1) ──
+            // `animastor:idempotency:ref:{enc(book)}:{enc(ch)}:{enc(sc)}:{enc(job)}`
+            // maps job_id → idem_key and is the ONLY handle on the 7-day
+            // completion marker (`idempotency:done:{idem}`). It is therefore
+            // not a raw DEL pattern above: the owner module removes
+            // ref + claim + marker TOGETHER, scoped to the encoded book id.
+            // Only a caller that is destroying the book asks for it — the
+            // cache-clear path releases AFTER the hub lane clear (Stage
+            // 116/118 ordering: never free a claim while a lane entry can
+            // still be dispatched).
+            let releasedClaims = { released: 0, done: 0, scanned: 0 };
+            if (options.releaseClaims) {
+                try {
+                    const qidem = require('./queue-idempotency.cjs');
+                    releasedClaims = await qidem.releaseClaimsForBook(redis, bookId);
+                    totalDeleted += releasedClaims.scanned;
+                } catch (err) {
+                    console.warn('[CLEAN] Idempotency claim release failed for', bookId, ':', err.message);
                 }
             }
 
@@ -508,8 +597,14 @@ module.exports = function(redis, deps = {}) {
             // if the counter only had scenes from this book. Otherwise leave them.
             // For safety, we don't touch global counters here.
 
-            log(`[CLEAN] ${bookId}: deleted ${totalDeleted} Redis keys`);
-            return { deleted: totalDeleted };
+            log(`[CLEAN] ${bookId}: deleted ${totalDeleted} Redis keys` +
+                (options.releaseClaims
+                    ? ` (incl. ${releasedClaims.released} idempotency claim(s), ${releasedClaims.done} completion marker(s))`
+                    : ''));
+            return {
+                deleted: totalDeleted,
+                ...(options.releaseClaims ? { claims_released: releasedClaims.released, markers_released: releasedClaims.done } : {}),
+            };
         },
     };
 };

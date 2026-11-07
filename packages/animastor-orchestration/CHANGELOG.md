@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.1.0 (2026-11-07) — этап 2a: изображения (`iu_image`)
+
+ADR `architecture/ORCHESTRATION_V2.md` (§4.3, §7, §12 «2a», §13 п.9). Minor: только
+добавления, контракт портов 1.0.0 не меняется (новые поля юнита опциональны).
+
+- **Проверка PNG** (`media.inspectPng`, `defaults.createPngValidator`; порт по умолчанию
+  для `iu_image`): сигнатура, IHDR первым, CRC каждого чанка, IDAT, IEND; ширина и высота
+  в 1…16384; поток пикселей распаковывается ровно в размер из IHDR; **не пустой кадр** —
+  стандартное отклонение яркости по выборке пикселей ≥ `minLumaStddev` (по умолчанию
+  `2.0` по шкале 0…255; чёрный / однотонный кадр = 0). Причины отказа: `not_png`,
+  `truncated`, `bad_crc`, `no_ihdr`, `bad_dimensions`, `bad_header`, `no_idat`, `no_iend`,
+  `corrupt_data`, `blank_frame` → `invalid_result` (один повтор, затем failed — как
+  тишина у аудио). Чересстрочные и < 8 бит — только структурная проверка
+  (`flat_check: 'skipped'`). 1.0.0 проверяла только сигнатуру.
+- **Пропуск готового по части** (`input.part_hash`): без `force` юнит пропускается, если в
+  `scene_assets.metadata.gen_parts[unit_key].part_hash` той же сборки записан тот же хэш
+  (строка не `stale`). Приём сохраняет `part_hash` в запись части. Юниты без `part_hash`
+  (аудио) — прежнее правило по `scene_hash` сцены.
+- **Готовность сцены без склейки** (`input.scene_parts = [{unit_key, part_hash}]`): приём
+  части, закрывающий набор, ставит строке сцены `ready` + `sha256` (манифест
+  «unit_key:sha256» по порядку) + `job_id` + `path` (файл первой части) + `format`
+  (`png`); незакрытый набор → `pending`, `sha256`/`job_id` = NULL. Параллельный приём
+  двух частей одной сцены сериализуется блокировкой строки.
+- `cancel({commandId})` дополнительно возвращает `layers` остановленной команды.
+- `src/gen` может использовать встроенный `zlib` (граница зависимостей).
+- **legacy** (`src/legacy/runtime/scene-window`): `initSceneWindow`, `slideWindow`,
+  `trySlideWindowOnComplete`, `reconcileWindowStatuses`, `restoreChunkStatusForScene` для
+  v2-книги ничего не делают (тот же предикат `isV2Book`, fail-closed) — read-repair
+  chunk-статусов по файлам и сдвиг окна больше не пишут legacy-ключи v2-книги
+  (`POST /book/:id/generate-next`).
+
 ## 1.0.0 (2026-11-06) — первая публикация: оркестрация v2, ядро `gen` (этапы 1a–1c)
 
 Опубликованный пакет: `src/` (`src/gen` с миграциями `sql/001–003`, `src/legacy` — код 0.3.x),
