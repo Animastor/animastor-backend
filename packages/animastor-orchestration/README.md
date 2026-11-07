@@ -31,6 +31,14 @@ orch.startSweeper(10_000);
 «already done» skip) and `input.scene_parts` (scene asset `ready` once every
 listed part is accepted — for part kinds without a merge stage).
 
+**1.2.0 (observability).** Pass `logger` (`{ info | log, error }`) to
+`createOrchestration`: the core writes one line per step —
+`[gen-v2] command-created | claim | accept | error | requeue | command-finished`
+with `book_id`, `command_id`, `job_id`, `kind`, `unit_key`, `attempt`,
+`worker_id`, `sha256`, sizes and durations (allowlisted fields only: no upload
+tokens, paths or task params). Image acceptance records `width`/`height`;
+accepted files are `0644`.
+
 `gen` requires only node builtins and its own files: no `src/legacy`, Redis,
 Express or ComfyUI. Tests: `npm run test:gen` (env `PG_*` of the animastor-test
 stack; refuses a DB not ending in `_test` or port 5432).

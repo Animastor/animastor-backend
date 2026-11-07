@@ -11,7 +11,7 @@
 
 const { withTx, notifyProgress } = require('./util');
 
-function createLocalRunner({ pool, ports, accept, logger = console }) {
+function createLocalRunner({ pool, ports, accept, logger = null }) {
     const timeoutsJson = JSON.stringify({
         audio_merge: ports.timeoutFor('audio_merge'),
         video_merge: ports.timeoutFor('video_merge'),
@@ -60,7 +60,7 @@ function createLocalRunner({ pool, ports, accept, logger = console }) {
                 try {
                     while (!stopped && await runLocalOnce()) { /* drain */ }
                 } catch (err) {
-                    logger.error && logger.error(`[gen-v2] local runner: ${err && err.message}`);
+                    logger && logger.error && logger.error(`[gen-v2] local runner: ${err && err.message}`);
                 } finally { running = false; }
             }
             if (!stopped) { timer = setTimeout(tick, intervalMs); if (timer.unref) timer.unref(); }

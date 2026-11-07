@@ -10,6 +10,8 @@
 
 'use strict';
 
+const NOOP_LOG = Object.freeze({ event() {} });
+
 const {
     GenError, withTx, requireUuid, requireText, isUuid, notifyProgress, linkJobs,
     EXECUTOR_OF_KIND, LAYER_OF_KIND, FIRST_STAGE_KINDS, LAYERS,
@@ -88,13 +90,13 @@ async function purgeBookRows(pool, bookId) {
     });
 }
 
-function createCommands({ pool, ports }) {
+function createCommands({ pool, ports, genLog = NOOP_LOG }) {
     /**
      * ADR §6.1 — one transaction.
      * @returns {Promise<{command_id:string, created:boolean, existing:boolean, status:string, layers:string[],
      *          summary:{jobs_created:number, joined:number, skipped_ready:number}}>}
      */
-    async function createCommand(params = {}) {
+    async function createCommandTx(params = {}) {
         const workspaceId = requireUuid(params.workspaceId, 'workspaceId');
         const userId = requireUuid(params.userId, 'userId');
         const bookId = requireText(params.bookId, 'bookId');
@@ -360,6 +362,19 @@ function createCommands({ pool, ports }) {
     }
 
     const purgeBook = (bookId) => purgeBookRows(pool, bookId);
+
+    /** createCommandTx + the О3 `command-created` info line (also for a repeated click: existing=true). */
+    async function createCommand(params = {}) {
+        const t0 = Date.now();
+        const r = await createCommandTx(params);
+        genLog.event('command-created', {
+            book_id: params.bookId, command_id: r.command_id, layers: r.layers, status: r.status,
+            scope: params.scope && params.scope.level, existing: r.existing === true ? true : undefined,
+            jobs_created: r.summary && r.summary.jobs_created, joined: r.summary && r.summary.joined,
+            skipped_ready: r.summary && r.summary.skipped_ready, ms: Date.now() - t0,
+        });
+        return r;
+    }
 
     return { createCommand, cancel, purgeBook };
 }

@@ -1,5 +1,5 @@
 // ======================================================
-// @animastor/orchestration · gen — orchestration v2 core (1.1.0)
+// @animastor/orchestration · gen — orchestration v2 core (1.2.0)
 // ======================================================
 // ADR: animastor-docs architecture/ORCHESTRATION_V2.md. The single source of
 // truth is PG (gen_commands, gen_jobs). This namespace depends ONLY on the
@@ -25,6 +25,7 @@ const { createAccept } = require('./accept');
 const { createSweeper } = require('./sweeper');
 const { createProgress } = require('./progress');
 const { createLocalRunner } = require('./local-runner');
+const { createGenLog, formatGenEvent } = require('./log');
 
 /**
  * @param {object} o
@@ -37,7 +38,7 @@ const { createLocalRunner } = require('./local-runner');
  * @param {number} [o.incomingMaxAgeMs=3600000]         §9 п.4
  * @param {number} [o.tokenGraceMs=900000]              upload token validity after the deadline
  * @param {number} [o.maxUploadBytes]
- * @param {object} [o.logger=console]
+ * @param {object} [o.logger=console]                 host logger port: info/log ([gen-v2] events, О3), error
  */
 function createOrchestration(o = {}) {
     const { pool } = o;
@@ -54,10 +55,12 @@ function createOrchestration(o = {}) {
     const ports = portsMod.validatePorts(o.ports);
     const logger = o.logger || console;
 
-    const accept = createAccept({ pool, ports, uploadSecret: secret, maxUploadBytes: o.maxUploadBytes });
-    const commands = createCommands({ pool, ports });
-    const claim = createClaim({ pool, ports, uploadSecret: secret, accept, sharedLimit: o.sharedLimit ?? null, tokenGraceMs: o.tokenGraceMs });
-    const sweeper = createSweeper({ pool, accept, outputDir: o.outputDir || null, offlineAfterMs: o.offlineAfterMs, incomingMaxAgeMs: o.incomingMaxAgeMs, logger });
+    // О3: one-line [gen-v2] info events through the host logger port (gen/log.js)
+    const genLog = createGenLog(logger);
+    const accept = createAccept({ pool, ports, uploadSecret: secret, maxUploadBytes: o.maxUploadBytes, genLog });
+    const commands = createCommands({ pool, ports, genLog });
+    const claim = createClaim({ pool, ports, uploadSecret: secret, accept, sharedLimit: o.sharedLimit ?? null, tokenGraceMs: o.tokenGraceMs, genLog });
+    const sweeper = createSweeper({ pool, accept, outputDir: o.outputDir || null, offlineAfterMs: o.offlineAfterMs, incomingMaxAgeMs: o.incomingMaxAgeMs, logger, genLog });
     const progress = createProgress({ pool });
     const local = createLocalRunner({ pool, ports, accept, logger });
 
@@ -106,5 +109,7 @@ module.exports = Object.freeze({
         DEFAULT_MIN_LUMA_STDDEV: media.DEFAULT_MIN_LUMA_STDDEV,
     }),
     GenError: util.GenError,
+    /** pure formatter of the [gen-v2] info lines (О3) — for host tests / log parsers */
+    formatGenEvent,
     PROGRESS_CHANNEL: util.PROGRESS_CHANNEL,
 });
