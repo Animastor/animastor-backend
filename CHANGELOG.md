@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — orchestration v2, stage 2a: images (IU) on the gen core for `books.orchestration='v2'`
+
+ADR animastor-docs `architecture/ORCHESTRATION_V2.md` (§12 «2a», §13 п.9); recon
+`ORCHESTRATION_V2_RECON_IMAGE.md`. Branch `orch-v2/2a-image`; not deployed. **Needs
+`@animastor/orchestration` 1.1.0** (this repo, `packages/`): publish it, then bump
+`backend/package.json` to `^1.1.0` + lockfile — until then the backend keeps 1.0.0 from the
+registry and the image layer of a v2 book answers 409 `v2_image_unavailable` (fail-closed).
+
+- `orchestration-v2/image-ports.js`: `planUnits(image)` — one `iu_image` per scene unit
+  (`units[]` + `dialogue_blocks[].units[]`, legacy order), `unit_key` = unit id, payload = the
+  workflow of `image/iu-processor.buildIUWorkflow` (extracted from `processSingleIU`, no behaviour
+  change; same bytes as the legacy dispatch), `input.part_hash` = sha256 of that workflow,
+  `input.scene_parts`; `artifactPath` = `{OUTPUT_DIR}/{build}/{book}_{ch}_{sc}_{unit}.png` (the
+  canonical IU file every reader serves); `onArtifactPlaced` drops the stale preview `…_pr…png`.
+  No side effects at planning (no `image_units`, no Redis).
+- `orchestration-v2/index.js`: audio + image ports by kind; PNG check threshold
+  `ORCH_V2_MIN_LUMA_STDDEV` (default 2.0); `imageUnsupportedReason()` — `IU_IMAGE_VERSIONED` on, or
+  a core without `inspectPng` → image refused.
+- `/regenerate` of a v2 book: `worker_types` ⊂ {audio, image, video}; video → no work,
+  `summary.skipped_unsupported` + `skipped_worker_types`; only video → 409
+  `v2_layer_not_supported_yet`; image unavailable → 409 `v2_image_unavailable`; unknown type → 400;
+  `tasks[]` one row per layer; `layer_disabled` lists the requested layers.
+  `cancel-worker {task_id}` → `cancelled` = the command's layers.
+- `progress-adapter`: the image layer has no merge — `total` = planned IUs.
+- Tests: `orch-v2-image.test.js` (fake image worker over HTTP + player read routes),
+  `orch-v2-image-isolation.test.js` (every legacy image point), `orch-v2-integration` (video → 409).
+
 ## Unreleased — orchestration v2, stage 1d: `@animastor/orchestration` 1.0.0 from the registry
 
 - `backend/package.json`: `"@animastor/orchestration": "^1.0.0"` (published 2026-11-06, shasum

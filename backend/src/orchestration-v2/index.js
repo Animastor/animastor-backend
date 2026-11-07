@@ -1,8 +1,12 @@
 // ======================================================
 // orchestration-v2 — composition of the gen core into the backend host
 // ======================================================
-// ADR animastor-docs architecture/ORCHESTRATION_V2.md (этап 1: только аудио,
-// только книги books.orchestration='v2').
+// ADR animastor-docs architecture/ORCHESTRATION_V2.md (этап 1: аудио; этап 2a:
+// изображения IU; только книги books.orchestration='v2'). Video is not on v2 yet.
+//
+// Image layer (2a) is fail-closed: it is refused (409 at the command) while
+// IU_IMAGE_VERSIONED is on (v2 publishes the canonical file, not the versioned
+// pointer — ADR §13 п.9) or when the gen core lacks the 1.1.0 PNG check.
 //
 // Master flag ORCH_V2_ENABLED (unset / not 1|true = OFF): nothing of v2 runs —
 // no migration, no sweeper, no local runner, the /internal/gen/* routes answer
@@ -18,6 +22,7 @@
 const { spawnSync } = require('child_process');
 const bookFlag = require('./book-flag');
 const { createAudioPorts } = require('./audio-ports');
+const { createImagePorts } = require('./image-ports');
 const { createProgressAdapter } = require('./progress-adapter');
 
 function flagOn(v) { return v === '1' || v === 'true' || v === 'yes'; }
@@ -66,17 +71,29 @@ function createOrchV2Host(o) {
         const pool = o.getPool();
         await gen.migrate(pool);
         const audio = createAudioPorts({ log, deps: { book: o.book, ...((o.portOverrides && o.portOverrides.audioDeps) || {}) } });
+        const image = createImagePorts({ log, deps: { book: o.book, ...((o.portOverrides && o.portOverrides.imageDeps) || {}) } });
+        state.coreHasPngCheck = !!(gen.media && typeof gen.media.inspectPng === 'function');
+        const byKind = (kind) => (kind === 'iu_image' ? image : audio);
         const dispatcher = o.gpuDispatcher;           // injected by the composition root (provider-seam guard)
         if (!dispatcher) throw new Error('orchestration v2: gpuDispatcher (lane lookups) is not injected');
+        const numEnv = (name, dflt) => (env[name] !== undefined && env[name] !== '' && Number.isFinite(Number(env[name])) ? Number(env[name]) : dflt);
         const ports = {
-            planUnits: audio.planUnits,
-            buildPayload: audio.buildPayload,
-            artifactPath: audio.artifactPath,
+            planUnits: async (bookRef, scope, layer) => {
+                if (layer === 'audio') return audio.planUnits(bookRef, scope, layer);
+                if (layer === 'image') {
+                    const why = imageUnsupportedReason();
+                    if (why) throw Object.assign(new Error(`image layer unavailable: ${why}`), { status: 409, code: 'v2_image_unavailable' });
+                    return image.planUnits(bookRef, scope, layer);
+                }
+                return [];                                   // video: stage 3 (the §6.3 transition plans nothing)
+            },
+            buildPayload: (job) => byKind(job.kind).buildPayload(job),
+            artifactPath: (job) => byKind(job.kind).artifactPath(job),
             runLocal: audio.runLocal,
-            onArtifactPlaced: audio.onArtifactPlaced,
+            onArtifactPlaced: (job, finalPath) => byKind(job.kind).onArtifactPlaced(job, finalPath),
             validateResult: gen.defaults.createDefaultValidateResult({
-                rmsThresholdDbfs: Number.isFinite(Number(env.ORCH_V2_SILENCE_DBFS)) && env.ORCH_V2_SILENCE_DBFS !== undefined && env.ORCH_V2_SILENCE_DBFS !== ''
-                    ? Number(env.ORCH_V2_SILENCE_DBFS) : gen.media.DEFAULT_RMS_THRESHOLD_DBFS,
+                rmsThresholdDbfs: numEnv('ORCH_V2_SILENCE_DBFS', gen.media.DEFAULT_RMS_THRESHOLD_DBFS),
+                minLumaStddev: numEnv('ORCH_V2_MIN_LUMA_STDDEV', gen.media.DEFAULT_MIN_LUMA_STDDEV),
             }),
             laneFor: gen.defaults.makeLaneFor({
                 hasActivePrivateWorker: (ws, type) => dispatcher.workspaceHasPrivateWorker(ws, type),
@@ -109,6 +126,16 @@ function createOrchV2Host(o) {
         return state;
     }
 
+    /** null when v2 may run the image layer, otherwise the reason (fail-closed). */
+    function imageUnsupportedReason() {
+        if (!state.enabled && state.reason) return state.reason;
+        if (state.coreHasPngCheck === false) return '@animastor/orchestration < 1.1.0 (no PNG check)';
+        let versioned;
+        try { versioned = (o.imageVersioned || (() => require('../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled()))(); } catch (_) { versioned = true; }
+        if (versioned) return 'IU_IMAGE_VERSIONED is on (v2 publishes the canonical IU file only)';
+        return null;
+    }
+
     async function stop() {
         if (state.orch) state.orch.stop();
         if (state.listener) { try { await state.listener.close(); } catch (_) { /* pool closing */ } state.listener = null; }
@@ -119,6 +146,7 @@ function createOrchV2Host(o) {
         stop,
         isEnabled: () => state.enabled,
         disabledReason: () => state.reason,
+        imageUnsupportedReason,
         orch: () => state.orch,
         progress: () => state.progress,
         uploadUrl: (jobId, attempt) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/result?attempt=${attempt}`,

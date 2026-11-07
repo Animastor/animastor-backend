@@ -18,6 +18,8 @@ const path = require('path');
 const { scopeBounds } = require('../services/gen-scope');
 
 const LEGACY_TO_SCOPE = Object.freeze({ whole_book: 'book', current_chapter: 'chapter', current_scene: 'scene' });
+const ALL_LAYERS = Object.freeze(['audio', 'image', 'video']);
+const V2_LAYERS = Object.freeze(['audio', 'image']);      // 2a; video — stage 3
 const FROM_CURRENT_SCENE = 'from_current_scene';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -148,12 +150,23 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
         const body = req.body || {};
         const types = body.worker_types === undefined ? ['audio'] : body.worker_types;
-        if (!Array.isArray(types) || types.length === 0) {
+        if (!Array.isArray(types) || types.length === 0 || types.some((t) => !ALL_LAYERS.includes(t))) {
             return res.status(400).json({ error: 'worker_types must be a non-empty array containing audio, image, or video' });
         }
-        const unsupported = [...new Set(types)].filter((t) => t !== 'audio');
-        if (unsupported.length) {
-            return res.status(409).json({ code: 'v2_layer_not_supported_yet', error: `orchestration v2 (stage 1) supports audio only`, worker_types: unsupported });
+        // 2a: audio + image run on v2; video is stage 3 — no work is created for it,
+        // the answer says so (summary.skipped_unsupported, skipped_worker_types)
+        const requested = [...new Set(types)];
+        const unsupported = requested.filter((t) => !V2_LAYERS.includes(t));
+        const layers = requested.filter((t) => V2_LAYERS.includes(t));
+        if (!layers.length) {
+            return res.status(409).json({
+                code: 'v2_layer_not_supported_yet', error: 'orchestration v2 runs audio and image only (video: stage 3)',
+                worker_types: unsupported, summary: { jobs_created: 0, joined: 0, skipped_ready: 0, skipped_unsupported: unsupported },
+            });
+        }
+        if (layers.includes('image')) {
+            const why = host.imageUnsupportedReason ? host.imageUnsupportedReason() : 'host without image support';
+            if (why) return res.status(409).json({ code: 'v2_image_unavailable', error: `image layer is unavailable on orchestration v2: ${why}`, worker_types: ['image'] });
         }
         const legacyScope = body.scope || 'whole_book';
         let scope;
@@ -185,28 +198,37 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             const ca = body.client_action && typeof body.client_action === 'object' ? body.client_action : null;
             const clientActionId = ca && typeof ca.action_id === 'string' && ca.action_id ? ca.action_id.slice(0, 200) : null;
             const r = await host.orch().createCommand({
-                workspaceId, userId, bookId, kind: 'regenerate', scope, layers: ['audio'],
+                workspaceId, userId, bookId, kind: 'regenerate', scope, layers,
                 force: body.rebuild_all === true || body.force === true,
                 clientActionId, enabledLayers,
             });
             const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
             const scopeLog = scope.level === 'scenes' ? `${legacyScope}→scenes[${scope.scene_ids.length}] from ${scope.scene_ids[0]}` : legacyScope;
-            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} scope=${scopeLog} summary=${JSON.stringify(r.summary)} client_action_id=${clientActionId || '-'}`);
+            const summary = unsupported.length ? { ...r.summary, skipped_unsupported: unsupported } : r.summary;
+            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} layers=${r.layers.join(',')} scope=${scopeLog} summary=${JSON.stringify(summary)} client_action_id=${clientActionId || '-'}`);
+            // per-layer counts of the command (jobs it created or joined, §4.2a)
+            let byLayer = {};
+            try {
+                const p = await host.orch().progress(bookId);
+                const c = p.commands.find((x) => x.command_id === r.command_id);
+                if (c) byLayer = c.by_layer || {};
+            } catch (_) { /* counts are informational */ }
+            const layerCount = (l) => { const t = byLayer[l] || {}; return (t.queued || 0) + (t.running || 0) + (t.done || 0) + (t.failed || 0) + (t.cancelled || 0); }
             return res.json({
                 book_id: bookId,
                 orchestration: 'v2',
                 command_id: r.command_id,
                 existing: r.existing,
-                summary: r.summary,
+                summary,
                 scope: legacyScope,
                 build_id: (loaded && loaded.manifest && loaded.manifest.build_id) || 'default',
                 dirty_scenes: [],
-                skipped_worker_types: [],
-                tasks: [{ task_id: r.command_id, type: 'audio', target_count: r.summary.jobs_created + r.summary.joined }],
+                skipped_worker_types: unsupported,
+                tasks: r.layers.map((type) => ({ task_id: r.command_id, type, target_count: layerCount(type) })),
             });
         } catch (err) {
             if (err && err.code === 'layer_disabled') {
-                return res.status(409).json({ error: 'layer_disabled', message: 'All requested layers are disabled in layer-config', disabled_worker_types: ['audio'] });
+                return res.status(409).json({ error: 'layer_disabled', message: 'All requested layers are disabled in layer-config', disabled_worker_types: layers });
             }
             return sendGenError(res, err, 'regenerate');
         }
@@ -233,7 +255,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             if (taskId && UUID_RE.test(String(taskId))) {
                 if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() });
                 const r = await host.orch().cancel({ commandId: String(taskId) }, { cancelledBy: userIdOf(req) || 'cancel-worker' });
-                return res.json({ ok: true, book_id: bookId, cancelled: ['audio'], task_ids: [String(taskId)], jobs_cancelled: r.jobs_cancelled, kept_shared: r.kept_shared });
+                return res.json({ ok: true, book_id: bookId, cancelled: r.layers || [], task_ids: [String(taskId)], jobs_cancelled: r.jobs_cancelled, kept_shared: r.kept_shared });
             }
             if (type === 'cover') return res.json({ ok: true, book_id: bookId, cancelled: ['cover'], task_ids: [] }); // no legacy leases for a v2 book
             if (['audio', 'image', 'video'].includes(type)) {
