@@ -338,6 +338,11 @@ app.use('/api/', rateLimit({
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// О1: polling / restore endpoints are never cached or answered with 304
+// (Cache-Control: no-store, no ETag) — middleware/no-store.js.
+const { noStoreForPolling } = require('./middleware/no-store');
+app.use('/api/v1', noStoreForPolling);
+
 // Auth context middleware (session cookie → req.user / req.workspace).
 // Requests without a valid session stay anonymous (pre-auth compatibility —
 // no global requireAuth); authenticated requests get real identity.
