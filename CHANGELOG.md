@@ -28,6 +28,37 @@ registry and the image layer of a v2 book answers 409 `v2_image_unavailable` (fa
 - Tests: `orch-v2-image.test.js` (fake image worker over HTTP + player read routes),
   `orch-v2-image-isolation.test.js` (every legacy image point), `orch-v2-integration` (video → 409).
 
+## Unreleased — fix (legacy): `cleanBookRedisKeys` covers the legacy key families of a book
+
+reports/2026-11-06/orch-v2-1d-release.md §18: after `DELETE /api/v1/book/<id>` a book generated
+through the legacy path kept 35 Redis keys — `artifact-manifest` (TTL −1), `assets` (TTL −1),
+`fence-journal`, `fence-publish`, `intent`, `dispatch-intent`, `idempotency:ref`,
+`idempotency:stage-epoch`, `job`, `result-processed`, `dispatch-completed`, `cancelled-workers`.
+`helpers/redis-helpers.cjs` now has a MATCH pattern for each family, scoped to THIS book id
+(formats taken from the writers; book id glob-escaped, percent-encoded where the writer encodes it):
+
+- `animastor:assets:{book}:*` (asset-registry, no TTL);
+- `animastor:artifact-manifest|fence-journal|fence-publish|fence-unrecoverable:{enc(book)}:*`
+  (`fence-unrecoverable` has the same durable shape as the manifest and was unreachable too);
+- `animastor:intent:{enc(book)}:*`, `animastor:dispatch-intent:*:{enc(book)}_*`
+  (the receipt is keyed by `dispatch_id` first, the book lives inside the encoded job id);
+- `animastor:idempotency:stage-epoch:{enc(book)}:*`;
+- `animastor:job:*:{book}_*` — the hub dedup key is `job:{dispatch_id}:{job_id}`, so the old
+  `job:{book}_*` pattern could never match (that is why the §18 `job` keys survived);
+- `animastor:result-processed:{book}_*`, `animastor:dispatch-completed:{book}:*`,
+  `animastor:cancelled-workers:{book}`.
+
+`animastor:idempotency:ref` is **not** a raw pattern: the ref is the ownership index of the
+7-day completion marker (Stage 118 · B1), so it is released together with claim + marker by
+`queue-idempotency.releaseClaimsForBook` — via the new `options.releaseClaims` of the helper,
+passed only by `services/book-deletion.cjs` (the book is gone). The cache-clear route keeps the
+default: it releases claims only AFTER the hub lane clear (Stage 116/118 ordering).
+
+`book-deletion.cjs` re-arms `cancelled-workers:{book}` (1 h TTL) right after the purge, so the
+cancellation signal still reaches a running VBook agent. Tests:
+`tests/book-cleanup-legacy-key-families.test.js` (two books + a prefix-neighbour book; only the
+deleted book reaches 0; no global pattern; glob escaping; paired ref/claim/marker release).
+
 ## Unreleased — orchestration v2, stage 1d: `@animastor/orchestration` 1.0.0 from the registry
 
 - `backend/package.json`: `"@animastor/orchestration": "^1.0.0"` (published 2026-11-06, shasum
