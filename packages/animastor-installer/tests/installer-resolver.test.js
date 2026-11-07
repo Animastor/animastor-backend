@@ -33,11 +33,11 @@ function workerProbe(workerType) {
 const WORKFLOW_HASHES = {
     'tts-qwen-narrator': '87180aee01288be6e23240b2d873ce2d451f63cf404dec331a3b221bb9f8b8c1',
     'tts-qwen-dialogue': '7dcdc6997d36aaeb1a54e1578c69f0c534be29698c7a7b48813f637c740e69db',
-    'img-qwen-image': 'fb4c25e52bbb2f75270367d2696b4b7469617d6557cd0bcc634a6a6fc03a5816',
-    'video-ltx-1p': '6ab036e1c7b4f9e3e9df11b31b08d7495a4c7a761d8f8159951bf06768df3cc1',
-    'video-ltx-2p': '1be44f6fd00e2684a6db138e1a20e8445653bfc65bbb3caa62dfe00b31067617',
-    'video-ltx-3p': 'ec15a01259afcc6b3d76df5d5eec75a080b6aa54bd6b064b79538bd30dcf90f4',
-    'video-ltx-4p': 'acef76b38f25b41f133b92bb71e2ab3ac8f75808209c29624319c9d08822d80d',
+    'img-qwen-image': 'd2cb4c4edead909b7358e1353fdd0e0e4d5efc231abfcad28749f1c0bc99d5be',
+    'video-ltx-1p': 'b675a572934f95a8fb475e4832e94a78d495f4b89b1e8a1e99e93fc4b6ef30d7',
+    'video-ltx-2p': 'c6bc34f3a5eb36009e203deedd7a6467a1ae3d60b9ef4abb2f0122c02c352f62',
+    'video-ltx-3p': '26692d1970c92ad1d56c52d676df2f930d77898dc85618814f95d10b10ec2a80',
+    'video-ltx-4p': '8ea650a8cde4660eaefce427152ffe77050ff433c1b5be0a0c72a8bd73288ca6',
 };
 
 function baselineWorkflow(type, name) {
