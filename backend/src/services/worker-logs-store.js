@@ -22,7 +22,7 @@
 //     blocked by any other worker's I/O.
 //
 // The store never reads the DB: the route resolves the worker row (identity
-// + log_shipping opt-in) and calls in here only after that check.
+// + the log_shipping kill switch) and calls in here only after that check.
 
 'use strict';
 

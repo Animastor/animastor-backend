@@ -103,7 +103,7 @@ async function cleanup() {
     await query(`DELETE FROM users WHERE username LIKE $1`, [`${PREFIX}%`]);
 }
 
-describe('worker logs — repository opt-in defaults', () => {
+describe('worker logs — repository defaults (WLOG-2: every worker ships logs)', () => {
     let aliceWorkspaceId, adminWorkspaceId, tenantWorkerId, adminWorkerId, systemWorkerId;
 
     before(async function () {
@@ -123,11 +123,11 @@ describe('worker logs — repository opt-in defaults', () => {
         await cleanup();
     });
 
-    it('tenant worker (workspace owner role=user) defaults to log_shipping=false', async () => {
+    it('tenant worker (workspace owner role=user) also defaults to log_shipping=true', async () => {
         const r = await workerRepo.createWorker({ workspaceId: aliceWorkspaceId, name: `${PREFIX}_tenant`, workerType: 'audio' });
         tenantWorkerId = r.worker.worker_id;
-        expect(r.worker.log_shipping).to.equal(false);
-        expect((await workerRepo.findById(tenantWorkerId)).log_shipping).to.equal(false);
+        expect(r.worker.log_shipping).to.equal(true);
+        expect((await workerRepo.findById(tenantWorkerId)).log_shipping).to.equal(true);
     });
 
     it('admin-owned workspace worker defaults to log_shipping=true', async () => {
@@ -145,7 +145,19 @@ describe('worker logs — repository opt-in defaults', () => {
 
     it('the mirror identity carries log_shipping (findActiveByIdWithTokenHash)', async () => {
         const row = await workerRepo.findActiveByIdWithTokenHash(tenantWorkerId);
-        expect(row.log_shipping).to.equal(false);
+        expect(row.log_shipping).to.equal(true);
+    });
+
+    it('WLOG-2: the column default is TRUE after migrations', async () => {
+        const { rows } = await query(`SELECT column_default FROM information_schema.columns
+             WHERE table_name = 'workers' AND column_name = 'log_shipping'`);
+        expect(String(rows[0].column_default)).to.match(/true/i);
+    });
+
+    it('the column stays a kill switch: an operator FALSE is not flipped by the repository', async () => {
+        await query(`UPDATE workers SET log_shipping = FALSE WHERE worker_id = $1`, [tenantWorkerId]);
+        expect((await workerRepo.findById(tenantWorkerId)).log_shipping).to.equal(false);
+        await query(`UPDATE workers SET log_shipping = TRUE WHERE worker_id = $1`, [tenantWorkerId]);
     });
 });
 
@@ -342,19 +354,24 @@ describe('worker logs — HTTP surface', function () {
         expect(res.status).to.equal(404);
     });
 
-    it('log_shipping=false → 204 and nothing is written', async () => {
-        const before = fs.existsSync(path.join(root, aliceWorkerId));
-        const res = await postLogs(aliceWorkerId, {
-            worker_id: aliceWorkerId,
-            seq_from: 1,
-            seq_to: 1,
-            lines: [{ ts: '2026-11-06T11:10:00.000Z', level: 'info', msg: 'must-not-land' }],
-        });
-        expect(res.status).to.equal(204);
-        const after = fs.existsSync(path.join(root, aliceWorkerId));
-        expect(after).to.equal(before);
-        if (after) {
-            expect(fs.readFileSync(path.join(root, aliceWorkerId, 'current.log'), 'utf8')).to.not.include('must-not-land');
+    it('kill switch: log_shipping=false → 204 and nothing is written', async () => {
+        await query(`UPDATE workers SET log_shipping = FALSE WHERE worker_id = $1`, [aliceWorkerId]);
+        try {
+            const before = fs.existsSync(path.join(root, aliceWorkerId));
+            const res = await postLogs(aliceWorkerId, {
+                worker_id: aliceWorkerId,
+                seq_from: 1,
+                seq_to: 1,
+                lines: [{ ts: '2026-11-06T11:10:00.000Z', level: 'info', msg: 'must-not-land' }],
+            });
+            expect(res.status).to.equal(204);
+            const after = fs.existsSync(path.join(root, aliceWorkerId));
+            expect(after).to.equal(before);
+            if (after) {
+                expect(fs.readFileSync(path.join(root, aliceWorkerId, 'current.log'), 'utf8')).to.not.include('must-not-land');
+            }
+        } finally {
+            await query(`UPDATE workers SET log_shipping = TRUE WHERE worker_id = $1`, [aliceWorkerId]);
         }
     });
 
@@ -435,5 +452,51 @@ describe('worker logs — HTTP surface', function () {
         expect(res.status).to.equal(200);
         const body = await res.json();
         expect(body.count).to.equal(2);
+    });
+
+    // ── sharing never grants log access (owner decision 2026-11-07) ─────
+    it('logs are the owner\'s: a users-grant holder and a public-policy participant get 404', async () => {
+        const ids = await query(`SELECT
+                (SELECT user_id FROM users WHERE username = $1) AS owner_id,
+                (SELECT user_id FROM users WHERE username = $2) AS guest_id`,
+            [alice.username, bob.username]);
+        const ownerId = ids.rows[0].owner_id;
+        const guestId = ids.rows[0].guest_id;
+        const aliceWs = (await query(`SELECT workspace_id FROM workers WHERE worker_id = $1`, [aliceWorkerId])).rows[0].workspace_id;
+
+        // A second worker keeps the 'users' policy apart from the public one
+        // (ONE active policy per worker).
+        const second = await api('POST', '/api/v1/workers', { name: `${PREFIX}_alice_shared`, worker_type: 'audio' }, alice.cookie);
+        expect(second.status).to.equal(201);
+        const sharedWorkerId = (await second.json()).worker.worker_id;
+
+        const usersPolicy = await query(`INSERT INTO share_policies (worker_id, workspace_id, scope_kind, created_by)
+             VALUES ($1, $2, 'users', $3) RETURNING policy_id`, [sharedWorkerId, aliceWs, ownerId]);
+        await query(`INSERT INTO share_policy_grants (policy_id, workspace_id, user_id, created_by)
+             VALUES ($1, $2, $3, $4)`, [usersPolicy.rows[0].policy_id, aliceWs, guestId, ownerId]);
+        await query(`INSERT INTO share_policies (worker_id, workspace_id, scope_kind, created_by)
+             VALUES ($1, $2, 'public', $3)`, [aliceWorkerId, aliceWs, ownerId]);
+
+        // The grant holder may USE the worker — its log stays the owner's.
+        const grantedRead = await api('GET', `/api/v1/workers/${sharedWorkerId}/log`, undefined, bob.cookie);
+        expect(grantedRead.status).to.equal(404);
+        const grantedRequest = await api('POST', `/api/v1/workers/${sharedWorkerId}/request-log`, {}, bob.cookie);
+        expect(grantedRequest.status).to.equal(404);
+
+        // A public policy exposes capacity, never the owner's log.
+        const publicRead = await api('GET', `/api/v1/workers/${aliceWorkerId}/log`, undefined, bob.cookie);
+        expect(publicRead.status).to.equal(404);
+        const publicRequest = await api('POST', `/api/v1/workers/${aliceWorkerId}/request-log`, {}, bob.cookie);
+        expect(publicRequest.status).to.equal(404);
+
+        // Anonymous 401, owner 200, platform admin (support) 200.
+        const anon = await api('GET', `/api/v1/workers/${aliceWorkerId}/log`, undefined, undefined);
+        expect(anon.status).to.equal(401);
+        const ownerRead = await api('GET', `/api/v1/workers/${aliceWorkerId}/log?lines=1`, undefined, alice.cookie);
+        expect(ownerRead.status).to.equal(200);
+        const adminRead = await api('GET', `/api/v1/workers/${sharedWorkerId}/log`, undefined, admin.cookie);
+        expect(adminRead.status).to.equal(200);
+        const ownerRequest = await api('POST', `/api/v1/workers/${sharedWorkerId}/request-log`, {}, alice.cookie);
+        expect(ownerRequest.status).to.equal(200);
     });
 });
