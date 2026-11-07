@@ -16,6 +16,8 @@ const fs = require('fs');
 const path = require('path');
 
 const { scopeBounds } = require('../services/gen-scope');
+const workerLogsStore = require('../services/worker-logs-store');
+const workerLogTail = require('../services/worker-log-tail');
 
 const LEGACY_TO_SCOPE = Object.freeze({ whole_book: 'book', current_chapter: 'chapter', current_scene: 'scene' });
 const ALL_LAYERS = Object.freeze(['audio', 'image', 'video']);
@@ -84,8 +86,49 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 const b = req.body || {};
                 if (!UUID_RE.test(String(b.worker_id || ''))) return res.status(400).json({ code: 'bad_request', error: 'worker_id required' });
                 const r = await host.orch().beacon(b.worker_id, { current_job_id: b.current_job_id || null });
-                return res.json({ cancel: r.cancel });
+                // §8.5: a pending one-shot tail request rides exactly ONE
+                // beacon answer. Consumed only after the beacon succeeded, so
+                // a failed/disabled beacon never swallows the request.
+                const sendLogTail = workerLogTail.consume(b.worker_id);
+                return res.json({ cancel: r.cancel, send_log_tail: sendLogTail });
             } catch (err) { return sendGenError(res, err, 'beacon'); }
+        });
+
+        // POST /internal/workers/:workerId/logs — fresh worker logs (§8.5).
+        // The hub is the only caller (x-api-key, docker network; nginx blocks
+        // /internal/workers/ externally). The URL identity is the token-derived
+        // worker_id and is validated as a UUID before it reaches the disk.
+        // log_shipping=false → 204 without writing (tenant opt-out).
+        app.post('/internal/workers/:workerId/logs', requireHubKey, async (req, res) => {
+            const workerId = String(req.params.workerId || '');
+            if (!UUID_RE.test(workerId)) {
+                return res.status(400).json({ code: 'bad_request', error: 'worker_id must be a UUID' });
+            }
+            const declared = Number(req.headers['content-length']);
+            if (Number.isFinite(declared) && declared > 128 * 1024) {
+                return res.status(413).json({ code: 'too_large', error: 'limit 131072 bytes' });
+            }
+            const b = req.body || {};
+            if (!Array.isArray(b.lines)) {
+                return res.status(400).json({ code: 'bad_request', error: 'lines[] required' });
+            }
+            if (b.lines.length > 2000) {
+                return res.status(413).json({ code: 'too_many_lines', error: 'limit 2000 lines' });
+            }
+            try {
+                const w = await workerRepo.findById(workerId);
+                if (!w || w.revoked_at != null) {
+                    return res.status(404).json({ code: 'unknown_worker', error: 'worker unknown or revoked' });
+                }
+                if (w.log_shipping !== true) {
+                    // Opt-out: acknowledge without touching the disk (the
+                    // worker's own buffer is not our data to keep).
+                    return res.status(204).end();
+                }
+                if (b.lines.length === 0) return res.status(204).end();
+                await workerLogsStore.writeLines(workerId, b.lines);
+                return res.status(204).end();
+            } catch (err) { return sendGenError(res, err, 'logs'); }
         });
 
         app.put('/internal/gen/jobs/:jobId/result', async (req, res) => {
