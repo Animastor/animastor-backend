@@ -410,16 +410,16 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         expect(panel.body.tasks[0]).to.include({ failed: true, done: false });
     });
 
-    it('video: [image, video] → работы только image, summary.skipped_unsupported; [video] → 409; аудио + картинки одной сцены параллельно', async () => {
+    it('video (этап 3): [image, video] без аудио → только IU, видео skipped_needs_audio; [video] → 200 без работ; аудио + картинки одной сцены параллельно', async () => {
         const r = await runScene('ch-1', 'sc-1', { worker_types: ['image', 'video'] });
         expect(r.status).to.equal(200);
-        expect(r.body.summary).to.deep.equal({ jobs_created: 2, joined: 0, skipped_ready: 0, skipped_unsupported: ['video'] });
-        expect(r.body.skipped_worker_types).to.deep.equal(['video']);
-        expect((await query(`SELECT layers FROM gen_commands WHERE command_id = $1`, [r.body.command_id])).rows[0].layers).to.deep.equal(['image']);
+        expect(r.body.summary).to.deep.equal({ jobs_created: 2, joined: 0, skipped_ready: 0, skipped_needs_audio: ['sc-1'] });
+        expect(r.body.skipped_worker_types).to.deep.equal([]);
+        expect((await query(`SELECT layers FROM gen_commands WHERE command_id = $1`, [r.body.command_id])).rows[0].layers).to.deep.equal(['image', 'video']);
         const v = await runScene('ch-1', 'sc-1', { worker_types: ['video'] });
-        expect(v.status).to.equal(409);
-        expect(v.body).to.include({ code: 'v2_layer_not_supported_yet' });
-        expect(v.body.summary.skipped_unsupported).to.deep.equal(['video']);
+        expect(v.status).to.equal(200);
+        expect(v.body.summary).to.include({ jobs_created: 0 });
+        expect(v.body.summary.skipped_needs_audio).to.deep.equal(['sc-1']);
         expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND layer = 'video'`, [bookId])).to.equal(0);
 
         await api('POST', `/api/v1/book/${bookId}/cancel-generation`, {});      // drop the sc-1 images queued above

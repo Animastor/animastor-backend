@@ -23,6 +23,9 @@ const {
 } = require('./util');
 const { checkLane } = require('./ports');
 const { msBetween } = require('./log');
+const {
+    normalisePlan, readyParts, mergePartsOf, mergeUnitFor, linkSceneLive, recordSkips,
+} = require('./stage');
 
 const NOOP_LOG = Object.freeze({ event() {} });
 /** Mode of an accepted artifact: world-readable like the legacy outputs (О3; the tmp file is 0640). */
@@ -272,43 +275,106 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         return r.rows.map((x) => ({ unit_key: x.unit_key, job_id: x.job_id, path: x.result_path, sha256: x.result_sha256, meta: x.meta || null }));
     }
 
+    /** Is the scene asset of this layer already ready for exactly this content? */
+    async function sceneReady(client, job, layer, sceneHash) {
+        if (!sceneHash) return false;
+        const r = await client.query(
+            `SELECT 1 FROM scene_assets WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND asset_type = $4
+               AND build_id = $5 AND status = 'ready' AND scene_hash = $6 LIMIT 1`,
+            [job.book_id, job.chapter_id, job.scene_id, layer, job.build_id, sceneHash]);
+        return r.rowCount > 0;
+    }
+
+    /**
+     * 1.3.0 — the video stage of one scene (§6.3, §6.5, §13 п.11): asked after the last
+     * IU of the scene and after its audio merge. The host video planner, run on THIS
+     * transaction, decides: groups now / wait (join the live images or audio) / skip
+     * with a reason (recorded for the commands, insert-only).
+     */
+    async function videoStage(client, qualifying, job) {
+        const owner = qualifying[0];
+        const ids = qualifying.map((c) => c.command_id);
+        const force = qualifying.some((c) => c.force === true);
+        const plan = normalisePlan(await ports.planUnits(
+            { bookId: owner.book_id, workspaceId: owner.workspace_id, userId: owner.user_id },
+            { level: 'scene', chapter_id: job.chapter_id, scene_id: job.scene_id }, 'video', { db: client }), 'video');
+        let units = plan.units.filter((u) => u && u.kind === 'video_group'
+            && u.chapter_id === job.chapter_id && u.scene_id === job.scene_id
+            && typeof u.unit_key === 'string' && u.unit_key && typeof u.build_id === 'string' && u.build_id
+            && u.input && typeof u.input === 'object')
+            .map((u) => ({ ...u, input: { ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null } }));
+        let created = 0;
+        if (units.length && !force) {
+            const sceneHash = units[0].input.scene_hash;
+            if (await sceneReady(client, units[0], 'video', sceneHash)) {
+                units = [];                                         // the scene video is current
+            } else {
+                const done = await readyParts(client, job.book_id, units);
+                if (done.size === units.length && mergePartsOf(units[0].input)) {
+                    const merge = await mergeUnitFor(client, job.book_id, units[0]);
+                    if (merge) { created += await insertStageJobs(client, qualifying, [merge]); units = []; }
+                } else if (done.size) {
+                    units = units.filter((u) => !done.has(u));
+                }
+            }
+        }
+        created += await insertStageJobs(client, qualifying, units);
+        if (plan.waits.length) await linkSceneLive(client, ids, job.book_id, plan.waits);
+        if (plan.skipped.length) await recordSkips(client, ids, plan.skipped);
+        return created;
+    }
+
     /**
      * §6.3: a next stage is created only if at least one command linked to the finished job is
      * active, has the layer and the layer is enabled; the new job is linked to all such commands.
+     *   audio_chunk (last of the scene) → audio_merge  — commands with audio, and (1.3.0) video
+     *                                                    commands waiting for this audio (§13 п.11 п.3)
+     *   iu_image (last of the scene)    → video stage   — commands with video
+     *   audio_merge                     → video stage   — commands with video (1.3.0)
+     *   video_group (last of the plan)  → video_merge   — by input.merge_parts (1.3.0) or, without
+     *                                                    it, every linked group of the scene
      */
     async function transitions(client, cmds, job) {
-        const nextLayer = job.kind === 'iu_image' ? 'video' : job.layer;
-        const qualifying = [];
-        for (const c of cmds) {
-            if (c.status === 'active' && c.layers.includes(nextLayer) && await ports.isLayerEnabled(c.book_id, nextLayer)) qualifying.push(c);
-        }
-        if (!qualifying.length) return 0;
-        const ids = qualifying.map((c) => c.command_id);
+        const active = cmds.filter((c) => c.status === 'active');
+        if (!active.length) return 0;
+        const pick = async (layers, enabledLayer) => {
+            const out = [];
+            for (const c of active) {
+                if (layers.some((l) => c.layers.includes(l)) && await ports.isLayerEnabled(c.book_id, enabledLayer)) out.push(c);
+            }
+            return out;
+        };
+        const lockScene = () => client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
         const mergeInput = async (kind) => ({
             scene_hash: job.input.scene_hash ?? null,
             parts: await doneParts(client, job, kind),
         });
         const sceneUnit = (kind, input) => ({ chapter_id: job.chapter_id, scene_id: job.scene_id, kind, unit_key: 'scene', build_id: job.build_id, input });
 
-        if (job.kind === 'audio_chunk' || job.kind === 'video_group' || job.kind === 'iu_image') {
-            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
-            if (!(await sceneStageComplete(client, job, job.kind, ids))) return 0;
-        }
         if (job.kind === 'audio_chunk') {
-            return insertStageJobs(client, qualifying, [sceneUnit('audio_merge', await mergeInput('audio_chunk'))]);
+            const q = await pick(['audio', 'video'], 'audio');
+            if (!q.length) return 0;
+            await lockScene();
+            if (!(await sceneStageComplete(client, job, 'audio_chunk', q.map((c) => c.command_id)))) return 0;
+            return insertStageJobs(client, q, [sceneUnit('audio_merge', await mergeInput('audio_chunk'))]);
         }
         if (job.kind === 'video_group') {
-            return insertStageJobs(client, qualifying, [sceneUnit('video_merge', await mergeInput('video_group'))]);
+            const q = await pick(['video'], 'video');
+            if (!q.length) return 0;
+            await lockScene();
+            if (mergePartsOf(job.input)) {
+                const merge = await mergeUnitFor(client, job.book_id, job);
+                return merge ? insertStageJobs(client, q, [merge]) : 0;
+            }
+            if (!(await sceneStageComplete(client, job, 'video_group', q.map((c) => c.command_id)))) return 0;
+            return insertStageJobs(client, q, [sceneUnit('video_merge', await mergeInput('video_group'))]);
         }
-        if (job.kind === 'iu_image') {
-            const owner = qualifying[0];
-            const planned = await ports.planUnits(
-                { bookId: owner.book_id, workspaceId: owner.workspace_id, userId: owner.user_id },
-                { level: 'scene', chapter_id: job.chapter_id, scene_id: job.scene_id }, 'video');
-            const groups = (Array.isArray(planned) ? planned : []).filter((u) => u && u.kind === 'video_group'
-                && u.chapter_id === job.chapter_id && u.scene_id === job.scene_id
-                && typeof u.unit_key === 'string' && typeof u.build_id === 'string' && u.input && typeof u.input === 'object');
-            return insertStageJobs(client, qualifying, groups.map((u) => ({ ...u, input: { ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null } })));
+        if (job.kind === 'iu_image' || job.kind === 'audio_merge') {
+            const q = await pick(['video'], 'video');
+            if (!q.length) return 0;
+            await lockScene();
+            if (job.kind === 'iu_image' && !(await sceneStageComplete(client, job, 'iu_image', q.map((c) => c.command_id)))) return 0;
+            return videoStage(client, q, job);
         }
         return 0;
     }
@@ -317,8 +383,8 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
      * Steps 1(validate)–5 of §7 for a file already on disk at tmpPath.
      * @returns {Promise<{status:number, code?:string, reason?:string, idempotent?:boolean, sha256?:string, job_status?:string, stage_jobs_created?:number}>}
      */
-    async function finishAccept(pre, attempt, tmpPath, sha, bytes, t0 = Date.now()) {
-        const r = await finishAcceptInner(pre, attempt, tmpPath, sha, bytes, t0);
+    async function finishAccept(pre, attempt, tmpPath, sha, bytes, t0 = Date.now(), localMeta = null) {
+        const r = await finishAcceptInner(pre, attempt, tmpPath, sha, bytes, localMeta);
         // О3: `accept` for a committed result (or its idempotent replay); a stale
         // attempt is an `error` line (code stale_attempt); invalid_result is logged by failAttempt.
         const ids = {
@@ -337,7 +403,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         return r;
     }
 
-    async function finishAcceptInner(pre, attempt, tmpPath, sha, bytes) {
+    async function finishAcceptInner(pre, attempt, tmpPath, sha, bytes, localMeta = null) {
         const finalPath = ports.artifactPath(pre);
         if (typeof finalPath !== 'string' || !path.isAbsolute(finalPath)) {
             await unlinkQuiet(tmpPath);
@@ -376,7 +442,8 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 await fs.promises.rename(tmpPath, finalPath);           // §7 п.3 (atomic, same partition)
                 renamed = true;
                 await fs.promises.chmod(finalPath, ARTIFACT_MODE).catch(() => {});   // О3: 0644 like legacy outputs
-                if (ports.onArtifactPlaced) await ports.onArtifactPlaced(job, finalPath);   // e.g. drop the placeholder sidecar
+                // e.g. drop the placeholder sidecar; 1.3.0: ctx.db = this transaction, ctx.meta = what runLocal returned
+                if (ports.onArtifactPlaced) await ports.onArtifactPlaced(job, finalPath, { db: client, meta: localMeta });
                 await client.query(
                     `UPDATE gen_jobs SET status = 'done', result_path = $2, result_sha256 = $3, result_bytes = $4,
                             finished_at = now(), deadline = NULL
@@ -472,11 +539,11 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
     }
 
     /** Accept a file produced by the backend itself (executor='local'); no token. */
-    async function acceptLocalFile(job, filePath) {
+    async function acceptLocalFile(job, filePath, meta = null) {
         const hash = crypto.createHash('sha256');
         let bytes = 0;
         for await (const chunk of fs.createReadStream(filePath)) { hash.update(chunk); bytes += chunk.length; }
-        return finishAccept(job, job.attempt, filePath, hash.digest('hex'), bytes);
+        return finishAccept(job, job.attempt, filePath, hash.digest('hex'), bytes, Date.now(), meta);
     }
 
     return { acceptResult, acceptError, failAttempt, acceptLocalFile };

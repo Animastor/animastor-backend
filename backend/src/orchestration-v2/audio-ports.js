@@ -7,13 +7,23 @@
 //                   + audio/generation.buildMergedDialogueWorkflow / buildSegmentWorkflow
 //   buildPayload  ← the workflow snapshot taken by planUnits (input.workflow_json)
 //   artifactPath  ← @animastor/generation artifactNaming + audio/helpers.getOutputPath
-//   runLocal      ← audio/generation.trimPaddedSceneAudio + audio/pipeline.buildSceneAudio
-//   onArtifactPlaced ← audio/placeholder-marker.clearPlaceholderMarker
+//   runLocal      ← audio/generation.trimPaddedSceneAudio + audio/pipeline.buildSceneAudio;
+//                   1.3.0: measures every chunk before the merge (audio/ffmpeg.probeDuration,
+//                   the last one also after the tail-only trim — as trackChunkDurations) and
+//                   returns the records as meta
+//   onArtifactPlaced ← audio/placeholder-marker.clearPlaceholderMarker; 1.3.0 (ADR §13 п.11 п.7):
+//                   audio_merge recalculates the IU timings of the scene IN the acceptance
+//                   transaction (orchestration-v2/iu-timings — the legacy IU-RECALC formulas)
 // The unit grammar mirrors the legacy path exactly: a pure-dialogue scene is
 // ONE merged chunk (0001); otherwise one chunk per segment, NNNN = segment
 // order (1-based, padded to 4).
 
 'use strict';
+
+/** units of a scene payload: the injected facade's collectSceneUnits, else vbook-runtime's (same function) */
+function collectUnits(book) {
+    return typeof book.collectSceneUnits === 'function' ? book.collectSceneUnits : require('@animastor/vbook-runtime').collectSceneUnits;
+}
 
 const fs = require('fs');
 const path = require('path');
@@ -28,6 +38,13 @@ function deps(overrides = {}) {
         pipeline: overrides.pipeline || require('../audio/pipeline'),
         helpers: overrides.helpers || require('../audio/helpers'),
         marker: overrides.marker || require('../audio/placeholder-marker'),
+        ffmpeg: overrides.ffmpeg || require('../audio/ffmpeg'),
+        // duration of the merged scene file — music-metadata, as the legacy IU-RECALC
+        probeMerged: overrides.probeMerged || (async (p) => {
+            try { return Number((await require('music-metadata').parseFile(p)).format.duration) || 0; } catch (_) { return 0; }
+        }),
+        iuTimings: overrides.iuTimings || require('./iu-timings'),
+        tailOnly: overrides.tailOnly !== undefined ? overrides.tailOnly : !!process.env.AUDIO_CLEANUP_TAIL_ONLY,
         artifactNaming: overrides.artifactNaming || require('@animastor/generation').artifactNaming,
     };
 }
@@ -147,20 +164,55 @@ function createAudioPorts(opts = {}) {
                 if (p.meta && p.meta.padded) await d.generation.trimPaddedSceneAudio(copy, p.meta.original_text_length);
                 copies.push(copy);
             }
+            // 1.3.0: real chunk durations bound to their unit (the input of the IU timings,
+            // same measurement as the legacy trackChunkDurations: raw, + tail-only of the last)
+            const records = [];
+            for (let i = 0; i < copies.length; i++) {
+                const raw = await d.ffmpeg.probeDuration(copies[i]);
+                let tail = raw;
+                if (d.tailOnly && i === copies.length - 1) {
+                    const tmp = copies[i].replace(/\.mp3$/, '.tailonly.mp3');
+                    try { await d.ffmpeg.runFFmpegTrim(copies[i], tmp, 0, null, true); tail = await d.ffmpeg.probeDuration(tmp); } catch (_) { tail = raw; }
+                    finally { try { fs.unlinkSync(tmp); } catch (_) { /* absent */ } }
+                }
+                const meta = parts[i].meta || {};
+                records.push({ chunk_index: i + 1, unit_id: meta.unit_id || null, raw_duration_sec: Number(raw) || 0, tail_duration_sec: Number(tail) || 0 });
+            }
             const out = path.join(incoming, `${job.job_id}.${job.attempt}.merge.mp3`);
             const built = await d.pipeline.buildSceneAudio(copies, out, job.build_id, true);
             if (!built || !fs.existsSync(out)) throw Object.assign(new Error('audio merge produced no output'), { error_class: 'transient' });
-            return { path: out };
+            return { path: out, meta: { chunk_records: records, tail_only: !!d.tailOnly } };
         } finally {
             try { fs.rmSync(work, { recursive: true, force: true }); } catch (_) { /* best effort */ }
         }
     }
 
-    /** Inside the acceptance tx after the rename: the scene file is real audio now. */
-    function onArtifactPlaced(job, finalPath) {
-        if (job.kind === 'audio_merge' && d.marker.clearPlaceholderMarker(finalPath)) {
-            log(`[ORCH-V2] placeholder marker cleared: ${path.basename(finalPath)}`);
-        }
+    /**
+     * Inside the acceptance tx after the rename: the scene file is real audio now.
+     * 1.3.0 (ADR §13 п.11 п.7): the IU timings of the scene follow this audio — in the SAME
+     * transaction (ctx.db), so a video stage planned right after sees them, and a rolled
+     * back acceptance leaves the old ones.
+     */
+    async function onArtifactPlaced(job, finalPath, ctx = {}) {
+        if (job.kind !== 'audio_merge') return;
+        if (d.marker.clearPlaceholderMarker(finalPath)) log(`[ORCH-V2] placeholder marker cleared: ${path.basename(finalPath)}`);
+        if (!ctx || !ctx.db) { log(`[ORCH-V2] IU timings of ${job.chapter_id}/${job.scene_id} not recalculated (core without acceptance db)`); return; }
+        const loadedBook = d.book.loadBook(job.book_id);
+        const sceneData = loadedBook && d.book.collectScenes(loadedBook).find((s) => s.chapter_id === job.chapter_id && s.scene_id === job.scene_id);
+        if (!sceneData) { log(`[ORCH-V2] IU timings: scene ${job.chapter_id}/${job.scene_id} not in the book — skipped`); return; }
+        const units = collectUnits(d.book)(sceneData.payload || sceneData.scene)
+            .map((u) => ({ unit_id: String(u.id), text: u.text || '', text_length: (u.text || '').length }));
+        if (!units.length) return;
+        const realSec = Number(await d.probeMerged(finalPath)) || 0;
+        let records = ctx.meta && Array.isArray(ctx.meta.chunk_records) ? ctx.meta.chunk_records : null;
+        // a chunk that could not be measured (0 s) would zero its unit → no per-unit data at all
+        if (records && records.some((r) => !(r.raw_duration_sec > 0))) records = null;
+        const rows = d.iuTimings.computeUnitTimings(units, realSec, records);
+        const n = await d.iuTimings.writeUnitTimings(ctx.db, {
+            buildId: job.build_id, bookId: job.book_id, chapterId: job.chapter_id, sceneId: job.scene_id,
+            sceneAudioFile: d.artifactNaming.sceneAudioName(job.book_id, job.chapter_id, job.scene_id),
+        }, rows, units);
+        log(`[ORCH-V2] IU timings ${job.chapter_id}/${job.scene_id}: ${n} unit(s), ${rows[0] ? rows[0].mode : '-'}, scene ${realSec.toFixed(3)}s — ${rows.map((r) => `${r.unit_id}=${r.end_ms - r.start_ms}ms`).join(', ')}`);
     }
 
     return { planUnits, buildPayload, artifactPath, runLocal, onArtifactPlaced, _sceneUnits: sceneUnits };

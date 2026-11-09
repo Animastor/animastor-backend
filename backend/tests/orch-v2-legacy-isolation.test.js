@@ -183,7 +183,7 @@ describe('orchestration v2 — legacy isolation (one predicate, fail-closed)', f
         const { createV2Routes } = require('../src/orchestration-v2/routes');
         const routes = createV2Routes({ host: noFf, config: { GPU_HUB_API_KEY: 'k' }, workerRepo: {}, bookRepo: {}, layerConfig: {}, redis: null, book: null, log: () => {} });
         const handlers = {};
-        routes.mountInternal({ post: (p, ...h) => { handlers[`POST ${p}`] = h; }, put: (p, ...h) => { handlers[`PUT ${p}`] = h; } });
+        routes.mountInternal({ post: (p, ...h) => { handlers[`POST ${p}`] = h; }, put: (p, ...h) => { handlers[`PUT ${p}`] = h; }, get: (p, ...h) => { handlers[`GET ${p}`] = h; } });
         const res = { code: 0, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } };
         const [auth, handler] = handlers['POST /internal/gen/claim'];
         await new Promise((resolve) => auth({ headers: { 'x-api-key': 'k' } }, res, resolve));

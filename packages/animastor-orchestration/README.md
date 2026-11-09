@@ -39,6 +39,17 @@ with `book_id`, `command_id`, `job_id`, `kind`, `unit_key`, `attempt`,
 tokens, paths or task params). Image acceptance records `width`/`height`;
 accepted files are `0644`.
 
+**1.3.0 (video, stage 3a).** `planUnits(book, scope, layer, ctx)` gets
+`ctx.db` (the command / acceptance transaction); for `video` it may answer
+`{units, waits, skipped}` — waits join the live images / audio of the scene,
+skip reasons (`skipped_*`) land in the command summary and in
+`gen_command_skips` (migration 004, `progress().commands[].skipped`). Stage
+transitions: `audio_merge → video`, `iu_image → video`, `video_group →
+video_merge` by `input.merge_parts`; all parts done, no merge → the merge alone.
+`onArtifactPlaced(job, path, {db, meta})` (meta = what `runLocal` returned);
+optional port `inputFiles(job)` → `task.input_files` + `orch.openInput(…)` for
+`GET /internal/gen/jobs/:id/input/:name` (ADR §8.1).
+
 `gen` requires only node builtins and its own files: no `src/legacy`, Redis,
 Express or ComfyUI. Tests: `npm run test:gen` (env `PG_*` of the animastor-test
 stack; refuses a DB not ending in `_test` or port 5432).

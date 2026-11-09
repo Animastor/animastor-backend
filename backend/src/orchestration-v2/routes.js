@@ -5,6 +5,8 @@
 //      POST /internal/gen/claim                 x-api-key (GPU_HUB_API_KEY, REQUIRED)
 //      POST /internal/gen/beacon                x-api-key
 //      PUT  /internal/gen/jobs/:id/result?attempt=N   Bearer upload_token, raw body stream
+//      GET  /internal/gen/jobs/:id/input/:name?attempt=N  Bearer upload_token (stage 3: IU frames of a
+//           video group, ADR §8.1 — by link, not base64; public through nginx like result)
 //      POST /internal/gen/jobs/:id/error?attempt=N    Bearer upload_token, JSON
 //    No key / token → 401. Master flag off → 503 {code:'orch_v2_disabled'}.
 // 2. Book handlers for books.orchestration='v2' — the existing routes call
@@ -21,7 +23,7 @@ const workerLogTail = require('../services/worker-log-tail');
 
 const LEGACY_TO_SCOPE = Object.freeze({ whole_book: 'book', current_chapter: 'chapter', current_scene: 'scene' });
 const ALL_LAYERS = Object.freeze(['audio', 'image', 'video']);
-const V2_LAYERS = Object.freeze(['audio', 'image']);      // 2a; video — stage 3
+const BASE_V2_LAYERS = Object.freeze(['audio', 'image']);  // + video (stage 3) when the core supports it
 const FROM_CURRENT_SCENE = 'from_current_scene';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -68,15 +70,19 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 });
                 if (!out.task) return res.json({ task: null });
                 const t = out.task;
-                return res.json({
-                    task: {
-                        ...t,
-                        protocol_version: 3,
-                        job_type: w.worker_type,
-                        upload_url: host.uploadUrl(t.job_id, t.attempt),
-                        error_url: host.errorUrl(t.job_id, t.attempt),
-                    },
-                });
+                const task = {
+                    ...t,
+                    protocol_version: 3,
+                    job_type: w.worker_type,
+                    upload_url: host.uploadUrl(t.job_id, t.attempt),
+                    error_url: host.errorUrl(t.job_id, t.attempt),
+                };
+                // stage 3: input files by link (same token as the result) — the worker puts them
+                // into COMFY_INPUT_DIR under `name` before the workflow runs
+                if (Array.isArray(t.input_files) && t.input_files.length && host.inputUrl) {
+                    task.input_files = t.input_files.map((f) => ({ ...f, url: host.inputUrl(t.job_id, t.attempt, f.name) }));
+                }
+                return res.json({ task });
             } catch (err) { return sendGenError(res, err, 'claim'); }
         });
 
@@ -146,6 +152,25 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             } catch (err) { return sendGenError(res, err, 'result'); }
         });
 
+        // ADR §8.1 (stage 3): an input file of the CURRENT running attempt, by the job's upload
+        // token; only names the job lists; bytes = the snapshot hashed at planning (else 409).
+        app.get('/internal/gen/jobs/:jobId/input/:name', async (req, res) => {
+            const token = bearer(req);
+            if (!token) return res.status(401).json({ code: 'unauthorized', error: 'upload token required' });
+            if (!host.isEnabled()) return disabled(res);
+            const orch = host.orch();
+            if (!orch || typeof orch.openInput !== 'function') return res.status(404).json({ code: 'not_found', error: 'input files need @animastor/orchestration >= 1.3.0' });
+            try {
+                const r = await orch.openInput(req.params.jobId, Number(req.query.attempt), token, String(req.params.name || ''));
+                if (r.status !== 200) return res.status(r.status).json({ code: r.code });
+                res.set('Content-Type', /\.png$/i.test(r.name) ? 'image/png' : 'application/octet-stream');
+                res.set('Content-Length', String(r.body.length));
+                res.set('Cache-Control', 'no-store');
+                res.set('X-Content-SHA256', r.sha256);
+                return res.status(200).end(r.body);
+            } catch (err) { return sendGenError(res, err, 'input'); }
+        });
+
         app.post('/internal/gen/jobs/:jobId/error', async (req, res) => {
             const token = bearer(req);
             if (!token) return res.status(401).json({ code: 'unauthorized', error: 'upload token required' });
@@ -196,14 +221,16 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         if (!Array.isArray(types) || types.length === 0 || types.some((t) => !ALL_LAYERS.includes(t))) {
             return res.status(400).json({ error: 'worker_types must be a non-empty array containing audio, image, or video' });
         }
-        // 2a: audio + image run on v2; video is stage 3 — no work is created for it,
-        // the answer says so (summary.skipped_unsupported, skipped_worker_types)
+        // audio + image (2a) + video (stage 3, core >= 1.3.0) run on v2; a layer the host
+        // cannot run creates no work — the answer says so (summary.skipped_unsupported)
         const requested = [...new Set(types)];
-        const unsupported = requested.filter((t) => !V2_LAYERS.includes(t));
-        const layers = requested.filter((t) => V2_LAYERS.includes(t));
+        const videoWhy = host.videoUnsupportedReason ? host.videoUnsupportedReason() : 'host without video support';
+        const supported = videoWhy ? BASE_V2_LAYERS : [...BASE_V2_LAYERS, 'video'];
+        const unsupported = requested.filter((t) => !supported.includes(t));
+        const layers = requested.filter((t) => supported.includes(t));
         if (!layers.length) {
             return res.status(409).json({
-                code: 'v2_layer_not_supported_yet', error: 'orchestration v2 runs audio and image only (video: stage 3)',
+                code: 'v2_video_unavailable', error: `video layer is unavailable on orchestration v2: ${videoWhy}`,
                 worker_types: unsupported, summary: { jobs_created: 0, joined: 0, skipped_ready: 0, skipped_unsupported: unsupported },
             });
         }

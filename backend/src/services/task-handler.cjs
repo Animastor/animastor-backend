@@ -290,6 +290,16 @@ module.exports = function(redis, config, deps) {
             throw new Error(`Invalid job_id: ${job_id}`);
         }
 
+        // orchestration v2 (stage 3, ADR §13 п.11): legacy never writes a video group of a
+        // v2 book — a late legacy scene_video result is rejected before any file write
+        // (the v2 group files {prefix}_gN.mp4 belong to gen_jobs acceptance)
+        if (parsed.kind === 'scene_video'
+            && await ((deps && deps.bookFlag) || require('../orchestration-v2/book-flag')).isV2BookFailClosed(parsed.bookId)) {
+            const err = new Error(`Rejected task result: orchestration_v2 (book ${parsed.bookId} is on orchestration v2)`);
+            err.code = 'orchestration_v2';
+            throw err;
+        }
+
         const dispatchEngine = require('@animastor/orchestration').runtime.dispatch;
         const identity = await dispatchEngine.verifyDispatchIdentity(
             redis,
@@ -628,6 +638,13 @@ module.exports = function(redis, config, deps) {
             case 'scene_video': {
                 if (!parsed || parsed.kind !== 'scene_video') {
                     console.warn('⚠️ Invalid video job_id format:', job_id);
+                    break;
+                }
+                // orchestration v2: a late legacy group result of a v2 book is not legacy's
+                // (the file was rejected before staging, see handleTaskResult); never drive
+                // the legacy video-orch / merge for it
+                if (await ((deps && deps.bookFlag) || require('../orchestration-v2/book-flag')).isV2BookFailClosed(parsed.bookId)) {
+                    log(`[VIDEO-RESULT] scene_video for v2 book ${parsed.bookId} ignored (orchestration_v2)`);
                     break;
                 }
                 // VIDEO-ORCH: результат одной группы сцены. completeStage вызывается
