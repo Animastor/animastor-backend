@@ -342,7 +342,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect(panel.body.tasks[0]).to.include({ failed: true, done: false });
     });
 
-    it('internal routes: без ключа / токена → 401; video на v2-книге → 409 (image — этап 2a, orch-v2-image.test.js)', async () => {
+    it('internal routes: без ключа / токена → 401; video без готового аудио → 200, работ нет, skipped_needs_audio (этап 3)', async () => {
         expect((await api('POST', '/internal/gen/claim', { worker_id: workerId })).status).to.equal(401);
         expect((await api('POST', '/internal/gen/claim', { worker_id: workerId }, { 'x-api-key': 'wrong' })).status).to.equal(401);
         expect((await api('POST', '/internal/gen/beacon', { worker_id: workerId })).status).to.equal(401);
@@ -354,8 +354,12 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect((await api('POST', `/internal/gen/jobs/${t.job_id}/error?attempt=1`, { error_class: 'transient' })).status).to.equal(401);
         for (const types of [['video'], ['video', 'video']]) {
             const r = await regenerate({ worker_types: types, scope: 'whole_book' });
-            expect(r.status).to.equal(409);
-            expect(r.body.code).to.equal('v2_layer_not_supported_yet');
+            expect(r.status).to.equal(200);
+            expect(r.body.summary.jobs_created).to.equal(0);
+            // the scenes of this book have no IU pictures and (but sc-1, in work) no audio
+            const skippedScenes = Object.entries(r.body.summary).filter(([k]) => k.startsWith('skipped_needs_')).flatMap(([, v]) => v);
+            expect(skippedScenes.length, JSON.stringify(r.body.summary)).to.be.greaterThan(0);
+            expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND layer = 'video'`, [bookId])).to.equal(0);
         }
         expect((await regenerate({ worker_types: ['bogus'], scope: 'whole_book' })).status).to.equal(400);
         const e = await worker.error(t, { error_class: 'deterministic', reason: 'node_errors' });

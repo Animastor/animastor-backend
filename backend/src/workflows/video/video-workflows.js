@@ -445,6 +445,19 @@ async function buildVideoWorkflows(sceneData, loadedBook, buildId, workflows) {
         return meta ? (meta.estimated_duration_sec || MIN_IU_DURATION) : MIN_IU_DURATION;
     }));
 
+    return buildGroupWorkflows(sceneData, loadedBook, buildId, workflows, units, iuDurations);
+}
+
+/**
+ * Plan + build the LTX group workflows of a scene for GIVEN units and durations
+ * (seconds, one per unit). The legacy entry above passes the image_units
+ * estimates; orchestration v2 passes the real audio durations of the units that
+ * have any (ADR §13 п.11 п.5) — one function for the DP composition,
+ * totalFrames, LTXVAddGuide frame_idx and the prompt time codes.
+ * @returns {{success:true, workflows:Array<{workflowName, workflow, units, unitCount, offset, durations}>}|{success:false, reason}}
+ */
+function buildGroupWorkflows(sceneData, loadedBook, buildId, workflows, units, iuDurations) {
+    if (!Array.isArray(units) || units.length === 0) return { success: false, reason: 'no_units' };
     const groups = selectWorkflowGroups(units, iuDurations);
     log(`Scene has ${units.length} IU(s), split into ${groups.length} workflow group(s)`);
 
@@ -471,7 +484,9 @@ async function buildVideoWorkflows(sceneData, loadedBook, buildId, workflows) {
             workflowName: group.name,
             workflow: result.workflow,
             units: groupUnits,
-            unitCount: group.count
+            unitCount: group.count,
+            offset: group.offset,
+            durations: groupDurations,
         });
     }
 
@@ -634,6 +649,8 @@ function selectWorkflowGroups(units, iuDurations) {
 // ======================================================
 module.exports = {
     buildVideoWorkflows,
+    buildGroupWorkflows,
+    buildWorkflowForGroup,
     buildVideoPrompt,
     buildVideoNegativePrompt,
     buildVideoPromptLegacy,

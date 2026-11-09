@@ -11,9 +11,31 @@
 
 'use strict';
 
+const fs = require('fs');
+const crypto = require('crypto');
+
 const {
-    GenError, withTx, requireUuid, isUuid, issueUploadToken, notifyProgress, KINDS, WORKER_TYPES,
+    GenError, withTx, requireUuid, isUuid, issueUploadToken, verifyUploadToken, notifyProgress, KINDS, WORKER_TYPES,
 } = require('./util');
+
+const SAFE_INPUT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,200}$/;
+const MAX_INPUTS = 16;
+
+/** Validate the host's inputFiles(job) answer: plain file names, absolute paths, sha256. */
+function listInputs(list) {
+    if (list == null) return [];
+    if (!Array.isArray(list) || list.length > MAX_INPUTS) throw new GenError('bad_inputs', 500, 'inputFiles(job) must return an array (<= 16)');
+    const seen = new Set();
+    return list.map((f) => {
+        const ok = f && typeof f.name === 'string' && SAFE_INPUT_NAME.test(f.name) && !f.name.includes('..')
+            && typeof f.path === 'string' && f.path.startsWith('/')
+            && typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/.test(f.sha256)
+            && Number.isInteger(f.bytes) && f.bytes > 0;
+        if (!ok || seen.has(f.name)) throw new GenError('bad_inputs', 500, `inputFiles(job): invalid entry ${f && f.name}`);
+        seen.add(f.name);
+        return { name: f.name, path: f.path, sha256: f.sha256, bytes: f.bytes };
+    });
+}
 
 const MODES = Object.freeze(['private', 'share', 'system']);
 
@@ -102,8 +124,11 @@ function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, to
         if (!job) return { task: null };
 
         let payload;
+        let inputs = null;
         try {
             payload = await ports.buildPayload(job);
+            // 1.3.0 — input files (e.g. IU frames of a video group) travel by link, not base64 (§8.1)
+            if (ports.inputFiles) inputs = listInputs(await ports.inputFiles(job));
         } catch (err) {
             // the payload cannot be built → this attempt fails deterministically (no silent loss)
             await accept.failAttempt(job.job_id, job.attempt, 'deterministic', `build_payload: ${err && err.message}`);
@@ -128,8 +153,35 @@ function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, to
                 timeout_ms: ports.timeoutFor(job.kind),
                 deadline: new Date(deadlineMs).toISOString(),
                 upload_token: issueUploadToken(uploadSecret, job.job_id, job.attempt, exp),
+                ...(inputs && inputs.length ? { input_files: inputs.map((f) => ({ name: f.name, sha256: f.sha256, bytes: f.bytes })) } : {}),
             },
         };
+    }
+
+    /**
+     * GET /internal/gen/jobs/:job_id/input/:name?attempt=N (ADR §8.1, 1.3.0): the same
+     * upload token as the result; only the CURRENT running attempt; only a name the job
+     * lists; the bytes must still be the snapshot taken at planning (sha256) — a frame
+     * replaced in between → 409 input_changed (the video would not match its hash).
+     * @returns {Promise<{status:number, code?:string, body?:Buffer, name?:string, sha256?:string}>}
+     */
+    async function openInput(jobId, attempt, token, name) {
+        if (!isUuid(jobId)) return { status: 404, code: 'not_found' };
+        if (!Number.isInteger(attempt) || attempt < 1) return { status: 400, code: 'bad_request' };
+        if (!verifyUploadToken(uploadSecret, token, jobId, attempt)) return { status: 401, code: 'unauthorized' };
+        if (!ports.inputFiles) return { status: 404, code: 'not_found' };
+        const job = (await pool.query('SELECT * FROM gen_jobs WHERE job_id = $1', [jobId])).rows[0];
+        if (!job) return { status: 404, code: 'not_found' };
+        if (job.status !== 'running' || job.attempt !== attempt) return { status: 409, code: 'stale_attempt' };
+        let list;
+        try { list = listInputs(await ports.inputFiles(job)); } catch (_) { return { status: 404, code: 'not_found' }; }
+        const f = list.find((x) => x.name === name);
+        if (!f) return { status: 404, code: 'not_found' };
+        let body;
+        try { body = await fs.promises.readFile(f.path); } catch (_) { return { status: 409, code: 'input_missing' }; }
+        const sha = crypto.createHash('sha256').update(body).digest('hex');
+        if (sha !== f.sha256) return { status: 409, code: 'input_changed' };
+        return { status: 200, body, name: f.name, sha256: sha };
     }
 
     /**
@@ -156,7 +208,7 @@ function createClaim({ pool, ports, uploadSecret, accept, sharedLimit = null, to
         });
     }
 
-    return { claim, beacon };
+    return { claim, beacon, openInput };
 }
 
 module.exports = { createClaim, MODES };

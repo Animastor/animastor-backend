@@ -43,7 +43,9 @@ async function upsertImageUnit(buildId, bookId, chapterId, sceneId, unitId, data
         data.text_length || null,
         data.text_proportion || null,
         data.scene_duration_sec || null,
-        data.estimated_duration_sec || null,
+        // 0 is a real value (a unit without own audio: zero width) — kept as 0, not
+        // turned into NULL (COALESCE would then keep a stale estimate, ADR §13 п.11 п.5)
+        data.estimated_duration_sec != null && Number.isFinite(Number(data.estimated_duration_sec)) ? Number(data.estimated_duration_sec) : null,
         data.scene_audio_file || null,
         data.start_ms !== undefined ? data.start_ms : null,
         data.end_ms !== undefined ? data.end_ms : null,

@@ -40,10 +40,22 @@ function createProgress({ pool }) {
              WHERE l.command_id = ANY($1::uuid[])
              GROUP BY 1, 2, 3, 4, 5, 6`, [ids])).rows : [];
 
+        // 1.3.0 — why the command made no work for a scene (§6.5, §13 п.11 п.9): {reason: [scene_id…]}
+        const skipRows = ids.length ? (await pool.query(
+            `SELECT command_id, reason, scene_id FROM gen_command_skips WHERE command_id = ANY($1::uuid[])
+             ORDER BY created_at, chapter_id, scene_id`, [ids])).rows : [];
+        const skippedOf = new Map();
+        for (const r of skipRows) {
+            if (!skippedOf.has(r.command_id)) skippedOf.set(r.command_id, {});
+            const m = skippedOf.get(r.command_id);
+            if (!m[r.reason]) m[r.reason] = [];
+            if (!m[r.reason].includes(r.scene_id)) m[r.reason].push(r.scene_id);
+        }
+
         const byCmd = new Map(cmds.map((c) => [c.command_id, {
             command_id: c.command_id, kind: c.kind, scope: c.scope, layers: c.layers, force: c.force,
             status: c.status, user_id: c.user_id, created_at: c.created_at, finished_at: c.finished_at,
-            error: c.error, summary: c.summary,
+            error: c.error, summary: c.summary, skipped: skippedOf.get(c.command_id) || {},
             totals: zero(), by_layer: {}, merges: {}, scenes: new Map(),
         }]));
         const add = (row, field) => {

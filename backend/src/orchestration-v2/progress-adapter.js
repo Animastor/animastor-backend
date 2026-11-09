@@ -70,6 +70,9 @@ function createProgressAdapter({ orch }) {
                     error_code: null,
                     error_message: failed ? (c.error || null) : null,
                     retrying: !failed && !done && !cancelled && (t.retrying || 0) > 0,
+                    // stage 3 (§6.5, §13 п.11 п.9): scenes the command did not do and why —
+                    // {skipped_needs_audio|skipped_image_dirty|skipped_needs_image: [scene_id…]}
+                    skipped: layer === 'video' ? (c.skipped || {}) : {},
                     retry_no: null,
                     retry_max: null,
                     retry_at: null,

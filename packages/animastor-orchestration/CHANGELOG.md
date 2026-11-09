@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.3.0 (2026-11-09) — этап 3a: видео (`video_group` + `video_merge`)
+
+Основание: ADR `ORCHESTRATION_V2.md` §6.3, §6.5, §8.1, §13 п.11. Minor: порты 1.0–1.2 не меняются,
+новое — дополнительно (лишний аргумент `ctx`, объектная форма ответа планировщика video, порт `inputFiles`).
+
+- **Планирование на транзакции.** `planUnits(book, scope, layer, ctx)`, `ctx.db` — клиент транзакции
+  команды или приёма. Слои audio / image планируются и вставляются первыми, video — последним, чтобы
+  планировщик видел только что созданные работы этой же команды.
+- **Ответ video `{units, waits, skipped}`.** `waits` — сцена ждёт живые `iu_image` / `audio_chunk` /
+  `audio_merge`: команда присоединяется к ним (`gen_command_jobs`), группы появятся переходом.
+  `skipped` — `{chapter_id, scene_id, reason: 'skipped_*'}` → `summary[reason] = [scene_id…]` и таблица
+  **`gen_command_skips`** (миграция `004-command-skips`, insert-only — приём не обновляет `gen_commands`).
+  `progress().commands[].skipped`.
+- **Переходы (§6.3).** `audio_chunk → audio_merge` также для видео-команд, ждущих это аудио;
+  `audio_merge → ступень video`; `iu_image → ступень video`; `video_group → video_merge` по
+  `input.merge_parts` (все части плана сцены `done` с тем же `part_hash`, ни одной живой), иначе прежнее
+  правило. Ступень video уважает `part_hash` готовых групп; все группы готовы, склейки для этого контента
+  нет → только `video_merge` (и при создании команды без `force`).
+- **Хуки.** `onArtifactPlaced(job, finalPath, {db, meta})`: `db` — транзакция приёма, `meta` — то, что
+  `runLocal` вернул рядом с `{path}`.
+- **Входные файлы (§8.1).** Необязательный порт `inputFiles(job)` → `[{name, path, sha256, bytes}]`;
+  задача выдачи несёт `input_files: [{name, sha256, bytes}]`; `orch.openInput(jobId, attempt, token, name)`
+  — тот же токен, только текущая `running`-попытка (`409 stale_attempt`), только имена из списка (`404`),
+  байты = sha256 снимка (`409 input_changed`).
+- Тесты: `test/gen/video.test.js` (10).
+
 ## 1.2.0 (2026-11-07) — наблюдаемость v2 (О3)
 
 Основание: `reports/2026-11-07/orch-v2-image-scene-run.md` О3 и «мелочи». Minor: только

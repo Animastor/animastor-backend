@@ -42,7 +42,8 @@ function createLocalRunner({ pool, ports, accept, logger = null }) {
             const r = await accept.failAttempt(job.job_id, job.attempt, (err && err.error_class) || 'unknown', `run_local: ${err && err.message}`);
             return { job_id: job.job_id, attempt: job.attempt, ...r };
         }
-        const r = await accept.acceptLocalFile(job, out.path);
+        // 1.3.0: out.meta (e.g. measured chunk durations) reaches onArtifactPlaced inside the acceptance tx
+        const r = await accept.acceptLocalFile(job, out.path, out.meta === undefined ? null : out.meta);
         return { job_id: job.job_id, attempt: job.attempt, ...r };
     }
 

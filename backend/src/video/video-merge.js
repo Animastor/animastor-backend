@@ -653,6 +653,11 @@ async function muxVideoAudio(videoPath, audioPath, outputPath) {
 }
 
 module.exports = {
+    // orchestration v2 (video_merge, ADR §13 п.11) composes the scene merge from
+    // these steps with its own durations — the legacy entry points are unchanged
+    trimVideoToFrames,
+    faststartRemux,
+    resolveVideoProfileMeta,
     mergeSceneVideoGroups,
     mergeBookVideos,
     mergeBookVideosFromSources,

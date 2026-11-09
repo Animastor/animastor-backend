@@ -1,5 +1,5 @@
 // ======================================================
-// @animastor/orchestration · gen — orchestration v2 core (1.2.0)
+// @animastor/orchestration · gen — orchestration v2 core (1.3.0)
 // ======================================================
 // ADR: animastor-docs architecture/ORCHESTRATION_V2.md. The single source of
 // truth is PG (gen_commands, gen_jobs). This namespace depends ONLY on the
@@ -10,7 +10,7 @@
 //   await gen.migrate(pool);
 //   const orch = gen.createOrchestration({ pool, ports, uploadSecret, outputDir });
 //   orch.createCommand(...), orch.cancel(...), orch.purgeBook(bookId), orch.claim(...), orch.acceptResult(...),
-//   orch.acceptError(...), orch.beacon(...), orch.sweepOnce(), orch.startSweeper(ms),
+//   orch.acceptError(...), orch.beacon(...), orch.openInput(...), orch.sweepOnce(), orch.startSweeper(ms),
 //   orch.stop(), orch.progress(bookId), orch.listenProgress(fn), orch.runLocalOnce()
 
 'use strict';
@@ -70,6 +70,7 @@ function createOrchestration(o = {}) {
         purgeBook: commands.purgeBook,
         claim: claim.claim,
         beacon: claim.beacon,
+        openInput: claim.openInput,
         acceptResult: accept.acceptResult,
         acceptError: accept.acceptError,
         sweepOnce: sweeper.sweepOnce,
