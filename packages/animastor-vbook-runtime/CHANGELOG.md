@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 (2026-11-10, unpublished)
+
+behavior.json schema v2 (behaviour rules, phase 0 — animastor-docs
+`architecture/VBOOK_BEHAVIOUR.md`).
+
+### Added
+
+- `src/behavior-schema.cjs` (subpath export `./behavior-schema.cjs`, also
+  `behaviorSchema` on the root): `normalizeBehaviors`, `ensureBehaviorsV2`,
+  `behaviorCharacters`, `toApiBehaviors`, `projectBookBehaviorsForApi`,
+  `mergeIncomingBehaviors`, `flatToCharacters`, `BEHAVIOR_RESERVED_KEYS`.
+- Lazy-book create keeps optional IU fields `state`, `behaviour`,
+  `behaviour_locked` and a pre-assigned unit `id`.
+
+### Changed
+
+- behavior.json on disk and in memory is
+  `{schema_version: 2, rules: [], characters: {<id>: …}}`. A file without
+  `schema_version` (v2.1) is migrated on load (`loadBook`, `.vbook` import):
+  every top-level key becomes a `characters` entry. `saveBookBundle` always
+  writes v2; a new book is seeded with an empty v2 document instead of `{}`.
+- Bundle validator checks the v2 shape (`schema_version === 2`, `rules[]` with
+  unique non-empty `id`, `characters` object); v2.1 files are still accepted.
+
 ## 0.2.0 (2026-09-26)
 
 Parser Core physically moved out of this package into the standalone

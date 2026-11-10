@@ -161,6 +161,25 @@ const SCENE_FIELDS = [
 ];
 
 // ======================================================
+// REGISTRY: Unit-level fields with an explicit layer set
+// ======================================================
+// unit.audio / unit.type / unit.image / unit.video are handled inline in
+// computeBookDiff (audio; image → image+video; video → video). The fields
+// below would otherwise hit the "unknown field → all layers" catch-all.
+// Behaviour (animastor-docs architecture/VBOOK_BEHAVIOUR.md):
+//   behaviour        — applied rule snapshot; its phrases are appended to the
+//                      video storyboard line only → video
+//   state            — per-IU emotions, matcher INPUT; never sent to a GPU → none
+//   behaviour_locked — author lock, matcher input → none
+// ======================================================
+
+const UNIT_FIELD_LAYERS = Object.freeze({
+    behaviour: Object.freeze(['video']),
+    state: Object.freeze([]),
+    behaviour_locked: Object.freeze([]),
+});
+
+// ======================================================
 // REGISTRY: Cross-cutting fields
 // ======================================================
 // These fields live outside individual scenes (characters.json,
@@ -389,8 +408,16 @@ function computeSceneDirtyLayers(oldScene, newScene) {
                         unitChanges.video = true;
                     }
 
+                    // Explicit unit fields with their own layer set
+                    // (UNIT_FIELD_LAYERS): behaviour → video, state /
+                    // behaviour_locked → none.
+                    for (const [key, layers] of Object.entries(UNIT_FIELD_LAYERS)) {
+                        if (isEqual(oldU[key], u[key])) continue;
+                        for (const layer of layers) unitChanges[layer] = true;
+                    }
+
                     // Unknown fields — conservative, mark all layers
-                    const knownUnitKeys = new Set(['id', 'type', 'audio', 'image', 'video']);
+                    const knownUnitKeys = new Set(['id', 'type', 'audio', 'image', 'video', ...Object.keys(UNIT_FIELD_LAYERS)]);
                     for (const key of Object.keys(u)) {
                         if (knownUnitKeys.has(key)) continue;
                         if (!isEqual(oldU[key], u[key])) {

@@ -123,7 +123,7 @@ Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github
 
 ## Versioning / release
 
-- Current version: `0.2.0`.
+- Current version: `0.3.0`.
 - SemVer: the frozen HTTP surface (26 endpoints), the four public factories and the
   8-port `editorPorts` shape are the contract — breaking any of them requires a major
   bump. New optional ports or endpoints are minor; fixes are patch.

@@ -47,21 +47,24 @@ module.exports = function(config, deps = {}) {
             'When the user asks to fix participants across the whole book, apply the change to EVERY scene in EVERY chapter — do not stop after one scene. List one patch per affected scene.',
             '',
             '## Character Behavior',
-            'Each character can have a Behavior entry in the book data under `behaviors` (keyed by character_id).',
+            'Each character can have a Behavior entry in the book data under `behaviors.characters` (keyed by character_id).',
+            '`behaviors` is schema v2: `{"schema_version": 2, "rules": [...], "characters": {...}}`. Edit ONLY `behaviors.characters.<character_id>`; never change `schema_version` or `rules` unless the user explicitly asks about behaviour rules.',
             'Behavior describes HOW a character acts — their mannerisms, habits, and reactions.',
             '',
             'Behavior schema:',
             '```json',
             '{',
-            '  "<character_id>": {',
-            '    "baseline": "How the character normally behaves — characteristic manner of movement, expressions, gestures, posture, speech patterns.",',
-            '    "quirks": ["Repeated characteristic habit or mannerism."],',
-            '    "reactions": [',
-            '      {',
-            '        "trigger": "A situation or emotional state.",',
-            '        "reaction": "The observable behavioral response."',
-            '      }',
-            '    ]',
+            '  "characters": {',
+            '    "<character_id>": {',
+            '      "baseline": "How the character normally behaves — characteristic manner of movement, expressions, gestures, posture, speech patterns.",',
+            '      "quirks": ["Repeated characteristic habit or mannerism."],',
+            '      "reactions": [',
+            '        {',
+            '          "trigger": "A situation or emotional state.",',
+            '          "reaction": "The observable behavioral response."',
+            '        }',
+            '      ]',
+            '    }',
             '  }',
             '}',
             '```',
@@ -75,7 +78,7 @@ module.exports = function(config, deps = {}) {
             '1. Find the character by character_id from `characters` in the book data.',
             '2. Study the character passport (appearance, clothes, description) to understand their personality.',
             '3. Create behavior that matches the character personality — distinct, specific, believable.',
-            '4. Use `edit_book` to write to `/behaviors/{character_id}` with the full behavior object.',
+            '4. Use `edit_book` to write to `/behaviors/characters/{character_id}` with the full behavior object.',
             '5. Do NOT create a new character. Do NOT modify passport or voice unless asked.',
             '',
             'Example user request: "Придумай поведение для Юры и Светланы."',
@@ -289,7 +292,7 @@ module.exports = function(config, deps = {}) {
         type: 'function',
         function: {
             name: 'edit_book',
-            description: 'Apply changes to the current book. Call this when the user asks to edit the book content (title, author, characters, scenes, text, behavior, etc.). Supports writing to /behaviors/{character_id} for character behavior. Do NOT call if the book is locked.',
+            description: 'Apply changes to the current book. Call this when the user asks to edit the book content (title, author, characters, scenes, text, behavior, etc.). Supports writing to /behaviors/characters/{character_id} for character behavior. Do NOT call if the book is locked.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -300,7 +303,7 @@ module.exports = function(config, deps = {}) {
                             type: 'object',
                             properties: {
                                 op: { type: 'string', enum: ['replace', 'add', 'remove'], description: 'Operation type' },
-                                path: { type: 'string', description: 'JSON path like /book/title, /chapters/0/scenes/1/units/0/text, /behaviors/character_id/baseline' },
+                                path: { type: 'string', description: 'JSON path like /book/title, /chapters/0/scenes/1/units/0/text, /behaviors/characters/character_id/baseline' },
                                 value: { description: 'New value (for replace/add)' },
                             },
                             required: ['op', 'path'],
@@ -395,7 +398,7 @@ module.exports = function(config, deps = {}) {
         const result = JSON.parse(JSON.stringify(obj));
         const errors = [];
 
-        for (const patch of patches) {
+        for (const patch of normalizeBehaviorPatches(obj, patches || [])) {
             const { op, path: pathStr, value } = patch;
             const { parent, key, value: oldValue } = resolvePath(result, pathStr);
 
@@ -525,6 +528,44 @@ module.exports = function(config, deps = {}) {
     // state. On violation the result is withheld (null) so no caller can
     // persist broken JSON; errors name the failing file/resource so the
     // assistant (or the user) can issue a corrective patch in the next turn.
+    // ── Deterministic behavior.json v2 guard ───────────
+    // In memory `behaviors` is schema v2 ({schema_version, rules, characters}).
+    // Models (and older prompts) still write the v2.1 paths, so before the
+    // patches run:
+    //   /behaviors/<character_id>[/...]  → /behaviors/characters/<character_id>[/...]
+    //   add|replace /behaviors with a flat map (schema_version !== 2)
+    //                                    → the map becomes `characters`,
+    //                                      stored rules/schema_version survive.
+    // Runs inside applyPatches, so every caller gets it. Reserved top-level
+    // keys are never treated as character ids. A legacy
+    // in-memory book (no schema_version) is left alone — it is migrated on save.
+    const BEHAVIOR_RESERVED_KEYS = ['schema_version', 'rules', 'characters', 'defaults'];
+    function normalizeBehaviorPatches(obj, patches) {
+        const stored = obj && obj.behaviors;
+        const isV2 = stored && typeof stored === 'object' && !Array.isArray(stored) && stored.schema_version != null;
+        if (!isV2 || !Array.isArray(patches)) return patches;
+        return patches.map((patch) => {
+            if (!patch || typeof patch.path !== 'string') return patch;
+            const p = patch.path;
+            if (p === '/behaviors' && (patch.op === 'add' || patch.op === 'replace')) {
+                const v = patch.value;
+                if (v && typeof v === 'object' && !Array.isArray(v) && v.schema_version !== 2) {
+                    const characters = {};
+                    for (const [k, entry] of Object.entries(v)) {
+                        if (!BEHAVIOR_RESERVED_KEYS.includes(k)) characters[k] = entry;
+                    }
+                    return { ...patch, value: { ...stored, characters } };
+                }
+                return patch;
+            }
+            const m = /^\/behaviors\/([^/]+)(\/.*)?$/.exec(p);
+            if (!m) return patch;
+            const seg = m[1];
+            if (BEHAVIOR_RESERVED_KEYS.includes(seg)) return patch;
+            return { ...patch, path: `/behaviors/characters/${seg}${m[2] || ''}` };
+        });
+    }
+
     function applyPatchesValidated(obj, patches) {
         const { result, errors } = applyPatches(obj, patches);
         if (errors.length > 0) {
@@ -558,6 +599,7 @@ module.exports = function(config, deps = {}) {
         resolvePath,
         applyPatches,
         applyPatchesValidated,
+        normalizeBehaviorPatches,
         normalizeBookParticipants,
         validateBundleObject,
         toolDefinitions: {

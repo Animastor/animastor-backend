@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (2026-11-10, unpublished)
+
+- Edit-mode prompt and `edit_book` tool describe behavior.json schema v2:
+  entries at `/behaviors/characters/{character_id}`.
+- Deterministic guard inside `applyPatches` (exported as
+  `normalizeBehaviorPatches`): on a v2 book, legacy `/behaviors/<id>…` paths
+  are rewritten to `/behaviors/characters/<id>…`, and a flat map written to
+  `/behaviors` becomes `characters` while `rules`/`schema_version` survive.
+
 ## 0.1.1
 
 - Fix: `enable_thinking` is sent only to providers that accept it

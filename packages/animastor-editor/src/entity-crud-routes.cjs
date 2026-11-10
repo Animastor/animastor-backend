@@ -30,6 +30,9 @@ const { normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cj
 // The project's single hex-id generator (lazy-book paths): ch-<hex8> / sc-<hex8>
 // / iu-<hex8>. No second generator is ever introduced on the clients.
 const { chapterId, sceneId, unitId, generateBookId } = require('@animastor/vbook-runtime/lazy-book/paths');
+// behavior.json schema v2: entries live under behaviors.characters.<id>
+// (rules are untouched by these routes). Legacy v2.1 maps are migrated in place.
+const { behaviorCharacters } = require('@animastor/vbook-runtime/behavior-schema.cjs');
 
 // (redis is not destructured: purge/ownership legs arrive via editorPorts)
 module.exports = function (app, redis, deps) {
@@ -156,11 +159,11 @@ module.exports = function (app, redis, deps) {
             }
 
             // Same dangling-data cleanup for the character's behavior
-            // (behavior.json is keyed by character_id).
-            const behaviors = oldBook.behaviors || {};
-            if (behaviors[characterId]) {
-                delete behaviors[characterId];
-                oldBook.behaviors = behaviors;
+            // (behavior.json v2: characters.<character_id>; rules stay —
+            // a character-scoped rule of a deleted hero simply never matches).
+            const behaviorChars = behaviorCharacters(oldBook);
+            if (behaviorChars[characterId]) {
+                delete behaviorChars[characterId];
             }
 
             editorModel.commit(oldBook);
@@ -289,8 +292,9 @@ module.exports = function (app, redis, deps) {
     // ======================================================
     // BEHAVIORS — add / delete (manual, keyed by character_id)
     //
-    // behavior.json mirrors voices.json: a map keyed by the existing
-    // character_id ({"berlioz": {"baseline": "..."}}). A behavior belongs
+    // behavior.json (schema v2) keeps character entries under `characters`,
+    // keyed by the existing character_id
+    // ({"characters": {"berlioz": {"baseline": "..."}}}). A behavior belongs
     // to a character that must already exist — no id transliteration here,
     // the key is a character id, not a free-form entity id.
     // ======================================================
@@ -311,7 +315,7 @@ module.exports = function (app, redis, deps) {
                 return res.status(404).json({ error: `Character ${characterId} not found` });
             }
 
-            const behaviors = oldBook.behaviors || {};
+            const behaviors = behaviorCharacters(oldBook);
             if (behaviors[characterId]) {
                 return res.status(409).json({ error: `Behavior for character "${characterId}" already exists` });
             }
@@ -322,7 +326,6 @@ module.exports = function (app, redis, deps) {
             if (body.baseline && String(body.baseline).trim()) {
                 behaviors[characterId].baseline = String(body.baseline).trim();
             }
-            oldBook.behaviors = behaviors;
 
             editorModel.commit(oldBook);
             log(`[ADD BEHAVIOR] ${bookId}/${characterId}`);
@@ -338,12 +341,11 @@ module.exports = function (app, redis, deps) {
             const { bookId, characterId } = req.params;
             const oldBook = loadBook(bookId);
 
-            const behaviors = oldBook.behaviors || {};
+            const behaviors = behaviorCharacters(oldBook);
             if (!behaviors[characterId]) {
                 return res.status(404).json({ error: `Behavior for character ${characterId} not found` });
             }
             delete behaviors[characterId];
-            oldBook.behaviors = behaviors;
 
             editorModel.commit(oldBook);
             log(`[DELETE BEHAVIOR] ${bookId}/${characterId}`);

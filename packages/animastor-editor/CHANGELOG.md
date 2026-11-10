@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 (2026-11-10, unpublished)
+
+behavior.json schema v2 (animastor-docs `architecture/VBOOK_BEHAVIOUR.md`).
+Requires `@animastor/vbook-runtime ^0.3.0`.
+
+### Changed
+
+- `POST/PATCH/DELETE /behaviors…` and the character-delete cascade work on
+  `behaviors.characters.<character_id>`; `rules` / `schema_version` are never
+  touched; a v2.1 file is migrated on the first write.
+- `GET /book/:id` keeps the v2.1 API contract: `behaviors` is the flat
+  character map, the rules come as read-only `behavior_rules`.
+- `PUT /book/:id` folds a client `behaviors` flat map into the stored v2
+  document (rules survive; reserved keys are not characters); an absent
+  `behaviors` keeps the stored document (previously it was reset to `{}`);
+  `behavior_rules` in the body is ignored.
+
 ## 0.2.0 (2026-10-29)
 
 `POST /api/v1/book/blank` — ownership is now mandatory and the scaffold is

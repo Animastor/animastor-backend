@@ -15,6 +15,12 @@
 
 const { setDeep, findUnitInScene, normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cjs');
 const { recoverMissingRedisChunks } = require('./read-recovery.cjs');
+// behavior.json schema v2 (disk + memory) ⇄ API flat map + behavior_rules.
+const {
+    behaviorCharacters,
+    projectBookBehaviorsForApi,
+    mergeIncomingBehaviors,
+} = require('@animastor/vbook-runtime/behavior-schema.cjs');
 
 // ── Editor-save prompt guard ─────────────────────────────────────────
 // A frame prompt (image.prompt / video.action) longer than the ceiling is almost
@@ -147,7 +153,10 @@ module.exports = function(app, redis, deps) {
                 console.warn(`[BOOK-RECOVER] ${bookId}: chunk recovery failed: ${chunkErr.message}`);
             }
 
-            return res.json(bookData);
+            // API contract: `behaviors` is the flat character map (v2.1 shape,
+            // released clients parse it as Map<character_id, entry>) and
+            // `behavior_rules` the read-only rule list; memory/disk stay v2.
+            return res.json(projectBookBehaviorsForApi(bookData));
         } catch (err) {
             console.error('[GET BOOK] Error:', err.message);
             return res.status(500).json({ error: err.message });
@@ -180,6 +189,13 @@ module.exports = function(app, redis, deps) {
             }
 
             const oldBook = editorModel.read(bookId);
+
+            // behaviors: clients send the flat API map (or omit it). Fold it
+            // into the stored v2 document — rules and schema_version are never
+            // lost; an absent field keeps the stored behaviours. The read-only
+            // projection key never reaches the model.
+            delete updatedBookData.behavior_rules;
+            updatedBookData.behaviors = mergeIncomingBehaviors(oldBook ? oldBook.behaviors : null, updatedBookData.behaviors);
 
             if (oldBook) {
                 const oldChars = oldBook.characters;
@@ -696,11 +712,12 @@ module.exports = function(app, redis, deps) {
     });
 
     // ======================================================
-    // PATCH BOOK BEHAVIOR (per-character, keyed by character_id).
-    // Manual Behavior editor only for now: behavior does not participate in
-    // generation/runtime yet, so unlike PATCH VOICE there is no dirty-scene
-    // propagation — fields are merged via setDeep (unknown keys pass through
-    // so a future schema extension survives round-trips).
+    // PATCH BOOK BEHAVIOR (per-character, behaviors.characters.<id>).
+    // No dirty-scene propagation: character entries are not read by
+    // generation, and rule matches are snapshotted into unit.behaviour at
+    // pipeline time (architecture/VBOOK_BEHAVIOUR.md) — editing a behaviour
+    // never invalidates ready assets. Fields are merged via setDeep
+    // (unknown keys pass through so a future extension survives round-trips).
     // ======================================================
     app.patch('/api/v1/book/:bookId/behaviors/:characterId', async (req, res) => {
         try {
@@ -714,7 +731,7 @@ module.exports = function(app, redis, deps) {
             const oldBook = editorModel.read(bookId);
             if (!oldBook) return res.status(404).json({ error: 'Book not found' });
 
-            const behaviors = oldBook.behaviors || {};
+            const behaviors = behaviorCharacters(oldBook);
             const behavior = behaviors[characterId];
             if (!behavior) {
                 return res.status(404).json({ error: `Behavior for character ${characterId} not found` });
