@@ -43,4 +43,16 @@ describe('behavior-schema (v2)', () => {
             .to.deep.equal({ schema_version: 2, rules: [RULE], characters: {} });
         expect(s.mergeIncomingBehaviors(null, { hero: {} })).to.deep.equal({ schema_version: 2, rules: [], characters: { hero: {} } });
     });
+
+    it('removeCharacterBehaviors: entry + scope:"character" rules of that id; global rules stay', () => {
+        const heroRule = { ...RULE, id: 'h', scope: 'character', character_id: 'hero' };
+        const sideRule = { ...RULE, id: 's', scope: 'character', character_id: 'side' };
+        const book = { behaviors: { schema_version: 2, rules: [RULE, heroRule, sideRule], characters: { hero: {}, side: {} } } };
+        expect(s.removeCharacterBehaviors(book, 'hero')).to.deep.equal({ entry: true, rules: ['h'] });
+        expect(book.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE, sideRule], characters: { side: {} } });
+        expect(s.removeCharacterBehaviors(book, 'ghost')).to.deep.equal({ entry: false, rules: [] });
+        const legacy = { behaviors: { hero: { baseline: 'x' } } };
+        s.removeCharacterBehaviors(legacy, 'hero');
+        expect(legacy.behaviors).to.deep.equal({ schema_version: 2, rules: [], characters: {} });
+    });
 });

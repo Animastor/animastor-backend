@@ -34,4 +34,13 @@ describe('assistant — behavior.json v2 patch guard', () => {
         const patches = [{ op: 'replace', path: '/behaviors/hero', value: { baseline: 'q' } }];
         expect(engine().normalizeBehaviorPatches(legacy, patches)).to.deep.equal(patches);
     });
+
+    it('removing a character cascades its behaviour entry and scope:"character" rules', () => {
+        const h = { id: 'h', scope: 'character', character_id: 'hero', when: { emotion: ['sad'] }, then: { action: 'x' } };
+        const b = { characters: [{ id: 'hero' }, { id: 'side' }], behaviors: { schema_version: 2, rules: [RULE, h], characters: { hero: {}, side: {} } } };
+        const { result, errors } = engine().applyPatches(b, [{ op: 'remove', path: '/characters/0' }]);
+        expect(errors).to.deep.equal([]);
+        expect(result.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE], characters: { side: {} } });
+        expect(b.behaviors.rules).to.have.length(2); // input untouched
+    });
 });

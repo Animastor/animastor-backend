@@ -11,6 +11,8 @@ behavior.json schema v2 (behaviour rules, phase 0 — animastor-docs
   `behaviorSchema` on the root): `normalizeBehaviors`, `ensureBehaviorsV2`,
   `behaviorCharacters`, `toApiBehaviors`, `projectBookBehaviorsForApi`,
   `mergeIncomingBehaviors`, `flatToCharacters`, `BEHAVIOR_RESERVED_KEYS`.
+- `removeCharacterBehaviors(book, characterId)` — character-delete cascade:
+  drops `characters.<id>` and every rule with `scope:"character"` bound to it.
 - Lazy-book create keeps optional IU fields `state`, `behaviour`,
   `behaviour_locked` and a pre-assigned unit `id`.
 

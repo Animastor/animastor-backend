@@ -461,7 +461,33 @@ module.exports = function(config, deps = {}) {
             }
         }
 
+        cascadeDeletedCharacterBehaviors(obj, result);
         return { result, errors };
+    }
+
+    // ── Character-removal cascade for behavior.json v2 ──
+    // A character removed by the patches (present in obj.characters, gone in
+    // result.characters) loses its behaviors.characters entry and every rule
+    // with scope:"character" bound to it — same contract as the editor's
+    // character removal route. Global rules stay. Legacy (no schema_version)
+    // in-memory maps only lose the entry.
+    function cascadeDeletedCharacterBehaviors(before, after) {
+        if (!after || !after.behaviors || typeof after.behaviors !== 'object') return;
+        const ids = (list) => new Set((Array.isArray(list) ? list : []).map(c => c && c.id).filter(Boolean));
+        const was = ids(before && before.characters);
+        if (was.size === 0) return;
+        const now = ids(after.characters);
+        const gone = [...was].filter(id => !now.has(id));
+        if (gone.length === 0) return;
+        const bh = after.behaviors;
+        const isV2 = bh.schema_version != null;
+        const chars = isV2 ? bh.characters : bh;
+        for (const id of gone) {
+            if (chars && typeof chars === 'object') delete chars[id];
+            if (isV2 && Array.isArray(bh.rules)) {
+                bh.rules = bh.rules.filter(r => !(r && r.scope === 'character' && r.character_id === id));
+            }
+        }
     }
 
     // ── Deterministic scene-participants guard ─────────

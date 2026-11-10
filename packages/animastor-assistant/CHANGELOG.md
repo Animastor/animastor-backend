@@ -8,6 +8,9 @@
   `normalizeBehaviorPatches`): on a v2 book, legacy `/behaviors/<id>…` paths
   are rewritten to `/behaviors/characters/<id>…`, and a flat map written to
   `/behaviors` becomes `characters` while `rules`/`schema_version` survive.
+- Character-delete cascade in `applyPatches`: a character removed by the
+  patches loses its `behaviors.characters` entry and its `scope:"character"`
+  rules (same contract as the editor).
 
 ## 0.1.1
 

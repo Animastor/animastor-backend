@@ -360,6 +360,15 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
         });
     });
 
+    it('DELETE character also removes its scope:"character" rules; global and other heroes\' rules stay', () => {
+        const g = { id: 'g', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
+        const h = { id: 'h', scope: 'character', character_id: 'hero', when: { emotion: ['sad'] }, then: { action: 'x' } };
+        const k = { id: 'k', scope: 'character', character_id: 'sidekick', when: { emotion: ['sad'] }, then: { action: 'y' } };
+        writeBehaviorsDoc({ schema_version: 2, rules: [g, h, k], characters: { hero: { baseline: 'a' } } });
+        expect(invoke(CHAR_DEL, { bookId, characterId: 'hero' }).statusCode).to.equal(200);
+        expect(readBehaviorsDoc()).to.deep.equal({ schema_version: 2, rules: [g, k], characters: {} });
+    });
+
     it('routes never touch rules / schema_version of a v2 document', () => {
         const rule = { id: 'r1', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
         writeBehaviorsDoc({ schema_version: 2, rules: [rule], characters: {} });

@@ -124,7 +124,29 @@ function mergeIncomingBehaviors(stored, incoming) {
     return { ...base, characters: flatToCharacters(incoming) };
 }
 
+/**
+ * Character-delete cascade: drops the character entry AND every rule bound
+ * to that character (scope:"character", character_id === id). Global rules
+ * stay. Mutates `book.behaviors` (migrated to v2 if needed).
+ * @returns {{entry: boolean, rules: string[]}} what was removed
+ */
+function removeCharacterBehaviors(book, characterId) {
+    const doc = ensureBehaviorsV2(book);
+    const removed = { entry: false, rules: [] };
+    if (Object.prototype.hasOwnProperty.call(doc.characters, characterId)) {
+        delete doc.characters[characterId];
+        removed.entry = true;
+    }
+    doc.rules = doc.rules.filter((r) => {
+        const bound = isPlainObject(r) && r.scope === 'character' && r.character_id === characterId;
+        if (bound) removed.rules.push(r.id);
+        return !bound;
+    });
+    return removed;
+}
+
 module.exports = {
+    removeCharacterBehaviors,
     BEHAVIOR_SCHEMA_VERSION,
     BEHAVIOR_RESERVED_KEYS,
     normalizeBehaviors,

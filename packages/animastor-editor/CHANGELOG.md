@@ -10,6 +10,8 @@ Requires `@animastor/vbook-runtime ^0.3.0`.
 - `POST/PATCH/DELETE /behaviors…` and the character-delete cascade work on
   `behaviors.characters.<character_id>`; `rules` / `schema_version` are never
   touched; a v2.1 file is migrated on the first write.
+- `DELETE /characters/:id` also removes the rules with `scope:"character"`
+  and that `character_id` (global rules stay).
 - `GET /book/:id` keeps the v2.1 API contract: `behaviors` is the flat
   character map, the rules come as read-only `behavior_rules`.
 - `PUT /book/:id` folds a client `behaviors` flat map into the stored v2

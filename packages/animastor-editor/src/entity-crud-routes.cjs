@@ -32,7 +32,7 @@ const { normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cj
 const { chapterId, sceneId, unitId, generateBookId } = require('@animastor/vbook-runtime/lazy-book/paths');
 // behavior.json schema v2: entries live under behaviors.characters.<id>
 // (rules are untouched by these routes). Legacy v2.1 maps are migrated in place.
-const { behaviorCharacters } = require('@animastor/vbook-runtime/behavior-schema.cjs');
+const { behaviorCharacters, removeCharacterBehaviors } = require('@animastor/vbook-runtime/behavior-schema.cjs');
 
 // (redis is not destructured: purge/ownership legs arrive via editorPorts)
 module.exports = function (app, redis, deps) {
@@ -159,12 +159,9 @@ module.exports = function (app, redis, deps) {
             }
 
             // Same dangling-data cleanup for the character's behavior
-            // (behavior.json v2: characters.<character_id>; rules stay —
-            // a character-scoped rule of a deleted hero simply never matches).
-            const behaviorChars = behaviorCharacters(oldBook);
-            if (behaviorChars[characterId]) {
-                delete behaviorChars[characterId];
-            }
+            // (behavior.json v2): characters.<character_id> and every rule
+            // with scope:"character" bound to this id. Global rules stay.
+            removeCharacterBehaviors(oldBook, characterId);
 
             editorModel.commit(oldBook);
             log(`[DELETE CHARACTER] ${bookId}/${characterId} (removed ${before.length - after.length} character(s))`);
