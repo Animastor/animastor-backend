@@ -25,6 +25,22 @@ const logPrefix = '[WF-VIDEO]';
 
 // Connector constants are no longer needed — connectors are required at startup
 
+
+// unit.behaviour = [{rule_id, character_id, strength, seed, action}] →
+// "anna_smirnova pauses…; boris_volkov lights up…" ('' when empty/invalid).
+function buildBehaviourText(behaviour) {
+    if (!Array.isArray(behaviour) || behaviour.length === 0) return '';
+    const phrases = [];
+    for (const b of behaviour) {
+        if (!b || typeof b.action !== 'string') continue;
+        const action = b.action.trim().replace(/[.\s]+$/, '');
+        if (!action) continue;
+        const who = typeof b.character_id === 'string' && b.character_id ? `${b.character_id} ` : '';
+        phrases.push(`${who}${action}`);
+    }
+    return phrases.join('; ');
+}
+
 function log(msg) {
     console.log(`${logPrefix} ${msg}`);
 }
@@ -279,6 +295,13 @@ function buildVideoPrompt(sceneData, loadedBook, units, iuDurations, profileName
         } else if (prompt) {
             descParts.push(prompt);
         }
+
+        // Behaviour rules (architecture/VBOOK_BEHAVIOUR.md): phrases snapshotted
+        // into unit.behaviour by the pipeline matcher are appended to the
+        // storyboard line ("<character_id> <action>"); unit.video.action itself
+        // is never rewritten. No behaviour → the line is byte-identical.
+        const behaviourText = buildBehaviourText(unit.behaviour);
+        if (behaviourText) descParts.push(behaviourText);
 
         const line = `${startSec.toFixed(1)}–${endSec.toFixed(1)}s: ${descParts.join('. ')}`;
         storyboardParts.push(line);
@@ -662,5 +685,6 @@ module.exports = {
     buildCamera,
     selectWorkflowGroups,
     calculateFrames,
-    toValidLTXFrames
+    toValidLTXFrames,
+    buildBehaviourText
 };

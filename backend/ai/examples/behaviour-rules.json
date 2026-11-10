@@ -1,0 +1,175 @@
+{
+  "schema_version": 2,
+  "_comment": "Default behaviour rules (schema v2, architecture/VBOOK_BEHAVIOUR.md). Effective rules of a book = these defaults overridden by behavior.json rules with the same id; enabled:false in the book disables a default. Migrated 1:1 from ai/examples/behavior.json reactions (character-scoped: they fire only for these character_ids).",
+  "rules": [
+    {
+      "id": "anna_smirnova.contradicted_in_public",
+      "scope": "character",
+      "character_id": "anna_smirnova",
+      "description": "anna_smirnova is contradicted in public",
+      "when": {
+        "emotion": [
+          "angry",
+          "tense"
+        ]
+      },
+      "then": {
+        "action": "pauses without changing expression, then answers with one calm, exact sentence that ends the argument"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "anna_smirnova.praised",
+      "scope": "character",
+      "character_id": "anna_smirnova",
+      "description": "anna_smirnova is praised",
+      "when": {
+        "emotion": [
+          "proud",
+          "embarrassed"
+        ]
+      },
+      "then": {
+        "action": "deflects briefly with a small nod and immediately turns the conversation to work"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "anna_smirnova.bad_news",
+      "scope": "character",
+      "character_id": "anna_smirnova",
+      "description": "anna_smirnova hears bad news",
+      "when": {
+        "emotion": [
+          "sad",
+          "anxious"
+        ]
+      },
+      "then": {
+        "action": "freezes for a moment, sets down whatever she is holding, then asks one short clarifying question"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "boris_volkov.praised",
+      "scope": "character",
+      "character_id": "boris_volkov",
+      "description": "boris_volkov is praised",
+      "when": {
+        "emotion": [
+          "proud",
+          "joyful"
+        ]
+      },
+      "then": {
+        "action": "lights up instantly, straightens to his full height and talks twice as fast"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "boris_volkov.criticized",
+      "scope": "character",
+      "character_id": "boris_volkov",
+      "description": "boris_volkov is criticized",
+      "when": {
+        "emotion": [
+          "angry",
+          "embarrassed"
+        ]
+      },
+      "then": {
+        "action": "flares up defensively, argues back with sweeping gestures, then quickly deflates and becomes sullen and quiet"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "boris_volkov.frightened",
+      "scope": "character",
+      "character_id": "boris_volkov",
+      "description": "boris_volkov is frightened",
+      "when": {
+        "emotion": [
+          "afraid"
+        ]
+      },
+      "then": {
+        "action": "backs away, voice breaks into a higher pitch, clutches the nearest object with both hands"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "dmitry_orekhov.provoked",
+      "scope": "character",
+      "character_id": "dmitry_orekhov",
+      "description": "dmitry_orekhov is provoked or insulted",
+      "when": {
+        "emotion": [
+          "angry",
+          "tense"
+        ]
+      },
+      "then": {
+        "action": "remains perfectly still, answers with one dry short line and a colder smile, never raises his voice"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "dmitry_orekhov.threatened",
+      "scope": "character",
+      "character_id": "dmitry_orekhov",
+      "description": "dmitry_orekhov is threatened",
+      "when": {
+        "emotion": [
+          "afraid",
+          "tense"
+        ]
+      },
+      "then": {
+        "action": "stops moving entirely, lowers his voice further, and studies the other person the way one studies a solved puzzle"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    },
+    {
+      "id": "dmitry_orekhov.unexpected",
+      "scope": "character",
+      "character_id": "dmitry_orekhov",
+      "description": "dmitry_orekhov sees something genuinely unexpected",
+      "when": {
+        "emotion": [
+          "surprised"
+        ]
+      },
+      "then": {
+        "action": "a single raised eyebrow is the only visible reaction; he then changes the subject with practiced ease"
+      },
+      "strength": 0.7,
+      "probability": 0.6,
+      "cooldown_iu": 3,
+      "priority": 10
+    }
+  ]
+}

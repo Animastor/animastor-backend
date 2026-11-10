@@ -2,8 +2,10 @@
 // Behavior via edit_book — creation, loading, AI-agent contract
 // =====================================================
 // Verifies that:
-//   1. behavior.json is created as {} during new book creation
-//   2. Empty behavior.json loads correctly
+//   1. behavior.json {} (legacy v2.1) loads as an empty schema-v2 document
+//   2. Empty behavior.json loads correctly and is saved back as v2
+//   (schema v2: entries live under behaviors.characters.<id>; the v2.1 paths
+//    /behaviors/<id> used below are rewritten by the assistant guard)
 //   3. edit_book can create behavior for existing character_id
 //   4. edit_book cannot create behavior for unknown character_id
 //   5. edit_book can update existing behavior fields
@@ -93,7 +95,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
     it('loads behavior.json as empty object when file contains {}', () => {
         const bookData = bookModule.loadBook(bookId);
         expect(bookData).to.not.be.null;
-        expect(bookData.behaviors).to.deep.equal({});
+        expect(bookData.behaviors).to.deep.equal({ schema_version: 2, rules: [], characters: {} });
     });
 
     // ── Test 2: behavior.json always persists after saveBookBundle ──
@@ -104,7 +106,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         const bhPath = path.join(bookDir, 'behavior.json');
         expect(fs.existsSync(bhPath)).to.be.true;
         const saved = JSON.parse(fs.readFileSync(bhPath, 'utf8'));
-        expect(saved).to.deep.equal({});
+        expect(saved).to.deep.equal({ schema_version: 2, rules: [], characters: {} });
     });
 
     // ── Test 3: edit_book can CREATE behavior for existing character ──
@@ -126,7 +128,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         ]);
 
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(result.result.behaviors.characters[CHAR_HERO]).to.deep.equal(behaviorData);
     });
 
     // ── Test 4: edit_book can UPDATE behavior fields ──
@@ -135,7 +137,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         const engine = chatEngineFactory(config);
 
         // First create the behavior
-        bookData.behaviors[CHAR_HERO] = {
+        bookData.behaviors.characters[CHAR_HERO] = {
             baseline: 'Old baseline.',
             quirks: ['old quirk'],
         };
@@ -146,9 +148,9 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         ]);
 
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors[CHAR_HERO].baseline).to.equal('New baseline.');
+        expect(result.result.behaviors.characters[CHAR_HERO].baseline).to.equal('New baseline.');
         // quirks should be preserved
-        expect(result.result.behaviors[CHAR_HERO].quirks).to.deep.equal(['old quirk']);
+        expect(result.result.behaviors.characters[CHAR_HERO].quirks).to.deep.equal(['old quirk']);
     });
 
     // ── Test 5: edit_book can replace quirks array ──
@@ -156,7 +158,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         const bookData = bookModule.loadBook(bookId);
         const engine = chatEngineFactory(config);
 
-        bookData.behaviors[CHAR_HERO] = {
+        bookData.behaviors.characters[CHAR_HERO] = {
             baseline: 'Calm.',
             quirks: ['old quirk'],
         };
@@ -166,7 +168,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         ]);
 
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors[CHAR_HERO].quirks).to.deep.equal(['new quirk 1', 'new quirk 2']);
+        expect(result.result.behaviors.characters[CHAR_HERO].quirks).to.deep.equal(['new quirk 1', 'new quirk 2']);
     });
 
     // ── Test 6: edit_book can replace reactions array ──
@@ -174,7 +176,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         const bookData = bookModule.loadBook(bookId);
         const engine = chatEngineFactory(config);
 
-        bookData.behaviors[CHAR_HERO] = {
+        bookData.behaviors.characters[CHAR_HERO] = {
             baseline: 'Calm.',
             reactions: [{ trigger: 'old trigger', reaction: 'old reaction' }],
         };
@@ -189,7 +191,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         ]);
 
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors[CHAR_HERO].reactions).to.deep.equal(newReactions);
+        expect(result.result.behaviors.characters[CHAR_HERO].reactions).to.deep.equal(newReactions);
     });
 
     // ── Test 7: full behavior creation + saveBookBundle roundtrip ──
@@ -217,11 +219,12 @@ describe('Behavior via edit_book — AI-agent contract', () => {
 
         // Reload and verify
         const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.behaviors[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(reloaded.behaviors.characters[CHAR_HERO]).to.deep.equal(behaviorData);
 
         // Verify on-disk file
         const saved = JSON.parse(fs.readFileSync(path.join(bookDir, 'behavior.json'), 'utf8'));
-        expect(saved[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(saved.schema_version).to.equal(2);
+        expect(saved.characters[CHAR_HERO]).to.deep.equal(behaviorData);
     });
 
     // ── Test 8: multiple characters behavior ──
@@ -245,14 +248,14 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         ]);
 
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors[CHAR_HERO]).to.deep.equal(heroBehavior);
-        expect(result.result.behaviors[CHAR_SIDEKICK]).to.deep.equal(sidekickBehavior);
+        expect(result.result.behaviors.characters[CHAR_HERO]).to.deep.equal(heroBehavior);
+        expect(result.result.behaviors.characters[CHAR_SIDEKICK]).to.deep.equal(sidekickBehavior);
 
         // Save and reload
         bookModule.saveBookBundle(result.result);
         const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.behaviors[CHAR_HERO]).to.deep.equal(heroBehavior);
-        expect(reloaded.behaviors[CHAR_SIDEKICK]).to.deep.equal(sidekickBehavior);
+        expect(reloaded.behaviors.characters[CHAR_HERO]).to.deep.equal(heroBehavior);
+        expect(reloaded.behaviors.characters[CHAR_SIDEKICK]).to.deep.equal(sidekickBehavior);
     });
 
     // ── Test 9: behavior creation does not break characters/voices ──
@@ -298,7 +301,7 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         expect(result.errors).to.have.length(0);
         expect(result.validation_errors).to.have.length(0);
         expect(result.result).to.not.be.null;
-        expect(result.result.behaviors[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(result.result.behaviors.characters[CHAR_HERO]).to.deep.equal(behaviorData);
     });
 
     // ── Test 11: remove behavior entry ──
@@ -307,14 +310,14 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         const engine = chatEngineFactory(config);
 
         // Create behavior first
-        bookData.behaviors[CHAR_HERO] = { baseline: 'To be removed.' };
+        bookData.behaviors.characters[CHAR_HERO] = { baseline: 'To be removed.' };
 
         const result = engine.applyPatches(bookData, [
             { op: 'remove', path: `/behaviors/${CHAR_HERO}` },
         ]);
 
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors).to.not.have.property(CHAR_HERO);
+        expect(result.result.behaviors.characters).to.not.have.property(CHAR_HERO);
     });
 
     // ── Test 12: behavior.json survives save/load roundtrip ──
@@ -339,13 +342,13 @@ describe('Behavior via edit_book — AI-agent contract', () => {
 
         // Reload — verify behavior persists
         const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.behaviors).to.deep.equal({ [CHAR_HERO]: behaviorData });
+        expect(reloaded.behaviors).to.deep.equal({ schema_version: 2, rules: [], characters: { [CHAR_HERO]: behaviorData } });
 
         // Reload again — verify still there after multiple loads
         const reloaded2 = bookModule.loadBook(bookId);
-        expect(reloaded2.behaviors[CHAR_HERO].baseline).to.equal('Calm and composed.');
-        expect(reloaded2.behaviors[CHAR_HERO].quirks).to.have.length(2);
-        expect(reloaded2.behaviors[CHAR_HERO].reactions).to.have.length(2);
+        expect(reloaded2.behaviors.characters[CHAR_HERO].baseline).to.equal('Calm and composed.');
+        expect(reloaded2.behaviors.characters[CHAR_HERO].quirks).to.have.length(2);
+        expect(reloaded2.behaviors.characters[CHAR_HERO].reactions).to.have.length(2);
 
         // Verify all other artifacts still intact
         expect(reloaded2.characters).to.be.an('array').with.length(2);
