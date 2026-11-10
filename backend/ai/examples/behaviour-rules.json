@@ -1,0 +1,118 @@
+{
+  "schema_version": 2,
+  "_comment": "Default behaviour rules (schema v2, architecture/VBOOK_BEHAVIOUR.md): global, EN, gestures only — no appearance or clothes (never conflicts with passport / render_rules). Phrases are subject-less verb phrases: the storyboard prepends the character_id. Effective rules of a book = these defaults overridden by behavior.json rules with the same id; enabled:false in the book disables a default. Sample character rules: behaviour-rules.example.json (not loaded).",
+  "rules": [
+    {
+      "id": "global.embarrassed_blush",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "embarrassed"
+        ]
+      },
+      "then": {
+        "action": "blushes and looks away"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    },
+    {
+      "id": "global.thoughtful_head_rub",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "thoughtful"
+        ]
+      },
+      "then": {
+        "action": "rubs the back of the head"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    },
+    {
+      "id": "global.anxious_fidget",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "anxious"
+        ]
+      },
+      "then": {
+        "action": "fidgets with the hands"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    },
+    {
+      "id": "global.surprised_freeze",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "surprised"
+        ]
+      },
+      "then": {
+        "action": "raises the eyebrows sharply and freezes for a moment"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    },
+    {
+      "id": "global.angry_jaw",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "angry"
+        ]
+      },
+      "then": {
+        "action": "clenches the jaw, fists tightening"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    },
+    {
+      "id": "global.sad_shoulders",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "sad"
+        ]
+      },
+      "then": {
+        "action": "lets the shoulders drop, gaze lowering"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    },
+    {
+      "id": "global.joyful_smile",
+      "scope": "global",
+      "when": {
+        "emotion": [
+          "joyful"
+        ]
+      },
+      "then": {
+        "action": "breaks into a wide smile"
+      },
+      "strength": 0.6,
+      "probability": 0.25,
+      "cooldown_iu": 4,
+      "priority": 0
+    }
+  ]
+}

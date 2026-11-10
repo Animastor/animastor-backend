@@ -184,16 +184,55 @@ describe('behaviour-matcher (phase 0)', () => {
 });
 
 describe('behaviour rules — effective set', () => {
-    it('defaults file: schema v2, 9 rules, all valid', () => {
+    it('defaults file: schema v2, 6–8 global EN rules, gestures only, all valid', () => {
         const doc = JSON.parse(fs.readFileSync(behaviourRules.DEFAULT_RULES_PATH, 'utf8'));
+        expect(path.basename(behaviourRules.DEFAULT_RULES_PATH)).to.equal('behaviour-rules.json');
         expect(doc.schema_version).to.equal(2);
-        expect(doc.rules).to.have.length(9);
+        expect(doc.rules.length).to.be.within(6, 8);
         const eff = behaviourRules.computeEffectiveRules(doc.rules, []);
-        expect(eff).to.have.length(9);
+        expect(eff).to.have.length(doc.rules.length);
         for (const r of eff) {
-            expect(r.scope).to.equal('character');
-            expect(r.then.action).to.match(/^[\x20-\x7E]+$/); // EN, ASCII
+            expect(r).to.include({ scope: 'global', strength: 0.6, probability: 0.25, cooldown_iu: 4, priority: 0 });
+            expect(r).to.not.have.property('character_id');
+            expect(r.then.action).to.match(/^[a-z][\x20-\x7E]+$/); // EN, ASCII, subject-less verb phrase
+            // no appearance / clothes words (passport + render_rules own them)
+            expect(r.then.action).to.not.match(/\b(hair|eyes? (are|is)|coat|dress|shirt|scarf|glasses|suit|wearing|clothes|skin|tall|short|beard)\b/i);
         }
+        const emotions = new Set(eff.flatMap(r => r.when.emotion));
+        for (const e of ['embarrassed', 'thoughtful', 'anxious', 'surprised', 'angry', 'sad', 'joyful']) expect(emotions.has(e), e).to.equal(true);
+    });
+
+    it('behaviour-rules.example.json (9 character rules) is a sample: valid, but never loaded', () => {
+        const exPath = path.join(path.dirname(behaviourRules.DEFAULT_RULES_PATH), 'behaviour-rules.example.json');
+        const ex = JSON.parse(fs.readFileSync(exPath, 'utf8'));
+        expect(ex.rules).to.have.length(9);
+        expect(behaviourRules.computeEffectiveRules(ex.rules, [])).to.have.length(9);
+        expect(ex.rules.every(r => r.scope === 'character' && r.character_id)).to.equal(true);
+        // not part of the effective defaults
+        const loaded = behaviourRules.loadDefaultRules().map(r => r.id);
+        for (const r of ex.rules) expect(loaded).to.not.include(r.id);
+        const eff = behaviourRules.loadEffectiveRules(null).map(r => r.id);
+        for (const r of ex.rules) expect(eff).to.not.include(r.id);
+        // no source file references it
+        const srcRoot = path.join(__dirname, '..', 'src');
+        const hits = [];
+        (function walk(d) {
+            for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                const f = path.join(d, e.name);
+                if (e.isDirectory()) walk(f);
+                else if (/\.(c?js)$/.test(e.name) && fs.readFileSync(f, 'utf8').includes('behaviour-rules.example')) hits.push(f);
+            }
+        })(srcRoot);
+        expect(hits).to.deep.equal([]);
+    });
+
+    it('rule files never reach the import prompt (ai-service reference examples)', () => {
+        const aiService = require('../src/services/ai-service');
+        const dir = path.join(__dirname, '..', 'ai', 'examples');
+        const names = aiService.loadReferenceExamples(dir).map(x => x.relPath);
+        expect(names).to.not.include('behaviour-rules.json');
+        expect(names).to.not.include('behaviour-rules.example.json');
+        expect(names).to.include('behavior.json'); // the pre-existing structure example stays
     });
 
     it('book rules override defaults by id (shallow merge), add new ids, enabled:false disables a default', () => {
@@ -228,7 +267,7 @@ describe('behaviour rules — effective set', () => {
         fs.writeFileSync(path.join(dir, 'behavior.json'), JSON.stringify({ schema_version: 2, rules: [rule({ id: 'own' })], characters: {} }));
         const eff = behaviourRules.loadEffectiveRules(dir);
         expect(eff.map(r => r.id)).to.include('own');
-        expect(eff).to.have.length(10);
+        expect(eff).to.have.length(behaviourRules.loadDefaultRules().length + 1);
         fs.rmSync(dir, { recursive: true, force: true });
     });
 });
@@ -625,6 +664,17 @@ describe('editor routes — flat API map in, v2 on disk (rules survive)', () => 
         expect(disk()).to.deep.equal({ schema_version: 2, rules: [RULE], characters: {} });
     });
 
+    it('DELETE /characters/:id cascades: entry + scope:"character" rules of that hero; other rules stay', async () => {
+        const heroRule = { ...RULE, id: 'hero.r', scope: 'character', character_id: 'hero' };
+        const sideRule = { ...RULE, id: 'side.r', scope: 'character', character_id: 'side' };
+        const odd = { ...RULE, id: 'global.with_id', scope: 'global', character_id: 'hero' };
+        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({
+            schema_version: 2, rules: [RULE, heroRule, sideRule, odd], characters: { hero: { baseline: 'calm' }, side: { baseline: 's' } },
+        }));
+        expect((await call('DELETE /api/v1/book/:bookId/characters/:characterId', { bookId, characterId: 'hero' })).statusCode).to.equal(200);
+        expect(disk()).to.deep.equal({ schema_version: 2, rules: [RULE, sideRule, odd], characters: { side: { baseline: 's' } } });
+    });
+
     it('legacy v2.1 file on disk: PATCH migrates to v2 and edits characters.<id>', async () => {
         fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({ hero: { baseline: 'calm' } }));
         await call('PATCH /api/v1/book/:bookId/behaviors/:characterId', { bookId, characterId: 'hero' }, { fields: { baseline: 'v2' } });
@@ -670,6 +720,22 @@ describe('assistant edit_book — behaviours in characters.<id>', () => {
         const r = ce.applyPatchesValidated(book(), [{ op: 'replace', path: '/behaviors', value: { hero: { baseline: 'z' }, rules: [] } }]);
         expect(r.errors).to.deep.equal([]);
         expect(r.result.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'z' } } });
+    });
+
+    it('deleting a character via edit_book cascades: entry + its scope:"character" rules', () => {
+        const ce = createChatEngine({});
+        const b = book();
+        b.characters.push({ id: 'side', name: 'Side' });
+        b.behaviors.characters.side = { baseline: 's' };
+        const heroRule = { id: 'hero.r', scope: 'character', character_id: 'hero', when: { emotion: ['sad'] }, then: { action: 'x' } };
+        const sideRule = { id: 'side.r', scope: 'character', character_id: 'side', when: { emotion: ['sad'] }, then: { action: 'y' } };
+        b.behaviors.rules.push(heroRule, sideRule);
+        const r = ce.applyPatchesValidated(b, [{ op: 'remove', path: '/characters/0' }]);
+        expect(r.errors).to.deep.equal([]);
+        expect(r.result.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE, sideRule], characters: { side: { baseline: 's' } } });
+        // no character removed → behaviours untouched
+        const r2 = ce.applyPatchesValidated(b, [{ op: 'replace', path: '/characters/0/name', value: 'H' }]);
+        expect(r2.result.behaviors).to.deep.equal(b.behaviors);
     });
 
     it('edit-mode prompt documents /behaviors/characters/{character_id}', () => {

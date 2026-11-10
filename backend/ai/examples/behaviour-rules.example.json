@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "_comment": "Default behaviour rules (schema v2, architecture/VBOOK_BEHAVIOUR.md). Effective rules of a book = these defaults overridden by behavior.json rules with the same id; enabled:false in the book disables a default. Migrated 1:1 from ai/examples/behavior.json reactions (character-scoped: they fire only for these character_ids).",
+  "_comment": "SAMPLE ONLY — never loaded (neither by the behaviour pipeline nor by the import prompt). Character-scoped rules migrated 1:1 from ai/examples/behavior.json reactions; copy them into a book's behavior.json rules (schema v2) and adapt character_id. Active defaults: ai/examples/behaviour-rules.json. Docs: animastor-docs architecture/VBOOK_BEHAVIOUR.md.",
   "rules": [
     {
       "id": "anna_smirnova.contradicted_in_public",

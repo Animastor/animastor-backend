@@ -260,6 +260,37 @@ function parseJsonResponse(content) {
 // Sends the first chapter text + candidate data to the AI,
 // gets back refined characters, locations, and scene structure.
 
+// Behaviour rule files in ai/examples/ (behaviour-rules.json defaults and the
+// behaviour-rules.<suffix>.json samples) are pipeline configuration, not book
+// structure examples — they never go into the import prompt
+// (animastor-docs architecture/VBOOK_BEHAVIOUR.md §2.2).
+const REFERENCE_EXAMPLE_EXCLUDE = /^behaviour-rules(\.[\w-]+)?\.json$/;
+
+// ai/examples/**/*.json (depth ≤ 4, sorted), parsed; unreadable files skipped.
+function loadReferenceExamples(examplesDir) {
+    const fs = require('fs');
+    const path = require('path');
+    const out = [];
+    function walkDir(dir, depth = 0) {
+        if (depth > 4) return;
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walkDir(fullPath, depth + 1);
+            } else if (entry.name.endsWith('.json') && !REFERENCE_EXAMPLE_EXCLUDE.test(entry.name)) {
+                const relPath = path.relative(examplesDir, fullPath);
+                try {
+                    out.push({ relPath, parsed: JSON.parse(fs.readFileSync(fullPath, 'utf8')) });
+                } catch { }
+            }
+        }
+    }
+    walkDir(examplesDir);
+    return out;
+}
+
 async function refineDraft(chapterText) {
     const fs = require('fs');
     const path = require('path');
@@ -269,26 +300,8 @@ async function refineDraft(chapterText) {
     try {
         const examplesDir = path.join(__dirname, '../../ai/examples');
         if (fs.existsSync(examplesDir)) {
-            const allParts = [];
-            function walkDir(dir, depth = 0) {
-                if (depth > 4) return;
-                const entries = fs.readdirSync(dir, { withFileTypes: true });
-                entries.sort((a, b) => a.name.localeCompare(b.name));
-                for (const entry of entries) {
-                    const fullPath = path.join(dir, entry.name);
-                    if (entry.isDirectory()) {
-                        walkDir(fullPath, depth + 1);
-                    } else if (entry.name.endsWith('.json')) {
-                        const relPath = path.relative(examplesDir, fullPath);
-                        try {
-                            const content = fs.readFileSync(fullPath, 'utf8');
-                            const parsed = JSON.parse(content);
-                            allParts.push(`### ${relPath}\n\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``);
-                        } catch { }
-                    }
-                }
-            }
-            walkDir(examplesDir);
+            const allParts = loadReferenceExamples(examplesDir)
+                .map(({ relPath, parsed }) => `### ${relPath}\n\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``);
             if (allParts.length > 0) {
                 const totalBytes = allParts.reduce((s, p) => s + p.length, 0);
                 console.log(`[AI-SERVICE] Loaded ${allParts.length} example files (${totalBytes} chars) into prompt`);
@@ -649,6 +662,7 @@ async function checkAIHealth(cfg, provider = null) {
 
 module.exports = {
     callAI,
+    loadReferenceExamples,
     callAIStream,
     parseJsonResponse,
     refineDraft,
