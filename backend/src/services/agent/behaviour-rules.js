@@ -12,6 +12,10 @@
 //    then:{action}, strength 0..1, probability 0..1, cooldown_iu, priority, enabled?}
 // Missing numbers fall back to RULE_DEFAULTS.
 //
+// Scene limit: defaults.max_per_scene of the defaults file (2), overridden by
+// the book's behavior.json defaults.max_per_scene (integer ≥ 0; 0 = behaviours
+// off in every scene). Invalid values are ignored; neither set = unlimited.
+//
 // Docs: animastor-docs architecture/VBOOK_BEHAVIOUR.md.
 // ======================================================
 
@@ -90,39 +94,71 @@ function computeEffectiveRules(defaults, bookRules) {
     return out;
 }
 
+/** Integer ≥ 0, or undefined when the value cannot be used. */
+function sanitizeMaxPerScene(v) {
+    return Number.isInteger(v) && v >= 0 ? v : undefined;
+}
+
 let _defaultsCache = null;
-function loadDefaultRules(filePath = DEFAULT_RULES_PATH) {
+function loadDefaultsDoc(filePath = DEFAULT_RULES_PATH) {
     if (filePath === DEFAULT_RULES_PATH && _defaultsCache) return _defaultsCache;
     const doc = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    const rules = Array.isArray(doc?.rules) ? doc.rules : [];
-    if (filePath === DEFAULT_RULES_PATH) _defaultsCache = rules;
-    return rules;
+    if (filePath === DEFAULT_RULES_PATH) _defaultsCache = doc;
+    return doc;
+}
+
+function loadDefaultRules(filePath = DEFAULT_RULES_PATH) {
+    const doc = loadDefaultsDoc(filePath);
+    return Array.isArray(doc?.rules) ? doc.rules : [];
+}
+
+/** A book's behavior.json when it is a v2 document, else null (v2.1 has no rules/defaults). */
+function readBookDoc(bookDir) {
+    if (!bookDir) return null;
+    const p = path.join(bookDir, 'behavior.json');
+    if (!fs.existsSync(p)) return null;
+    const doc = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.schema_version == null) return null;
+    return doc;
 }
 
 /** Rules stored in a book's behavior.json (v2 only — v2.1 files have none). */
 function readBookRules(bookDir) {
-    if (!bookDir) return [];
-    const p = path.join(bookDir, 'behavior.json');
-    if (!fs.existsSync(p)) return [];
-    const doc = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (!doc || typeof doc !== 'object' || doc.schema_version == null) return [];
-    return Array.isArray(doc.rules) ? doc.rules : [];
+    const doc = readBookDoc(bookDir);
+    return doc && Array.isArray(doc.rules) ? doc.rules : [];
 }
 
 /**
- * Effective rules for a book directory. Never throws: a broken defaults
- * file or behavior.json is logged and treated as "no rules" for that source.
+ * Effective settings from the two documents (pure).
+ * @returns {{rules: object[], maxPerScene: number|null}}
  */
-function loadEffectiveRules(bookDir, { log = console } = {}) {
-    let defaults = [];
-    let bookRules = [];
-    try { defaults = loadDefaultRules(); } catch (e) {
+function computeEffectiveSettings(defaultsDoc, bookDoc) {
+    const rules = computeEffectiveRules(defaultsDoc?.rules, bookDoc?.rules);
+    const fromBook = sanitizeMaxPerScene(bookDoc?.defaults?.max_per_scene);
+    const fromDefaults = sanitizeMaxPerScene(defaultsDoc?.defaults?.max_per_scene);
+    const maxPerScene = fromBook !== undefined ? fromBook : fromDefaults !== undefined ? fromDefaults : null;
+    return { rules, maxPerScene };
+}
+
+/**
+ * Effective rules + scene limit for a book directory. Never throws: a broken
+ * defaults file or behavior.json is logged and treated as absent.
+ */
+function loadEffectiveSettings(bookDir, { log = console } = {}) {
+    let defaultsDoc = null;
+    let bookDoc = null;
+    try { defaultsDoc = loadDefaultsDoc(); } catch (e) {
         log.warn(`[BEHAVIOUR] default rules unreadable: ${e.message}`);
     }
-    try { bookRules = readBookRules(bookDir); } catch (e) {
-        log.warn(`[BEHAVIOUR] behavior.json rules unreadable (${bookDir}): ${e.message}`);
+    try { bookDoc = readBookDoc(bookDir); } catch (e) {
+        log.warn(`[BEHAVIOUR] behavior.json unreadable (${bookDir}): ${e.message}`);
     }
-    return computeEffectiveRules(defaults, bookRules);
+    return computeEffectiveSettings(defaultsDoc, bookDoc);
+}
+
+/** Effective rules only (see loadEffectiveSettings). */
+function loadEffectiveRules(bookDir, opts) {
+    return loadEffectiveSettings(bookDir, opts).rules;
 }
 
 module.exports = {
@@ -132,6 +168,11 @@ module.exports = {
     sanitizeRule,
     computeEffectiveRules,
     loadDefaultRules,
+    loadDefaultsDoc,
+    readBookDoc,
     readBookRules,
+    sanitizeMaxPerScene,
+    computeEffectiveSettings,
+    loadEffectiveSettings,
     loadEffectiveRules,
 };

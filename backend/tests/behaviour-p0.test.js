@@ -183,6 +183,89 @@ describe('behaviour-matcher (phase 0)', () => {
     });
 });
 
+describe('behaviour-matcher — max_per_scene', () => {
+    const count = (out) => out.reduce((n, b) => n + (b ? b.length : 0), 0);
+    const twoHeroes = (n) => units(n, { yura: 'embarrassed', svetlana: 'embarrassed' });
+
+    it('the limit always holds (probability 1, no cooldown, many books)', () => {
+        for (let k = 0; k < 300; k++) {
+            for (const limit of [1, 2, 3]) {
+                const out = matchSceneBehaviours({ bookId: `b${k}`, units: twoHeroes(6), rules: [rule({ probability: 0.7 })], maxPerScene: limit });
+                expect(count(out)).to.be.at.most(limit);
+            }
+        }
+        const unlimited = matchSceneBehaviours({ bookId: BOOK, units: twoHeroes(6), rules: [rule()] });
+        expect(count(unlimited)).to.equal(12);
+    });
+
+    it('0 switches behaviours off in the scene; null / invalid = unlimited', () => {
+        expect(count(matchSceneBehaviours({ bookId: BOOK, units: twoHeroes(4), rules: [rule()], maxPerScene: 0 }))).to.equal(0);
+        expect(count(matchSceneBehaviours({ bookId: BOOK, units: twoHeroes(4), rules: [rule()], maxPerScene: null }))).to.equal(8);
+        expect(count(matchSceneBehaviours({ bookId: BOOK, units: twoHeroes(4), rules: [rule()], maxPerScene: -1 }))).to.equal(8);
+    });
+
+    it('counts in IU order; inside an IU: priority desc, then rule id, then character_id; rest of the scene skipped', () => {
+        const rules = [
+            rule({ id: 'z_high', priority: 5, scope: 'character', character_id: 'yura', then: { action: 'high' } }),
+            rule({ id: 'a_low', priority: 1, scope: 'character', character_id: 'svetlana', then: { action: 'low' } }),
+        ];
+        const out = matchSceneBehaviours({ bookId: BOOK, units: twoHeroes(3), rules, maxPerScene: 1 });
+        expect(out[0].map(b => b.rule_id)).to.deep.equal(['z_high']); // priority beats id and character order
+        expect(out[1]).to.equal(null);
+        expect(out[2]).to.equal(null);
+        const same = matchSceneBehaviours({ bookId: BOOK, units: twoHeroes(2), rules: [rule()], maxPerScene: 3 });
+        expect(same[0].map(b => b.character_id)).to.deep.equal(['svetlana', 'yura']);
+        expect(same[1].map(b => b.character_id)).to.deep.equal(['svetlana']);
+    });
+
+    it('filled and locked IU count toward the limit', () => {
+        const us = units(4);
+        us[0].behaviour = [{ rule_id: 'manual', character_id: 'yura', strength: 1, seed: 0, action: 'a' }];
+        us[1].behaviour_locked = true;
+        us[1].behaviour = [{ rule_id: 'manual2', character_id: 'yura', strength: 1, seed: 0, action: 'b' }];
+        const out = matchSceneBehaviours({ bookId: BOOK, units: us, rules: [rule()], maxPerScene: 2 });
+        expect(out.every(x => x === null)).to.equal(true);
+        const out3 = matchSceneBehaviours({ bookId: BOOK, units: us, rules: [rule()], maxPerScene: 3 });
+        expect(out3.map(Boolean)).to.deep.equal([false, false, true, false]);
+    });
+
+    it('is deterministic with a limit (two runs identical)', () => {
+        const args = () => ({ bookId: BOOK, units: twoHeroes(8), rules: [rule({ probability: 0.5 })], maxPerScene: 2 });
+        expect(matchSceneBehaviours(args())).to.deep.equal(matchSceneBehaviours(args()));
+    });
+
+    it('defaults file sets defaults.max_per_scene = 2; book defaults.max_per_scene overrides; invalid ignored', () => {
+        const doc = behaviourRules.loadDefaultsDoc();
+        expect(doc.defaults.max_per_scene).to.equal(2);
+        expect(behaviourRules.computeEffectiveSettings(doc, null).maxPerScene).to.equal(2);
+        expect(behaviourRules.computeEffectiveSettings(doc, { schema_version: 2, defaults: { max_per_scene: 5 } }).maxPerScene).to.equal(5);
+        expect(behaviourRules.computeEffectiveSettings(doc, { schema_version: 2, defaults: { max_per_scene: 0 } }).maxPerScene).to.equal(0);
+        expect(behaviourRules.computeEffectiveSettings(doc, { schema_version: 2, defaults: { max_per_scene: 1.5 } }).maxPerScene).to.equal(2);
+        expect(behaviourRules.computeEffectiveSettings({ rules: [] }, null).maxPerScene).to.equal(null);
+    });
+
+    it('applyBehavioursToWindow reads the book override from behavior.json (0 = off for the whole window)', () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'beh-limit-'));
+        const glob = rule({ id: 'g', probability: 1 });
+        const mk = () => [{ units: twoHeroes(4) }, { units: twoHeroes(4) }];
+        fs.writeFileSync(path.join(dir, 'behavior.json'), JSON.stringify({ schema_version: 2, rules: [glob], characters: {}, defaults: { max_per_scene: 1 } }));
+        let scenes = mk();
+        let r = applyBehavioursToWindow(scenes, { bookId: BOOK, bookDir: dir });
+        expect(r.maxPerScene).to.equal(1);
+        expect(scenes.map(sc => count(sc.units.map(u => u.behaviour)))).to.deep.equal([1, 1]);
+        fs.writeFileSync(path.join(dir, 'behavior.json'), JSON.stringify({ schema_version: 2, rules: [glob], characters: {}, defaults: { max_per_scene: 0 } }));
+        scenes = mk();
+        r = applyBehavioursToWindow(scenes, { bookId: BOOK, bookDir: dir });
+        expect(r.applied).to.equal(0);
+        expect(scenes.every(sc => sc.units.every(u => u.behaviour === undefined))).to.equal(true);
+        fs.writeFileSync(path.join(dir, 'behavior.json'), JSON.stringify({ schema_version: 2, rules: [glob], characters: {} }));
+        scenes = mk();
+        applyBehavioursToWindow(scenes, { bookId: BOOK, bookDir: dir });
+        expect(scenes.map(sc => count(sc.units.map(u => u.behaviour)))).to.deep.equal([2, 2]); // defaults file: 2
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+});
+
 describe('behaviour rules — effective set', () => {
     it('defaults file: schema v2, 6–8 global EN rules, gestures only, all valid', () => {
         const doc = JSON.parse(fs.readFileSync(behaviourRules.DEFAULT_RULES_PATH, 'utf8'));

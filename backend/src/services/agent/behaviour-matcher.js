@@ -16,8 +16,14 @@
 //                i+1 … i+cooldown_iu
 //   conflicts  : at most one behaviour per hero per IU — higher priority,
 //                then rule id ascending
+//   scene limit: maxPerScene behaviours per scene at most (null/undefined =
+//                unlimited, 0 = behaviours off in the scene). Counted in IU
+//                order; inside one IU the per-hero winners are taken by
+//                priority desc, rule id asc, character_id asc. Once the limit
+//                is reached the remaining IU of the scene are skipped.
 //   idempotent : IU with behaviour_locked:true or an existing behaviour array
-//                are skipped (their existing entries still count for cooldown)
+//                are skipped (their existing entries still count for cooldown
+//                and for the scene limit)
 //   snapshot   : `action` is a copy of rule.then.action at application time
 //
 // Docs: animastor-docs architecture/VBOOK_BEHAVIOUR.md.
@@ -66,14 +72,18 @@ function compareRules(a, b) {
  * @param {object[]} input.rules           — effective rules (see behaviour-rules.js)
  * @param {Iterable<string>} [input.characterIds] — known character ids; state
  *                                            entries of other ids are ignored
+ * @param {number|null} [input.maxPerScene] — scene limit (integer ≥ 0); null = unlimited
  * @returns {Array<null|object[]>} parallel to units: null = leave the unit
  *          untouched (skipped or nothing fired); array = new unit.behaviour
  */
-function matchSceneBehaviours({ bookId, units, rules, characterIds } = {}) {
+function matchSceneBehaviours({ bookId, units, rules, characterIds, maxPerScene = null } = {}) {
     const list = Array.isArray(units) ? units : [];
     const out = list.map(() => null);
     const active = (Array.isArray(rules) ? rules : []).filter(isRuleActive);
     if (active.length === 0 || list.length === 0) return out;
+    const limit = Number.isInteger(maxPerScene) && maxPerScene >= 0 ? maxPerScene : Infinity;
+    if (limit === 0) return out;
+    let used = 0;
     const known = characterIds ? new Set(characterIds) : null;
 
     // last fire index per `${rule_id}\u0000${character_id}`
@@ -87,18 +97,22 @@ function matchSceneBehaviours({ bookId, units, rules, characterIds } = {}) {
     };
 
     for (let idx = 0; idx < list.length; idx++) {
+        if (used >= limit) break; // scene limit reached — remaining IU skipped
         const unit = list[idx] || {};
 
         if (unit.behaviour_locked === true || Array.isArray(unit.behaviour)) {
             for (const b of (Array.isArray(unit.behaviour) ? unit.behaviour : [])) {
-                if (b && b.rule_id && b.character_id) lastFired.set(key(b.rule_id, b.character_id), idx);
+                if (!b) continue;
+                used++;
+                if (b.rule_id && b.character_id) lastFired.set(key(b.rule_id, b.character_id), idx);
             }
             continue;
         }
         if (typeof unit.id !== 'string' || !unit.id) continue;
 
         const state = unit.state && typeof unit.state === 'object' && !Array.isArray(unit.state) ? unit.state : {};
-        const applied = [];
+        // one winner per hero …
+        const winners = [];
         for (const charId of Object.keys(state).sort()) {
             const emotion = state[charId];
             if (known && !known.has(charId)) continue;
@@ -114,7 +128,14 @@ function matchSceneBehaviours({ bookId, units, rules, characterIds } = {}) {
             }
             if (candidates.length === 0) continue;
             candidates.sort((a, b) => compareRules(a.rule, b.rule));
-            const { rule, seed } = candidates[0];
+            winners.push({ charId, ...candidates[0] });
+        }
+        // … then taken by priority desc, rule id asc, character_id asc up to the limit
+        winners.sort((a, b) => compareRules(a.rule, b.rule) || (a.charId < b.charId ? -1 : a.charId > b.charId ? 1 : 0));
+        const applied = [];
+        for (const { charId, rule, seed } of winners) {
+            if (used >= limit) break;
+            used++;
             lastFired.set(key(rule.id, charId), idx);
             applied.push({
                 rule_id: rule.id,

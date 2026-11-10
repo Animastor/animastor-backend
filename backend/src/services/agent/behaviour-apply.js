@@ -17,7 +17,7 @@
 
 const { unitId } = require('@animastor/vbook-runtime/lazy-book/paths');
 const { matchSceneBehaviours } = require('./behaviour-matcher');
-const { loadEffectiveRules } = require('./behaviour-rules');
+const { loadEffectiveSettings } = require('./behaviour-rules');
 
 /**
  * @param {object[]} scenes — enriched scenes of the window (mutated in place)
@@ -26,14 +26,20 @@ const { loadEffectiveRules } = require('./behaviour-rules');
  * @param {object[]} [opts.characters]
  * @param {string|null} [opts.bookDir] — book directory (book rules come from its behavior.json)
  * @param {object[]} [opts.rules] — effective rules (tests); default: loaded from bookDir
+ * @param {number|null} [opts.maxPerScene] — scene limit with explicit rules (tests); default: from settings
  * @returns {{rules:number, applied:number}}
  */
-function applyBehavioursToWindow(scenes, { bookId, characters, bookDir = null, rules } = {}) {
+function applyBehavioursToWindow(scenes, { bookId, characters, bookDir = null, rules, maxPerScene = null } = {}) {
     const list = Array.isArray(scenes) ? scenes : [];
     if (!bookId || list.length === 0) return { rules: 0, applied: 0 };
 
     let effective = rules;
-    if (!Array.isArray(effective)) effective = loadEffectiveRules(bookDir);
+    let limit = maxPerScene;
+    if (!Array.isArray(effective)) {
+        const settings = loadEffectiveSettings(bookDir);
+        effective = settings.rules;
+        limit = settings.maxPerScene;
+    }
     if (effective.length === 0) return { rules: 0, applied: 0 };
 
     // Known ids filter state entries; without a character list (tests) the
@@ -46,7 +52,7 @@ function applyBehavioursToWindow(scenes, { bookId, characters, bookDir = null, r
         for (const u of units) {
             if (u && (typeof u.id !== 'string' || !u.id)) u.id = unitId();
         }
-        const result = matchSceneBehaviours({ bookId, scene, units, rules: effective, characterIds });
+        const result = matchSceneBehaviours({ bookId, scene, units, rules: effective, characterIds, maxPerScene: limit });
         result.forEach((behaviour, i) => {
             if (behaviour) {
                 units[i].behaviour = behaviour;
@@ -55,7 +61,7 @@ function applyBehavioursToWindow(scenes, { bookId, characters, bookDir = null, r
         });
     }
     if (applied > 0) console.log(`[BEHAVIOUR] ${bookId}: ${applied} behaviour(s) applied (${effective.length} effective rule(s))`);
-    return { rules: effective.length, applied };
+    return { rules: effective.length, applied, maxPerScene: limit };
 }
 
 module.exports = { applyBehavioursToWindow };
