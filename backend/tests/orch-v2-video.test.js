@@ -38,6 +38,7 @@ const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
 const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { lockReference } = require('./helpers/voice-reference-fixture');
 
 const FIX = path.resolve(__dirname, '../../packages/animastor-orchestration/test/gen/fixtures');
 const fixture = (n) => fs.readFileSync(path.join(FIX, n));
@@ -95,7 +96,7 @@ function bookJson(bookId, buildId, prompts = {}) {
     const b = 'Лиса остановилась у реки и долго смотрит на лёд.';
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { instruction: 'calm male narrator' } },
+        voices: { narrator: { timbre: 'calm male narrator', manner: '' } },
         characters: [],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
@@ -289,6 +290,7 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         bookId = `${stamp}-${crypto.randomBytes(3).toString('hex')}`;
         buildId = `bld-${bookId}`;
         books.set(bookId, bookJson(bookId, buildId));
+        lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
         bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = ANY($1)`, [Object.values(workers)]);
@@ -435,10 +437,12 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
 
         // prompt of one IU edited after its picture → dirty; a picture without gen_parts → needs_image
         books.set(bookId, bookJson(bookId, buildId, { [IU.d]: 'a village at night, lanterns' }));
+        lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         const r3 = await scene('ch-2', 'sc-3', ['video']);
         expect(r3.body.summary).to.include({ jobs_created: 0 });
         expect(r3.body.summary.skipped_image_dirty).to.deep.equal(['sc-3']);
         books.set(bookId, bookJson(bookId, buildId));
+        lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`UPDATE scene_assets SET metadata = jsonb_set(metadata, '{gen_parts}', (metadata->'gen_parts') - $2) WHERE book_id = $1 AND scene_id = 'sc-3' AND asset_type = 'image'`, [bookId, IU.e]);
         const r4 = await scene('ch-2', 'sc-3', ['video']);
         expect(r4.body.summary.skipped_needs_image).to.deep.equal(['sc-3']);

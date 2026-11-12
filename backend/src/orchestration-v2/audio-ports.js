@@ -4,7 +4,10 @@
 // Every port CALLS existing category-B code; no workflow / naming / merge
 // logic is copied here:
 //   planUnits     ← vbook-runtime collectScenes + audio/segments.buildSegments
-//                   + audio/generation.buildMergedDialogueWorkflow / buildSegmentWorkflow
+//                   + audio/generation.buildMergedDialogueWorkflow / buildSegmentWorkflow;
+//                   every voice the scope needs must have a locked reference
+//                   (audio/voice-references.requireReferences → 409 voice_reference_required)
+//   inputFiles    ← the voice references of the chunk (VOICE_REFERENCES.md)
 //   buildPayload  ← the workflow snapshot taken by planUnits (input.workflow_json)
 //   artifactPath  ← @animastor/generation artifactNaming + audio/helpers.getOutputPath
 //   runLocal      ← audio/generation.trimPaddedSceneAudio + audio/pipeline.buildSceneAudio;
@@ -46,6 +49,8 @@ function deps(overrides = {}) {
         iuTimings: overrides.iuTimings || require('./iu-timings'),
         tailOnly: overrides.tailOnly !== undefined ? overrides.tailOnly : !!process.env.AUDIO_CLEANUP_TAIL_ONLY,
         artifactNaming: overrides.artifactNaming || require('@animastor/generation').artifactNaming,
+        // VOICE_REFERENCES.md: locked voice references → worker input files
+        voiceRefs: overrides.voiceRefs || null,
     };
 }
 
@@ -62,23 +67,23 @@ function createAudioPorts(opts = {}) {
     const log = opts.log || ((m) => console.log(m));
 
     /** The units of one scene, exactly as the legacy dispatch would send them. */
-    function sceneUnits(loadedBook, sceneData, bookId, buildId) {
+    function sceneUnits(loadedBook, sceneData, bookId, buildId, segList = d.segments.buildSegments(sceneData)) {
         const chapterId = sceneData.chapter_id;
         const sceneId = sceneData.scene_id;
-        const segList = d.segments.buildSegments(sceneData);
         if (!segList.length) return [];
-        const ctx = { bookId, chapterId, sceneId };
         const units = [];
         const isPureDialogue = segList.every((seg) => seg.segment_type === 'dialogue');
-        const merged = isPureDialogue ? d.generation.buildMergedDialogueWorkflow(segList, loadedBook) : null;
+        const merged = isPureDialogue ? d.generation.buildMergedDialogueWorkflow(segList, loadedBook, sceneData, d.voiceRefs) : null;
         if (merged) {
-            units.push({ index: 1, workflow: merged, workflow_name: 'merged_dialogue',
+            units.push({ index: 1, workflow: merged.workflow, input_files: merged.input_files, workflow_name: 'merged_dialogue',
                 meta: { segment_type: 'dialogue', padded: false, original_text_length: null, unit_id: null } });
         } else {
             segList.forEach((segment, i) => {
+                const built = d.generation.buildSegmentWorkflow(segment, sceneData, loadedBook, d.voiceRefs);
                 units.push({
                     index: i + 1,
-                    workflow: d.generation.buildSegmentWorkflow(segment, sceneData, loadedBook, ctx),
+                    workflow: built.workflow,
+                    input_files: built.input_files,
                     workflow_name: segment.segment_type === 'dialogue' ? d.generation.WORKFLOW_DIALOGUE : d.generation.WORKFLOW_NARRATION,
                     meta: {
                         segment_type: segment.segment_type,
@@ -108,6 +113,8 @@ function createAudioPorts(opts = {}) {
                 workflow_json: u.workflow_json,
                 workflow_name: u.workflow_name,
                 scene_type: sceneData.scene_type,
+                // the locked voice references this chunk is cloned from (vref_<sha>.wav)
+                input_files: u.input_files || [],
                 part_meta: { ...u.meta, chunk_index: u.index, expected_chunk_count: expected },
             },
         }));
@@ -118,11 +125,20 @@ function createAudioPorts(opts = {}) {
         const loadedBook = d.book.loadBook(bookRef.bookId);
         if (!loadedBook) throw Object.assign(new Error(`book ${bookRef.bookId} not found`), { status: 404 });
         const buildId = loadedBook.manifest?.build_id || 'default';
-        const out = [];
+        if (!d.voiceRefs) throw new Error('audio-ports: deps.voiceRefs is required (voice references)');
+        const scenes = [];
+        const needed = new Set();
         for (const s of d.book.collectScenes(loadedBook)) {
             if (!s.chapter_id || !s.scene_id || !inScope(scope, s)) continue;
-            out.push(...sceneUnits(loadedBook, s, bookRef.bookId, buildId));
+            const segList = d.segments.buildSegments(s);
+            for (const id of d.generation.requiredVoiceIds(segList, s, loadedBook)) needed.add(id);
+            scenes.push({ s, segList });
         }
+        // one 409 voice_reference_required listing EVERY voice the scope needs —
+        // no work is created while a single reference is missing (no fallback)
+        d.voiceRefs.requireReferences(loadedBook, [...needed]);
+        const out = [];
+        for (const { s, segList } of scenes) out.push(...sceneUnits(loadedBook, s, bookRef.bookId, buildId, segList));
         log(`[ORCH-V2] planUnits ${bookRef.bookId} scope=${scope.level}${scope.level === 'scenes' ? `[${scope.scene_ids.length}]` : ''}${scope.chapter_id ? '/' + scope.chapter_id : ''}${scope.scene_id ? '/' + scope.scene_id : ''}: ${out.length} audio chunk(s)`);
         return out;
     }
@@ -215,7 +231,13 @@ function createAudioPorts(opts = {}) {
         log(`[ORCH-V2] IU timings ${job.chapter_id}/${job.scene_id}: ${n} unit(s), ${rows[0] ? rows[0].mode : '-'}, scene ${realSec.toFixed(3)}s — ${rows.map((r) => `${r.unit_id}=${r.end_ms - r.start_ms}ms`).join(', ')}`);
     }
 
-    return { planUnits, buildPayload, artifactPath, runLocal, onArtifactPlaced, _sceneUnits: sceneUnits };
+    /** audio_chunk: the voice references of the chunk (absolute paths, sha256 checked by the worker) */
+    function inputFiles(job) {
+        if (job.kind !== 'audio_chunk') return [];
+        return (job.input && Array.isArray(job.input.input_files)) ? job.input.input_files : [];
+    }
+
+    return { planUnits, buildPayload, artifactPath, runLocal, onArtifactPlaced, inputFiles, _sceneUnits: sceneUnits };
 }
 
 module.exports = { createAudioPorts, inScope };

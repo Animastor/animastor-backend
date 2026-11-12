@@ -28,6 +28,7 @@ const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
 const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { lockReference, toneWav } = require('./helpers/voice-reference-fixture');
 
 const FIX = path.resolve(__dirname, '../../packages/animastor-orchestration/test/gen/fixtures');
 const fixture = (n) => fs.readFileSync(path.join(FIX, n));
@@ -49,7 +50,7 @@ function bookJson(bookId, buildId) {
     const long = (n) => `Сцена ${n}: достаточно длинный текст повествования, чтобы обойтись без режима добивки коротких фраз.`;
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { instruction: 'calm male narrator' } },
+        voices: { narrator: { timbre: 'calm male narrator', manner: '' } },
         characters: [],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
@@ -127,6 +128,10 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         });
         routes.mountInternal(app);
         mountBookRoutes(app, routes);
+        require('../src/orchestration-v2/voice-routes').mountVoiceRoutes(app, {
+            host, editorModel: { read: (id) => books.get(id) || null, commit: () => {} },
+            bookRepo: require('../src/storage/postgres/repositories/book-repo'), getPool, log: () => {},
+        });
         server.removeAllListeners('request');
         server.on('request', app);
     }
@@ -175,6 +180,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         bookId = `${stamp}-${crypto.randomBytes(3).toString('hex')}`;
         buildId = `bld-${bookId}`;
         books.set(bookId, bookJson(bookId, buildId));
+        lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
         bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = $1`, [workerId]);
@@ -459,20 +465,116 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         }
     });
 
-    it('payload аудио-чанка = workflow старого пути (тот же buildSegmentWorkflow, байт-в-байт)', async () => {
-        const provider = require('@animastor/generation').comfyuiProvider;
-        const sent = [];
-        const origGenerate = provider.generate;
-        provider.generate = async (req) => { sent.push(req.workflow); return { sent: true }; };
-        try {
-            const generation = require('../src/audio/generation');
-            const s = require('../src/book').collectScenes(books.get(bookId)).find((x) => x.scene_id === 'sc-1');
-            const r2 = createMockRedis();
-            await generation.generateSceneAudio(r2, s, books.get(bookId), buildId, bookId, 'disp-1');
-        } finally { provider.generate = origGenerate; }
-        await runScene('ch-1', 'sc-1');
+    // VOICE_REFERENCES.md: a chunk is cloned from the narrator's LOCKED reference —
+    // the task carries LoadAudio(vref_<sha>.wav) and the file as a job input (by link)
+    it('аудио-чанк: workflow = buildSegmentWorkflow (клон с референса), референс приходит input_files по ссылке, sha256 сходится', async () => {
+        const ref = lockReference(books.get(bookId), config.OUTPUT_DIR);
+        const r = await runScene('ch-1', 'sc-1');
+        expect(r.status).to.equal(200);
         const t = (await worker.claim()).body.task;
-        expect(sent).to.have.length(1);
-        expect(JSON.stringify(t.params)).to.equal(JSON.stringify(sent[0]));
+        const generation = require('../src/audio/generation');
+        const s = require('../src/book').collectScenes(books.get(bookId)).find((x) => x.scene_id === 'sc-1');
+        const seg = require('../src/audio/segments').buildSegments(s)[0];
+        const built = generation.buildSegmentWorkflow(seg, s, books.get(bookId), host.voiceRefs());
+        expect(JSON.stringify(t.params)).to.equal(JSON.stringify(built.workflow));
+        expect(t.params['90'].inputs.audio).to.equal(ref.name);
+        expect(Object.values(t.params).map((n) => n.class_type)).to.not.include('Qwen3TTSVoiceDesign');
+        expect(t.input_files.map((f) => [f.name, f.sha256])).to.deep.equal([[ref.name, ref.sha256]]);
+        const got = await origFetch(t.input_files[0].url, { headers: { authorization: `Bearer ${t.upload_token}` } });
+        expect(got.status).to.equal(200);
+        expect(crypto.createHash('sha256').update(Buffer.from(await got.arrayBuffer())).digest('hex')).to.equal(ref.sha256);
+    });
+
+    it('нет закреплённого референса / sha256 не совпал → 409 voice_reference_required, работ нет (без фолбэка)', async () => {
+        delete books.get(bookId).voices.narrator.reference;
+        const r1 = await runScene('ch-1', 'sc-1');
+        expect(r1.status).to.equal(409);
+        expect(r1.body).to.include({ code: 'voice_reference_required' });
+        expect(r1.body.character_ids).to.deep.equal(['narrator']);
+        expect(r1.body.reasons).to.deep.equal({ narrator: 'missing' });
+        const ref = lockReference(books.get(bookId), config.OUTPUT_DIR);
+        fs.appendFileSync(ref.path, Buffer.from([0, 0]));          // the file changed after locking
+        const r2 = await runScene('ch-1', 'sc-1');
+        expect(r2.status).to.equal(409);
+        expect(r2.body.reasons).to.deep.equal({ narrator: 'sha_mismatch' });
+        expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId])).to.equal(0);
+    });
+
+    // ── VOICE_REFERENCES.md: candidates → worker → strict check → lock ──
+    function candidateWav(meta) {
+        const base = toneWav(9);
+        const text = Buffer.concat([Buffer.from(JSON.stringify(meta), 'utf8'), Buffer.from([0])]);
+        const t2 = text.length % 2 ? Buffer.concat([text, Buffer.from([0])]) : text;
+        const icmt = Buffer.concat([Buffer.from('ICMT'), Buffer.from(Uint32Array.of(t2.length).buffer), t2]);
+        const body = Buffer.concat([Buffer.from('INFO'), icmt]);
+        const list = Buffer.concat([Buffer.from('LIST'), Buffer.from(Uint32Array.of(body.length).buffer), body]);
+        const out = Buffer.concat([base, list]);
+        out.writeUInt32LE(out.length - 8, 4);
+        return out;
+    }
+
+    it('референсы голоса: кандидаты по явной команде → воркер → строгая сверка → закрепление; «Очистить кэш» не трогает voices/', async () => {
+        const b = books.get(bookId);
+        b.book = { language: 'ru' };
+        b.voices.anna = { timbre: 'Warm female voice.', manner: 'Teasing.', timbre_source: 'user' };
+        const phrase = require('../ai/voice-reference-phrases.json').ru.conversational.text;
+
+        expect((await api('POST', `/api/v1/book/${bookId}/voices/references/candidates`, { character_ids: ['anna'] })).body.code).to.equal('no_user_action');
+        expect((await api('POST', `/api/v1/book/${bookId}/voices/references/candidates`, { character_ids: ['narrator'], client_action: { action_id: 'x0' } })).body.code).to.equal('reference_locked');
+        const c = await api('POST', `/api/v1/book/${bookId}/voices/references/candidates`, { character_ids: ['anna'], count: 2, client_action: { action_id: 'v1' } });
+        expect(c.status).to.equal(200);
+        expect(c.body.summary.jobs_created).to.equal(2);
+
+        let list = (await api('GET', `/api/v1/book/${bookId}/voices/references`)).body;
+        const anna = () => list.voices.find((v) => v.id === 'anna');
+        expect(anna().reference_status).to.equal('missing');
+        expect(anna().design_description).to.equal('Warm female voice.');      // a character: timbre only
+        expect(anna().candidates.map((x) => x.status)).to.deep.equal(['pending', 'pending']);
+        expect(anna().phrase.text).to.equal(phrase);
+
+        const t1 = (await worker.claim()).body.task;
+        const t2 = (await worker.claim()).body.task;
+        for (const t of [t1, t2]) {
+            expect(t.kind).to.equal('voice_reference');
+            expect(t.params['1009'].class_type).to.equal('SaveAudioAnimastorReference');
+            expect(t.params['71'].inputs).to.include({ text: phrase, voice_instruction: 'Warm female voice.', language: 'Russian' });
+        }
+        expect(t1.params['71'].inputs.seed).to.not.equal(t2.params['71'].inputs.seed);
+        // case / punctuation / ё differ → still equal after normalisation; one changed word → failed
+        const ok = phrase.toUpperCase().replace(/[.,]/g, '').replace(/е/g, 'ё');
+        const bad = phrase.replace('окна', 'двери');
+        expect((await worker.put(t1, candidateWav({ asr_transcript: ok, verification_model: 'faster-whisper-small', words: [{ w: 'x', start: 0, end: 0.2, p: 0.9 }] }))).status).to.equal(200);
+        expect((await worker.put(t2, candidateWav({ asr_transcript: bad, verification_model: 'faster-whisper-small' }))).status).to.equal(200);
+
+        list = (await api('GET', `/api/v1/book/${bookId}/voices/references`)).body;
+        const byJob = (t) => anna().candidates.find((x) => x.candidate_id === t.unit_key);
+        const good = byJob(t1); const failed = byJob(t2);
+        expect(good).to.include({ status: 'ready', verification: 'passed', source: 'designed', duration_sec: 9, comparison_policy_version: 1, verification_model: 'faster-whisper-small', asr_transcript: ok });
+        expect(good.phrase_id).to.equal('ru-conversational-1');
+        expect(failed.verification).to.equal('failed');
+        expect(failed.verification_problems).to.include('transcript_mismatch');
+        // stored canonical: LIST cut, sha256 = the stored bytes
+        const stored = fs.readFileSync(path.join(config.OUTPUT_DIR, buildId, 'voices', 'anna', `${t1.unit_key}.wav`));
+        const vr = require('../src/audio/voice-references');
+        expect(vr.parseWavMeta(stored)).to.equal(null);
+        expect(vr.sha256(stored)).to.equal(good.sha256);
+        const audio = await origFetch(`${base}/api/v1/book/${bookId}/voices/anna/references/candidates/${t1.unit_key}/audio`);
+        expect(audio.headers.get('content-type')).to.equal('audio/wav');
+
+        expect((await api('POST', `/api/v1/book/${bookId}/voices/anna/reference`, { candidate_id: t2.unit_key })).body.code).to.equal('candidate_not_verified');
+        const lock = await api('POST', `/api/v1/book/${bookId}/voices/anna/reference`, { candidate_id: t1.unit_key });
+        expect(lock.status).to.equal(200);
+        expect(b.voices.anna.reference).to.include({ file: `voices/anna/${t1.unit_key}.wav`, ref_text: phrase, source: 'designed', sha256: good.sha256, verification: 'passed', locked: true });
+        expect(b.voices.anna.reference.seed).to.equal(t1.params['71'].inputs.seed);
+        expect((await api('DELETE', `/api/v1/book/${bookId}/voices/anna/references/candidates/${t1.unit_key}`)).body.code).to.equal('candidate_locked');
+        expect((await api('DELETE', `/api/v1/book/${bookId}/voices/anna/references/candidates/${t2.unit_key}`)).status).to.equal(200);
+
+        // В3: cache clear keeps voices/
+        fs.writeFileSync(path.join(config.OUTPUT_DIR, buildId, 'generated.mp3'), 'x');
+        await api('DELETE', `/api/v1/book/${bookId}/cache`);
+        expect(fs.existsSync(path.join(config.OUTPUT_DIR, buildId, 'voices', 'anna', `${t1.unit_key}.wav`))).to.equal(true);
+
+        expect((await api('DELETE', `/api/v1/book/${bookId}/voices/anna/reference`)).status).to.equal(200);
+        expect(b.voices.anna).to.not.have.property('reference');
     });
 });

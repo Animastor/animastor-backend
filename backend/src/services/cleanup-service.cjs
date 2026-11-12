@@ -6,6 +6,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { clearBuildDirKeepingVoices } = require('../utils/build-dir');
 
 
 module.exports = function(redis, config, { log }) {
@@ -67,7 +68,8 @@ module.exports = function(redis, config, { log }) {
 
         if (fs.existsSync(buildPath)) {
             try {
-                fs.rmSync(buildPath, { recursive: true, force: true });
+                // VOICE_REFERENCES.md: voices/ is kept — removed only with the book
+                clearBuildDirKeepingVoices(buildPath);
                 log('🗑 Cleaned up build:', buildId);
                 return { ok: true, reason: 'success', path: buildPath };
             } catch (err) {

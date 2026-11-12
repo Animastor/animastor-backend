@@ -5,7 +5,6 @@ const {
     buildSegments,
     splitTextIntoChunks,
     splitDialogueIntoChunks,
-    narratorVoice,
 } = require('../src/audio/segments');
 
 // Silence helpers.log during tests — only show warnings
@@ -599,36 +598,4 @@ describe('Audio Segments', () => {
         });
     });
 
-    // ═══════════════════════════════════════════════════════
-    // narratorVoice
-    // ═══════════════════════════════════════════════════════
-    describe('narratorVoice', () => {
-        it('returns narrator voice instruction from voices.narrator', () => {
-            const scene = {};
-            const book = {
-                voices: { narrator: { instruction: 'calm russian male' } }
-            };
-            expect(narratorVoice(scene, book)).to.equal('calm russian male');
-        });
-
-        it('falls back to bible.narrator.voice.instruction', () => {
-            const scene = {};
-            const book = {
-                bible: { narrator: { voice: { instruction: 'deep female' } } }
-            };
-            expect(narratorVoice(scene, book)).to.equal('deep female');
-        });
-
-        it('uses scene audio voice override', () => {
-            const scene = { audio: { voice: 'special_narrator' } };
-            const book = {
-                characters: [{ id: 'special_narrator', voice: { instruction: 'special tone' } }]
-            };
-            expect(narratorVoice(scene, book)).to.equal('special tone');
-        });
-
-        it('returns empty string when no voice found', () => {
-            expect(narratorVoice({}, {})).to.equal('');
-        });
-    });
 });

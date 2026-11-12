@@ -53,8 +53,12 @@ describe('Audio assembly resolution (generation.js)', () => {
 
     it('buildMergedDialogueWorkflow writes default_instruct from the profile defaults', () => {
         const segments = [{ segment_type: 'dialogue', text: 'berlioz: Привет, Бездомный.' }];
-        const wf = buildMergedDialogueWorkflow(segments, { characters: [] });
-        expect(wf).to.not.equal(null);
+        // VOICE_REFERENCES.md: the speaker (an episodic one → narrator voice) is cloned from its reference
+        const voiceRefs = { referenceInput: (_b, id) => ({ voice_id: id, name: `vref_${id}.wav`, path: `/x/${id}.wav`, sha256: 'a'.repeat(64), bytes: 1, ref_text: 'Фраза.' }) };
+        const built = buildMergedDialogueWorkflow(segments, { characters: [] }, { payload: {} }, voiceRefs);
+        expect(built).to.not.equal(null);
+        const wf = built.workflow;
+        expect(built.input_files.map((f) => f.name)).to.deep.equal(['vref_narrator.wav']);
         // Profile default is '' → node 108 default_instruct must be ''
         expect(wf["108"].inputs.default_instruct).to.equal('');
         // Script still carries the dialogue text

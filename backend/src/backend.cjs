@@ -726,6 +726,15 @@ routeDeps.bookDeletion.configureOrchV2({
 });
 
 require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, bookDiff, windowGenerator });
+// Voice references (VOICE_REFERENCES.md) — orchestration v2 only; the book
+// guard of /api/v1/book/:bookId applies (registered above).
+require('./orchestration-v2/voice-routes').mountVoiceRoutes(app, {
+    host: orchV2Host,
+    editorModel: routeDeps.editorModel,
+    bookRepo: require('./storage/postgres/repositories/book-repo'),
+    getPool: () => storage.postgres.getPool(),
+    log: utils.log,
+});
 // Player (playback) routes — registered through the @animastor/player
 // package API (the playback HTTP contour lives in
 // packages/animastor-player; the host must not require package internals —

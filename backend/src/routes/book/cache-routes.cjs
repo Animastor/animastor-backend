@@ -15,6 +15,8 @@
 // purgeAssistantForBook port — this route must not know the Assistant's
 // storage details.
 
+const { clearBuildDirKeepingVoices } = require('../../utils/build-dir');
+
 module.exports = function registerCacheRoutes(app, ctx) {
     const { redis, config, storage, path, fs, getAllChunks, getChunk, cleanBookRedisKeys, purgeAssistantForBook, log } = ctx;
 
@@ -77,7 +79,8 @@ module.exports = function registerCacheRoutes(app, ctx) {
             for (const buildId of buildIds) {
                 const buildPath = path.join(OUTPUT_DIR, buildId);
                 if (fs.existsSync(buildPath)) {
-                    try { fs.rmSync(buildPath, { recursive: true, force: true }); } catch (e) {
+                    // VOICE_REFERENCES.md: voices/ (locked / uploaded references) survives a cache clear
+                    try { clearBuildDirKeepingVoices(buildPath, fs); } catch (e) {
                         console.warn('[CACHE] Failed to delete build dir:', buildPath);
                     }
                 }

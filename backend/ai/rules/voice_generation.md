@@ -40,7 +40,12 @@ Use the following chain, from highest to lowest priority:
 
 ## Instructions
 - For each character identified as a dialogue participant, write a voice description (1-3 sentences).
-- Focus on: tone, pitch, pace, emotion, accent, speech patterns.
+- The description becomes the character's PERMANENT voice: a neutral reference sample is synthesised
+  from it once and every line is cloned from that sample (VOICE_REFERENCES). Describe the constant
+  TIMBRE only: pitch, register, texture, age, pace, accent.
+- NO situational or plot directions: no conditions ("when …", "if …"), no quoted words or lines,
+  no emotions tied to a moment, no addressee-dependent changes. Such sentences are removed automatically.
+- Focus on: tone, pitch, pace, accent, constant speech manner.
 - Use the character's appearance (age, build, face, impression) as the PRIMARY basis for voice inference when no explicit voice is described.
 - Use dialogue lines from the source text to identify speech patterns, vocabulary, and emotional range.
 - Voice descriptions must be in ENGLISH (they feed into an English-only TTS model).
@@ -48,7 +53,7 @@ Use the following chain, from highest to lowest priority:
 - Be vivid and specific. Avoid generic phrases like "A character voice", "natural intonation", or "matching the character".
 
 ## Examples of good voice descriptions
-- "Deep, resonant baritone, slow and deliberate like flowing honey. Slightly sarcastic edge in dialogue. Native Russian pronunciation."
+- "Deep, resonant baritone, slow and deliberate like flowing honey. Slightly dry, sarcastic manner. Native Russian pronunciation."
 - "High-pitched and nervous, words tumbling out in a rush. Often trails off at the end of sentences. Native English pronunciation."
 - "Warm, motherly alto with a gentle, reassuring tone. Speaks softly but with quiet authority. Native Russian pronunciation."
 - "Sharp, clipped, impatient. Every word precise and cutting. Professional demeanor, slightly condescending. Native English pronunciation."

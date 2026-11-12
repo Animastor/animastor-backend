@@ -27,6 +27,7 @@ const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
 const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { lockReference } = require('./helpers/voice-reference-fixture');
 
 const HUB_KEY = 'test-hub-key-orch-v2-img';
 const SECRET = 'orch-v2-image-test-upload-secret-0123456789';
@@ -64,7 +65,7 @@ function bookJson(bookId, buildId) {
     const long = (n) => `Сцена ${n}: достаточно длинный текст повествования, чтобы обойтись без режима добивки коротких фраз.`;
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { instruction: 'calm male narrator' } },
+        voices: { narrator: { timbre: 'calm male narrator', manner: '' } },
         characters: [],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
@@ -212,6 +213,7 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         bookId = `${stamp}-${crypto.randomBytes(3).toString('hex')}`;
         buildId = `bld-${bookId}`;
         books.set(bookId, bookJson(bookId, buildId));
+        lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
         bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = ANY($1)`, [[workerId, audioWorkerId]]);

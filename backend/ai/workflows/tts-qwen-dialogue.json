@@ -1,33 +1,17 @@
 {
   "71": {
     "inputs": {
-      "text": "Это тестовое предложение для согласования голоса.",
-      "voice_instruction": "A calm, warm male voice of a thoughtful Russian writer. \nLow and soft, gentle and reflective, with quiet интеллигент depth. \nSlow, careful speech with natural pauses. \nWhen the interlocutor is a close friend, the voice becomes warmer and more alive, tender and intimate.",
-      "language": "Russian",
-      "output_mode": "Concatenate (Merge)",
-      "seed": 588760720740241,
-      "max_new_tokens": 2048,
-      "temperature": 0.9,
-      "top_p": 1,
-      "top_k": 50,
-      "repetition_penalty": 1.05,
-      "subtalker_temperature": 0.9,
-      "subtalker_top_p": 1,
-      "subtalker_top_k": 50,
-      "model_obj": [
-        "78",
-        0
-      ]
+      "audio": "vref_speaker1.wav"
     },
-    "class_type": "Qwen3TTSVoiceDesign",
+    "class_type": "LoadAudio",
     "_meta": {
-      "title": "Qwen3-TTS Voice Design 🎨"
+      "title": "Voice reference (speaker 1)"
     }
   },
   "73": {
     "inputs": {
       "x_vector_only": false,
-      "ref_text": "Это тестовое предложение для согласования голоса.",
+      "ref_text": "Reference transcript.",
       "model_obj": [
         "79",
         0
@@ -39,7 +23,7 @@
     },
     "class_type": "Qwen3TTSVoiceClonePrompt",
     "_meta": {
-      "title": "Qwen3-TTS Clone Prompt 🧠"
+      "title": "Qwen3-TTS Clone Prompt 🧠 (speaker 1)"
     }
   },
   "74": {
@@ -106,19 +90,6 @@
       "title": "Qwen3-TTS Advanced Dialogue Engine 🎭"
     }
   },
-  "78": {
-    "inputs": {
-      "model_repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-      "download_source": "ModelScope",
-      "precision": "bf16",
-      "attn_mode": "sdpa",
-      "auto_download": true
-    },
-    "class_type": "Qwen3TTSLoader",
-    "_meta": {
-      "title": "Qwen3-TTS Loader 🚀"
-    }
-  },
   "79": {
     "inputs": {
       "model_repo": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -134,33 +105,17 @@
   },
   "80": {
     "inputs": {
-      "text": "Это тестовое предложение для согласования голоса.",
-      "voice_instruction": "A mature Russian woman's voice, warm and expressive. \nMedium-low female voice, confident and elegant. \nClear articulation, emotional depth, calm strength and intelligence.",
-      "language": "Russian",
-      "output_mode": "Concatenate (Merge)",
-      "seed": 304876050292178,
-      "max_new_tokens": 2048,
-      "temperature": 0.9,
-      "top_p": 1,
-      "top_k": 50,
-      "repetition_penalty": 1.05,
-      "subtalker_temperature": 0.9,
-      "subtalker_top_p": 1,
-      "subtalker_top_k": 50,
-      "model_obj": [
-        "78",
-        0
-      ]
+      "audio": "vref_speaker2.wav"
     },
-    "class_type": "Qwen3TTSVoiceDesign",
+    "class_type": "LoadAudio",
     "_meta": {
-      "title": "Qwen3-TTS Voice Design 🎨"
+      "title": "Voice reference (speaker 2)"
     }
   },
   "81": {
     "inputs": {
       "x_vector_only": false,
-      "ref_text": "Это тестовое предложение для согласования голоса.",
+      "ref_text": "Reference transcript.",
       "model_obj": [
         "79",
         0
@@ -172,38 +127,22 @@
     },
     "class_type": "Qwen3TTSVoiceClonePrompt",
     "_meta": {
-      "title": "Qwen3-TTS Clone Prompt 🧠"
+      "title": "Qwen3-TTS Clone Prompt 🧠 (speaker 2)"
     }
   },
   "82": {
     "inputs": {
-      "text": "Это тестовое предложение для согласования голоса.",
-      "voice_instruction": "A calm, warm male voice of a thoughtful Russian writer. Low and soft, gentle and reflective. Native Russian pronunciation.",
-      "language": "Russian",
-      "output_mode": "Concatenate (Merge)",
-      "seed": 412857391048253,
-      "max_new_tokens": 2048,
-      "temperature": 0.9,
-      "top_p": 1,
-      "top_k": 50,
-      "repetition_penalty": 1.05,
-      "subtalker_temperature": 0.9,
-      "subtalker_top_p": 1,
-      "subtalker_top_k": 50,
-      "model_obj": [
-        "78",
-        0
-      ]
+      "audio": "vref_speaker3.wav"
     },
-    "class_type": "Qwen3TTSVoiceDesign",
+    "class_type": "LoadAudio",
     "_meta": {
-      "title": "Qwen3-TTS Voice Design 🎨"
+      "title": "Voice reference (speaker 3)"
     }
   },
   "83": {
     "inputs": {
       "x_vector_only": false,
-      "ref_text": "Это тестовое предложение для согласования голоса.",
+      "ref_text": "Reference transcript.",
       "model_obj": [
         "79",
         0
@@ -215,12 +154,12 @@
     },
     "class_type": "Qwen3TTSVoiceClonePrompt",
     "_meta": {
-      "title": "Qwen3-TTS Clone Prompt 🧠"
+      "title": "Qwen3-TTS Clone Prompt 🧠 (speaker 3)"
     }
   },
   "108": {
     "inputs": {
-      "script": "Анна: Борис… ты пришёл. Я думала, ты уже забыл обо мне.\nБорис: Забыть можно, но я — не забыл. Я искал тебя повсюду.\nАнна: У меня ничего не осталось… ни прежней жизни, ни имени.\nБорис: У тебя осталась правда, которую ты написала… и у тебя есть я.\nАнна: Иногда мне кажется, что ночь добрее дня.\nБорис: Пусть тогда ночь сохранит нас. Мы не будем бояться её вместе.\nАнна: Ты говоришь так, будто покой возможен.\nБорис: С тобой… он уже есть.",
+      "script": "Speaker1: Пример реплики.\nSpeaker2: Ответ.",
       "default_instruct": ""
     },
     "class_type": "Qwen3TTSScriptProcessor",

@@ -184,46 +184,57 @@ describe('semantic binding API (connector-driven workflow assembly)', () => {
     it('applyValue patches the bound node field via the connector', () => {
         const wf = provider.loadWorkflow(provider.WORKFLOW_NAMES.narration);
         expect(provider.applyValue(wf, provider.WORKFLOW_NAMES.narration, 'narrationText', 'строка')).to.equal(true);
-        expect(wf['108'].inputs.text).to.equal('строка');
+        expect(wf['108'].inputs.target_text).to.equal('строка');
     });
 
     it('applyValue returns false without a connector (hard invariant, not a recoverable state)', () => {
         expect(provider.applyValue({}, 'workflow-without-connector', 'anyKey', 1)).to.equal(false);
     });
 
-    it('assembleMergedDialogueWorkflow reproduces the pre-S-3 node wiring (1 speaker)', () => {
+    // VOICE_REFERENCES.md: every speaker slot = LoadAudio(locked reference) → VoiceClonePrompt
+    it('assembleMergedDialogueWorkflow: 1 speaker → slot 1 from its reference, slots 2–3 REMOVED, no VoiceDesign', () => {
         const wf = provider.assembleMergedDialogueWorkflow({
             script: 'berlioz: Привет.',
             defaultInstruct: 'instruct',
-            speakers: [{ name: 'berlioz', voice: 'голос' }],
+            speakers: [{ name: 'berlioz', referenceFile: 'vref_aa.wav', referenceText: 'Фраза.' }],
         });
         expect(wf['108'].inputs).to.deep.equal({ script: 'berlioz: Привет.', default_instruct: 'instruct' });
-        expect(wf['71'].inputs.voice_instruction).to.equal('голос');
-        // untouched slots keep their template values
-        expect(wf['80'].inputs.voice_instruction).to.not.equal('голос');
-        expect(wf['74'].inputs.role_name_1).to.equal('berlioz');
-        expect(wf['74'].inputs.prompt_1).to.deep.equal(['73', 0]);
-        expect(wf['74'].inputs.role_name_2).to.equal('Speaker2');
-        expect(wf['74'].inputs.prompt_2).to.deep.equal(['81', 0]);
+        expect(wf['71']).to.include({ class_type: 'LoadAudio' });
+        expect(wf['71'].inputs.audio).to.equal('vref_aa.wav');
+        expect(wf['73'].inputs.ref_text).to.equal('Фраза.');
+        for (const id of ['80', '81', '82', '83']) expect(wf).to.not.have.property(id);
+        expect(wf['74'].inputs).to.deep.equal({ role_name_1: 'berlioz', prompt_1: ['73', 0] });
+        expect(Object.values(wf).map((n) => n.class_type)).to.not.include('Qwen3TTSVoiceDesign');
+        expect(Object.values(wf).filter((n) => n.class_type === 'Qwen3TTSLoader').map((n) => n.inputs.model_repo))
+            .to.deep.equal(['Qwen/Qwen3-TTS-12Hz-1.7B-Base']);
     });
 
-    it('assembleMergedDialogueWorkflow wires all three slots (3 speakers, narrator fallback)', () => {
-        const wf = provider.assembleMergedDialogueWorkflow({
-            script: 'a: x\nb: y\nc: z',
-            defaultInstruct: '',
-            speakers: [
-                { name: 'a', voice: 'va' },
-                { name: 'b', voice: '' },   // empty voice → template default stays
-                { name: 'c', voice: 'vc' },
-            ],
-        });
-        expect(wf['71'].inputs.voice_instruction).to.equal('va');
-        expect(wf['80'].inputs.voice_instruction).to.not.equal('');
-        expect(wf['82'].inputs.voice_instruction).to.equal('vc');
-        expect(wf['74'].inputs.role_name_1).to.equal('a');
-        expect(wf['74'].inputs.role_name_2).to.equal('b');
+    it('assembleMergedDialogueWorkflow wires all three slots; a speaker without a reference throws', () => {
+        const sp = (n) => ({ name: n, referenceFile: `vref_${n}.wav`, referenceText: `t${n}` });
+        const wf = provider.assembleMergedDialogueWorkflow({ script: 'a: x\nb: y\nc: z', defaultInstruct: '', speakers: [sp('a'), sp('b'), sp('c')] });
+        expect([wf['71'].inputs.audio, wf['80'].inputs.audio, wf['82'].inputs.audio]).to.deep.equal(['vref_a.wav', 'vref_b.wav', 'vref_c.wav']);
+        expect([wf['73'].inputs.ref_text, wf['81'].inputs.ref_text, wf['83'].inputs.ref_text]).to.deep.equal(['ta', 'tb', 'tc']);
         expect(wf['74'].inputs.role_name_3).to.equal('c');
         expect(wf['74'].inputs.prompt_3).to.deep.equal(['83', 0]);
+        expect(() => provider.assembleMergedDialogueWorkflow({ script: 'a: x', defaultInstruct: '', speakers: [{ name: 'a' }] }))
+            .to.throw(/voice reference required/);
+        expect(provider.assembleMergedDialogueWorkflow({ script: '', defaultInstruct: '', speakers: [sp('a'), sp('b'), sp('c'), sp('d')] })).to.equal(null);
+    });
+
+    it('assembleNarrationWorkflow clones the chunk text from the narrator reference in the book language', () => {
+        const wf = provider.assembleNarrationWorkflow({ text: 'Текст главы.', referenceFile: 'vref_n.wav', referenceText: 'Фраза.', language: 'German' });
+        expect(wf['108']).to.include({ class_type: 'Qwen3TTSVoiceClone' });
+        expect(wf['108'].inputs).to.include({ target_text: 'Текст главы.', target_language: 'German' });
+        expect(wf['90'].inputs.audio).to.equal('vref_n.wav');
+        expect(wf['91'].inputs.ref_text).to.equal('Фраза.');
+        expect(wf['79'].inputs.model_repo).to.equal('Qwen/Qwen3-TTS-12Hz-1.7B-Base');
+    });
+
+    it('assembleVoiceReferenceWorkflow: VoiceDesign(description, phrase, seed) → SaveAudioAnimastorReference', () => {
+        const wf = provider.assembleVoiceReferenceWorkflow({ description: 'Warm female.', phrase: 'Фраза шаблона.', language: 'Russian', seed: 42, filenamePrefix: 'voices/anna/c1' });
+        expect(wf['71'].inputs).to.include({ voice_instruction: 'Warm female.', text: 'Фраза шаблона.', language: 'Russian', seed: 42 });
+        expect(wf['1009']).to.include({ class_type: 'SaveAudioAnimastorReference' });
+        expect(wf['1009'].inputs).to.include({ language: 'Russian', whisper_model: 'small', filename_prefix: 'voices/anna/c1' });
     });
 
     it('profileNameFromConnector reads the per-type profile field', () => {

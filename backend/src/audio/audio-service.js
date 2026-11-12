@@ -12,7 +12,7 @@
 //   ffmpeg.js         - runFFmpegMerge, runFFmpegTrim, probeDuration, cutFirstHalf, findQuietestPoint
 //   validation.js     - validateCanonicalAudio, isSceneAudioReady, getAudioDuration
 //   chunks.js         - findExistingSceneChunks, allSceneChunksExist, areSceneAudioChunksReady, makeChunkId, getChunkAudioPath
-//   segments.js       - splitTextIntoChunks, splitDialogueIntoChunks, narratorVoice, padShortText, buildSegments
+//   segments.js       - splitTextIntoChunks, splitDialogueIntoChunks, padShortText, buildSegments
 //   pipeline.js       - buildSceneAudio, createConcatFile, mergeSceneAudioChunks, recoverSceneAudioFromChunks
 //   generation.js     - generateSceneAudio, mergeBookAudio, trimPaddedSceneAudio, trimPaddedAudioBuffer
 //   silence.js        - generateSilentAudio, writeSilentMP3Node
@@ -66,7 +66,6 @@ module.exports = {
     // segments
     splitTextIntoChunks: segments.splitTextIntoChunks,
     splitDialogueIntoChunks: segments.splitDialogueIntoChunks,
-    narratorVoice: segments.narratorVoice,
     padShortText: segments.padShortText,
     buildSegments: segments.buildSegments,
 

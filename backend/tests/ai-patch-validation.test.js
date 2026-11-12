@@ -164,13 +164,13 @@ describe('AI Patch Validation — bundle contract guard', () => {
     it('validateBundleFile reports resource-level errors with details', () => {
         const { validateBundleFile } = require('../src/book/bundle-validator.cjs');
 
-        const ok = validateBundleFile('voices.json', { narrator: { instruction: 'ok' } });
+        const ok = validateBundleFile('voices.json', { narrator: { timbre: 'ok', manner: '' } });
         expect(ok.valid).to.be.true;
 
-        const bad = validateBundleFile('voices.json', { narrator: { instruction: 42 } });
+        const bad = validateBundleFile('voices.json', { narrator: { timbre: 42 } });
         expect(bad.valid).to.be.false;
         expect(bad.errors[0]).to.include('narrator');
-        expect(bad.errors[0]).to.include('instruction');
+        expect(bad.errors[0]).to.include('timbre');
 
         const nonSerializable = validateBundleFile('book.json', { structure: { chapters_order: [] }, bad: undefined });
         expect(nonSerializable.valid).to.be.true; // undefined keys are dropped by stringify — legal

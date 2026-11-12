@@ -30,12 +30,15 @@ const bookFlag = require('./book-flag');
 const { createAudioPorts } = require('./audio-ports');
 const { createImagePorts } = require('./image-ports');
 const { createVideoPorts } = require('./video-ports');
+const { createVoicePorts } = require('./voice-ports');
+const { createVoiceReferences } = require('../audio/voice-references');
 
 /** job kind → the host port family that owns it (ADR §5). */
 const PORT_OF_KIND = Object.freeze({
     audio_chunk: 'audio', audio_merge: 'audio',
     iu_image: 'image',
     video_group: 'video', video_merge: 'video',
+    voice_reference: 'voice',        // 1.4.0 — VOICE_REFERENCES.md
 });
 function unknownKind(kind) {
     return Object.assign(new Error(`orchestration v2: unknown job kind ${JSON.stringify(kind)}`), { error_class: 'deterministic' });
@@ -66,6 +69,8 @@ function createOrchV2Host(o) {
     const env = o.env || process.env;
     const log = o.log || ((m) => console.log(m));
     const state = { enabled: false, reason: 'not_started', orch: null, listener: null, started: false };
+    // VOICE_REFERENCES.md: the voice-reference store of the content folder (OUTPUT_DIR/build_<id>/voices)
+    state.voiceRefs = o.outputDir ? createVoiceReferences({ outputDir: o.outputDir, log }) : null;
 
     const requested = flagOn(String(env.ORCH_V2_ENABLED || '').toLowerCase());
     const secret = env.ORCH_V2_UPLOAD_SECRET || '';
@@ -87,11 +92,13 @@ function createOrchV2Host(o) {
         const gen = o.gen || require('@animastor/orchestration').gen;
         const pool = o.getPool();
         await gen.migrate(pool);
-        const audio = createAudioPorts({ log, deps: { book: o.book, ...((o.portOverrides && o.portOverrides.audioDeps) || {}) } });
+        const voiceRefs = (o.portOverrides && o.portOverrides.voiceRefs) || state.voiceRefs;
+        const audio = createAudioPorts({ log, deps: { book: o.book, voiceRefs, ...((o.portOverrides && o.portOverrides.audioDeps) || {}) } });
+        const voice = createVoicePorts({ log, deps: { book: o.book, voiceRefs, outputDir: o.outputDir, ...((o.portOverrides && o.portOverrides.voiceDeps) || {}) } });
         const image = createImagePorts({ log, deps: { book: o.book, ...((o.portOverrides && o.portOverrides.imageDeps) || {}) } });
         const video = createVideoPorts({ log, deps: { book: o.book, imagePorts: image, ...((o.portOverrides && o.portOverrides.videoDeps) || {}) } });
         state.coreHasPngCheck = !!(gen.media && typeof gen.media.inspectPng === 'function');
-        const families = { audio, image, video };
+        const families = { audio, image, video, voice };
         const byKind = (kind) => {
             const f = PORT_OF_KIND[kind];
             if (!f) throw unknownKind(kind);
@@ -102,6 +109,8 @@ function createOrchV2Host(o) {
         const numEnv = (name, dflt) => (env[name] !== undefined && env[name] !== '' && Number.isFinite(Number(env[name])) ? Number(env[name]) : dflt);
         const ports = {
             planUnits: async (bookRef, scope, layer, planCtx) => {
+                // 1.4.0: a voice_reference command plans voice candidates only
+                if (planCtx && planCtx.kind === 'voice_reference') return voice.planUnits(bookRef, scope, layer);
                 if (layer === 'audio') return audio.planUnits(bookRef, scope, layer);
                 if (layer === 'image') {
                     const why = imageUnsupportedReason();
@@ -123,7 +132,7 @@ function createOrchV2Host(o) {
                 return f.runLocal(job);
             },
             onArtifactPlaced: (job, finalPath, ctx) => byKind(job.kind).onArtifactPlaced(job, finalPath, ctx),
-            inputFiles: (job) => (PORT_OF_KIND[job.kind] === 'video' ? video.inputFiles(job) : []),
+            inputFiles: (job) => byKind(job.kind).inputFiles ? byKind(job.kind).inputFiles(job) : [],
             validateResult: gen.defaults.createDefaultValidateResult({
                 rmsThresholdDbfs: numEnv('ORCH_V2_SILENCE_DBFS', gen.media.DEFAULT_RMS_THRESHOLD_DBFS),
                 minLumaStddev: numEnv('ORCH_V2_MIN_LUMA_STDDEV', gen.media.DEFAULT_MIN_LUMA_STDDEV),
@@ -193,6 +202,7 @@ function createOrchV2Host(o) {
         imageUnsupportedReason,
         videoUnsupportedReason,
         orch: () => state.orch,
+        voiceRefs: () => state.voiceRefs,
         progress: () => state.progress,
         uploadUrl: (jobId, attempt) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/result?attempt=${attempt}`,
         errorUrl: (jobId, attempt) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/error?attempt=${attempt}`,
