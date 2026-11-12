@@ -58,6 +58,9 @@ function pipInstallRequirements(io, { root, reqPath, python, torchSpec, log = nu
  * retry a broken deps state would never heal).
  * @returns {{ status: 'installed'|'blocked'|'failed', origin?, reason?, directory? }}
  */
+/** marker written into a node installed from a repository subdirectory (probe reads it) */
+const SOURCE_MARKER = '.animastor-source.json';
+
 function installCustomNode(io, { root, dep, python = null, torchSpec = null, retryDeps = false, log = null }) {
     const src = (dep.install && dep.install.source) || {};
     const dirName = (dep.install && dep.install.directory) || dep.name;
@@ -84,15 +87,51 @@ function installCustomNode(io, { root, dep, python = null, torchSpec = null, ret
         return { status: 'installed', origin: 'pre-existing', directory: dirName, reason: 'already present — kept as-is' };
     }
 
-    let r = io.exec('git', ['clone', src.repository, target]);
-    if (r.code !== 0) {
-        return { status: 'failed', reason: `git clone ${src.repository} failed: ${String(r.stderr || r.error).slice(-300)}` };
-    }
-
-    if (src.commit) {
-        r = io.exec('git', ['-C', target, 'checkout', src.commit]);
+    if (src.subdirectory) {
+        // 0.2.11 — a node that lives in a SUBDIRECTORY of a repository (e.g.
+        // animastor-worker/comfyui-nodes/animastor-voice-ref): clone OUTSIDE
+        // custom_nodes (ComfyUI would load the whole checkout as a node),
+        // check out the pin, copy the subdirectory, record the source.
+        const sub = String(src.subdirectory);
+        if (path.isAbsolute(sub) || sub.split(/[\\/]/).includes('..')) {
+            return { status: 'blocked', reason: `bad subdirectory ${JSON.stringify(sub)} for ${dep.id}` };
+        }
+        if (!src.commit) {
+            return { status: 'blocked', reason: `${dep.id}: a subdirectory source needs a pinned commit` };
+        }
+        const staging = path.join(root, '.animastor-node-sources', dirName);
+        io.fs.rmSync(staging, { recursive: true, force: true });
+        io.fs.mkdirSync(path.dirname(staging), { recursive: true });
+        let c = io.exec('git', ['clone', src.repository, staging]);
+        if (c.code !== 0) {
+            io.fs.rmSync(staging, { recursive: true, force: true });
+            return { status: 'failed', reason: `git clone ${src.repository} failed: ${String(c.stderr || c.error).slice(-300)}` };
+        }
+        c = io.exec('git', ['-C', staging, 'checkout', src.commit]);
+        if (c.code !== 0) {
+            io.fs.rmSync(staging, { recursive: true, force: true });
+            return { status: 'failed', reason: `git checkout ${src.commit} failed: ${String(c.stderr).slice(-300)}` };
+        }
+        const from = path.join(staging, sub);
+        if (!io.fs.isDirectory(from)) {
+            io.fs.rmSync(staging, { recursive: true, force: true });
+            return { status: 'failed', reason: `subdirectory ${sub} not found in ${src.repository}@${src.commit}` };
+        }
+        c = io.exec('cp', ['-a', from, target]);
+        io.fs.rmSync(staging, { recursive: true, force: true });
+        if (c.code !== 0) return { status: 'failed', reason: `copy of ${sub} failed: ${String(c.stderr || c.error).slice(-300)}` };
+        io.fs.writeFileSync(path.join(target, SOURCE_MARKER), JSON.stringify({ repository: src.repository, commit: src.commit, subdirectory: sub }, null, 2) + '\n');
+    } else {
+        let r = io.exec('git', ['clone', src.repository, target]);
         if (r.code !== 0) {
-            return { status: 'failed', reason: `git checkout ${src.commit} failed: ${String(r.stderr).slice(-300)}` };
+            return { status: 'failed', reason: `git clone ${src.repository} failed: ${String(r.stderr || r.error).slice(-300)}` };
+        }
+
+        if (src.commit) {
+            r = io.exec('git', ['-C', target, 'checkout', src.commit]);
+            if (r.code !== 0) {
+                return { status: 'failed', reason: `git checkout ${src.commit} failed: ${String(r.stderr).slice(-300)}` };
+            }
         }
     }
 

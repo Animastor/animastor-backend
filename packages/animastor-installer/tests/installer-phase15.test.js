@@ -161,7 +161,7 @@ describe('Phase 1.5 — installer scenarios', () => {
     describe('scenario 3: clean machine + Audio', () => {
         it('offers narrator + dialogue optional workflows and plans the audio worker', () => {
             const r = resolver.resolveInstallation({ manifests: [AUDIO()], environment: resolver.createEmptyEnvironment(), mode: 'managed' });
-            expect(r.summary.missing_required).to.equal(8); // 2 optional workflows are NOT counted
+            expect(r.summary.missing_required).to.equal(13); // 4 runtime + 2 nodes + 2 model repos + 4 whisper files + worker; 4 optional workflows are NOT counted
             expect(entry(r, 'workflow:tts-qwen-narrator').action).to.equal('install');
             expect(entry(r, 'workflow:tts-qwen-dialogue').action).to.equal('install');
             expect(entry(r, 'worker:audio/qwen-tts').status).to.equal('missing');
@@ -392,10 +392,11 @@ describe('Phase 1.5 — installer scenarios', () => {
                 ...repoFiles('model-repo:qwen3-tts-12hz-1.7b-voicedesign'),
                 ...repoFiles('model-repo:qwen3-tts-12hz-1.7b-base'),
             );
-            env.workflows.push(
-                { path: 'user/default/workflows/animastor/audio/tts-qwen-narrator.json', sha256: '87180aee01288be6e23240b2d873ce2d451f63cf404dec331a3b221bb9f8b8c1' },
-                { path: 'user/default/workflows/animastor/audio/tts-qwen-dialogue.json', sha256: '7dcdc6997d36aaeb1a54e1578c69f0c534be29698c7a7b48813f637c740e69db' }
-            );
+            // VOICE_REFERENCES (2026-11-12): animastor-voice-ref node (subdirectory source) + faster-whisper small
+            env.custom_nodes.push({ directory: 'animastor-voice-ref', repository: 'https://github.com/Animastor/animastor-worker', commit: '6a88ad960e47df9fa6e76e4cce5308d9590297c3' });
+            env.models.push(...AUDIO().dependencies.filter((d) => d.kind === 'model' && /faster-whisper/.test(d.target_dir))
+                .map((d) => ({ path: `${d.target_dir}/${d.filename}`, size_bytes: d.size_bytes_approx, sha256: d.checksum.value })));
+            env.workflows.push(...AUDIO().workflows.artifacts.map((a) => ({ path: `${a.target_dir}/${a.filename}`, sha256: a.baseline_sha256 })));
             env.worker = [env.worker, workerProbe('audio')];
             const r = resolver.resolveInstallation({ manifests: [AUDIO(), IMAGE()], environment: env, mode: 'shared' });
             expect(r.sharing.can_share).to.be.true;

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 (2026-11-12, unpublished)
+
+Voice references (animastor-docs `architecture/VOICE_REFERENCES.md`).
+
+- `assembleMergedDialogueWorkflow({script, defaultInstruct, speakers:[{name, referenceFile, referenceText}]})`:
+  each speaker slot is `LoadAudio(locked reference) → VoiceClonePrompt`; unused slots are removed from
+  the graph; the VoiceDesign loader is gone. Breaking: `speakers[].voice` no longer exists.
+- New: `assembleNarrationWorkflow`, `assembleVoiceReferenceWorkflow`, `assembleVoiceTranscribeWorkflow`,
+  `MAX_DIALOGUE_SPEAKERS`; `WORKFLOW_NAMES.voiceReference` / `voiceTranscribe`.
+- Dirty grammar `book.voices`: audio is dirty only when the LOCKED reference changes (sha256 / ref_text);
+  `timbre` / `manner` edits change no chunk.
+- Depends on `animastor-comfyui-workflow-connector` ^0.2.0 (reference entity types).
+
 ## 0.1.2 (2026-11-10, unpublished)
 
 - Prompt Dependency Registry: explicit unit fields of the behaviour feature —

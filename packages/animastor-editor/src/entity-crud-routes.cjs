@@ -33,6 +33,7 @@ const { chapterId, sceneId, unitId, generateBookId } = require('@animastor/vbook
 // behavior.json schema v2: entries live under behaviors.characters.<id>
 // (rules are untouched by these routes). Legacy v2.1 maps are migrated in place.
 const { behaviorCharacters, removeCharacterBehaviors } = require('@animastor/vbook-runtime/behavior-schema.cjs');
+const voiceModel = require('@animastor/vbook-runtime/voice');
 
 // (redis is not destructured: purge/ownership legs arrive via editorPorts)
 module.exports = function (app, redis, deps) {
@@ -249,12 +250,14 @@ module.exports = function (app, redis, deps) {
                 return res.status(409).json({ error: `Voice "${entityId}" already exists` });
             }
 
-            voices[entityId] = {
-                instruction: body.instruction && String(body.instruction).trim()
-                    ? String(body.instruction).trim()
-                    : '',
-            };
+            // VOICE_REFERENCES.md: a voice is {timbre, manner, timbre_source, reference};
+            // the reference is created later through the voice-reference API only
             oldBook.voices = voices;
+            voiceModel.setCharacterVoiceDescription(oldBook, entityId, {
+                timbre: body.timbre != null ? String(body.timbre) : '',
+                manner: body.manner != null ? String(body.manner) : '',
+                timbre_source: 'user',
+            });
 
             editorModel.commit(oldBook);
             log(`[ADD VOICE] ${bookId}/${entityId} (name=${String(name).trim().slice(0, 40)})`);

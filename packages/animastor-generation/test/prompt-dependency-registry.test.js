@@ -273,16 +273,21 @@ describe('Prompt Dependency Registry', () => {
         describe('book.voices entitySource', () => {
             it('extracts voices map entries with id from book', () => {
                 const field = registry.getCrossFields().find(f => f.key === 'book.voices');
-                const book = { voices: { narrator: { instruction: 'a' }, dialogue: { instruction: 'b' } } };
+                const book = { voices: { narrator: { timbre: 'a' }, dialogue: { timbre: 'b' } } };
                 const entities = field.entitySource(book);
                 expect(entities).to.have.length(2);
                 expect(entities[0].id).to.equal('narrator');
             });
 
-            it('isChanged compares instruction strings', () => {
+            it('isChanged follows the LOCKED reference only (sha256 + ref_text), not timbre / manner', () => {
                 const field = registry.getCrossFields().find(f => f.key === 'book.voices');
-                expect(field.isChanged({ instruction: 'x' }, { instruction: 'y' })).to.equal(true);
-                expect(field.isChanged({ instruction: 'x' }, { instruction: 'x' })).to.equal(false);
+                const ref = (sha, text, locked = true) => ({ reference: { sha256: sha, ref_text: text, locked } });
+                expect(field.isChanged({ timbre: 'x' }, { timbre: 'y' })).to.equal(false);
+                expect(field.isChanged(ref('a', 't'), ref('b', 't'))).to.equal(true);
+                expect(field.isChanged(ref('a', 't'), ref('a', 'u'))).to.equal(true);
+                expect(field.isChanged(ref('a', 't'), { timbre: 'z', ...ref('a', 't') })).to.equal(false);
+                expect(field.isChanged(ref('a', 't'), ref('a', 't', false))).to.equal(true);
+                expect(field.isChanged({}, ref('a', 't', false))).to.equal(false);
             });
         });
 

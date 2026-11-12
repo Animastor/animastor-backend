@@ -54,9 +54,14 @@ async function withTx(pool, fn) {
 }
 
 // ── kinds / executors / layers ───────────────────────────────────────────
-const KINDS = Object.freeze(['audio_chunk', 'iu_image', 'video_group', 'audio_merge', 'video_merge']);
+// voice_reference (1.4.0, VOICE_REFERENCES.md): one candidate of a character's
+// voice reference (or the normalisation of an uploaded file) on the audio worker.
+// Layer 'audio' (the worker type), but NOT a scene asset — acceptance never
+// writes scene_assets for it and it has no stage transition.
+const KINDS = Object.freeze(['audio_chunk', 'iu_image', 'video_group', 'audio_merge', 'video_merge', 'voice_reference']);
 const EXECUTOR_OF_KIND = Object.freeze({
     audio_chunk: 'gpu:audio',
+    voice_reference: 'gpu:audio',
     iu_image: 'gpu:image',
     video_group: 'gpu:video',
     audio_merge: 'local',
@@ -65,12 +70,15 @@ const EXECUTOR_OF_KIND = Object.freeze({
 const LAYER_OF_KIND = Object.freeze({
     audio_chunk: 'audio',
     audio_merge: 'audio',
+    voice_reference: 'audio',
     iu_image: 'image',
     video_group: 'video',
     video_merge: 'video',
 });
 /** Kinds a command may create directly (first stage, ADR §6.1 п.5 / §6.3). */
-const FIRST_STAGE_KINDS = Object.freeze(['audio_chunk', 'iu_image', 'video_group']);
+const FIRST_STAGE_KINDS = Object.freeze(['audio_chunk', 'iu_image', 'video_group', 'voice_reference']);
+/** Kinds that are not scene assets (acceptance skips scene_assets). */
+const NON_SCENE_KINDS = Object.freeze(['voice_reference']);
 const LAYERS = Object.freeze(['audio', 'image', 'video']);
 const WORKER_TYPES = LAYERS;
 const LIVE = Object.freeze(['queued', 'running']);
@@ -128,6 +136,7 @@ module.exports = {
     EXECUTOR_OF_KIND,
     LAYER_OF_KIND,
     FIRST_STAGE_KINDS,
+    NON_SCENE_KINDS,
     LAYERS,
     WORKER_TYPES,
     LIVE,

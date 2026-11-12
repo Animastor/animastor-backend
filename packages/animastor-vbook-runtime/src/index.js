@@ -54,6 +54,7 @@ const AdmZip = require('adm-zip');
 
 const { validateBundleFile } = require('./bundle-validator.cjs');
 const behaviorSchema = require('./behavior-schema.cjs');
+const voice = require('./voice');
 const { getBooksRoot } = require('./books-root');
 
 // Last line of defense before disk: every bundle resource that saveBookBundle
@@ -859,4 +860,7 @@ module.exports = {
 
     // behavior.json schema v2 helpers (also at ./behavior-schema.cjs)
     behaviorSchema,
+
+    // character voice port (also at ./voice) — VOICE_REFERENCES.md
+    voice,
 };

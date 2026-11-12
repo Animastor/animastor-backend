@@ -15,6 +15,7 @@
 
 const { setDeep, findUnitInScene, normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cjs');
 const { recoverMissingRedisChunks } = require('./read-recovery.cjs');
+const voiceModel = require('@animastor/vbook-runtime/voice');
 // behavior.json schema v2 (disk + memory) ⇄ API flat map + behavior_rules.
 const {
     behaviorCharacters,
@@ -660,7 +661,7 @@ module.exports = function(app, redis, deps) {
     });
 
     // ======================================================
-    // PATCH BOOK VOICE (instruction) — targeted edit.
+    // PATCH BOOK VOICE (timbre / manner) — targeted edit.
     // ======================================================
     app.patch('/api/v1/book/:bookId/voices/:voiceId', async (req, res) => {
         try {
@@ -680,11 +681,20 @@ module.exports = function(app, redis, deps) {
                 return res.status(404).json({ error: `Voice ${voiceId} not found` });
             }
 
+            // VOICE_REFERENCES.md: only the description is edited here; the reference
+            // (audio link + sha256) changes only through the voice-reference API
+            const allowed = new Set(['timbre', 'manner']);
+            const bad = Object.keys(fields).filter((k) => !allowed.has(k));
+            if (bad.length) {
+                return res.status(400).json({ error: `voice fields not editable here: ${bad.join(', ')} (allowed: timbre, manner)` });
+            }
+
             const bookBeforePatch = JSON.parse(JSON.stringify(oldBook));
 
-            for (const [key, value] of Object.entries(fields)) {
-                setDeep(voice, key, value === '' ? null : value);
-            }
+            voiceModel.setCharacterVoiceDescription(oldBook, voiceId, {
+                ...(fields.timbre !== undefined ? { timbre: fields.timbre == null ? '' : String(fields.timbre), timbre_source: 'user' } : {}),
+                ...(fields.manner !== undefined ? { manner: fields.manner == null ? '' : String(fields.manner) } : {}),
+            });
             log(`[PATCH VOICE] ${bookId}/${voiceId}: fields=${Object.keys(fields).join(', ')}`);
 
             editorModel.commit(oldBook, null);

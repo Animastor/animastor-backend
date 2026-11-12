@@ -19,7 +19,7 @@ const crypto = require('crypto');
 
 const {
     GenError, withTx, isUuid, notifyProgress, verifyUploadToken, linkJobs,
-    EXECUTOR_OF_KIND, LAYER_OF_KIND, LIVE,
+    EXECUTOR_OF_KIND, LAYER_OF_KIND, LIVE, NON_SCENE_KINDS,
 } = require('./util');
 const { checkLane } = require('./ports');
 const { msBetween } = require('./log');
@@ -122,6 +122,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
 
     // ── scene_assets (§4.3: written only by acceptance) ──────────────────────
     async function upsertSceneAsset(client, job, finalPath, sha, bytes, validation) {
+        if (NON_SCENE_KINDS.includes(job.kind)) return;   // 1.4.0: voice_reference is not a scene asset
         const assetType = job.layer;
         const build = job.build_id;
         const sceneHash = job.input.scene_hash || null;

@@ -250,6 +250,8 @@ describe('@animastor/generation package', () => {
             expect(comfyuiProvider.WORKFLOW_NAMES).to.deep.equal({
                 narration: 'tts-qwen-narrator',
                 dialogue: 'tts-qwen-dialogue',
+                voiceReference: 'tts-qwen-voice-reference',
+                voiceTranscribe: 'tts-qwen-voice-transcribe',
                 image: 'img-qwen-image',
                 videoFamily: 'video-ltx',
             });

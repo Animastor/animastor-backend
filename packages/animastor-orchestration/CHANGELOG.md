@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.0 (2026-11-12, unpublished) — kind `voice_reference`
+
+Основание: animastor-docs `architecture/VOICE_REFERENCES.md`. Minor: прежние порты не меняются.
+
+- **Kind `voice_reference`** — кандидат референса голоса героя (или нормализация загруженного файла)
+  на аудио-воркере: executor `gpu:audio`, слой `audio`, таймаут 15 мин. Не сценовый ассет: приём
+  не пишет `scene_assets`, переходов стадий нет (`NON_SCENE_KINDS`).
+- **Команда `kind: 'voice_reference'`**: `layers: ['audio']`, `scope = {level:'book', voice:{…}}`
+  (`voice` — непрозрачные данные хоста, ≤ 16 КиБ); layer-config книги не применяется. Планировщик
+  получает `planCtx.kind`; команда `voice_reference` принимает только units `voice_reference`, другие
+  команды — только прочие kinds (`bad_plan`).
+- **Миграция `005-voice-reference`** — новые определения `gen_jobs_kind_check`,
+  `gen_jobs_kind_executor_check`, `gen_jobs_layer_kind_check`, `gen_commands_kind_check` (имена прежние,
+  идемпотентно).
+- **WAV-валидатор** `createWavValidator` / `media.inspectWav`: RIFF/WAVE, PCM s16, непустой `data`,
+  не тишина (RMS по PCM, без ffmpeg). `createDefaultValidateResult` диспатчит `voice_reference` → wav.
+- Экспорт `KINDS`.
+
 ## 1.3.0 (2026-11-09) — этап 3a: видео (`video_group` + `video_merge`)
 
 Основание: ADR `ORCHESTRATION_V2.md` §6.3, §6.5, §8.1, §13 п.11. Minor: порты 1.0–1.2 не меняются,

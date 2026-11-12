@@ -22,6 +22,8 @@
 // resource that AI patches can touch is covered by the same check.
 'use strict';
 
+const voice = require('./voice');
+
 const CHAPTER_ID_RE = /^ch-[a-f0-9]{6,}$/;
 const SCENE_ID_RE = /^sc-[a-f0-9]{6,}$/;
 const UNIT_ID_RE = /^iu-[a-f0-9]{6,}$/;
@@ -106,8 +108,19 @@ function validateVoiceEntry(id, entry, errors) {
         errors.push(`voices: voice "${id}" must be an object (got ${Array.isArray(entry) ? 'array' : typeof entry})`);
         return;
     }
-    if (entry.instruction !== undefined && entry.instruction !== null && typeof entry.instruction !== 'string') {
-        errors.push(`voices: voice "${id}".instruction must be a string`);
+    for (const k of ['timbre', 'manner']) {
+        if (entry[k] !== undefined && entry[k] !== null && typeof entry[k] !== 'string') {
+            errors.push(`voices: voice "${id}".${k} must be a string`);
+        }
+    }
+    if (entry.timbre_source !== undefined && entry.timbre_source !== null && !voice.TIMBRE_SOURCES.includes(entry.timbre_source)) {
+        errors.push(`voices: voice "${id}".timbre_source must be ${voice.TIMBRE_SOURCES.join('|')}`);
+    }
+    // the audio reference itself lives in the content folder, NOT in the bundle —
+    // only the text link + metadata are validated here (VOICE_REFERENCES.md)
+    if (entry.reference !== undefined && entry.reference !== null) {
+        const problem = voice.referenceProblem(entry.reference);
+        if (problem) errors.push(`voices: voice "${id}".${problem}`);
     }
 }
 

@@ -100,6 +100,7 @@ module.exports = Object.freeze({
         createDefaultValidateResult: media.createDefaultValidateResult,
         createAudioValidator: media.createAudioValidator,
         createPngValidator: media.createPngValidator,
+        createWavValidator: media.createWavValidator,
     }),
     media: Object.freeze({
         inspectMp3: media.inspectMp3,
@@ -107,10 +108,12 @@ module.exports = Object.freeze({
         ffmpegDecodePcm: media.ffmpegDecodePcm,
         DEFAULT_RMS_THRESHOLD_DBFS: media.DEFAULT_RMS_THRESHOLD_DBFS,
         inspectPng: media.inspectPng,
+        inspectWav: media.inspectWav,
         DEFAULT_MIN_LUMA_STDDEV: media.DEFAULT_MIN_LUMA_STDDEV,
     }),
     GenError: util.GenError,
     /** pure formatter of the [gen-v2] info lines (О3) — for host tests / log parsers */
     formatGenEvent,
     PROGRESS_CHANNEL: util.PROGRESS_CHANNEL,
+    KINDS: util.KINDS,
 });

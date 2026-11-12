@@ -30,8 +30,10 @@ const cli = require('../src/installer/cli');
 const pkg = require('../package.json');
 
 const TTS = require('../ai/install-manifests/audio/qwen-tts.json');
+// VOICE_REFERENCES (2026-11-12): SaveAudioMP3 / LoadAudio are ComfyUI core nodes (not declared);
+// + Qwen3TTSVoiceClone and SaveAudioAnimastorReference (animastor-voice-ref)
 const TTS_CLASSES = ['Qwen3TTSAdvancedDialogue', 'Qwen3TTSLoader', 'Qwen3TTSRoleBank', 'Qwen3TTSScriptProcessor',
-    'Qwen3TTSVoiceClonePrompt', 'Qwen3TTSVoiceDesign', 'SaveAudioMP3'];
+    'Qwen3TTSVoiceClone', 'Qwen3TTSVoiceClonePrompt', 'Qwen3TTSVoiceDesign', 'SaveAudioAnimastorReference'];
 
 describe('0.2.7 N1 node classes come from the manifests', () => {
     it('N1a: audio/qwen-tts → its custom-node classes, sorted, unique', () => {

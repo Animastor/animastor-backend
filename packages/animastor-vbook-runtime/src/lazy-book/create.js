@@ -14,6 +14,7 @@ const draft = require('./draft');
 const metadata = require('./metadata');
 const chapterUtils = require('./chapter-utils');
 const appearance = require('./appearance');
+const { voiceFromDescription } = require('../voice');
 
 function createFromAnalysis(bookId, analysis, options = {}) {
     const { maxScenes, chapterTitle } = options;
@@ -254,9 +255,13 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         }
     }
 
+    // Default narrator voice (VOICE_REFERENCES.md): timbre + constant narrator
+    // manner — the reference is designed from both, the clone copies the manner.
     const narratorVoice = language === 'ru'
-        ? 'A mature Russian male voice. Deep, calm, reflective, slightly melancholic. Slow literary narration, soft authority, philosophical tone. Native Russian pronunciation.'
-        : 'A mature male voice. Deep, calm, reflective. Slow literary narration, soft authority. Native English pronunciation.';
+        ? { timbre: 'A mature Russian male voice. Deep, calm, reflective, slightly melancholic. Native Russian pronunciation.',
+            manner: 'Slow literary narration, soft authority, philosophical tone.', timbre_source: 'analysis' }
+        : { timbre: 'A mature male voice. Deep, calm, reflective. Native English pronunciation.',
+            manner: 'Slow literary narration, soft authority.', timbre_source: 'analysis' };
 
     const bible = {
         version: '3.0',
@@ -331,12 +336,12 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     // voices.json — single source of truth. For subsequent windows, load existing
     // and only add/update voices for NEW characters from the current window.
     // Old characters keep their existing voices untouched.
-    let voices = { narrator: { instruction: narratorVoice } };
+    let voices = { narrator: { ...narratorVoice } };
     try {
         const vPath = getVoicesPath(bookDir);
         if (fs.existsSync(vPath)) {
             const existing = JSON.parse(fs.readFileSync(vPath, 'utf8')) || {};
-            voices = { narrator: { instruction: narratorVoice }, ...existing };
+            voices = { narrator: { ...narratorVoice }, ...existing };
         }
     } catch (e) {
         console.warn(`[LAZY-BOOK] Failed to load existing voices: ${e.message}`);
@@ -353,9 +358,12 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     for (const ch of (analysis.characters || [])) {
         if (!ch.id) continue;
         if (!passportIds.has(ch.id)) continue;
+        // the analysis writes one description string (ch.voice); it is split by
+        // the rule-based cleanup (voice port) — situational sentences dropped,
+        // timbre_source 'cleaned' until the user reviews it
         const vi = typeof ch.voice === 'string' ? ch.voice : ch.voice?.instruction;
         if (vi) {
-            voices[ch.id] = { instruction: vi };
+            voices[ch.id] = voiceFromDescription(vi);
         }
     }
     fs.writeFileSync(getVoicesPath(bookDir), JSON.stringify(voices, null, 2));

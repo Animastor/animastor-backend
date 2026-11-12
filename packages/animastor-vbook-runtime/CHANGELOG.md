@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 (2026-11-12, unpublished)
+
+Character voice port + voice references (animastor-docs
+`architecture/VOICE_REFERENCES.md`).
+
+### Added
+
+- `src/voice.js` (subpath export `./voice`, also `voice` on the root) — the ONE
+  access point to a character's voice: `getCharacterVoice`, `listVoiceIds`,
+  `setCharacterVoiceReference`, `setCharacterVoiceDescription`,
+  `narratorVoiceId`, `voiceDesignDescription`, `cleanVoiceDescription` /
+  `voiceFromDescription` (rule-based cleanup, no LLM), `referenceProblem`.
+
+### Changed (breaking)
+
+- `voices.json[id]` is `{timbre, manner, timbre_source, reference}`; the
+  `instruction` field is no longer read or written. Lazy-book create stores
+  analysis descriptions through `voiceFromDescription` (timbre_source
+  `cleaned`); the default narrator is `{timbre, manner}`.
+- Bundle validator checks `timbre` / `manner` / `timbre_source` and the
+  `reference` link (`voices/<id>/<candidate>.wav`, sha256, source,
+  verification, locked). Audio files are never part of the bundle.
+
 ## 0.3.0 (2026-11-10, unpublished)
 
 behavior.json schema v2 (behaviour rules, phase 0 — animastor-docs

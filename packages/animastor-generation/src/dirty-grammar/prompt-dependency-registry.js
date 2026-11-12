@@ -248,9 +248,10 @@ const CROSS_FIELDS = [
         usedBy: 'buildImagePrompt → bible.locations[locationId]',
     },
     // ── Book-level TTS voice config ──────────────────
-    // book.voices[voiceId].instruction is consumed by audio/generation.js and
-    // audio/segments.js (TTS instructions for any scene). Voice config is
-    // book-global, so ANY instruction change marks every scene's audio dirty.
+    // VOICE_REFERENCES.md: chunk audio is cloned from the LOCKED voice
+    // reference (file sha256 + ref_text). timbre / manner only drive the
+    // creation of reference candidates — editing them changes no chunk.
+    // A reference change is book-global (any scene may use the voice).
     {
         key: 'book.voices',
         layers: ['audio'],
@@ -260,11 +261,15 @@ const CROSS_FIELDS = [
         },
         entityId: (v) => v.id,
         isChanged: (oldEntity, newEntity) => {
-            return (oldEntity?.instruction || '') !== (newEntity?.instruction || '');
+            const key = (e) => {
+                const r = e && e.reference && e.reference.locked === true ? e.reference : null;
+                return r ? `${r.sha256 || ''}\u0000${r.ref_text || ''}` : '';
+            };
+            return key(oldEntity) !== key(newEntity);
         },
         findAffectedScenes: (allScenes) => allScenes,
-        label: 'TTS voice instruction (book.voices)',
-        usedBy: 'audio-service → TTS voice instructions',
+        label: 'Locked voice reference (book.voices[id].reference)',
+        usedBy: 'audio/generation → LoadAudio + VoiceClonePrompt',
     },
 ];
 

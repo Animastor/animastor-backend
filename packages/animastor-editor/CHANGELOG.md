@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 (2026-11-12, unpublished)
+
+Voice references (animastor-docs `architecture/VOICE_REFERENCES.md`).
+
+- `PATCH /voices/:id` edits only `timbre` / `manner` (others → 400); editing `timbre` sets
+  `timbre_source: "user"`. The reference is changed only through the voice-reference API.
+- `POST /voices` creates `{timbre, manner, timbre_source:"user"}` (the `instruction` field is gone).
+- Both go through the `@animastor/vbook-runtime` voice port (^0.4.0).
+
 ## 0.3.0 (2026-11-10, unpublished)
 
 behavior.json schema v2 (animastor-docs `architecture/VBOOK_BEHAVIOUR.md`).

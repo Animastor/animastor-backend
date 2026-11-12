@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "revision": "2026.11.07-r1",
+  "revision": "2026.11.12-r1",
   "status": "ready",
   "profile": {
     "id": "audio/qwen-tts",
@@ -10,11 +10,15 @@
   "provenance": {
     "workflows": [
       "tts-qwen-narrator",
-      "tts-qwen-dialogue"
+      "tts-qwen-dialogue",
+      "tts-qwen-voice-reference",
+      "tts-qwen-voice-transcribe"
     ],
     "connectors_backend_only": [
       "conn-tts-narration",
-      "conn-tts-dialogue"
+      "conn-tts-dialogue",
+      "conn-tts-voice-reference",
+      "conn-tts-voice-transcribe"
     ],
     "sources": [
       "docs/04-planning/private-worker-installer-dependency-research.md",
@@ -23,10 +27,10 @@
     "note": "Workflows are the single source of truth for 'required'. Connectors are backend-only execution metadata and are NOT installed. Runtime audits are reference only, never the source of truth."
   },
   "hardware": {
-    "gpu_min_vram_gb": 12,
+    "gpu_min_vram_gb": 8,
     "basis": "minimum_supported",
     "reference_gpu": "NVIDIA L40S (46068 MiB)",
-    "derivation": "Estimate, not a measured floor: tts-qwen-dialogue loads both 1.7B repos at once (VoiceDesign + Base: 2 x (3.57 GiB weights + 0.65 GiB speech tokenizer) = ~8.4 GiB) plus activations; 12 GB leaves headroom. Known to run on L40S 46 GB; installed on Tesla V100 (E2E, 2026-10-30). Lower it only after a measured run on a smaller card."
+    "derivation": "Estimate, not a measured floor (VOICE_REFERENCES.md): every workflow now loads ONE 1.7B repo — narrator/dialogue the Base model only (voice clone from a locked reference), voice-reference the VoiceDesign model only (3.57 GiB weights + 0.65 GiB speech tokenizer ≈ 4.2 GiB) plus faster-whisper small (≈ 0.5 GiB fp16) and activations; 8 GB leaves headroom. Was 12 GB while the dialogue workflow loaded VoiceDesign + Base together. Known to run on L40S 46 GB; installed on Tesla V100 (E2E, 2026-10-30). Lower it only after a measured run on a smaller card."
   },
   "runtime_requirements": {
     "comfyui": {
@@ -125,20 +129,22 @@
         "Qwen3TTSVoiceDesign",
         "Qwen3TTSLoader",
         "Qwen3TTSVoiceClonePrompt",
+        "Qwen3TTSVoiceClone",
         "Qwen3TTSRoleBank",
         "Qwen3TTSAdvancedDialogue",
-        "Qwen3TTSScriptProcessor",
-        "SaveAudioMP3"
+        "Qwen3TTSScriptProcessor"
       ],
       "provenance": {
         "workflows": [
           "tts-qwen-narrator",
-          "tts-qwen-dialogue"
+          "tts-qwen-dialogue",
+          "tts-qwen-voice-reference"
         ],
         "evidence": "docs/04-planning/private-worker-installer-dependency-research.md §6.1; audit-2026-08-25.txt [6]"
       },
       "notes": [
-        "SaveAudioMP3 attribution to this package is by elimination (only manager + qwen3-tts installed on the working instance); high confidence, needs /object_info confirmation (open question 5)."
+        "SaveAudioMP3 and LoadAudio are ComfyUI CORE nodes (not in nodes.py of this package at 2ee1131) — confirm both via /object_info on the reference fork (open question 5).",
+        "qwen-tts (pip) silently ignores `instruct` on the Base clone (0.1.1: kwargs swallowed by model.generate) — the clone copies the delivery of the reference."
       ]
     },
     {
@@ -186,8 +192,7 @@
       },
       "provenance": {
         "workflows": [
-          "tts-qwen-narrator",
-          "tts-qwen-dialogue"
+          "tts-qwen-voice-reference"
         ],
         "node_refs": [
           "78 Qwen3TTSLoader.model_repo"
@@ -239,10 +244,179 @@
       },
       "provenance": {
         "workflows": [
+          "tts-qwen-narrator",
           "tts-qwen-dialogue"
         ],
         "node_refs": [
           "79 Qwen3TTSLoader.model_repo"
+        ]
+      }
+    },
+    {
+      "id": "custom-node:animastor-voice-ref",
+      "kind": "custom_node",
+      "name": "animastor-voice-ref",
+      "requirement": "required",
+      "basis": "known_working",
+      "install": {
+        "directory": "animastor-voice-ref",
+        "source": {
+          "kind": "github",
+          "repository": "https://github.com/Animastor/animastor-worker",
+          "commit": "6a88ad960e47df9fa6e76e4cce5308d9590297c3",
+          "subdirectory": "comfyui-nodes/animastor-voice-ref",
+          "verification": "confirmed"
+        }
+      },
+      "provides_classes": [
+        "SaveAudioAnimastorReference"
+      ],
+      "python_requirements": [
+        "faster-whisper==1.2.1",
+        "ctranslate2==4.6.0"
+      ],
+      "provenance": {
+        "workflows": [
+          "tts-qwen-voice-reference",
+          "tts-qwen-voice-transcribe"
+        ],
+        "evidence": "animastor-worker comfyui-nodes/animastor-voice-ref (MIT); animastor-docs architecture/VOICE_REFERENCES.md"
+      },
+      "notes": [
+        "Needs the ffmpeg binary on PATH (normalisation to WAV pcm_s16le mono 24 kHz).",
+        "faster-whisper device=auto: CUDA float16, else CPU int8 (recorded in the candidate metadata). The ctranslate2 4.6.0 CUDA path on a V100 (sm_70) is NOT verified yet — live check step in reports/2026-11-12/voice-references.md.",
+        "Installed from a SUBDIRECTORY of the repository (install.source.subdirectory); the installer writes .animastor-source.json (repository + commit) into the node folder so the pinned version stays verifiable."
+      ]
+    },
+    {
+      "id": "model:audio.whisper.faster-whisper-small.config-json",
+      "kind": "model",
+      "name": "faster-whisper-small/config.json",
+      "filename": "config.json",
+      "target_dir": "models/whisper/faster-whisper-small",
+      "requirement": "required",
+      "basis": "known_working",
+      "size_bytes_approx": 2370,
+      "checksum": {
+        "algo": "sha256",
+        "value": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"
+      },
+      "source": {
+        "kind": "huggingface",
+        "repository": "Systran/faster-whisper-small",
+        "file_path": "config.json",
+        "revision": "536b0662742c02347bc0e980a01041f333bce120",
+        "gated": false,
+        "verification": "confirmed",
+        "verified_at": "2026-11-12",
+        "download_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json"
+      },
+      "provenance": {
+        "workflows": [
+          "tts-qwen-voice-reference",
+          "tts-qwen-voice-transcribe"
+        ],
+        "node_refs": [
+          "1009 SaveAudioAnimastorReference.whisper_model=small"
+        ]
+      }
+    },
+    {
+      "id": "model:audio.whisper.faster-whisper-small.model-bin",
+      "kind": "model",
+      "name": "faster-whisper-small/model.bin",
+      "filename": "model.bin",
+      "target_dir": "models/whisper/faster-whisper-small",
+      "requirement": "required",
+      "basis": "known_working",
+      "size_bytes_approx": 483546902,
+      "checksum": {
+        "algo": "sha256",
+        "value": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"
+      },
+      "source": {
+        "kind": "huggingface",
+        "repository": "Systran/faster-whisper-small",
+        "file_path": "model.bin",
+        "revision": "536b0662742c02347bc0e980a01041f333bce120",
+        "gated": false,
+        "verification": "confirmed",
+        "verified_at": "2026-11-12",
+        "download_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin"
+      },
+      "provenance": {
+        "workflows": [
+          "tts-qwen-voice-reference",
+          "tts-qwen-voice-transcribe"
+        ],
+        "node_refs": [
+          "1009 SaveAudioAnimastorReference.whisper_model=small"
+        ]
+      }
+    },
+    {
+      "id": "model:audio.whisper.faster-whisper-small.tokenizer-json",
+      "kind": "model",
+      "name": "faster-whisper-small/tokenizer.json",
+      "filename": "tokenizer.json",
+      "target_dir": "models/whisper/faster-whisper-small",
+      "requirement": "required",
+      "basis": "known_working",
+      "size_bytes_approx": 2203239,
+      "checksum": {
+        "algo": "sha256",
+        "value": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+      },
+      "source": {
+        "kind": "huggingface",
+        "repository": "Systran/faster-whisper-small",
+        "file_path": "tokenizer.json",
+        "revision": "536b0662742c02347bc0e980a01041f333bce120",
+        "gated": false,
+        "verification": "confirmed",
+        "verified_at": "2026-11-12",
+        "download_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json"
+      },
+      "provenance": {
+        "workflows": [
+          "tts-qwen-voice-reference",
+          "tts-qwen-voice-transcribe"
+        ],
+        "node_refs": [
+          "1009 SaveAudioAnimastorReference.whisper_model=small"
+        ]
+      }
+    },
+    {
+      "id": "model:audio.whisper.faster-whisper-small.vocabulary-txt",
+      "kind": "model",
+      "name": "faster-whisper-small/vocabulary.txt",
+      "filename": "vocabulary.txt",
+      "target_dir": "models/whisper/faster-whisper-small",
+      "requirement": "required",
+      "basis": "known_working",
+      "size_bytes_approx": 459861,
+      "checksum": {
+        "algo": "sha256",
+        "value": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+      },
+      "source": {
+        "kind": "huggingface",
+        "repository": "Systran/faster-whisper-small",
+        "file_path": "vocabulary.txt",
+        "revision": "536b0662742c02347bc0e980a01041f333bce120",
+        "gated": false,
+        "verification": "confirmed",
+        "verified_at": "2026-11-12",
+        "download_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt"
+      },
+      "provenance": {
+        "workflows": [
+          "tts-qwen-voice-reference",
+          "tts-qwen-voice-transcribe"
+        ],
+        "node_refs": [
+          "1009 SaveAudioAnimastorReference.whisper_model=small"
         ]
       }
     },
@@ -278,13 +452,13 @@
     "artifacts": [
       {
         "id": "workflow:tts-qwen-narrator",
-        "name": "Qwen TTS narrator",
+        "name": "Qwen TTS narrator (voice clone)",
         "filename": "tts-qwen-narrator.json",
         "requirement": "optional",
         "basis": "optional",
         "editable": true,
         "target_dir": "user/default/workflows/animastor/audio",
-        "baseline_sha256": "87180aee01288be6e23240b2d873ce2d451f63cf404dec331a3b221bb9f8b8c1",
+        "baseline_sha256": "3c99707a3e78c2432bcbd6ec7be3dc8638c636185c79eabb732d671768ac561e",
         "source": {
           "kind": "animastor",
           "repository_path": "backend/ai/workflows/tts-qwen-narrator.json",
@@ -298,18 +472,18 @@
           "evidence": "backend/ai/workflows/tts-qwen-narrator.json (production workflow)"
         },
         "notes": [
-          "sha256 of the canonical production workflow file in this repository (computed 2026-08-26); a differing hash on the target machine means the user customized it — that is allowed"
+          "sha256 of the canonical production workflow file in this repository (computed 2026-11-12); a differing hash on the target machine means the user customized it — that is allowed"
         ]
       },
       {
         "id": "workflow:tts-qwen-dialogue",
-        "name": "Qwen TTS dialogue",
+        "name": "Qwen TTS dialogue (voice clone)",
         "filename": "tts-qwen-dialogue.json",
         "requirement": "optional",
         "basis": "optional",
         "editable": true,
         "target_dir": "user/default/workflows/animastor/audio",
-        "baseline_sha256": "7dcdc6997d36aaeb1a54e1578c69f0c534be29698c7a7b48813f637c740e69db",
+        "baseline_sha256": "48db08cfcad19c25fd8bbb8d17e0cd0324a20afd012bcdeb085f5f672d5672da",
         "source": {
           "kind": "animastor",
           "repository_path": "backend/ai/workflows/tts-qwen-dialogue.json",
@@ -323,7 +497,57 @@
           "evidence": "backend/ai/workflows/tts-qwen-dialogue.json (production workflow)"
         },
         "notes": [
-          "sha256 of the canonical production workflow file in this repository (computed 2026-08-26); a differing hash on the target machine means the user customized it — that is allowed"
+          "sha256 of the canonical production workflow file in this repository (computed 2026-11-12); a differing hash on the target machine means the user customized it — that is allowed"
+        ]
+      },
+      {
+        "id": "workflow:tts-qwen-voice-reference",
+        "name": "Qwen voice reference candidate",
+        "filename": "tts-qwen-voice-reference.json",
+        "requirement": "optional",
+        "basis": "optional",
+        "editable": true,
+        "target_dir": "user/default/workflows/animastor/audio",
+        "baseline_sha256": "f2df67267445bbf48df60dbd8219ef70b3c7db1ab808d99fadff33275392ef9e",
+        "source": {
+          "kind": "animastor",
+          "repository_path": "backend/ai/workflows/tts-qwen-voice-reference.json",
+          "endpoint": "GET {HUB_URL}/workflow/tts-qwen-voice-reference",
+          "verification": "confirmed"
+        },
+        "provenance": {
+          "workflows": [
+            "tts-qwen-voice-reference"
+          ],
+          "evidence": "backend/ai/workflows/tts-qwen-voice-reference.json (production workflow)"
+        },
+        "notes": [
+          "sha256 of the canonical production workflow file in this repository (computed 2026-11-12); a differing hash on the target machine means the user customized it — that is allowed"
+        ]
+      },
+      {
+        "id": "workflow:tts-qwen-voice-transcribe",
+        "name": "Uploaded voice sample → reference",
+        "filename": "tts-qwen-voice-transcribe.json",
+        "requirement": "optional",
+        "basis": "optional",
+        "editable": true,
+        "target_dir": "user/default/workflows/animastor/audio",
+        "baseline_sha256": "4df13e1d914cdac97fb552802fb0ccdfedb3926f0fe3a1333a8e1539dd2cb12b",
+        "source": {
+          "kind": "animastor",
+          "repository_path": "backend/ai/workflows/tts-qwen-voice-transcribe.json",
+          "endpoint": "GET {HUB_URL}/workflow/tts-qwen-voice-transcribe",
+          "verification": "confirmed"
+        },
+        "provenance": {
+          "workflows": [
+            "tts-qwen-voice-transcribe"
+          ],
+          "evidence": "backend/ai/workflows/tts-qwen-voice-transcribe.json (production workflow)"
+        },
+        "notes": [
+          "sha256 of the canonical production workflow file in this repository (computed 2026-11-12); a differing hash on the target machine means the user customized it — that is allowed"
         ]
       }
     ]
@@ -432,14 +656,17 @@
     }
   ],
   "disk_budget": {
-    "models_bytes_approx": 9052587295,
-    "note": "≈8.4 GiB of models (audit [5]) plus ComfyUI + venv overhead. Approximate: derived from human-readable audit sizes."
+    "models_bytes_approx": 9538799667,
+    "note": "≈8.4 GiB Qwen3-TTS repos (audit [5]) + 0.46 GiB faster-whisper small, plus ComfyUI + venv overhead. Approximate."
   },
   "open_questions": [
     "D1: canonical ComfyUI pin — fork c4cfee7 (known-working reference) vs official v0.27.0; golden run required",
     "D1: canonical torch/CUDA tier — cu128 reference vs cu124",
     "Open question 5: confirm SaveAudioMP3 belongs to ComfyUI-Qwen3-TTS via /object_info",
     "Open question 8: ComfyUI-Manager inclusion (D7)",
-    "Open question 12: minimum VRAM is an estimate (12 GB, hardware.derivation) — measure on a smaller card"
+    "Open question 12: minimum VRAM is an estimate (12 GB, hardware.derivation) — measure on a smaller card",
+    "VOICE_REFERENCES: confirm LoadAudio (core) on the reference fork c4cfee7 via /object_info",
+    "VOICE_REFERENCES: ctranslate2 4.6.0 CUDA path on Tesla V100 (sm_70) — measure; CPU int8 fallback is automatic",
+    "VOICE_REFERENCES: qwen-tts pip version on the worker (`pip show qwen-tts`)"
   ]
 }
