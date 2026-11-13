@@ -140,19 +140,16 @@ function createBookDeletion(deps) {
                 if (chunk?.build_id) buildIds.add(chunk.build_id);
             } catch (_) {}
         }
-        for (const buildId of buildIds) {
-            const buildPath = path.join(OUTPUT_DIR, buildId);
-            if (fs.existsSync(buildPath)) {
-                try { fs.rmSync(buildPath, { recursive: true, force: true }); } catch (_) {}
-            }
-        }
-        if (fs.existsSync(OUTPUT_DIR)) {
-            for (const entry of fs.readdirSync(OUTPUT_DIR)) {
-                if (entry.startsWith(bookId)) {
-                    const entryPath = path.join(OUTPUT_DIR, entry);
-                    try { fs.rmSync(entryPath, { recursive: true, force: true }); } catch (_) {}
-                }
-            }
+        // Scoped removal: validated build ids, only this book's artifacts
+        // (never another book's files in a shared or same-prefix location).
+        try {
+            require('./book-artifacts.cjs').removeBookArtifacts({
+                outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, log,
+                // voices/ (VOICE_REFERENCES.md) belongs to the build dir itself
+                buildScoped: require('../utils/build-dir').PRESERVED_ENTRIES,
+            });
+        } catch (artErr) {
+            console.warn(`[DELETE-BOOK] artifact cleanup failed for ${bookId}: ${artErr.message}`);
         }
 
         // ── 4. Runtime / ephemeral state (Redis) ──

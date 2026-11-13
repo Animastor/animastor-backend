@@ -15,7 +15,7 @@
 // purgeAssistantForBook port — this route must not know the Assistant's
 // storage details.
 
-const { clearBuildDirKeepingVoices } = require('../../utils/build-dir');
+const { PRESERVED_ENTRIES } = require('../../utils/build-dir');
 
 module.exports = function registerCacheRoutes(app, ctx) {
     const { redis, config, storage, path, fs, getAllChunks, getChunk, cleanBookRedisKeys, purgeAssistantForBook, log } = ctx;
@@ -76,14 +76,15 @@ module.exports = function registerCacheRoutes(app, ctx) {
 
             // Clean up build directories
             const OUTPUT_DIR = config.OUTPUT_DIR;
-            for (const buildId of buildIds) {
-                const buildPath = path.join(OUTPUT_DIR, buildId);
-                if (fs.existsSync(buildPath)) {
-                    // VOICE_REFERENCES.md: voices/ (locked / uploaded references) survives a cache clear
-                    try { clearBuildDirKeepingVoices(buildPath, fs); } catch (e) {
-                        console.warn('[CACHE] Failed to delete build dir:', buildPath);
-                    }
-                }
+            // VOICE_REFERENCES.md: voices/ (locked / uploaded references) survives a cache clear
+            try {
+                require('../../services/book-artifacts.cjs').removeBookArtifacts({
+                    outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds,
+                    buildScoped: PRESERVED_ENTRIES, preserve: PRESERVED_ENTRIES,
+                    log: (m) => console.warn(`[CACHE] ${m}`),
+                });
+            } catch (e) {
+                console.warn(`[CACHE] Failed to clean build output for ${bookId}: ${e.message}`);
             }
 
             // Clean up ALL Redis keys for this book using the comprehensive helper
