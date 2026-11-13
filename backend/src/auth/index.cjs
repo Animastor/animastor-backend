@@ -101,6 +101,10 @@ function buildAuthService() {
     svc.clearSessionCookieHeader = (opts) => cookies.clearSessionCookieHeader(opts, liveCookieConfig());
     svc.guestCookieHeader = (token, opts) => cookies.guestCookieHeader(token, opts, liveCookieConfig());
     svc.clearGuestCookieHeader = (opts) => cookies.clearGuestCookieHeader(opts, liveCookieConfig());
+    // Sticky-cookie hardening: the host-only clearing pair and the all-values
+    // parser follow the same call-time COOKIE_DOMAIN rule as the four wrappers.
+    svc.clearHostOnlyCookieHeaders = (opts) => cookies.clearHostOnlyCookieHeaders(opts, liveCookieConfig());
+    svc.parseCookieHeaders = cookies.parseCookieHeaders;
     return svc;
 }
 
