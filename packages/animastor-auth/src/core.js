@@ -326,6 +326,8 @@ function createAuthService({ ports, config = {}, logger = console }) {
         guestCookieHeader: (token, opts) => cookies.guestCookieHeader(token, opts, cfg),
         clearGuestCookieHeader: (opts) => cookies.clearGuestCookieHeader(opts, cfg),
         parseCookieHeader: cookies.parseCookieHeader,
+        parseCookieHeaders: cookies.parseCookieHeaders,
+        clearHostOnlyCookieHeaders: (opts) => cookies.clearHostOnlyCookieHeaders(opts, cfg),
         // req-based convenience kept for existing consumers (auth-routes,
         // auth-context) — thin wrapper over the string-level parser.
         readCookie: (req, name) => cookies.parseCookieHeader(req && req.headers && req.headers.cookie, name),
