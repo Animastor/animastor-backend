@@ -174,6 +174,36 @@ async function getSceneDuration(buildId, bookId, chapterId, sceneId) {
     return 0;
 }
 
+/**
+ * The ComfyUI workflow of ONE image unit, exactly as it is sent to the GPU:
+ * the img-qwen-image template with the positive (node 108) and negative
+ * (node 109) prompt patched in; seed / size / steps / LoRA stay as in the
+ * template. Pure (no Redis / PG / disk writes) — shared by the legacy
+ * dispatch below and the orchestration v2 image port (image-ports.js), so
+ * both send byte-for-byte the same payload.
+ * @returns {{workflow:object, profile:string, prompt:string, negative:string}}
+ */
+function buildIUWorkflow(unit, sceneData, loadedBook) {
+    // Assembly profile for the image workflow — resolved from the connector's
+    // profile.imageProfile (e.g. "qwen-image"); falls back to the built-in
+    // assembly when unset (there is no 'default' profile). S-3: profile
+    // resolution rides the provider seam (override → connector profile).
+    const imageProfileName = profileOverride.getOverride('image')
+        || provider.profileNameFromConnector(provider.getConnector(provider.WORKFLOW_NAMES.image), 'image');
+    const assemblyCfg = assemblyProfile.resolveAssembly('image', imageProfileName);
+
+    const finalPrompt = promptBuilder.buildImagePrompt(unit, sceneData.payload, sceneData.chapter, loadedBook, { profile: imageProfileName });
+
+    const wfImg = provider.loadWorkflow(provider.WORKFLOW_NAMES.image);
+    const baseNegative = assemblyCfg.defaults.negativeBase || 'blurry, low quality, artifacts';
+    const customNegative = promptBuilder.resolveNegativePrompt(unit, sceneData.payload);
+    const negative = customNegative ? `${customNegative}, ${baseNegative}` : baseNegative;
+
+    provider.applyValue(wfImg, provider.WORKFLOW_NAMES.image, 'positivePrompt', finalPrompt);
+    provider.applyValue(wfImg, provider.WORKFLOW_NAMES.image, 'negativePrompt', negative);
+    return { workflow: wfImg, profile: imageProfileName, prompt: finalPrompt, negative };
+}
+
 async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId, bookId, chapterId, sceneId, sceneDuration, fullText, dirtyUnitIds = new Set(), dispatchId) {
     const canonicalUnitId = String(unit.id);
     if (!canonicalUnitId) {
@@ -313,24 +343,8 @@ async function processSingleIU(redis, unit, uIdx, sceneData, loadedBook, buildId
         helpers.warn(`Failed to save IU metadata for ${unit.id}: ${err.message}`);
     }
 
-    // Assembly profile for the image workflow — resolved from the connector's
-    // profile.imageProfile (e.g. "qwen-image"); falls back to the built-in
-    // assembly when unset (there is no 'default' profile). S-3: profile
-    // resolution rides the provider seam (override → connector profile).
-    const imageProfileName = profileOverride.getOverride('image')
-        || provider.profileNameFromConnector(provider.getConnector(provider.WORKFLOW_NAMES.image), 'image');
-    const assemblyCfg = assemblyProfile.resolveAssembly('image', imageProfileName);
-
-    const finalPrompt = promptBuilder.buildImagePrompt(unit, sceneData.payload, sceneData.chapter, loadedBook, { profile: imageProfileName });
-
+    const { workflow: wfImg, profile: imageProfileName } = buildIUWorkflow(unit, sceneData, loadedBook);
     helpers.log(`GENERATE IMAGE (IU): ${imageIUId}, unit.id: ${canonicalUnitId}, profile: ${imageProfileName}`);
-
-    const wfImg = provider.loadWorkflow(provider.WORKFLOW_NAMES.image);
-    const baseNegative = assemblyCfg.defaults.negativeBase || 'blurry, low quality, artifacts';
-    const customNegative = promptBuilder.resolveNegativePrompt(unit, sceneData.payload);
-
-    provider.applyValue(wfImg, provider.WORKFLOW_NAMES.image, 'positivePrompt', finalPrompt);
-    provider.applyValue(wfImg, provider.WORKFLOW_NAMES.image, 'negativePrompt', customNegative ? `${customNegative}, ${baseNegative}` : baseNegative);
 
     try {
         // Маркер = dispatch_id владельца: по нему finalizeDispatch чистит
@@ -483,6 +497,7 @@ async function generateSceneIUImages(redis, sceneData, loadedBook, buildId, book
 }
 
 module.exports = {
+    buildIUWorkflow,
     saveIUMetadata,
     getSceneDuration,
     processSingleIU,

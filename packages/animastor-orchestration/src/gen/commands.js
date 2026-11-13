@@ -10,11 +10,16 @@
 
 'use strict';
 
+const NOOP_LOG = Object.freeze({ event() {} });
+
 const {
     GenError, withTx, requireUuid, requireText, isUuid, notifyProgress, linkJobs,
     EXECUTOR_OF_KIND, LAYER_OF_KIND, FIRST_STAGE_KINDS, LAYERS,
 } = require('./util');
 const { checkLane } = require('./ports');
+const {
+    normalisePlan, readyParts, mergePartsOf, mergeUnitFor, linkSceneLive, recordSkips, skipSummary,
+} = require('./stage');
 
 const COMMAND_KINDS = Object.freeze(['regenerate', 'generate_all']);
 const SCOPE_LEVELS = Object.freeze(['book', 'chapter', 'scenes', 'scene', 'unit']);
@@ -88,13 +93,13 @@ async function purgeBookRows(pool, bookId) {
     });
 }
 
-function createCommands({ pool, ports }) {
+function createCommands({ pool, ports, genLog = NOOP_LOG }) {
     /**
      * ADR §6.1 — one transaction.
      * @returns {Promise<{command_id:string, created:boolean, existing:boolean, status:string, layers:string[],
      *          summary:{jobs_created:number, joined:number, skipped_ready:number}}>}
      */
-    async function createCommand(params = {}) {
+    async function createCommandTx(params = {}) {
         const workspaceId = requireUuid(params.workspaceId, 'workspaceId');
         const userId = requireUuid(params.userId, 'userId');
         const bookId = requireText(params.bookId, 'bookId');
@@ -151,52 +156,22 @@ function createCommands({ pool, ports }) {
             if (ins.rowCount === 0) return existingResponse(await existingOf()); // concurrent twin committed first
             const cmd = ins.rows[0];
 
-            // §6.1 п.3: plan units per layer
+            // §6.1 п.3: plan units per layer. Audio / image first, video last: the video
+            // planner (1.3.0) runs on THIS transaction and must see the image / audio jobs
+            // this very command has just created (they are what a video scene waits for).
             const bookRef = { bookId, workspaceId, userId };
-            const units = [];
+            const planCtx = { db: client };
             const seen = new Set();
-            for (const layer of effective) {
-                const planned = await ports.planUnits(bookRef, scope, layer);
-                if (!Array.isArray(planned)) throw new GenError('bad_plan', 500, `planUnits(${layer}) must return an array`);
-                for (const u of planned) {
+            const takeUnits = (list, layer) => {
+                const out = [];
+                for (const u of list) {
                     checkUnit(u, layer);
                     if (seen.has(unitKey(u))) continue; // video+image may both plan the same IU
                     seen.add(unitKey(u));
-                    units.push(u);
+                    out.push(u);
                 }
-            }
-
-            // §6.1 п.3: skip units whose scene asset is ready for the current content (PG scene_assets only)
-            let skipped = 0;
-            let todo = units;
-            if (!force && units.length) {
-                const k5 = (g) => `${g.chapter_id}\u0000${g.scene_id}\u0000${g.asset_type}\u0000${g.build_id}\u0000${g.scene_hash}`;
-                const gkey = (u) => k5({ ...u, asset_type: LAYER_OF_KIND[u.kind] });
-                const groups = new Map();
-                for (const u of units) {
-                    if (typeof u.scene_hash !== 'string' || !u.scene_hash) continue; // readiness unprovable → do it
-                    if (!groups.has(gkey(u))) groups.set(gkey(u), { chapter_id: u.chapter_id, scene_id: u.scene_id, asset_type: LAYER_OF_KIND[u.kind], build_id: u.build_id, scene_hash: u.scene_hash });
-                }
-                const readyKeys = new Set();
-                if (groups.size) {
-                    const list = [...groups.values()];
-                    const r = await client.query(
-                        `SELECT g.ord FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
-                                WITH ORDINALITY AS g(chapter_id, scene_id, asset_type, build_id, scene_hash, ord)
-                         WHERE EXISTS (SELECT 1 FROM scene_assets a
-                                       WHERE a.book_id = $1 AND a.chapter_id = g.chapter_id AND a.scene_id = g.scene_id
-                                         AND a.asset_type = g.asset_type AND a.build_id = g.build_id
-                                         AND a.status = 'ready' AND a.scene_hash = g.scene_hash)`,
-                        [bookId, list.map((x) => x.chapter_id), list.map((x) => x.scene_id), list.map((x) => x.asset_type),
-                            list.map((x) => x.build_id), list.map((x) => x.scene_hash)]);
-                    for (const row of r.rows) readyKeys.add(k5(list[Number(row.ord) - 1]));
-                }
-                todo = units.filter((u) => {
-                    if (typeof u.scene_hash !== 'string' || !u.scene_hash) return true;
-                    if (readyKeys.has(gkey(u))) { skipped += 1; return false; }
-                    return true;
-                });
-            }
+                return out;
+            };
 
             // lanes, one lookup per worker type (§4.2: computed at creation)
             const laneCache = new Map();
@@ -214,10 +189,73 @@ function createCommands({ pool, ports }) {
                 return laneCache.get(type);
             };
 
-            // §6.1 п.4: insert; a unit live under another command → joined (link to the live job)
             let created = 0;
             let joined = 0;
-            if (todo.length) {
+            let skipped = 0;
+
+            /** §6.1 пп.3–4 for one batch of planned units: skip ready, insert / join the rest. */
+            const place = async (units) => {
+                let todo = units;
+                if (!force && units.length) {
+                    // scene level: the scene asset is ready for the current content (PG scene_assets only)
+                    const k5 = (g) => `${g.chapter_id}\u0000${g.scene_id}\u0000${g.asset_type}\u0000${g.build_id}\u0000${g.scene_hash}`;
+                    const gkey = (u) => k5({ ...u, asset_type: LAYER_OF_KIND[u.kind] });
+                    const groups = new Map();
+                    for (const u of units) {
+                        if (typeof u.scene_hash !== 'string' || !u.scene_hash) continue; // readiness unprovable → do it
+                        if (!groups.has(gkey(u))) groups.set(gkey(u), { chapter_id: u.chapter_id, scene_id: u.scene_id, asset_type: LAYER_OF_KIND[u.kind], build_id: u.build_id, scene_hash: u.scene_hash });
+                    }
+                    const readyKeys = new Set();
+                    if (groups.size) {
+                        const list = [...groups.values()];
+                        const r = await client.query(
+                            `SELECT g.ord FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[])
+                                    WITH ORDINALITY AS g(chapter_id, scene_id, asset_type, build_id, scene_hash, ord)
+                             WHERE EXISTS (SELECT 1 FROM scene_assets a
+                                           WHERE a.book_id = $1 AND a.chapter_id = g.chapter_id AND a.scene_id = g.scene_id
+                                             AND a.asset_type = g.asset_type AND a.build_id = g.build_id
+                                             AND a.status = 'ready' AND a.scene_hash = g.scene_hash)`,
+                            [bookId, list.map((x) => x.chapter_id), list.map((x) => x.scene_id), list.map((x) => x.asset_type),
+                                list.map((x) => x.build_id), list.map((x) => x.scene_hash)]);
+                        for (const row of r.rows) readyKeys.add(k5(list[Number(row.ord) - 1]));
+                    }
+                    todo = units.filter((u) => {
+                        if (typeof u.scene_hash !== 'string' || !u.scene_hash) return true;
+                        if (readyKeys.has(gkey(u))) { skipped += 1; return false; }
+                        return true;
+                    });
+                    // 1.1.0 — part-level readiness (opt-in: the unit carries input.part_hash).
+                    // A part (e.g. one IU picture, one video group) whose accepted snapshot hash
+                    // is recorded in scene_assets.metadata.gen_parts[unit_key].part_hash for the
+                    // same build is already done for the current content — skip it even if its
+                    // scene is not complete («сгенерировать недостающее» = only the missing /
+                    // changed parts). A row the host marked 'stale' proves nothing. Units without
+                    // part_hash (audio) keep the scene-level rule above unchanged.
+                    const done = await readyParts(client, bookId, todo);
+                    if (done.size) {
+                        // 1.3.0 — a part kind with a merge stage (input.merge_parts: video_group):
+                        // every part of the scene is already done but the scene is not ready for
+                        // this content → the merge alone is created (local, no GPU). Parts whose
+                        // done job cannot be found go back to the plan.
+                        const byScene = new Map();
+                        for (const u of todo) {
+                            if (!mergePartsOf(u.input)) continue;
+                            const sk = `${u.chapter_id}\u0000${u.scene_id}`;
+                            if (!byScene.has(sk)) byScene.set(sk, []);
+                            byScene.get(sk).push(u);
+                        }
+                        const extra = [];
+                        for (const list of byScene.values()) {
+                            if (!list.every((u) => done.has(u))) continue;   // some parts run → the transition merges
+                            const merge = await mergeUnitFor(client, bookId, list[0]);
+                            if (merge) extra.push(merge);
+                            else for (const u of list) done.delete(u);
+                        }
+                        skipped += done.size;
+                        todo = todo.filter((u) => !done.has(u)).concat(extra);
+                    }
+                }
+                if (!todo.length) return;
                 const cols = { ch: [], sc: [], uk: [], kind: [], ex: [], layer: [], build: [], lane: [], max: [], input: [] };
                 for (const u of todo) {
                     const ex = EXECUTOR_OF_KIND[u.kind];
@@ -228,6 +266,7 @@ function createCommands({ pool, ports }) {
                     cols.max.push(ports.maxAttemptsFor(u.kind));
                     cols.input.push(JSON.stringify({ ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null }));
                 }
+                // §6.1 п.4: insert; a unit live under another command → joined (link to the live job)
                 const ins2 = await client.query(
                     `INSERT INTO gen_jobs (command_id, workspace_id, user_id, book_id, chapter_id, scene_id, unit_key,
                                            kind, executor, layer, build_id, lane, max_attempts, input, created_at)
@@ -242,7 +281,7 @@ function createCommands({ pool, ports }) {
                      RETURNING job_id`,
                     [cmd.command_id, workspaceId, userId, bookId, cols.ch, cols.sc, cols.uk, cols.kind, cols.ex,
                         cols.layer, cols.build, cols.lane, cols.max, cols.input]);
-                created = ins2.rowCount;
+                created += ins2.rowCount;
                 // live jobs of the same units (ours just inserted + other commands' → joined)
                 const live = await client.query(
                     `SELECT j.job_id, j.command_id FROM gen_jobs j
@@ -250,10 +289,37 @@ function createCommands({ pool, ports }) {
                        ON j.chapter_id = t.ch AND j.scene_id = t.sc AND j.kind = t.kind AND j.unit_key = t.uk
                      WHERE j.book_id = $1 AND j.status IN ('queued','running')`,
                     [bookId, cols.ch, cols.sc, cols.kind, cols.uk]);
-                joined = live.rows.filter((r) => r.command_id !== cmd.command_id).length;
+                joined += live.rows.filter((r) => r.command_id !== cmd.command_id).length;
                 await linkJobs(client, [cmd.command_id], live.rows.map((r) => r.job_id));
+            };
+
+            const nonVideo = [];
+            for (const layer of effective.filter((l) => l !== 'video')) {
+                const plan = normalisePlan(await ports.planUnits(bookRef, scope, layer, planCtx), layer);
+                nonVideo.push(...takeUnits(plan.units, layer));
             }
-            const summary = { jobs_created: created, joined, skipped_ready: skipped };
+            await place(nonVideo);
+
+            // 1.3.0 — video (§6.5, §13 п.11): the planner decides per scene: groups now /
+            // wait for live images or audio (the command joins those jobs; the groups come
+            // from the transition of their acceptance) / skip with a reason.
+            let skips = [];
+            if (effective.includes('video')) {
+                const plan = normalisePlan(await ports.planUnits(bookRef, scope, 'video', planCtx), 'video');
+                await place(takeUnits(plan.units, 'video'));
+                if (plan.waits.length) {
+                    // joined = links to live jobs another command created (our own image / audio jobs are not «joined»)
+                    const foreign = async () => (await client.query(
+                        `SELECT count(*)::int AS n FROM gen_command_jobs l JOIN gen_jobs j ON j.job_id = l.job_id
+                         WHERE l.command_id = $1 AND j.command_id <> $1`, [cmd.command_id])).rows[0].n;
+                    const before = await foreign();
+                    await linkSceneLive(client, [cmd.command_id], bookId, plan.waits);
+                    joined += (await foreign()) - before;
+                }
+                skips = plan.skipped;
+                await recordSkips(client, [cmd.command_id], skips);
+            }
+            const summary = { jobs_created: created, joined, skipped_ready: skipped, ...skipSummary(skips) };
             await client.query('UPDATE gen_commands SET summary = $2::jsonb WHERE command_id = $1', [cmd.command_id, JSON.stringify(summary)]);
             await notifyProgress(client, bookId, cmd.command_id);
             return {
@@ -271,7 +337,8 @@ function createCommands({ pool, ports }) {
      *                         command waits for them (gen_command_jobs) — shared jobs keep running
      * @param {object} target
      * @param {{cancelledBy?:string}} [opts]
-     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number}>}
+     * @returns {Promise<{commands_cancelled:number, jobs_cancelled:number, job_ids:string[], kept_shared:number, layers?:string[]}>}
+     *          layers (1.1.0, {commandId} only): the layers of the command that was stopped
      */
     async function cancel(target = {}, opts = {}) {
         const by = opts.cancelledBy == null ? null : String(opts.cancelledBy).slice(0, 200);
@@ -294,7 +361,7 @@ function createCommands({ pool, ports }) {
             if (commandId !== undefined) {
                 commands = (await client.query(
                     `UPDATE gen_commands SET status = 'cancelled', finished_at = now(), cancelled_by = $2
-                     WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id`, [commandId, by])).rows;
+                     WHERE command_id = $1 AND status = 'active' RETURNING command_id, book_id, layers`, [commandId, by])).rows;
                 jobs = await client.query(
                     `UPDATE gen_jobs j SET status = 'cancelled', finished_at = now()
                      FROM gen_command_jobs l
@@ -321,16 +388,31 @@ function createCommands({ pool, ports }) {
             }
             const books = new Set([...commands.map((c) => c.book_id), ...jobs.rows.map((j) => j.book_id)]);
             for (const b of books) await notifyProgress(client, b, commandId || null);
-            return {
+            const out = {
                 commands_cancelled: commands.length,
                 jobs_cancelled: jobs.rowCount,
                 job_ids: jobs.rows.map((j) => j.job_id),
                 kept_shared: keptShared,
             };
+            if (commandId !== undefined) out.layers = commands.length ? commands[0].layers : [];   // 1.1.0
+            return out;
         });
     }
 
     const purgeBook = (bookId) => purgeBookRows(pool, bookId);
+
+    /** createCommandTx + the О3 `command-created` info line (also for a repeated click: existing=true). */
+    async function createCommand(params = {}) {
+        const t0 = Date.now();
+        const r = await createCommandTx(params);
+        genLog.event('command-created', {
+            book_id: params.bookId, command_id: r.command_id, layers: r.layers, status: r.status,
+            scope: params.scope && params.scope.level, existing: r.existing === true ? true : undefined,
+            jobs_created: r.summary && r.summary.jobs_created, joined: r.summary && r.summary.joined,
+            skipped_ready: r.summary && r.summary.skipped_ready, ms: Date.now() - t0,
+        });
+        return r;
+    }
 
     return { createCommand, cancel, purgeBook };
 }

@@ -22,9 +22,30 @@ const {
     EXECUTOR_OF_KIND, LAYER_OF_KIND, LIVE,
 } = require('./util');
 const { checkLane } = require('./ports');
+const { msBetween } = require('./log');
+const {
+    normalisePlan, readyParts, mergePartsOf, mergeUnitFor, linkSceneLive, recordSkips,
+} = require('./stage');
+
+const NOOP_LOG = Object.freeze({ event() {} });
+/** Mode of an accepted artifact: world-readable like the legacy outputs (О3; the tmp file is 0640). */
+const ARTIFACT_MODE = 0o644;
+const dim = (v) => (Number.isInteger(v) && v > 0 ? v : null);
 
 const PART_KINDS = new Set(['audio_chunk', 'iu_image', 'video_group']);
 const FINAL_FORMAT = { audio_merge: 'mp3', video_merge: 'mp4' };
+const PART_FORMAT = { iu_image: 'png' };
+
+/** input.scene_parts → [{unit_key, part_hash}] (non-empty, string fields) or null. */
+function partsManifest(v) {
+    if (!Array.isArray(v) || v.length === 0) return null;
+    const out = [];
+    for (const p of v) {
+        if (!p || typeof p.unit_key !== 'string' || !p.unit_key || typeof p.part_hash !== 'string' || !p.part_hash) return null;
+        out.push({ unit_key: p.unit_key, part_hash: p.part_hash });
+    }
+    return out;
+}
 const DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 function epochS() { return Math.floor(Date.now() / 1000); }
@@ -39,7 +60,7 @@ async function drain(stream) {
     try { stream.resume(); } catch (_) { /* ignore */ }
 }
 
-function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES }) {
+function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES, genLog = NOOP_LOG }) {
     const sceneLockKey = (j) => `animastor:gen-v2:scene:${JSON.stringify([j.book_id, j.chapter_id, j.scene_id])}`;
 
     // ── shared: a failed attempt → retry with backoff or failed (§7 «Ошибка», §9 пп.1–2)
@@ -63,7 +84,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 [job.worker_id, job.job_id]);
         }
         await notifyProgress(client, job.book_id, job.command_id);
-        return { status: r.rows[0].status, not_before: r.rows[0].not_before, retry };
+        return { status: r.rows[0].status, not_before: r.rows[0].not_before, retry, delay_ms: retry ? delay : undefined };
     }
 
     /**
@@ -73,13 +94,30 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
     async function failAttempt(jobId, attempt, errorClass, reason) {
         const cls = typeof errorClass === 'string' && errorClass ? errorClass.slice(0, 64) : 'unknown';
         const why = reason == null ? null : String(reason).slice(0, 2000);
-        return withTx(pool, async (client) => {
-            const job = (await client.query('SELECT * FROM gen_jobs WHERE job_id = $1 FOR UPDATE', [jobId])).rows[0];
+        let job = null;
+        let out = null;
+        const r = await withTx(pool, async (client) => {
+            job = (await client.query('SELECT * FROM gen_jobs WHERE job_id = $1 FOR UPDATE', [jobId])).rows[0];
             if (!job) return { status: 404, code: 'not_found' };
             if (job.status !== 'running' || job.attempt !== attempt) return { status: 409, code: 'stale_attempt' };
-            const out = await failAttemptTx(client, job, cls, why);
+            out = await failAttemptTx(client, job, cls, why);
             return { status: 200, job_status: out.status, retry: out.retry };
         });
+        // О3, after commit: `error` for every failed attempt, `requeue` when it goes back to the queue
+        const ids = job ? {
+            book_id: job.book_id, command_id: job.command_id, job_id: job.job_id, kind: job.kind, unit_key: job.unit_key,
+            worker_id: job.worker_id,
+        } : { job_id: jobId };
+        if (r.status !== 200) {
+            genLog.event('error', { ...ids, attempt, error_class: cls, code: r.code });
+        } else {
+            genLog.event('error', {
+                ...ids, attempt, max_attempts: job.max_attempts, error_class: cls, job_status: out.status, retry: out.retry,
+                run_ms: msBetween(job.claimed_at),
+            });
+            if (out.retry) genLog.event('requeue', { ...ids, attempt, max_attempts: job.max_attempts, error_class: cls, delay_ms: out.delay_ms });
+        }
+        return r;
     }
 
     // ── scene_assets (§4.3: written only by acceptance) ──────────────────────
@@ -89,7 +127,54 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         const sceneHash = job.input.scene_hash || null;
         if (PART_KINDS.has(job.kind)) {
             // a part (chunk / IU / group) is recorded, the scene asset is not ready yet
-            const part = { [job.unit_key]: { kind: job.kind, path: finalPath, sha256: sha, bytes, job_id: job.job_id, attempt: job.attempt } };
+            const entry = { kind: job.kind, path: finalPath, sha256: sha, bytes, job_id: job.job_id, attempt: job.attempt };
+            // О3: the PNG validator knows the size — keep it with the part (scene_assets.width/height below)
+            if (validation && dim(validation.width) && dim(validation.height)) { entry.width = validation.width; entry.height = validation.height; }
+            if (typeof job.input.part_hash === 'string' && job.input.part_hash) entry.part_hash = job.input.part_hash;
+            const part = { [job.unit_key]: entry };
+            const sceneParts = partsManifest(job.input.scene_parts);
+            if (sceneParts) {
+                // 1.1.0 — a part kind WITHOUT a merge stage (iu_image): the scene asset is
+                // `ready` exactly when every part the planner listed for the scene
+                // (input.scene_parts = [{unit_key, part_hash}] in scene order) has an
+                // accepted entry with that part_hash; the acceptance that completes the
+                // set writes ready + sha256 (of the parts manifest «unit_key:sha256» per
+                // line, scene order) + job_id + path (the first part's file). Not complete
+                // → 'pending' (a half-regenerated scene is not ready for the new content).
+                // The row lock taken by the upsert serialises two IUs of one scene accepted
+                // in parallel; the second one sees the first one's part (READ COMMITTED
+                // re-reads the committed row on conflict).
+                const up = (await client.query(
+                    `INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, build_id, scene_hash, status, metadata, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, 'pending', jsonb_build_object('gen_parts', $7::jsonb), $8)
+                     ON CONFLICT (book_id, chapter_id, scene_id, asset_type, build_id) DO UPDATE SET
+                         metadata = jsonb_set(
+                             CASE WHEN jsonb_typeof(scene_assets.metadata) = 'object' THEN scene_assets.metadata ELSE '{}'::jsonb END,
+                             '{gen_parts}',
+                             COALESCE(CASE WHEN jsonb_typeof(scene_assets.metadata->'gen_parts') = 'object'
+                                           THEN scene_assets.metadata->'gen_parts' END, '{}'::jsonb) || $7::jsonb),
+                         updated_at = EXCLUDED.updated_at
+                     RETURNING id, metadata->'gen_parts' AS parts`,
+                    [job.book_id, job.chapter_id, job.scene_id, assetType, build, sceneHash, JSON.stringify(part), epochS()])).rows[0];
+                const parts = up.parts && typeof up.parts === 'object' ? up.parts : {};
+                const complete = sceneParts.every((p) => parts[p.unit_key] && parts[p.unit_key].part_hash === p.part_hash);
+                if (complete) {
+                    const manifest = sceneParts.map((p) => `${p.unit_key}:${parts[p.unit_key].sha256 || ''}`).join('\n');
+                    const first = parts[sceneParts[0].unit_key];
+                    // width/height = those of the file `path` points at (the first part)
+                    await client.query(
+                        `UPDATE scene_assets SET scene_hash = $2, status = 'ready', error = NULL, sha256 = $3, job_id = $4,
+                                path = $5, format = $6, width = $7, height = $8
+                         WHERE id = $1`,
+                        [up.id, sceneHash, crypto.createHash('sha256').update(manifest).digest('hex'), job.job_id,
+                            first.path || finalPath, PART_FORMAT[job.kind] || null, dim(first.width), dim(first.height)]);
+                } else {
+                    await client.query(
+                        `UPDATE scene_assets SET scene_hash = $2, status = 'pending', sha256 = NULL, job_id = NULL WHERE id = $1`,
+                        [up.id, sceneHash]);
+                }
+                return;
+            }
             await client.query(
                 `INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, build_id, scene_hash, status, metadata, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, 'pending', jsonb_build_object('gen_parts', $7::jsonb), $8)
@@ -104,17 +189,21 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
             return;
         }
         const duration = validation && Number.isFinite(validation.durationSec) ? validation.durationSec : null;
+        const width = validation ? dim(validation.width) : null;
+        const height = validation ? dim(validation.height) : null;
         await client.query(
             `INSERT INTO scene_assets (book_id, chapter_id, scene_id, asset_type, path, build_id, scene_hash, status,
-                                       job_id, sha256, duration_sec, format, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9, $10, $11, $12)
+                                       job_id, sha256, duration_sec, format, updated_at, width, height)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'ready', $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (book_id, chapter_id, scene_id, asset_type, build_id) DO UPDATE SET
                  path = EXCLUDED.path, scene_hash = EXCLUDED.scene_hash, status = 'ready', error = NULL,
                  job_id = EXCLUDED.job_id, sha256 = EXCLUDED.sha256,
                  duration_sec = COALESCE(EXCLUDED.duration_sec, scene_assets.duration_sec),
+                 width = COALESCE(EXCLUDED.width, scene_assets.width),
+                 height = COALESCE(EXCLUDED.height, scene_assets.height),
                  format = EXCLUDED.format, updated_at = EXCLUDED.updated_at`,
             [job.book_id, job.chapter_id, job.scene_id, assetType, finalPath, build, sceneHash,
-                job.job_id, sha, duration, FINAL_FORMAT[job.kind], epochS()]);
+                job.job_id, sha, duration, FINAL_FORMAT[job.kind], epochS(), width, height]);
     }
 
     // ── stage transitions (§6.3) — same transaction as the finished job ─────
@@ -186,43 +275,106 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         return r.rows.map((x) => ({ unit_key: x.unit_key, job_id: x.job_id, path: x.result_path, sha256: x.result_sha256, meta: x.meta || null }));
     }
 
+    /** Is the scene asset of this layer already ready for exactly this content? */
+    async function sceneReady(client, job, layer, sceneHash) {
+        if (!sceneHash) return false;
+        const r = await client.query(
+            `SELECT 1 FROM scene_assets WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3 AND asset_type = $4
+               AND build_id = $5 AND status = 'ready' AND scene_hash = $6 LIMIT 1`,
+            [job.book_id, job.chapter_id, job.scene_id, layer, job.build_id, sceneHash]);
+        return r.rowCount > 0;
+    }
+
+    /**
+     * 1.3.0 — the video stage of one scene (§6.3, §6.5, §13 п.11): asked after the last
+     * IU of the scene and after its audio merge. The host video planner, run on THIS
+     * transaction, decides: groups now / wait (join the live images or audio) / skip
+     * with a reason (recorded for the commands, insert-only).
+     */
+    async function videoStage(client, qualifying, job) {
+        const owner = qualifying[0];
+        const ids = qualifying.map((c) => c.command_id);
+        const force = qualifying.some((c) => c.force === true);
+        const plan = normalisePlan(await ports.planUnits(
+            { bookId: owner.book_id, workspaceId: owner.workspace_id, userId: owner.user_id },
+            { level: 'scene', chapter_id: job.chapter_id, scene_id: job.scene_id }, 'video', { db: client }), 'video');
+        let units = plan.units.filter((u) => u && u.kind === 'video_group'
+            && u.chapter_id === job.chapter_id && u.scene_id === job.scene_id
+            && typeof u.unit_key === 'string' && u.unit_key && typeof u.build_id === 'string' && u.build_id
+            && u.input && typeof u.input === 'object')
+            .map((u) => ({ ...u, input: { ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null } }));
+        let created = 0;
+        if (units.length && !force) {
+            const sceneHash = units[0].input.scene_hash;
+            if (await sceneReady(client, units[0], 'video', sceneHash)) {
+                units = [];                                         // the scene video is current
+            } else {
+                const done = await readyParts(client, job.book_id, units);
+                if (done.size === units.length && mergePartsOf(units[0].input)) {
+                    const merge = await mergeUnitFor(client, job.book_id, units[0]);
+                    if (merge) { created += await insertStageJobs(client, qualifying, [merge]); units = []; }
+                } else if (done.size) {
+                    units = units.filter((u) => !done.has(u));
+                }
+            }
+        }
+        created += await insertStageJobs(client, qualifying, units);
+        if (plan.waits.length) await linkSceneLive(client, ids, job.book_id, plan.waits);
+        if (plan.skipped.length) await recordSkips(client, ids, plan.skipped);
+        return created;
+    }
+
     /**
      * §6.3: a next stage is created only if at least one command linked to the finished job is
      * active, has the layer and the layer is enabled; the new job is linked to all such commands.
+     *   audio_chunk (last of the scene) → audio_merge  — commands with audio, and (1.3.0) video
+     *                                                    commands waiting for this audio (§13 п.11 п.3)
+     *   iu_image (last of the scene)    → video stage   — commands with video
+     *   audio_merge                     → video stage   — commands with video (1.3.0)
+     *   video_group (last of the plan)  → video_merge   — by input.merge_parts (1.3.0) or, without
+     *                                                    it, every linked group of the scene
      */
     async function transitions(client, cmds, job) {
-        const nextLayer = job.kind === 'iu_image' ? 'video' : job.layer;
-        const qualifying = [];
-        for (const c of cmds) {
-            if (c.status === 'active' && c.layers.includes(nextLayer) && await ports.isLayerEnabled(c.book_id, nextLayer)) qualifying.push(c);
-        }
-        if (!qualifying.length) return 0;
-        const ids = qualifying.map((c) => c.command_id);
+        const active = cmds.filter((c) => c.status === 'active');
+        if (!active.length) return 0;
+        const pick = async (layers, enabledLayer) => {
+            const out = [];
+            for (const c of active) {
+                if (layers.some((l) => c.layers.includes(l)) && await ports.isLayerEnabled(c.book_id, enabledLayer)) out.push(c);
+            }
+            return out;
+        };
+        const lockScene = () => client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
         const mergeInput = async (kind) => ({
             scene_hash: job.input.scene_hash ?? null,
             parts: await doneParts(client, job, kind),
         });
         const sceneUnit = (kind, input) => ({ chapter_id: job.chapter_id, scene_id: job.scene_id, kind, unit_key: 'scene', build_id: job.build_id, input });
 
-        if (job.kind === 'audio_chunk' || job.kind === 'video_group' || job.kind === 'iu_image') {
-            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sceneLockKey(job)]);
-            if (!(await sceneStageComplete(client, job, job.kind, ids))) return 0;
-        }
         if (job.kind === 'audio_chunk') {
-            return insertStageJobs(client, qualifying, [sceneUnit('audio_merge', await mergeInput('audio_chunk'))]);
+            const q = await pick(['audio', 'video'], 'audio');
+            if (!q.length) return 0;
+            await lockScene();
+            if (!(await sceneStageComplete(client, job, 'audio_chunk', q.map((c) => c.command_id)))) return 0;
+            return insertStageJobs(client, q, [sceneUnit('audio_merge', await mergeInput('audio_chunk'))]);
         }
         if (job.kind === 'video_group') {
-            return insertStageJobs(client, qualifying, [sceneUnit('video_merge', await mergeInput('video_group'))]);
+            const q = await pick(['video'], 'video');
+            if (!q.length) return 0;
+            await lockScene();
+            if (mergePartsOf(job.input)) {
+                const merge = await mergeUnitFor(client, job.book_id, job);
+                return merge ? insertStageJobs(client, q, [merge]) : 0;
+            }
+            if (!(await sceneStageComplete(client, job, 'video_group', q.map((c) => c.command_id)))) return 0;
+            return insertStageJobs(client, q, [sceneUnit('video_merge', await mergeInput('video_group'))]);
         }
-        if (job.kind === 'iu_image') {
-            const owner = qualifying[0];
-            const planned = await ports.planUnits(
-                { bookId: owner.book_id, workspaceId: owner.workspace_id, userId: owner.user_id },
-                { level: 'scene', chapter_id: job.chapter_id, scene_id: job.scene_id }, 'video');
-            const groups = (Array.isArray(planned) ? planned : []).filter((u) => u && u.kind === 'video_group'
-                && u.chapter_id === job.chapter_id && u.scene_id === job.scene_id
-                && typeof u.unit_key === 'string' && typeof u.build_id === 'string' && u.input && typeof u.input === 'object');
-            return insertStageJobs(client, qualifying, groups.map((u) => ({ ...u, input: { ...u.input, scene_hash: u.scene_hash ?? u.input.scene_hash ?? null } })));
+        if (job.kind === 'iu_image' || job.kind === 'audio_merge') {
+            const q = await pick(['video'], 'video');
+            if (!q.length) return 0;
+            await lockScene();
+            if (job.kind === 'iu_image' && !(await sceneStageComplete(client, job, 'iu_image', q.map((c) => c.command_id)))) return 0;
+            return videoStage(client, q, job);
         }
         return 0;
     }
@@ -231,7 +383,27 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
      * Steps 1(validate)–5 of §7 for a file already on disk at tmpPath.
      * @returns {Promise<{status:number, code?:string, reason?:string, idempotent?:boolean, sha256?:string, job_status?:string, stage_jobs_created?:number}>}
      */
-    async function finishAccept(pre, attempt, tmpPath, sha, bytes) {
+    async function finishAccept(pre, attempt, tmpPath, sha, bytes, t0 = Date.now(), localMeta = null) {
+        const r = await finishAcceptInner(pre, attempt, tmpPath, sha, bytes, localMeta);
+        // О3: `accept` for a committed result (or its idempotent replay); a stale
+        // attempt is an `error` line (code stale_attempt); invalid_result is logged by failAttempt.
+        const ids = {
+            book_id: pre.book_id, command_id: pre.command_id, job_id: pre.job_id, kind: pre.kind, unit_key: pre.unit_key,
+            attempt, worker_id: pre.worker_id,
+        };
+        if (r && r.status === 200) {
+            genLog.event('accept', {
+                ...ids, sha256: sha, bytes, width: r.width, height: r.height, idempotent: r.idempotent === true ? true : undefined,
+                stage_jobs_created: r.stage_jobs_created, ms: Date.now() - t0, run_ms: msBetween(pre.claimed_at),
+            });
+        } else if (r && r.code === 'stale_attempt') {
+            genLog.event('error', { ...ids, code: 'stale_attempt', sha256: sha, bytes });
+        }
+        if (r) { delete r.width; delete r.height; }
+        return r;
+    }
+
+    async function finishAcceptInner(pre, attempt, tmpPath, sha, bytes, localMeta = null) {
         const finalPath = ports.artifactPath(pre);
         if (typeof finalPath !== 'string' || !path.isAbsolute(finalPath)) {
             await unlinkQuiet(tmpPath);
@@ -269,7 +441,9 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
                 await fs.promises.rename(tmpPath, finalPath);           // §7 п.3 (atomic, same partition)
                 renamed = true;
-                if (ports.onArtifactPlaced) await ports.onArtifactPlaced(job, finalPath);   // e.g. drop the placeholder sidecar
+                await fs.promises.chmod(finalPath, ARTIFACT_MODE).catch(() => {});   // О3: 0644 like legacy outputs
+                // e.g. drop the placeholder sidecar; 1.3.0: ctx.db = this transaction, ctx.meta = what runLocal returned
+                if (ports.onArtifactPlaced) await ports.onArtifactPlaced(job, finalPath, { db: client, meta: localMeta });
                 await client.query(
                     `UPDATE gen_jobs SET status = 'done', result_path = $2, result_sha256 = $3, result_bytes = $4,
                             finished_at = now(), deadline = NULL
@@ -282,7 +456,10 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
                 await upsertSceneAsset(client, job, finalPath, sha, bytes, validation);
                 const stage = await transitions(client, cmds, job);
                 await notifyProgress(client, job.book_id, job.command_id);
-                return { status: 200, sha256: sha, job_status: 'done', stage_jobs_created: stage };
+                return {
+                    status: 200, sha256: sha, job_status: 'done', stage_jobs_created: stage,
+                    width: validation ? dim(validation.width) : null, height: validation ? dim(validation.height) : null,
+                };
             });
         } finally {
             if (!renamed) await unlinkQuiet(tmpPath);              // rejected / failed before rename → discard
@@ -306,6 +483,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
      * @param {AsyncIterable<Buffer>} stream raw file body
      */
     async function acceptResult(jobId, attempt, token, stream) {
+        const t0 = Date.now();
         checkIds(jobId, attempt);
         if (!verifyUploadToken(uploadSecret, token, jobId, attempt)) {
             await drain(stream);
@@ -314,7 +492,11 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
         const pre = await readJob(jobId);
         if (!pre) { await drain(stream); throw new GenError('not_found', 404, 'unknown job'); }
         const current = (pre.status === 'running' || pre.status === 'done') && pre.attempt === attempt;
-        if (!current) { await drain(stream); return { status: 409, code: 'stale_attempt' }; }
+        if (!current) {
+            await drain(stream);
+            genLog.event('error', { book_id: pre.book_id, command_id: pre.command_id, job_id: jobId, kind: pre.kind, unit_key: pre.unit_key, attempt, code: 'stale_attempt' });
+            return { status: 409, code: 'stale_attempt' };
+        }
 
         const finalPath = ports.artifactPath(pre);
         if (typeof finalPath !== 'string' || !path.isAbsolute(finalPath)) {
@@ -343,7 +525,7 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
             throw err;
         }
         await fh.close();
-        return finishAccept(pre, attempt, tmpPath, hash.digest('hex'), bytes);
+        return finishAccept(pre, attempt, tmpPath, hash.digest('hex'), bytes, t0);
     }
 
     /**
@@ -357,11 +539,11 @@ function createAccept({ pool, ports, uploadSecret, maxUploadBytes = DEFAULT_MAX_
     }
 
     /** Accept a file produced by the backend itself (executor='local'); no token. */
-    async function acceptLocalFile(job, filePath) {
+    async function acceptLocalFile(job, filePath, meta = null) {
         const hash = crypto.createHash('sha256');
         let bytes = 0;
         for await (const chunk of fs.createReadStream(filePath)) { hash.update(chunk); bytes += chunk.length; }
-        return finishAccept(job, job.attempt, filePath, hash.digest('hex'), bytes);
+        return finishAccept(job, job.attempt, filePath, hash.digest('hex'), bytes, Date.now(), meta);
     }
 
     return { acceptResult, acceptError, failAttempt, acceptLocalFile };

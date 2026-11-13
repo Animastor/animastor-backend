@@ -1,6 +1,6 @@
 # @animastor/orchestration
 
-## 1.0.0 — orchestration v2 (`gen`)
+## 1.x — orchestration v2 (`gen`)
 
 ADR: animastor-docs `architecture/ORCHESTRATION_V2.md`. The new core lives in
 `src/gen/` and is exported as `gen`. The 0.3.x contour described below ships
@@ -24,6 +24,31 @@ await orch.claim({ workerId, workerType: 'audio', mode: 'private', workspaceId }
 await orch.acceptResult(jobId, attempt, uploadToken, readableStream);
 orch.startSweeper(10_000);
 ```
+
+**1.1.0 (images, stage 2a).** `iu_image` results are checked by `inspectPng`
+(structure + CRC, dimensions > 0, pixel data, not a blank frame — luma stddev ≥
+`minLumaStddev`, default 2.0); a unit may carry `input.part_hash` (part-level
+«already done» skip) and `input.scene_parts` (scene asset `ready` once every
+listed part is accepted — for part kinds without a merge stage).
+
+**1.2.0 (observability).** Pass `logger` (`{ info | log, error }`) to
+`createOrchestration`: the core writes one line per step —
+`[gen-v2] command-created | claim | accept | error | requeue | command-finished`
+with `book_id`, `command_id`, `job_id`, `kind`, `unit_key`, `attempt`,
+`worker_id`, `sha256`, sizes and durations (allowlisted fields only: no upload
+tokens, paths or task params). Image acceptance records `width`/`height`;
+accepted files are `0644`.
+
+**1.3.0 (video, stage 3a).** `planUnits(book, scope, layer, ctx)` gets
+`ctx.db` (the command / acceptance transaction); for `video` it may answer
+`{units, waits, skipped}` — waits join the live images / audio of the scene,
+skip reasons (`skipped_*`) land in the command summary and in
+`gen_command_skips` (migration 004, `progress().commands[].skipped`). Stage
+transitions: `audio_merge → video`, `iu_image → video`, `video_group →
+video_merge` by `input.merge_parts`; all parts done, no merge → the merge alone.
+`onArtifactPlaced(job, path, {db, meta})` (meta = what `runLocal` returned);
+optional port `inputFiles(job)` → `task.input_files` + `orch.openInput(…)` for
+`GET /internal/gen/jobs/:id/input/:name` (ADR §8.1).
 
 `gen` requires only node builtins and its own files: no `src/legacy`, Redis,
 Express or ComfyUI. Tests: `npm run test:gen` (env `PG_*` of the animastor-test

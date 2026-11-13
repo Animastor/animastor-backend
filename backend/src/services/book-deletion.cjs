@@ -51,6 +51,9 @@ const CANCELLED_WORKERS_TTL_SEC = 3600;
  *                     cascade must not own the agent_sessions SQL — the
  *                     same frozen port implementation serves cancel-worker
  *                     and the generation routes)
+ *   removeBookArtifacts - scoped output cleanup port (services/book-artifacts;
+ *                     injected from backend.cjs). Without it the cascade
+ *                     leaves build output on disk (never removes blindly).
  *   purgeAssistantForBook - Assistant-data purge port (required; the
  *                     cascade must not know the ai_chat_sessions table —
  *                     the future @animastor/assistant owns that data)
@@ -63,6 +66,7 @@ function createBookDeletion(deps) {
         setCancelFlag = null,
         agentSessionControl = null,
         purgeAssistantForBook = null,
+        removeBookArtifacts = null,
     } = deps;
 
     /**
@@ -96,14 +100,15 @@ function createBookDeletion(deps) {
         //      - DELETE agent_sessions удалит все сессии
         //      - resetBook удалит саму книгу
         //    Агент продолжит работу — он не может обнаружить отмену.
-        //    Ключ animastor:cancelled-workers:{bookId} cleanBookRedisKeys НЕ
-        //    удаляет (его нет в списке паттернов) — сигнал намеренно
-        //    переживает шаг 4 и истекает сам по CANCELLED_WORKERS_TTL_SEC.
-        //    Поэтому сигнализируем агенту через cancelled-workers (Redis) и
-        //    статус сессий (PG) ДО удаления любого book state: агент увидит
-        //    отмену на следующем checkCancelled(). Даже если последующие шаги
-        //    (resetBook / Redis / PG / snapshot cleanup) упадут — cancellation
-        //    уже отправлен.
+        //    Ключ animastor:cancelled-workers:{bookId} входит в список
+        //    паттернов cleanBookRedisKeys (шаг 4 его удаляет), поэтому сигнал
+        //    ставится здесь, ДО чистки, и повторно взводится сразу после неё
+        //    (шаг 4) — так он гарантированно переживёт каскад и истечёт сам по
+        //    CANCELLED_WORKERS_TTL_SEC. Поэтому сигнализируем агенту через
+        //    cancelled-workers (Redis) и статус сессий (PG) ДО удаления любого
+        //    book state: агент увидит отмену на следующем checkCancelled().
+        //    Даже если последующие шаги (resetBook / Redis / PG / snapshot
+        //    cleanup) упадут — cancellation уже отправлен.
         try {
             await redis.sadd(`animastor:cancelled-workers:${bookId}`, 'vbook');
             await redis.expire(`animastor:cancelled-workers:${bookId}`, CANCELLED_WORKERS_TTL_SEC);
@@ -139,19 +144,15 @@ function createBookDeletion(deps) {
                 if (chunk?.build_id) buildIds.add(chunk.build_id);
             } catch (_) {}
         }
-        for (const buildId of buildIds) {
-            const buildPath = path.join(OUTPUT_DIR, buildId);
-            if (fs.existsSync(buildPath)) {
-                try { fs.rmSync(buildPath, { recursive: true, force: true }); } catch (_) {}
-            }
-        }
-        if (fs.existsSync(OUTPUT_DIR)) {
-            for (const entry of fs.readdirSync(OUTPUT_DIR)) {
-                if (entry.startsWith(bookId)) {
-                    const entryPath = path.join(OUTPUT_DIR, entry);
-                    try { fs.rmSync(entryPath, { recursive: true, force: true }); } catch (_) {}
-                }
-            }
+        // Scoped removal: validated build ids, only this book's artifacts
+        // (never another book's files in a shared or same-prefix location).
+        try {
+            if (typeof removeBookArtifacts !== 'function') throw new Error('removeBookArtifacts port not injected');
+            removeBookArtifacts({
+                outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, log,
+            });
+        } catch (artErr) {
+            console.warn(`[DELETE-BOOK] artifact cleanup failed for ${bookId}: ${artErr.message}`);
         }
 
         // ── 4. Runtime / ephemeral state (Redis) ──
@@ -165,7 +166,25 @@ function createBookDeletion(deps) {
         await redis.del('animastor:runtime:active-audio');
         await redis.del('animastor:runtime:active-image');
         await redis.del('animastor:runtime:active-video');
-        await cleanBookRedisKeys(redis, bookId);
+        // releaseClaims: the book is being destroyed, so its idempotency
+        // ownership refs go with it — ref + claim + completion marker together
+        // through the owner module (a raw ref DEL would orphan every done
+        // marker; see helpers/redis-helpers.cjs). The cache-clear route keeps
+        // the default and releases after the hub lane clear instead.
+        const cleanResult = await cleanBookRedisKeys(redis, bookId, { releaseClaims: true });
+        // Re-arm the cancellation signal the purge has just removed: a running
+        // VBook agent must still observe it on its next checkCancelled() (the
+        // cascade can take seconds), and the key then expires on its own.
+        try {
+            await redis.sadd(`animastor:cancelled-workers:${bookId}`, 'vbook');
+            await redis.expire(`animastor:cancelled-workers:${bookId}`, CANCELLED_WORKERS_TTL_SEC);
+            log(`[DELETE-BOOK] Re-armed cancelled-workers for ${bookId} (TTL ${CANCELLED_WORKERS_TTL_SEC}s)`);
+        } catch (redisErr) {
+            console.warn(`[DELETE-BOOK] Failed to re-arm cancelled-workers: ${redisErr.message}`);
+        }
+        if (cleanResult && cleanResult.claims_released) {
+            log(`[DELETE-BOOK] ${bookId}: released ${cleanResult.claims_released} idempotency claim(s), ${cleanResult.markers_released} completion marker(s)`);
+        }
 
         // ── 5. Derived PostgreSQL state — clean ALL PG tables, each with an
         //    individual try/catch so one failure (e.g. table doesn't exist in

@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const { BookState, SceneStatus } = require('./constants');
+const { normalizeBehaviors } = require('../behavior-schema.cjs');
 const { getBookDir, getChapterDir, getBookMetaPath, getCharactersPath, getMentionsPath, getBiblePath, getLocationsPath, getVoicesPath, getBehaviorPath, chapterId, sceneId, unitId } = require('./paths');
 const { detectLanguage } = require('@animastor/parser');
 const { findCanonicalCharacter, isGenericCharacter, isPlaceholderCharacter, hasRealAppearance } = require('../character-identity');
@@ -364,12 +365,12 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     fs.writeFileSync(getBiblePath(bookDir), JSON.stringify(bibleWithoutExtra, null, 2));
 
     // Create behavior.json on first window if it does not exist yet.
-    // Starts as an empty object — behavior entries are added later by the
-    // user (Editor tab) or by the AI-agent via edit_book tool.
+    // Starts as an empty schema-v2 document — behavior entries are added later
+    // by the user (Editor tab) or by the AI-agent via edit_book tool.
     if (isFirstWindow) {
         const bhPath = getBehaviorPath(bookDir);
         if (!fs.existsSync(bhPath)) {
-            fs.writeFileSync(bhPath, JSON.stringify({}, null, 2));
+            fs.writeFileSync(bhPath, JSON.stringify(normalizeBehaviors({}), null, 2));
         }
     }
 
@@ -543,12 +544,19 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         const sceneUnits = aiScene.units
             .filter(u => (u.text || '').trim())
             .map(u => ({
-                id: unitId(),
+                // The pipeline pre-assigns ids when it applies behaviour rules
+                // (the matcher seed depends on the unit id) — keep them.
+                id: (typeof u.id === 'string' && u.id) ? u.id : unitId(),
                 type: u.type || 'perception',
                 text: u.text.trim(),
                 audio: u.audio || undefined,
                 image: u.image || undefined,
                 video: u.video || undefined,
+                // Behaviour (architecture/VBOOK_BEHAVIOUR.md): per-IU emotions
+                // (matcher input), applied-rule copies, author lock.
+                state: u.state || undefined,
+                behaviour: u.behaviour || undefined,
+                behaviour_locked: u.behaviour_locked || undefined,
                 source_start: u.source_start ?? undefined,
                 source_end: u.source_end ?? undefined,
             }));

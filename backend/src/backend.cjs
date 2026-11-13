@@ -307,7 +307,9 @@ const fs = require('fs');
 const { PORT = 3000, HUB_URL = 'https://animastor.org/gpu', BUILD_TTL_HOURS = 48 } = process.env;
 const crypto = require('crypto');
 
-const redis = new Redis({ host: 'redis', port: 6379 });
+// REDIS_PASSWORD (optional): set together with `requirepass` on the Redis
+// service; unset keeps the historical password-less connection.
+const redis = new Redis({ host: 'redis', port: 6379, ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}) });
 // Stage 114 — the GPU dispatcher needs the Redis client for the queue
 // idempotency claim and the executor-availability gate (both must run BEFORE
 // a job reaches the hub queue). Registering it here keeps a single
@@ -338,11 +340,22 @@ app.use('/api/', rateLimit({
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// О1: polling / restore endpoints are never cached or answered with 304
+// (Cache-Control: no-store, no ETag) — middleware/no-store.js.
+const { noStoreForPolling } = require('./middleware/no-store');
+app.use('/api/v1', noStoreForPolling);
+
 // Auth context middleware (session cookie → req.user / req.workspace).
 // Requests without a valid session stay anonymous (pre-auth compatibility —
 // no global requireAuth); authenticated requests get real identity.
 const { authContext, requireBookAccess } = require('./middleware/auth-context');
 app.use(authContext);
+
+// Input guard: book/build ids from the URL, query string and JSON body must
+// match the storage grammar before any route runs (400 otherwise).
+const inputGuard = require('./middleware/input-guard');
+inputGuard.registerParamGuards(app);
+app.use('/api/v1', inputGuard.requestIdsGuard);
 
 // Authentication MVP: strict rate limit on credential endpoints (brute-force
 // surface), registered BEFORE the auth route handlers.
@@ -365,19 +378,22 @@ app.use('/api/v1/auth/register', rateLimit({
 require('./routes/auth-routes.cjs')(app, redis, { utils: { log: (m) => console.log(m) } });
 
 // Book ownership guards (Authentication MVP): every /api/v1/book/:bookId/*
-// endpoint plus book-keyed media serving requires workspace membership when
-// authenticated. Pre-auth requests pass through unchanged. Book-CREATION
-// paths (import/blank/load-vbook) are exempt — they must run so ownership can
-// attach to the caller's workspace inside the handler.
-const CREATE_BOOK_SUBPATHS = new Set(['import', 'import-txt', 'import-text', 'load-vbook', 'blank']);
+// endpoint plus book-keyed media serving requires an identity (user or
+// guest) that may access the book; requests without identity get 401.
+// Book-CREATION paths (import/blank/load-vbook) are exempt — they must run
+// so ownership can attach to the caller's workspace inside the handler.
+const { CREATE_BOOK_SUBPATHS } = inputGuard;
 const bookAccessGuard = requireBookAccess('bookId');
-app.use('/api/v1/book/:bookId', (req, res, next) => {
+app.use('/api/v1/book/:bookId', inputGuard.bookIdPathGuard, (req, res, next) => {
     if (CREATE_BOOK_SUBPATHS.has(req.params.bookId)) return next();
     return bookAccessGuard(req, res, next);
 });
-app.use('/api/v1/scene/:bookId', requireBookAccess('bookId'));
-app.use('/api/v1/iu-image/:bookId', requireBookAccess('bookId'));
-app.use('/api/v1/preview/:bookId', requireBookAccess('bookId'));
+app.use('/api/v1/scene/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
+app.use('/api/v1/iu-image/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
+app.use('/api/v1/preview/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
+
+// Diagnostics surface: platform admins only.
+app.use('/api/v1/debug', authContextMiddleware.requireAdmin);
 
 // AI chat endpoints are book-scoped too (session contents belong to a book).
 // The target book comes from query/body/session lookup rather than the URL,
@@ -610,6 +626,8 @@ const routeDeps = {
     bookModel,
     bookDeletion: createBookDeletion({
         book, redis, config, storage,
+        // Scoped build-output cleanup (validated ids, only this book's files).
+        removeBookArtifacts: require('./services/book-artifacts.cjs').removeBookArtifacts,
         getAllChunks, getChunk, cleanBookRedisKeys,
         // Stage 116 (D4): queue-idempotency port (injected — the Book Model
         // layer must not depend on backend/src/helpers).

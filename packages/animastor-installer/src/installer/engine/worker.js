@@ -103,9 +103,53 @@ function ensureWorkerDependencies(io, { workerDir, nodeBin = null }) {
  * already on disk and were kept (files_kept).
  * @returns {{ status, files, files_installed, files_kept, dir_created, updated_from?, reason? }}
  */
-function installWorkerBundle(io, { workerDir, manifest, repoRoot = null, bundleDir = null, hubUrl = null, httpFetchText = null, log = null, update = true, nodeBin = null }) {
+// ── installer 0.2.10: the bundle source is copied WHOLE ─────────────────────
+// 0.2.9 copied only manifest.worker_bundle.files; bundle 2.4.1 added
+// worker-logs.cjs (required by worker.cjs) → «Cannot find module
+// './worker-logs.cjs'» after an update. The source dir (hub bundle or the
+// installer's bundled copy) IS the bundle: every regular file is deployed;
+// the manifest list is only the minimal presence check. Never copied: .env
+// and .env.* (except .env.example), node_modules/, .git/, logs/.
+const BUNDLE_SKIP_DIRS = new Set(['node_modules', '.git', 'logs']);
+/** Files of a bundle that are never removed as «stale» (user data / installer-written). */
+const BUNDLE_PROTECTED = new Set(['.env', 'node-classes.json']);
+
+/** io.fs.statSync returns booleans; node fs returns methods — accept both. */
+function statIs(st, what) {
+    if (!st) return false;
+    const v = st[what];
+    return typeof v === 'function' ? v.call(st) === true : v === true;
+}
+
+function isBundleFile(relPath) {
+    const base = relPath.split('/').pop();
+    if (base === '.env' || /^\.env\..+$/.test(base)) return base === '.env.example';
+    return true;
+}
+
+/** Sorted relative paths of every deployable file of a bundle dir. */
+function listBundleFiles(io, dir) {
+    const out = [];
+    const walk = (rel) => {
+        const abs = rel ? path.join(dir, rel) : dir;
+        let names;
+        try { names = io.fs.readdirSync(abs); } catch (_) { return; }
+        for (const name of names) {
+            const r = rel ? `${rel}/${name}` : name;
+            const p = path.join(dir, r);
+            let st;
+            try { st = io.fs.statSync(p); } catch (_) { continue; }
+            if (statIs(st, 'isDirectory')) { if (!BUNDLE_SKIP_DIRS.has(name)) walk(r); continue; }
+            if (statIs(st, 'isFile') && isBundleFile(r)) out.push(r);
+        }
+    };
+    walk('');
+    return out.sort();
+}
+
+function installWorkerBundle(io, { workerDir, manifest, repoRoot = null, bundleDir = null, hubUrl = null, httpFetchText = null, log = null, update = true, nodeBin = null, previousBundleFiles = null }) {
     const wb = manifest.worker_bundle || {};
-    const files = wb.files || [];
+    const manifestFiles = wb.files || [];
     const dirCreated = !io.fs.existsSync(workerDir);
     if (dirCreated) io.fs.mkdirSync(workerDir, { recursive: true });
 
@@ -118,17 +162,22 @@ function installWorkerBundle(io, { workerDir, manifest, repoRoot = null, bundleD
     const installed = [];
     const kept = [];
     const failed = [];
+    const removed = [];
 
-    for (const f of files) {
+    // every file of the source bundle(s), manifest-listed or not; a file only
+    // the hub bundle has (repo copy partial) still comes from the hub bundle
+    const sources = [fromRepo ? repoBundleDir : null, bundleDir].filter(Boolean);
+    const sourceOf = new Map();
+    for (const dir of sources) for (const f of listBundleFiles(io, dir)) if (!sourceOf.has(f)) sourceOf.set(f, dir);
+    const bundleFiles = [...new Set([...sourceOf.keys(), ...manifestFiles])].sort();
+
+    for (const f of bundleFiles) {
         const dest = path.join(workerDir, f);
         if (io.fs.existsSync(dest) && !outdated) { kept.push(f); continue; }
-        if (fromRepo && io.fs.existsSync(path.join(repoBundleDir, f))) {
-            io.fs.copyFileSync(path.join(repoBundleDir, f), dest);
-            installed.push(f);
-            continue;
-        }
-        if (bundleDir && io.fs.existsSync(path.join(bundleDir, f))) {
-            io.fs.copyFileSync(path.join(bundleDir, f), dest);
+        const src = sourceOf.get(f);
+        if (src) {
+            io.fs.mkdirSync(path.dirname(dest), { recursive: true });
+            io.fs.copyFileSync(path.join(src, f), dest);
             installed.push(f);
             continue;
         }
@@ -136,8 +185,26 @@ function installWorkerBundle(io, { workerDir, manifest, repoRoot = null, bundleD
         failed.push(f);
     }
 
+    // minimal presence check: everything the manifest names must be on disk
+    const missing = manifestFiles.filter((f) => !io.fs.existsSync(path.join(workerDir, f)));
+    for (const f of missing) if (!failed.includes(f)) failed.push(f);
     if (failed.length > 0) {
         return { status: 'failed', files: installed, files_installed: installed, files_kept: kept, dir_created: dirCreated, reason: `could not obtain bundle files: ${failed.join(', ')} (no repo checkout, no hub bundle)` };
+    }
+
+    // an UPDATE removes the files of the previous bundle version that the new
+    // one no longer ships — only files the installer itself recorded
+    // (install-state worker.bundle_files), never .env / node-classes.json
+    if (outdated && Array.isArray(previousBundleFiles) && sources.length > 0) {
+        const now = new Set(bundleFiles);
+        for (const f of previousBundleFiles) {
+            if (typeof f !== 'string' || !f || now.has(f) || BUNDLE_PROTECTED.has(f) || f.includes('..') || path.isAbsolute(f)) continue;
+            const p = path.join(workerDir, f);
+            try {
+                if (io.fs.existsSync(p) && statIs(io.fs.statSync(p), 'isFile')) { io.fs.unlinkSync(p); removed.push(f); }
+            } catch (_) { /* best effort */ }
+        }
+        if (removed.length && log) log.info(`worker bundle: removed ${removed.length} file(s) of ${installedVersion} not in ${sourceVersion}: ${removed.join(', ')}`);
     }
 
     const deps = ensureWorkerDependencies(io, { workerDir, nodeBin });
@@ -149,6 +216,9 @@ function installWorkerBundle(io, { workerDir, manifest, repoRoot = null, bundleD
     }
     return {
         status: 'installed', files: installed, files_installed: installed, files_kept: kept, dir_created: dirCreated,
+        // install-state worker.bundle_files: what the NEXT update may remove as stale
+        bundle_files: sources.length > 0 ? bundleFiles : (Array.isArray(previousBundleFiles) ? previousBundleFiles : bundleFiles),
+        files_removed: removed,
         version: readPkgVersion(io, workerDir),
         ...(outdated ? { updated_from: installedVersion } : {}),
     };
@@ -331,9 +401,50 @@ async function verifyRegistration(io, { hubUrl, token, expectedType = null }) {
  * DECLARES (the canonical bundle declares none — the old hard-coded
  * node-fetch probe made every zero-dependency install "unstartable").
  */
+const LOCAL_REQUIRE_RE = /require\(\s*(["'])(\.{1,2}\/[^"']+)\1\s*\)/g;
+
+/**
+ * installer 0.2.10: every local `require('./…')` reachable from worker.cjs
+ * must exist on disk — otherwise the worker dies at start with «Cannot find
+ * module» (bundle 2.4.1 / worker-logs.cjs). Pure over io.fs.
+ * @returns {string[]} missing modules as written in the source (e.g. './worker-logs.cjs')
+ */
+function missingLocalRequires(io, workerDir, entry = 'worker.cjs') {
+    const missing = [];
+    const seen = new Set();
+    const queue = [path.join(workerDir, entry)];
+    const resolve = (from, spec) => {
+        const base = path.resolve(path.dirname(from), spec);
+        for (const c of [base, `${base}.js`, `${base}.cjs`, `${base}.json`, path.join(base, 'index.js')]) {
+            try { if (io.fs.existsSync(c) && statIs(io.fs.statSync(c), 'isFile')) return c; } catch (_) { /* next */ }
+        }
+        return null;
+    };
+    while (queue.length) {
+        const file = queue.shift();
+        if (seen.has(file)) continue;
+        seen.add(file);
+        let src;
+        try { src = io.fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+        if (typeof src !== 'string') src = String(src);
+        LOCAL_REQUIRE_RE.lastIndex = 0;
+        let m;
+        while ((m = LOCAL_REQUIRE_RE.exec(src)) !== null) {
+            const hit = resolve(file, m[2]);
+            if (!hit) { if (!missing.includes(m[2])) missing.push(m[2]); continue; }
+            if (/\.(c?js)$/.test(hit) && path.resolve(hit).startsWith(path.resolve(workerDir))) queue.push(hit);
+        }
+    }
+    return missing;
+}
+
 function checkWorkerCanStart(io, { workerDir, nodeBin = 'node' }) {
     const workerCjs = path.join(workerDir, 'worker.cjs');
     if (!io.fs.existsSync(workerCjs)) return { ok: false, reason: 'worker.cjs missing' };
+    const missing = missingLocalRequires(io, workerDir);
+    if (missing.length > 0) {
+        return { ok: false, reason: `worker bundle incomplete: ${missing.join(', ')} missing in ${workerDir} (required by worker.cjs) — re-run the installer to redeploy the bundle`, missing };
+    }
     const syntax = io.exec(nodeBin, ['--check', workerCjs]);
     if (syntax.code !== 0) return { ok: false, reason: `worker.cjs failed syntax check: ${String(syntax.stderr).slice(-200)}` };
     const deps = Object.keys(declaredDependencies(io, workerDir));
@@ -449,7 +560,7 @@ function workerProcessStartMs(io, { workerDir, pid, platformAdapter = null }) {
 
 /** Files whose change requires a worker restart: .env and the bundle (installer 0.2.8). */
 const WORKER_CONFIG_FILES = Object.freeze(['.env', 'package.json', 'worker.cjs', 'worker-env.cjs',
-    'job-protocol-v2.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs']);
+    'job-protocol-v2.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'worker-logs.cjs']);
 
 /**
  * Configuration files (.env, bundle files) modified AFTER the worker `pid`
@@ -1077,6 +1188,8 @@ function writeNodeClasses(io, { workerDir, manifests, log = null, version = null
 
 module.exports = {
     installWorkerBundle,
+    listBundleFiles,
+    missingLocalRequires,
     ensureWorkerDependencies,
     declaredDependencies,
     readPkgVersion,

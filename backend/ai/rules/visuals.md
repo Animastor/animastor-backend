@@ -143,6 +143,13 @@ The Imagination Unit represents the picture the reader forms from THIS unit text
 - The reader does not know about other units, other scenes, or the overall plot — only this text fragment. The visual prompt must match ONLY what this text fragment describes.
 - Example: if the unit text says "продавщица у киоска ответила" and kiosk_saleswoman is in Scene Context → use kiosk_saleswoman. If no such participant exists, write "the kiosk saleswoman" as an extra, not a made-up id.
 
+## Character emotions (unit.state)
+For every character from the Scene Context (by character_id) who is actually present in the unit, add `state` — the character's emotion in this unit, ONE value from this fixed list:
+neutral, joyful, sad, angry, afraid, surprised, disgusted, embarrassed, anxious, proud, confused, determined, thoughtful, tender, tense
+- Keys are character_id only (the same ids you use in the prompts); never names, never extras without a character_id.
+- Use only the listed words; if unsure, use `neutral`. A unit without such characters gets `"state": {}`.
+- `state` is a separate field: do NOT write emotions into `image.prompt` or `video.action` because of it — those fields keep their rules above.
+
 ## Scene Context
 %CONTEXT%
 %EXAMPLES%
@@ -164,7 +171,8 @@ The Imagination Unit represents the picture the reader forms from THIS unit text
       },
       "video": {
         "action": "Temporal change in this unit: gestures, movement, camera motion, lighting shift, or dialogue delivery. What CHANGES during this unit compared to a static image."
-      }
+      },
+      "state": { "<character_id>": "<emotion from the fixed list>" }
     }
   ]
 }

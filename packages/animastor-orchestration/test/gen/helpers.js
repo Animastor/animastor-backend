@@ -81,6 +81,52 @@ async function fixtureDecodePcm(filePath) {
     throw Object.assign(new Error('no recorded decode for this file'), { code: 'EDECODE' });
 }
 
+// ── PNG encoder for tests (filter 0, zlib) — no image library needed ──────
+const CRC_T = (() => { const t = []; for (let n = 0; n < 256; n += 1) { let c = n; for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+function crc32(buf) { let c = 0xffffffff; for (const b of buf) c = CRC_T[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+function pngChunk(type, data) {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
+    return Buffer.concat([len, td, crc]);
+}
+/**
+ * makePng(w, h, (x, y) => [r, g, b]) → an 8-bit RGB PNG (ComfyUI SaveImage layout).
+ * opts.filter: per-row filter type to exercise unfiltering (0 = none, 1 = sub, 2 = up)
+ */
+function makePng(width, height, pixel, opts = {}) {
+    const zlib = require('zlib');
+    const filter = opts.filter || 0;
+    const rowBytes = width * 3;
+    const raw = Buffer.alloc((rowBytes + 1) * height);
+    let prev = Buffer.alloc(rowBytes);
+    for (let y = 0; y < height; y += 1) {
+        const row = Buffer.alloc(rowBytes);
+        for (let x = 0; x < width; x += 1) { const [r, g, b] = pixel(x, y); row[x * 3] = r; row[x * 3 + 1] = g; row[x * 3 + 2] = b; }
+        raw[y * (rowBytes + 1)] = filter;
+        for (let i = 0; i < rowBytes; i += 1) {
+            const a = i >= 3 ? row[i - 3] : 0;
+            raw[y * (rowBytes + 1) + 1 + i] = filter === 1 ? (row[i] - a) & 0xff : filter === 2 ? (row[i] - prev[i]) & 0xff : row[i];
+        }
+        prev = row;
+    }
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        pngChunk('IHDR', ihdr),
+        pngChunk('tEXt', Buffer.from('prompt\u0000{"comfy":"workflow"}', 'latin1')),
+        pngChunk('IDAT', zlib.deflateSync(raw)),
+        pngChunk('IEND', Buffer.alloc(0)),
+    ]);
+}
+/** A «real-looking» frame: deterministic pseudo-random texture. */
+function noisePng(w = 64, h = 48, seed = 1) {
+    let s = seed >>> 0;
+    const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s >>> 24; };
+    return makePng(w, h, () => [rnd(), rnd(), rnd()]);
+}
+
 function hasFfmpeg() {
     const r = require('child_process').spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
     return r.status === 0;
@@ -179,5 +225,5 @@ async function count(ctx, sql, params) {
 
 module.exports = {
     setupDb, makePorts, makeBook, makeWorker, count, uuid, fixture, streamOf,
-    fixtureDecodePcm, hasFfmpeg, SECRET, FIXTURES,
+    fixtureDecodePcm, hasFfmpeg, SECRET, FIXTURES, makePng, noisePng, pngChunk,
 };

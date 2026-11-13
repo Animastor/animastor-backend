@@ -20,8 +20,15 @@
 // Legacy single-file format is still readable for migration:
 //   /data/books/<bookId>.json
 //
-// ── behavior.json — Character Behavior contract (schema v2.1) ────────────
-// Map: character_id → behavior object. The object is SCHEMA-TOLERANT:
+// ── behavior.json — schema v2 (see ./behavior-schema.cjs) ────────────────
+// Disk and memory: {schema_version: 2, rules: [...], characters: {<id>: …}}.
+// A file without schema_version is the legacy v2.1 flat map and is migrated
+// on load (every top-level key = a character entry); saves are always v2.
+// HTTP responses project it back to the flat map + read-only behavior_rules
+// (projectBookBehaviorsForApi). Character entries (characters.<id>) follow
+// the v2.1 Character Behavior contract below.
+//
+// Character entry: character_id → behavior object. The object is SCHEMA-TOLERANT:
 // unknown keys (including future fields) are preserved on every load/save
 // round-trip. Fields:
 //
@@ -43,9 +50,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const AdmZip = require('adm-zip');
+const safePaths = require('./safe-paths');
+const {
+    InvalidInputError, BUNDLE_LIMITS,
+    assertBookId, assertBuildId, isValidBookId, joinInside, assertInside,
+    isUnsafeEntryName, isAllowedBundleEntry, isChapterFileName,
+} = safePaths;
 
 const { validateBundleFile } = require('./bundle-validator.cjs');
+const behaviorSchema = require('./behavior-schema.cjs');
 const { getBooksRoot } = require('./books-root');
 
 // Last line of defense before disk: every bundle resource that saveBookBundle
@@ -95,11 +110,13 @@ function getBooksDir() {
 }
 
 function getBookDir(bookId) {
-    return path.join(getBooksDir(), bookId);
+    assertBookId(bookId);
+    return joinInside(getBooksDir(), bookId);
 }
 
 function getBookPath(bookId) {
-    return path.join(getBooksDir(), `${bookId}.json`);
+    assertBookId(bookId);
+    return joinInside(getBooksDir(), `${bookId}.json`);
 }
 
 function getChapterDir(bookDir) {
@@ -115,20 +132,106 @@ function getChapterPath(bookDir, chapterFile) {
 // ======================================================
 
 /**
+ * List archive entries WITHOUT decompressing anything: names, sizes, flags.
+ * Throws InvalidInputError for archives that must be refused as a whole
+ * (unsafe names, symlinks, encryption, duplicates, size/count limits).
+ * @param {Buffer} buffer
+ * @returns {{ zip: AdmZip, entries: object[], payload: object[], skipped: number }}
+ */
+function inspectBookBundle(buffer, limits = BUNDLE_LIMITS) {
+    let zip;
+    try {
+        zip = new AdmZip(buffer);
+    } catch (_) {
+        throw new InvalidInputError('INVALID_ARCHIVE', 'invalid archive');
+    }
+    const entries = zip.getEntries();
+    if (entries.length > limits.maxEntries) {
+        throw new InvalidInputError('ARCHIVE_TOO_MANY_ENTRIES', 'archive has too many entries');
+    }
+    const seen = new Set();
+    const payload = [];
+    let skipped = 0;
+    let total = 0;
+    for (const entry of entries) {
+        const name = entry.entryName;
+        if (isUnsafeEntryName(name)) {
+            throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'archive contains an invalid entry name');
+        }
+        const mode = ((entry.header && entry.header.attr) >>> 16) & 0o170000;
+        if (mode === 0o120000) {
+            throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'archive contains a link entry');
+        }
+        if (entry.header && (entry.header.flags & 0x1)) {
+            throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'archive contains an encrypted entry');
+        }
+        const key = name.replace(/\/+$/, '').toLowerCase();
+        if (seen.has(key)) {
+            throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'archive contains duplicate entries');
+        }
+        seen.add(key);
+        if (entry.isDirectory) continue;
+        if (!isAllowedBundleEntry(name)) { skipped++; continue; }
+        const size = entry.header ? entry.header.size : 0;
+        if (!(size >= 0) || size > limits.maxEntryBytes) {
+            throw new InvalidInputError('ARCHIVE_TOO_LARGE', 'archive entry too large');
+        }
+        total += size;
+        if (total > limits.maxTotalBytes) {
+            throw new InvalidInputError('ARCHIVE_TOO_LARGE', 'archive too large');
+        }
+        payload.push(entry);
+    }
+    return { zip, entries, payload, skipped };
+}
+
+/** Decompress one entry with a hard output cap (declared sizes can lie). */
+function readEntryCapped(entry, cap) {
+    const method = entry.header ? entry.header.method : -1;
+    const raw = entry.getCompressedData();
+    let out;
+    if (method === 0) {
+        out = raw;
+    } else if (method === 8) {
+        try {
+            out = zlib.inflateRawSync(raw, { maxOutputLength: cap + 1 });
+        } catch (_) {
+            throw new InvalidInputError('ARCHIVE_TOO_LARGE', 'archive entry too large or corrupt');
+        }
+    } else {
+        throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'unsupported archive compression');
+    }
+    if (out.length > cap) {
+        throw new InvalidInputError('ARCHIVE_TOO_LARGE', 'archive entry too large');
+    }
+    return out;
+}
+
+/**
  * Extract book bundle from buffer.
+ * Only whitelisted format-3.1 entries are returned; other entries are
+ * skipped (counted, never written). Unsafe archives are refused.
  * @param {Buffer} buffer - The zipped bundle buffer
+ * @param {object} [opts] - { log?: (msg) => void, limits? }
  * @returns {Object} - Object with file contents keyed by filename (string values like backend expects)
  */
-function extractBookBundle(buffer) {
-    const zip = new AdmZip(buffer);
+function extractBookBundle(buffer, opts = {}) {
+    const limits = opts.limits || BUNDLE_LIMITS;
+    const { payload, skipped } = inspectBookBundle(buffer, limits);
     const files = {};
-
-    zip.getEntries().forEach(entry => {
-        if (!entry.isDirectory) {
-            files[entry.entryName] = zip.readAsText(entry);
+    let total = 0;
+    for (const entry of payload) {
+        const data = readEntryCapped(entry, limits.maxEntryBytes);
+        total += data.length;
+        if (total > limits.maxTotalBytes) {
+            throw new InvalidInputError('ARCHIVE_TOO_LARGE', 'archive too large');
         }
-    });
-
+        files[entry.entryName] = data.toString('utf8');
+    }
+    if (skipped > 0) {
+        const log = typeof opts.log === 'function' ? opts.log : console.warn;
+        log(`[VBOOK] ${skipped} archive entr${skipped === 1 ? 'y' : 'ies'} outside the bundle format skipped`);
+    }
     return files;
 }
 
@@ -167,6 +270,10 @@ function buildBookFromBundle(rawFiles) {
     if (!manifest.book_id) {
         throw new Error("manifest.book_id missing")
     }
+    assertBookId(manifest.book_id)
+    if (manifest.build_id !== undefined && manifest.build_id !== null) {
+        assertBuildId(manifest.build_id)
+    }
 
     // Bible, locations & characters
     const bibleKey = findFile("bible.json")
@@ -203,10 +310,10 @@ function buildBookFromBundle(rawFiles) {
 
     // Behavior (optional, per-character behavior keyed by character_id)
     const behaviorKey = findFile("behavior.json");
-    let behaviors = {};
+    let behaviors = behaviorSchema.normalizeBehaviors({});
     if (behaviorKey) {
         try {
-            behaviors = JSON.parse(files[behaviorKey]);
+            behaviors = behaviorSchema.normalizeBehaviors(JSON.parse(files[behaviorKey]));
         } catch {
             throw new Error("Invalid JSON in behavior.json")
         }
@@ -235,8 +342,15 @@ function buildBookFromBundle(rawFiles) {
     }
 
     // Chapters
+    if (!Array.isArray(parsedBook.structure.chapters_order)) {
+        throw new Error("book.structure.chapters_order must be an array")
+    }
     const chapters = parsedBook.structure.chapters_order.map(file => {
-        const fullKey = keys.find(k => k.endsWith(file))
+        const base = typeof file === "string" ? file.replace(/^chapters\//, "") : ""
+        if (!isChapterFileName(base)) {
+            throw new InvalidInputError("INVALID_BUNDLE", "invalid chapter file name in chapters_order")
+        }
+        const fullKey = keys.find(k => k === "chapters/" + base) || keys.find(k => k === base)
         if (!fullKey) {
             throw new Error("Missing chapter file: " + file)
         }
@@ -307,9 +421,13 @@ function addDirToZip(zip, dirPath, zipPath) {
     for (const entry of entries) {
         const fullPath = path.join(dirPath, entry.name);
         const entryZipPath = zipPath ? `${zipPath}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) {
+        // Dirent types come from lstat semantics: symlinks are neither
+        // directories nor files here and are never followed or exported.
+        if (entry.isSymbolicLink()) {
+            continue;
+        } else if (entry.isDirectory()) {
             addDirToZip(zip, fullPath, entryZipPath);
-        } else {
+        } else if (entry.isFile()) {
             zip.addFile(entryZipPath, fs.readFileSync(fullPath));
         }
     }
@@ -338,6 +456,7 @@ function saveBookBundle(book, files) {
     }
 
     const bookDir = getBookDir(bookId);
+    assertNotLink(bookDir);
     if (!fs.existsSync(bookDir)) {
         fs.mkdirSync(bookDir, { recursive: true });
     }
@@ -372,22 +491,39 @@ function saveBookBundle(book, files) {
             ['manifest.json', 'book.json', 'bible.json', 'locations.json', 'voices.json', 'characters.json', 'behavior.json']
         );
 
+        // Validate the complete write set BEFORE the first write: only
+        // whitelisted format entries, every target strictly inside bookDir.
+        const writes = [];
+        let skippedEntries = 0;
         for (const [filePath, content] of Object.entries(files)) {
+            if (isUnsafeEntryName(filePath)) {
+                throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'archive contains an invalid entry name');
+            }
             const normalized = normalize(filePath);
+            if (!isAllowedBundleEntry(normalized)) { skippedEntries++; continue; }
             const basename = normalized.split('/').pop();
 
             let targetPath;
-            if (chapterBasenames.has(basename)) {
+            if (isChapterFileName(basename) && (chapterBasenames.has(basename) || normalized.startsWith('chapters/'))) {
                 // Chapter file → chapters/ subdirectory
-                targetPath = path.join(bookDir, 'chapters', basename);
+                targetPath = joinInside(bookDir, 'chapters', basename);
+            } else if (isChapterFileName(basename)) {
+                targetPath = joinInside(bookDir, 'chapters', basename);
             } else {
-                targetPath = path.join(bookDir, normalized);
+                targetPath = joinInside(bookDir, basename);
             }
-
+            writes.push([targetPath, content]);
+        }
+        if (skippedEntries > 0) {
+            console.warn(`[SAVE] ${bookId}: ${skippedEntries} non-format entr${skippedEntries === 1 ? 'y' : 'ies'} not written`);
+        }
+        for (const [targetPath, content] of writes) {
             const dir = path.dirname(targetPath);
+            assertNotLink(dir);
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
+            assertNotLink(targetPath);
             fs.writeFileSync(targetPath, content);
         }
 
@@ -487,11 +623,11 @@ function saveBookBundle(book, files) {
         fs.unlinkSync(voPath);
     }
 
-    // Save behavior.json — always persists (created as {} during book creation).
-    // Empty object is kept on disk so the AI-agent can always discover and
-    // populate it via edit_book without needing to create the file first.
+    // Save behavior.json — always persists, always schema v2 (a legacy v2.1
+    // flat map is migrated here). Kept on disk even when empty so the
+    // AI-agent can always discover and populate it via edit_book.
     const bhPath = path.join(bookDir, 'behavior.json');
-    fs.writeFileSync(bhPath, JSON.stringify(book.behaviors || {}, null, 2));
+    fs.writeFileSync(bhPath, JSON.stringify(behaviorSchema.normalizeBehaviors(book.behaviors), null, 2));
 
     // Save characters.json (optional)
     const charPath = path.join(bookDir, 'characters.json');
@@ -510,9 +646,12 @@ function saveBookBundle(book, files) {
     const activeChapterFiles = new Set();
     for (const chapter of book.chapters || []) {
         const chapterFile = `${chapter.chapter_id}.json`;
+        if (!safePaths.isSafeChapterFile(chapterFile)) {
+            throw new InvalidInputError('INVALID_BUNDLE', 'invalid chapter id');
+        }
         activeChapterFiles.add(chapterFile);
         fs.writeFileSync(
-            path.join(chaptersDir, chapterFile),
+            joinInside(chaptersDir, chapterFile),
             JSON.stringify(chapter, null, 2)
         );
     }
@@ -543,6 +682,7 @@ function saveBookBundle(book, files) {
  * @returns {Object|null} - The loaded book {manifest, book, bible, characters, chapters}
  */
 function loadBook(bookId) {
+    if (!isValidBookId(bookId)) return null;
     const bookDir = getBookDir(bookId);
     const bookPath = getBookPath(bookId);
 
@@ -613,10 +753,11 @@ function loadBookFromDir(bookId, bookDir) {
 
         // Optional behavior.json — load as top-level key (per-character behavior
         // keyed by character_id, same pattern as voices.json)
-        let behaviors = {};
+        // Migrated to schema v2 in memory (legacy v2.1 file → characters).
+        let behaviors = behaviorSchema.normalizeBehaviors({});
         const behaviorPath = path.join(bookDir, 'behavior.json');
         if (fs.existsSync(behaviorPath)) {
-            behaviors = JSON.parse(fs.readFileSync(behaviorPath, 'utf8'));
+            behaviors = behaviorSchema.normalizeBehaviors(JSON.parse(fs.readFileSync(behaviorPath, 'utf8')));
         }
 
         // Optional characters.json
@@ -649,27 +790,53 @@ function loadBookFromDir(bookId, bookDir) {
     }
 }
 
+/** Refuse to operate on a symlink (lstat, does not follow). */
+function assertNotLink(p) {
+    let st = null;
+    try { st = fs.lstatSync(p); } catch (_) { return; }
+    if (st.isSymbolicLink()) {
+        throw new InvalidInputError('PATH_IS_LINK', 'refusing to use a linked path');
+    }
+}
+
+const BOOK_DIR_MARKERS = ['manifest.json', 'book.json', 'source.txt', 'chapters'];
+
 /**
  * Reset book (delete from disk).
+ * Only a validated book id, only a directory strictly inside the books root
+ * that carries book markers; never a symlink. A non-book directory under that
+ * name is refused (throws) instead of being removed.
  * @param {string} bookId - The book ID to delete
  */
 async function resetBook(bookId) {
-    const bookDir = getBookDir(bookId);
+    const booksDir = getBooksDir();
+    const bookDir = getBookDir(bookId);          // asserts id + containment
     const bookPath = getBookPath(bookId);
 
-    if (fs.existsSync(bookDir)) {
-        try {
-            const stat = fs.statSync(bookDir);
-            if (stat.isDirectory()) {
-                fs.rmSync(bookDir, { recursive: true, force: true });
-                return;
+    let st = null;
+    try { st = fs.lstatSync(bookDir); } catch (_) { st = null; }
+    if (st) {
+        if (st.isSymbolicLink()) {
+            throw new InvalidInputError('PATH_IS_LINK', 'refusing to remove a linked path');
+        }
+        if (st.isDirectory()) {
+            assertInside(booksDir, bookDir);
+            if (path.resolve(bookDir) === path.resolve(booksDir)) {
+                throw new InvalidInputError('PATH_OUTSIDE_ROOT', 'path outside storage root');
             }
-        } catch (e) {
-            // Fall through
+            const entries = fs.readdirSync(bookDir);
+            const isBook = entries.length === 0 || BOOK_DIR_MARKERS.some((m) => entries.includes(m));
+            if (!isBook) {
+                throw new InvalidInputError('NOT_A_BOOK_DIR', 'refusing to remove a non-book directory');
+            }
+            fs.rmSync(bookDir, { recursive: true, force: true });
+            return;
         }
     }
 
-    if (fs.existsSync(bookPath)) {
+    let fst = null;
+    try { fst = fs.lstatSync(bookPath); } catch (_) { fst = null; }
+    if (fst && fst.isFile()) {
         fs.unlinkSync(bookPath);
     }
 }
@@ -829,6 +996,7 @@ function findSceneRuntimeData(loadedBook, chapterId, sceneId) {
 
 module.exports = {
     // Bundle operations
+    inspectBookBundle,
     extractBookBundle,
     buildBookFromBundle,
     saveBookBundle,
@@ -846,5 +1014,12 @@ module.exports = {
     collectScenes,
     collectSceneList,
     collectSceneUnits,
-    findSceneRuntimeData
+    findSceneRuntimeData,
+
+    // behavior.json schema v2 helpers (also at ./behavior-schema.cjs)
+    behaviorSchema,
+
+    // Path/input safety
+    safePaths,
+    getBookDir,
 };

@@ -36,7 +36,7 @@ const AUDIO = () => manifestLoader.loadManifest('audio/qwen-tts');
 const IMAGE = () => manifestLoader.loadManifest('image/qwen-image');
 const VIDEO = () => manifestLoader.loadManifest('video/ltx-2.3');
 
-const IMAGE_WF_HASH = 'fb4c25e52bbb2f75270367d2696b4b7469617d6557cd0bcc634a6a6fc03a5816';
+const IMAGE_WF_HASH = 'd2cb4c4edead909b7358e1353fdd0e0e4d5efc231abfcad28749f1c0bc99d5be';
 
 function entry(report, id) {
     return report.entries.find((e) => e.id === id);
@@ -57,7 +57,7 @@ function workerProbe(workerType, { withEnv = true, setKeys = ['HUB_URL', 'ANIMAS
         bundle: {
             present: true,
             dir: `/home/test/animastor/worker-${workerType}`,
-            files: ['worker.cjs', 'worker-env.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'job-protocol-v2.cjs', 'package.json', 'package-lock.json', '.env.example'],
+            files: ['worker.cjs', 'worker-env.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'job-protocol-v2.cjs', 'worker-logs.cjs', 'package.json', 'package-lock.json', '.env.example'],
         },
         env: withEnv ? { present: true, set_keys: setKeys } : null,
     };
@@ -618,7 +618,7 @@ describe('Phase 1.5 — installer scenarios', () => {
     });
 
     describe('verification report', () => {
-        it('fully verified environment with live checks → INSTALLATION COMPLETE (WARN only for the unknown VRAM minimum)', () => {
+        it('fully verified environment with live checks → INSTALLATION COMPLETE (installer 0.2.10: image VRAM minimum known → PASS)', () => {
             const r = resolver.resolveInstallation({ manifests: [IMAGE()], environment: imageExistingEnv(), mode: 'existing' });
             const ver = verification.buildVerificationReport({
                 report: r,
@@ -629,18 +629,30 @@ describe('Phase 1.5 — installer scenarios', () => {
                     hub: { connection: true, registration: true },
                 },
             });
-            // minimum VRAM is an open question (manifest hardware.gpu_min_vram_gb=null)
-            // → honest WARN, never a silent PASS and never a FAIL
-            expect(ver.status).to.equal('WARN');
+            // installer 0.2.10: the image profile states gpu_min_vram_gb (estimate) —
+            // the reference L40S passes it, no «VRAM — minimum unknown» warning any more
+            expect(ver.status).to.equal('PASS');
             expect(ver.fails).to.equal(0);
-            expect(ver.text).to.match(/INSTALLATION COMPLETE WITH WARNINGS/);
-            expect(ver.text).to.match(/! VRAM — minimum unknown/);
+            expect(ver.text).to.match(/INSTALLATION COMPLETE/);
+            expect(ver.text).to.not.match(/VRAM — minimum unknown/);
             for (const label of ['GPU', 'ComfyUI', 'Runtime', 'Custom Nodes', 'Models', 'Worker', 'GPU Hub registration']) {
                 expect(ver.text).to.match(new RegExp(`\u2713 ${label}`));
             }
             // optional workflows are informational, never scored
             expect(ver.text).to.match(/\[i\] Profile workflows — 1 installed/);
             expect(ver.text).to.match(/\[i\] Profile workflows — not required for API-based generation/);
+        });
+
+        it('installer 0.2.10: a 12 GB card is below the image minimum → precise VRAM FAIL; 16 GB passes', () => {
+            const small = imageExistingEnv();
+            small.gpu = { ...(small.gpu || {}), vram_mib: 12288 };
+            const r = resolver.resolveInstallation({ manifests: [IMAGE()], environment: small, mode: 'existing' });
+            expect(r.hardware.sufficient_vram).to.equal(false);
+            const ver = verification.buildVerificationReport({ report: r });
+            expect(ver.text).to.match(/VRAM 12\.0 GB is below the manifest minimum 14 GB/);
+            const v100 = imageExistingEnv();
+            v100.gpu = { ...(v100.gpu || {}), vram_mib: 16160 };
+            expect(resolver.resolveInstallation({ manifests: [IMAGE()], environment: v100, mode: 'existing' }).hardware.sufficient_vram).to.equal(true);
         });
 
         it('missing model and unconfigured worker → precise FAIL lines', () => {

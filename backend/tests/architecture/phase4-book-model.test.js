@@ -346,9 +346,11 @@ describe('T6: route/controller does not implement the book deletion cascade', ()
     });
 
     it('cancelled-workers signal gets a TTL in (0, 3600] — survives the agent, then expires', async () => {
-        // cleanBookRedisKeys does not remove animastor:cancelled-workers:{bookId}
-        // (the signal must outlive the cascade for the running agent), so
-        // without EXPIRE the key of a deleted book would stay in Redis forever.
+        // cleanBookRedisKeys now removes animastor:cancelled-workers:{bookId}
+        // together with the other book-keyed families (reports/2026-11-06/
+        // orch-v2-1d-release.md §18), so book-deletion RE-ARMS the signal right
+        // after the purge: it must outlive the cascade for the running agent,
+        // and without EXPIRE the key of a deleted book would stay forever.
         const redis = createMockRedis();
         const bookId = 'book-deletion-ttl';
         const originalOutputDir = config.OUTPUT_DIR;

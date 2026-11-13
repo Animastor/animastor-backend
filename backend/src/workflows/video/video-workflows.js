@@ -25,6 +25,22 @@ const logPrefix = '[WF-VIDEO]';
 
 // Connector constants are no longer needed — connectors are required at startup
 
+
+// unit.behaviour = [{rule_id, character_id, strength, seed, action}] →
+// "anna_smirnova pauses…; boris_volkov lights up…" ('' when empty/invalid).
+function buildBehaviourText(behaviour) {
+    if (!Array.isArray(behaviour) || behaviour.length === 0) return '';
+    const phrases = [];
+    for (const b of behaviour) {
+        if (!b || typeof b.action !== 'string') continue;
+        const action = b.action.trim().replace(/[.\s]+$/, '');
+        if (!action) continue;
+        const who = typeof b.character_id === 'string' && b.character_id ? `${b.character_id} ` : '';
+        phrases.push(`${who}${action}`);
+    }
+    return phrases.join('; ');
+}
+
 function log(msg) {
     console.log(`${logPrefix} ${msg}`);
 }
@@ -280,6 +296,13 @@ function buildVideoPrompt(sceneData, loadedBook, units, iuDurations, profileName
             descParts.push(prompt);
         }
 
+        // Behaviour rules (architecture/VBOOK_BEHAVIOUR.md): phrases snapshotted
+        // into unit.behaviour by the pipeline matcher are appended to the
+        // storyboard line ("<character_id> <action>"); unit.video.action itself
+        // is never rewritten. No behaviour → the line is byte-identical.
+        const behaviourText = buildBehaviourText(unit.behaviour);
+        if (behaviourText) descParts.push(behaviourText);
+
         const line = `${startSec.toFixed(1)}–${endSec.toFixed(1)}s: ${descParts.join('. ')}`;
         storyboardParts.push(line);
     }
@@ -445,6 +468,19 @@ async function buildVideoWorkflows(sceneData, loadedBook, buildId, workflows) {
         return meta ? (meta.estimated_duration_sec || MIN_IU_DURATION) : MIN_IU_DURATION;
     }));
 
+    return buildGroupWorkflows(sceneData, loadedBook, buildId, workflows, units, iuDurations);
+}
+
+/**
+ * Plan + build the LTX group workflows of a scene for GIVEN units and durations
+ * (seconds, one per unit). The legacy entry above passes the image_units
+ * estimates; orchestration v2 passes the real audio durations of the units that
+ * have any (ADR §13 п.11 п.5) — one function for the DP composition,
+ * totalFrames, LTXVAddGuide frame_idx and the prompt time codes.
+ * @returns {{success:true, workflows:Array<{workflowName, workflow, units, unitCount, offset, durations}>}|{success:false, reason}}
+ */
+function buildGroupWorkflows(sceneData, loadedBook, buildId, workflows, units, iuDurations) {
+    if (!Array.isArray(units) || units.length === 0) return { success: false, reason: 'no_units' };
     const groups = selectWorkflowGroups(units, iuDurations);
     log(`Scene has ${units.length} IU(s), split into ${groups.length} workflow group(s)`);
 
@@ -471,7 +507,9 @@ async function buildVideoWorkflows(sceneData, loadedBook, buildId, workflows) {
             workflowName: group.name,
             workflow: result.workflow,
             units: groupUnits,
-            unitCount: group.count
+            unitCount: group.count,
+            offset: group.offset,
+            durations: groupDurations,
         });
     }
 
@@ -634,6 +672,8 @@ function selectWorkflowGroups(units, iuDurations) {
 // ======================================================
 module.exports = {
     buildVideoWorkflows,
+    buildGroupWorkflows,
+    buildWorkflowForGroup,
     buildVideoPrompt,
     buildVideoNegativePrompt,
     buildVideoPromptLegacy,
@@ -645,5 +685,6 @@ module.exports = {
     buildCamera,
     selectWorkflowGroups,
     calculateFrames,
-    toValidLTXFrames
+    toValidLTXFrames,
+    buildBehaviourText
 };

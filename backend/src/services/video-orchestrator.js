@@ -255,6 +255,13 @@ async function completeGroup(redis, bookId, chapterId, sceneId, groupSuffix, bui
 
     log(`completeGroup: scene=${bookId}/${chapterId}/${sceneId} group='${groupSuffix || '(base)'}' build=${buildId} dispatch=${dispatchId ? dispatchId.slice(0, 12) : 'none'}`);
 
+    // orchestration v2 (stage 3): the legacy video FSM / merge never touches a v2 book
+    // (fail-closed: an unknown answer counts as v2) — its video is gen_jobs' business
+    if (await (deps.bookFlag || require('../orchestration-v2/book-flag')).isV2BookFailClosed(bookId)) {
+        log(`completeGroup: ${bookId} is on orchestration v2 — legacy video-orch skipped`);
+        return { completed: false, reason: 'orchestration_v2' };
+    }
+
     const orchState = await getState(redis, bookId, chapterId, sceneId);
     if (!orchState) {
         // Результат без state — старый формат (одна группа, до video-orch).

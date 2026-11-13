@@ -10,6 +10,12 @@
 //        scope = {level, chapter_id?, scene_id?, unit_id?, scene_ids?}  (level 'scenes' → scene_ids, book order)
 //        Unit  = {chapter_id, scene_id, kind, unit_key, build_id, input, scene_hash?}
 //        build_id = the book build at command time (gen_jobs.build_id, §4.2)
+//        input.part_hash?   (1.1.0) snapshot hash of THIS part: without force the unit is
+//                           skipped when scene_assets.metadata.gen_parts[unit_key].part_hash
+//                           of the same build equals it (row not 'stale'); acceptance stores it
+//        input.scene_parts? (1.1.0) [{unit_key, part_hash}] — every part of the scene in scene
+//                           order, for a part kind WITHOUT a merge stage (iu_image): the
+//                           acceptance that completes the set marks the scene asset ready
 //   buildPayload(job)              → Promise<object>  ComfyUI params etc. (claim, §8.1)
 //   artifactPath(job)              → string           absolute final path (accept, §7 п.3)
 //   validateResult(job, tmpPath)   → Promise<{ok, reason?}>  (§7 п.1; default: validate-media)
@@ -22,8 +28,22 @@
 // Optional:
 //   maxAttemptsFor(kind)           → int ≥ 1          (default: 1 + max retries of the policy)
 //   isLayerEnabled(bookId, layer)  → Promise<boolean> (§6.3 «только если слой включён»; default true)
-//   onArtifactPlaced(job, finalPath) → called inside the acceptance transaction right after the
-//                                     rename (§7 п.3), e.g. to drop a placeholder sidecar marker
+//   onArtifactPlaced(job, finalPath, ctx) → called inside the acceptance transaction right after the
+//                                     rename (§7 п.3), e.g. to drop a placeholder sidecar marker.
+//                                     1.3.0: ctx = {db, meta} — db: the acceptance transaction client
+//                                     (writes commit or roll back with the result); meta: what runLocal
+//                                     returned next to {path} (local jobs), else null
+//   inputFiles(job)                → [{name, path, sha256, bytes}] (1.3.0) input files of a GPU job,
+//                                     served by GET /internal/gen/jobs/:id/input/:name (§8.1); listed
+//                                     in the claimed task as input_files [{name, sha256, bytes}]
+//
+// 1.3.0 planUnits(book, scope, layer, ctx): ctx = {db} — the command / acceptance transaction
+//   client (read-only use). For layer 'video' the result may be {units, waits, skipped}:
+//     waits   [{chapter_id, scene_id}] — the scene waits for live images / audio: the command
+//             joins those jobs, the video stage follows their acceptance (§6.3, §6.5)
+//     skipped [{chapter_id, scene_id, reason: 'skipped_*'}] — summary + gen_command_skips
+//   A part unit may carry input.merge_parts [{unit_key, part_hash}] (every part of the scene):
+//   its merge is created when all those parts are done (video_group → video_merge).
 
 'use strict';
 
@@ -33,7 +53,7 @@ const REQUIRED = Object.freeze([
     'planUnits', 'buildPayload', 'artifactPath', 'validateResult',
     'runLocal', 'laneFor', 'timeoutFor', 'retryPolicy',
 ]);
-const OPTIONAL = Object.freeze(['maxAttemptsFor', 'isLayerEnabled', 'onArtifactPlaced']);
+const OPTIONAL = Object.freeze(['maxAttemptsFor', 'isLayerEnabled', 'onArtifactPlaced', 'inputFiles']);
 
 // ── default retry policy: gpu-retry-policy.cjs:50–53 ─────────────────────
 const RETRY_POLICY = Object.freeze({

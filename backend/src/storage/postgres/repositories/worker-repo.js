@@ -107,10 +107,10 @@ async function createWorker({ workspaceId, name, workerType, mode = 'private', c
     const workerId = crypto.randomUUID();
     const { token, secretHash, tokenPrefix } = generateCredential(workerId);
     const { rows } = await query(`
-        INSERT INTO workers (worker_id, workspace_id, name, worker_type, mode, token_hash, token_prefix, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO workers (worker_id, workspace_id, name, worker_type, mode, token_hash, token_prefix, created_by, log_shipping)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
         RETURNING worker_id, workspace_id, name, worker_type, capabilities, mode, status,
-                  token_prefix, created_by, revoked_at, last_seen, created_at
+                  token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
     `, [workerId, workspaceId, name, workerType, mode, secretHash, tokenPrefix, createdBy || null]);
     return { worker: rows[0], token };
 }
@@ -126,10 +126,10 @@ async function createSystemWorker({ name, workerType, createdBy }) {
     const workerId = crypto.randomUUID();
     const { token, secretHash, tokenPrefix } = generateCredential(workerId);
     const { rows } = await query(`
-        INSERT INTO workers (worker_id, workspace_id, name, worker_type, mode, token_hash, token_prefix, created_by)
-        VALUES ($1, NULL, $2, $3, 'system', $4, $5, $6)
+        INSERT INTO workers (worker_id, workspace_id, name, worker_type, mode, token_hash, token_prefix, created_by, log_shipping)
+        VALUES ($1, NULL, $2, $3, 'system', $4, $5, $6, TRUE)
         RETURNING worker_id, workspace_id, name, worker_type, capabilities, mode, status,
-                  token_prefix, created_by, revoked_at, last_seen, created_at
+                  token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
     `, [workerId, name, workerType, secretHash, tokenPrefix, createdBy || null]);
     return { worker: rows[0], token };
 }
@@ -147,7 +147,7 @@ async function findByToken(token) {
     if (!parsed) return null;
     const { rows } = await query(`
         SELECT worker_id, workspace_id, name, worker_type, capabilities, mode,
-               status, token_prefix, last_seen, created_at, token_hash
+               status, token_prefix, last_seen, log_shipping, created_at, token_hash
         FROM workers
         WHERE worker_id = $1 AND revoked_at IS NULL
         LIMIT 1
@@ -166,7 +166,7 @@ async function findById(workerId) {
     if (!workerId) return null;
     const { rows } = await query(`
         SELECT worker_id, workspace_id, name, worker_type, capabilities, mode,
-               status, token_prefix, created_by, revoked_at, last_seen, created_at
+               status, token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
         FROM workers WHERE worker_id = $1 LIMIT 1
     `, [workerId]);
     return rows[0] || null;
@@ -176,7 +176,7 @@ async function findById(workerId) {
 async function listByWorkspace(workspaceId) {
     const { rows } = await query(`
         SELECT worker_id, workspace_id, name, worker_type, capabilities, mode,
-               status, token_prefix, created_by, revoked_at, last_seen, created_at
+               status, token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
         FROM workers WHERE workspace_id = $1
         ORDER BY created_at ASC
     `, [workspaceId]);
@@ -187,6 +187,7 @@ async function listByWorkspace(workspaceId) {
 async function listActive(now = Date.now()) {
     const { rows } = await query(`
         SELECT w.worker_id, w.workspace_id, w.name, w.worker_type, w.capabilities, w.mode, w.token_hash,
+               w.log_shipping,
                p.policy_id, p.scope_kind, p.starts_at, p.expires_at
         FROM workers w
         LEFT JOIN share_policies p
@@ -242,7 +243,7 @@ async function rotateCredential(workerId, workspaceId) {
         UPDATE workers SET token_hash = $3, token_prefix = $4
         WHERE worker_id = $1 AND workspace_id = $2 AND revoked_at IS NULL
         RETURNING worker_id, workspace_id, name, worker_type, capabilities, mode,
-                  status, token_prefix, created_by, revoked_at, last_seen, created_at
+                  status, token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
     `, [workerId, workspaceId, secretHash, tokenPrefix]);
     if (!rows[0]) return null;
     return { worker: rows[0], token, previousTokenHash };
@@ -294,7 +295,7 @@ async function purgeWorker(workerId, workspaceId) {
 async function listSystemWorkers() {
     const { rows } = await query(`
         SELECT worker_id, workspace_id, name, worker_type, capabilities, mode,
-               status, token_prefix, created_by, revoked_at, last_seen, created_at
+               status, token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
         FROM workers WHERE mode = 'system'
         ORDER BY created_at ASC
     `);
@@ -314,7 +315,7 @@ async function rotateSystemCredential(workerId) {
         UPDATE workers SET token_hash = $2, token_prefix = $3
         WHERE worker_id = $1 AND mode = 'system' AND revoked_at IS NULL
         RETURNING worker_id, workspace_id, name, worker_type, capabilities, mode,
-                  status, token_prefix, created_by, revoked_at, last_seen, created_at
+                  status, token_prefix, created_by, revoked_at, last_seen, log_shipping, created_at
     `, [workerId, secretHash, tokenPrefix]);
     if (!rows[0]) return null;
     return { worker: rows[0], token, previousTokenHash };
@@ -733,6 +734,7 @@ async function findActiveByIdWithTokenHash(workerId, now = Date.now()) {
     if (!workerId) return null;
     const { rows } = await query(`
         SELECT w.worker_id, w.workspace_id, w.name, w.worker_type, w.capabilities, w.mode, w.token_hash,
+               w.log_shipping,
                p.policy_id, p.scope_kind, p.starts_at, p.expires_at
         FROM workers w
         LEFT JOIN share_policies p

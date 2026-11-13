@@ -281,6 +281,14 @@ CREATE TABLE IF NOT EXISTS workers (
     last_seen       BIGINT,
     version         TEXT,
     metadata        JSONB,
+    -- Fresh worker logs (§8.5): every worker ships logs by default — the
+    -- workspace owner and platform admins read the tail, users the worker is
+    -- shared with never do. The column survives only as the operator kill
+    -- switch (WLOG-2 sets the default to TRUE and lifts pre-existing rows
+    -- ONCE, a later FALSE stays FALSE until an operator flips it back).
+    -- NOTE: runMigrations splits SCHEMA_SQL on the semicolon character,
+    -- so comments in this table must never contain one.
+    log_shipping    BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
     -- FAIL CLOSED ownership anchor: only Animastor-operated workers may be
     -- workspace-less — private/share workers ALWAYS belong to a workspace.
@@ -1875,6 +1883,36 @@ async function runMigrations() {
         console.log('[PG] WL-2: workers.revoked_at seconds check ensured');
     } catch (err) {
         console.error('[PG] WL-2 workers.revoked_at normalization failed:', err.message);
+    }
+
+    // ── WLOG-1 / WLOG-2: workers.log_shipping (§8.5, fresh worker logs) ──
+    // WLOG-1 introduced the column as an opt-in for platform-operated workers.
+    // WLOG-2 (stage166, owner decision 2026-11-07) makes log shipping the
+    // default for EVERY worker: the workspace owner and platform admins read
+    // the tail, users the worker is shared with never do. The column stays as
+    // the operator kill switch (FALSE → ingest answers 204 without writing).
+    // Both steps are idempotent. WLOG-2 touches rows only while the column
+    // default is still FALSE, so a FALSE set by an operator afterwards is
+    // never re-flipped on restart.
+    try {
+        const col = await query(`SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'workers' AND column_name = 'log_shipping'`);
+        if (!col.rows[0]) {
+            await query(`ALTER TABLE workers ADD COLUMN log_shipping BOOLEAN NOT NULL DEFAULT TRUE`);
+            console.log('[PG] WLOG-1: workers.log_shipping added (default TRUE on every row)');
+        } else {
+            const def = await query(`SELECT column_default FROM information_schema.columns
+                 WHERE table_name = 'workers' AND column_name = 'log_shipping'`);
+            const current = String((def.rows[0] && def.rows[0].column_default) || '');
+            if (!/^true$/i.test(current)) {
+                await query(`ALTER TABLE workers ALTER COLUMN log_shipping SET DEFAULT TRUE`);
+                const backfill = await query(`UPDATE workers SET log_shipping = TRUE
+                     WHERE revoked_at IS NULL AND log_shipping = FALSE`);
+                console.log(`[PG] WLOG-2: workers.log_shipping default → TRUE (backfilled ${backfill.rowCount} row(s))`);
+            }
+        }
+    } catch (err) {
+        console.error('[PG] WLOG workers.log_shipping migration failed:', err.message);
     }
 
     // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────

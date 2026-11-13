@@ -874,6 +874,28 @@ function nodeDepsFailedResult({ gate, mode }) {
     };
 }
 
+/** installer 0.2.10: install-state worker.bundle_files (fallback files_installed) of THIS dir, or null. */
+function previousBundleFilesFromState(io, statePath, workerDir) {
+    try {
+        const st = stateStore.loadState(io, statePath);
+        return engineMod.previousBundleFilesOf(st && st.components && st.components.worker, workerDir);
+    } catch (_) { return null; }
+}
+
+/** After a bundle update: record the new bundle file list and the copied files; drop removed ones. */
+function recordWorkerBundle(io, statePath, workerDir, res) {
+    try {
+        const st = stateStore.loadState(io, statePath);
+        const w = st && st.components && st.components.worker;
+        if (!w || !w.dir || path.resolve(w.dir) !== path.resolve(workerDir)) return false;
+        const removed = new Set(res.files_removed || []);
+        w.files_installed = [...new Set([...(w.files_installed || []), ...(res.files_installed || [])])].filter((f) => !removed.has(f));
+        if (Array.isArray(res.bundle_files)) w.bundle_files = res.bundle_files.slice();
+        stateStore.saveState(io, statePath, st, io.now);
+        return true;
+    } catch (_) { return false; }
+}
+
 /**
  * Register a file the installer wrote into the worker dir (uninstall removes
  * it). Only for the recorded worker of THIS dir; no-op without a state.
@@ -1037,7 +1059,9 @@ async function preflightSelfUpdate(io, {
         try {
             out.bundle = await engineMod.refreshInstalledWorkerBundle(io, {
                 workerDir, manifest: manifests[0], repoRoot, hubUrl, log: logger, nodeBin,
+                previousBundleFiles: previousBundleFilesFromState(io, statePath, workerDir),
             });
+            if (out.bundle && out.bundle.status === 'updated') recordWorkerBundle(io, statePath, workerDir, out.bundle);
         } catch (err) {
             out.bundle = { status: 'failed', reason: err.message };
         }

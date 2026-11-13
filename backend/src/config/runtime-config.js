@@ -79,6 +79,11 @@ function normalizeDataRoot(value) {
 const DATA_ROOT = normalizeDataRoot(process.env.DATA_ROOT);
 const OUTPUT_DIR = process.env.OUTPUT_DIR || (DATA_ROOT ? `${DATA_ROOT}/output` : '/data/output');
 const BOOKS_DIR = process.env.BOOKS_DIR || (DATA_ROOT ? `${DATA_ROOT}/books` : '/data/books');
+// Fresh worker logs (ORCHESTRATION_V2 §8.5). Same DATA_ROOT discipline as
+// books/output: a sibling directory, never inside either of them. Files are
+// written by the backend internal route only (per-worker 700/600, 5 MB
+// rotation in services/worker-logs-store.js).
+const WORKER_LOGS_DIR = process.env.WORKER_LOGS_DIR || (DATA_ROOT ? `${DATA_ROOT}/worker-logs` : '/data/worker-logs');
 const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
 
 // ======================================================
@@ -343,6 +348,7 @@ module.exports = {
     DATA_ROOT,
     OUTPUT_DIR,
     BOOKS_DIR,
+    WORKER_LOGS_DIR,
     HUB_URL,
     REDIS,
     QUOTAS,

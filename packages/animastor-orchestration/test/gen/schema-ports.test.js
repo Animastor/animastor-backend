@@ -207,7 +207,10 @@ describe('gen v2 — media validation (ADR §7 п.1, §13.4)', () => {
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gen-media-'));
         try {
             const v = gen.defaults.createDefaultValidateResult({ decodePcm: fixtureDecodePcm });
-            fs.writeFileSync(path.join(tmp, 'a.png'), Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]));
+            // 1.1.0: a signature alone is not a PNG any more (structure + pixels are checked)
+            fs.writeFileSync(path.join(tmp, 'sig.png'), Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]));
+            assert.equal((await v({ kind: 'iu_image' }, path.join(tmp, 'sig.png'))).ok, false);
+            fs.writeFileSync(path.join(tmp, 'a.png'), require('./helpers').noisePng());
             fs.writeFileSync(path.join(tmp, 'a.mp4'), Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(64)]));
             assert.equal((await v({ kind: 'iu_image' }, path.join(tmp, 'a.png'))).ok, true);
             assert.equal((await v({ kind: 'iu_image' }, path.join(tmp, 'a.mp4'))).ok, false);

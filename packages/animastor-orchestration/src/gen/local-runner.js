@@ -11,7 +11,7 @@
 
 const { withTx, notifyProgress } = require('./util');
 
-function createLocalRunner({ pool, ports, accept, logger = console }) {
+function createLocalRunner({ pool, ports, accept, logger = null }) {
     const timeoutsJson = JSON.stringify({
         audio_merge: ports.timeoutFor('audio_merge'),
         video_merge: ports.timeoutFor('video_merge'),
@@ -42,7 +42,8 @@ function createLocalRunner({ pool, ports, accept, logger = console }) {
             const r = await accept.failAttempt(job.job_id, job.attempt, (err && err.error_class) || 'unknown', `run_local: ${err && err.message}`);
             return { job_id: job.job_id, attempt: job.attempt, ...r };
         }
-        const r = await accept.acceptLocalFile(job, out.path);
+        // 1.3.0: out.meta (e.g. measured chunk durations) reaches onArtifactPlaced inside the acceptance tx
+        const r = await accept.acceptLocalFile(job, out.path, out.meta === undefined ? null : out.meta);
         return { job_id: job.job_id, attempt: job.attempt, ...r };
     }
 
@@ -60,7 +61,7 @@ function createLocalRunner({ pool, ports, accept, logger = console }) {
                 try {
                     while (!stopped && await runLocalOnce()) { /* drain */ }
                 } catch (err) {
-                    logger.error && logger.error(`[gen-v2] local runner: ${err && err.message}`);
+                    logger && logger.error && logger.error(`[gen-v2] local runner: ${err && err.message}`);
                 } finally { running = false; }
             }
             if (!stopped) { timer = setTimeout(tick, intervalMs); if (timer.unref) timer.unref(); }

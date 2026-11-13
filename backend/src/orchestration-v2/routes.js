@@ -5,6 +5,8 @@
 //      POST /internal/gen/claim                 x-api-key (GPU_HUB_API_KEY, REQUIRED)
 //      POST /internal/gen/beacon                x-api-key
 //      PUT  /internal/gen/jobs/:id/result?attempt=N   Bearer upload_token, raw body stream
+//      GET  /internal/gen/jobs/:id/input/:name?attempt=N  Bearer upload_token (stage 3: IU frames of a
+//           video group, ADR §8.1 — by link, not base64; public through nginx like result)
 //      POST /internal/gen/jobs/:id/error?attempt=N    Bearer upload_token, JSON
 //    No key / token → 401. Master flag off → 503 {code:'orch_v2_disabled'}.
 // 2. Book handlers for books.orchestration='v2' — the existing routes call
@@ -16,8 +18,12 @@ const fs = require('fs');
 const path = require('path');
 
 const { scopeBounds } = require('../services/gen-scope');
+const workerLogsStore = require('../services/worker-logs-store');
+const workerLogTail = require('../services/worker-log-tail');
 
 const LEGACY_TO_SCOPE = Object.freeze({ whole_book: 'book', current_chapter: 'chapter', current_scene: 'scene' });
+const ALL_LAYERS = Object.freeze(['audio', 'image', 'video']);
+const BASE_V2_LAYERS = Object.freeze(['audio', 'image']);  // + video (stage 3) when the core supports it
 const FROM_CURRENT_SCENE = 'from_current_scene';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -64,15 +70,19 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 });
                 if (!out.task) return res.json({ task: null });
                 const t = out.task;
-                return res.json({
-                    task: {
-                        ...t,
-                        protocol_version: 3,
-                        job_type: w.worker_type,
-                        upload_url: host.uploadUrl(t.job_id, t.attempt),
-                        error_url: host.errorUrl(t.job_id, t.attempt),
-                    },
-                });
+                const task = {
+                    ...t,
+                    protocol_version: 3,
+                    job_type: w.worker_type,
+                    upload_url: host.uploadUrl(t.job_id, t.attempt),
+                    error_url: host.errorUrl(t.job_id, t.attempt),
+                };
+                // stage 3: input files by link (same token as the result) — the worker puts them
+                // into COMFY_INPUT_DIR under `name` before the workflow runs
+                if (Array.isArray(t.input_files) && t.input_files.length && host.inputUrl) {
+                    task.input_files = t.input_files.map((f) => ({ ...f, url: host.inputUrl(t.job_id, t.attempt, f.name) }));
+                }
+                return res.json({ task });
             } catch (err) { return sendGenError(res, err, 'claim'); }
         });
 
@@ -82,8 +92,49 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 const b = req.body || {};
                 if (!UUID_RE.test(String(b.worker_id || ''))) return res.status(400).json({ code: 'bad_request', error: 'worker_id required' });
                 const r = await host.orch().beacon(b.worker_id, { current_job_id: b.current_job_id || null });
-                return res.json({ cancel: r.cancel });
+                // §8.5: a pending one-shot tail request rides exactly ONE
+                // beacon answer. Consumed only after the beacon succeeded, so
+                // a failed/disabled beacon never swallows the request.
+                const sendLogTail = workerLogTail.consume(b.worker_id);
+                return res.json({ cancel: r.cancel, send_log_tail: sendLogTail });
             } catch (err) { return sendGenError(res, err, 'beacon'); }
+        });
+
+        // POST /internal/workers/:workerId/logs — fresh worker logs (§8.5).
+        // The hub is the only caller (x-api-key, docker network; nginx blocks
+        // /internal/workers/ externally). The URL identity is the token-derived
+        // worker_id and is validated as a UUID before it reaches the disk.
+        // log_shipping=false → 204 without writing (tenant opt-out).
+        app.post('/internal/workers/:workerId/logs', requireHubKey, async (req, res) => {
+            const workerId = String(req.params.workerId || '');
+            if (!UUID_RE.test(workerId)) {
+                return res.status(400).json({ code: 'bad_request', error: 'worker_id must be a UUID' });
+            }
+            const declared = Number(req.headers['content-length']);
+            if (Number.isFinite(declared) && declared > 128 * 1024) {
+                return res.status(413).json({ code: 'too_large', error: 'limit 131072 bytes' });
+            }
+            const b = req.body || {};
+            if (!Array.isArray(b.lines)) {
+                return res.status(400).json({ code: 'bad_request', error: 'lines[] required' });
+            }
+            if (b.lines.length > 2000) {
+                return res.status(413).json({ code: 'too_many_lines', error: 'limit 2000 lines' });
+            }
+            try {
+                const w = await workerRepo.findById(workerId);
+                if (!w || w.revoked_at != null) {
+                    return res.status(404).json({ code: 'unknown_worker', error: 'worker unknown or revoked' });
+                }
+                if (w.log_shipping !== true) {
+                    // Opt-out: acknowledge without touching the disk (the
+                    // worker's own buffer is not our data to keep).
+                    return res.status(204).end();
+                }
+                if (b.lines.length === 0) return res.status(204).end();
+                await workerLogsStore.writeLines(workerId, b.lines);
+                return res.status(204).end();
+            } catch (err) { return sendGenError(res, err, 'logs'); }
         });
 
         app.put('/internal/gen/jobs/:jobId/result', async (req, res) => {
@@ -99,6 +150,25 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 const r = await host.orch().acceptResult(req.params.jobId, Number(req.query.attempt), token, req);
                 return res.status(r.status).json(r);
             } catch (err) { return sendGenError(res, err, 'result'); }
+        });
+
+        // ADR §8.1 (stage 3): an input file of the CURRENT running attempt, by the job's upload
+        // token; only names the job lists; bytes = the snapshot hashed at planning (else 409).
+        app.get('/internal/gen/jobs/:jobId/input/:name', async (req, res) => {
+            const token = bearer(req);
+            if (!token) return res.status(401).json({ code: 'unauthorized', error: 'upload token required' });
+            if (!host.isEnabled()) return disabled(res);
+            const orch = host.orch();
+            if (!orch || typeof orch.openInput !== 'function') return res.status(404).json({ code: 'not_found', error: 'input files need @animastor/orchestration >= 1.3.0' });
+            try {
+                const r = await orch.openInput(req.params.jobId, Number(req.query.attempt), token, String(req.params.name || ''));
+                if (r.status !== 200) return res.status(r.status).json({ code: r.code });
+                res.set('Content-Type', /\.png$/i.test(r.name) ? 'image/png' : 'application/octet-stream');
+                res.set('Content-Length', String(r.body.length));
+                res.set('Cache-Control', 'no-store');
+                res.set('X-Content-SHA256', r.sha256);
+                return res.status(200).end(r.body);
+            } catch (err) { return sendGenError(res, err, 'input'); }
         });
 
         app.post('/internal/gen/jobs/:jobId/error', async (req, res) => {
@@ -148,12 +218,25 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
         const body = req.body || {};
         const types = body.worker_types === undefined ? ['audio'] : body.worker_types;
-        if (!Array.isArray(types) || types.length === 0) {
+        if (!Array.isArray(types) || types.length === 0 || types.some((t) => !ALL_LAYERS.includes(t))) {
             return res.status(400).json({ error: 'worker_types must be a non-empty array containing audio, image, or video' });
         }
-        const unsupported = [...new Set(types)].filter((t) => t !== 'audio');
-        if (unsupported.length) {
-            return res.status(409).json({ code: 'v2_layer_not_supported_yet', error: `orchestration v2 (stage 1) supports audio only`, worker_types: unsupported });
+        // audio + image (2a) + video (stage 3, core >= 1.3.0) run on v2; a layer the host
+        // cannot run creates no work — the answer says so (summary.skipped_unsupported)
+        const requested = [...new Set(types)];
+        const videoWhy = host.videoUnsupportedReason ? host.videoUnsupportedReason() : 'host without video support';
+        const supported = videoWhy ? BASE_V2_LAYERS : [...BASE_V2_LAYERS, 'video'];
+        const unsupported = requested.filter((t) => !supported.includes(t));
+        const layers = requested.filter((t) => supported.includes(t));
+        if (!layers.length) {
+            return res.status(409).json({
+                code: 'v2_video_unavailable', error: `video layer is unavailable on orchestration v2: ${videoWhy}`,
+                worker_types: unsupported, summary: { jobs_created: 0, joined: 0, skipped_ready: 0, skipped_unsupported: unsupported },
+            });
+        }
+        if (layers.includes('image')) {
+            const why = host.imageUnsupportedReason ? host.imageUnsupportedReason() : 'host without image support';
+            if (why) return res.status(409).json({ code: 'v2_image_unavailable', error: `image layer is unavailable on orchestration v2: ${why}`, worker_types: ['image'] });
         }
         const legacyScope = body.scope || 'whole_book';
         let scope;
@@ -185,28 +268,38 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             const ca = body.client_action && typeof body.client_action === 'object' ? body.client_action : null;
             const clientActionId = ca && typeof ca.action_id === 'string' && ca.action_id ? ca.action_id.slice(0, 200) : null;
             const r = await host.orch().createCommand({
-                workspaceId, userId, bookId, kind: 'regenerate', scope, layers: ['audio'],
+                workspaceId, userId, bookId, kind: 'regenerate', scope, layers,
                 force: body.rebuild_all === true || body.force === true,
                 clientActionId, enabledLayers,
             });
             const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
             const scopeLog = scope.level === 'scenes' ? `${legacyScope}→scenes[${scope.scene_ids.length}] from ${scope.scene_ids[0]}` : legacyScope;
-            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} scope=${scopeLog} summary=${JSON.stringify(r.summary)} client_action_id=${clientActionId || '-'}`);
+            const summary = unsupported.length ? { ...r.summary, skipped_unsupported: unsupported } : r.summary;
+            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} layers=${r.layers.join(',')} scope=${scopeLog} summary=${JSON.stringify(summary)} client_action_id=${clientActionId || '-'}`);
+            // per-layer counts of the command (jobs it created or joined, §4.2a)
+            let byLayer = {};
+            try {
+                const p = await host.orch().progress(bookId);
+                const c = p.commands.find((x) => x.command_id === r.command_id);
+                if (c) byLayer = c.by_layer || {};
+            } catch (_) { /* counts are informational */ }
+            const layerCount = (l) => { const t = byLayer[l] || {}; return (t.queued || 0) + (t.running || 0) + (t.done || 0) + (t.failed || 0) + (t.cancelled || 0); }
             return res.json({
                 book_id: bookId,
                 orchestration: 'v2',
                 command_id: r.command_id,
                 existing: r.existing,
-                summary: r.summary,
+                summary,
                 scope: legacyScope,
                 build_id: (loaded && loaded.manifest && loaded.manifest.build_id) || 'default',
                 dirty_scenes: [],
-                skipped_worker_types: [],
-                tasks: [{ task_id: r.command_id, type: 'audio', target_count: r.summary.jobs_created + r.summary.joined }],
+                // not run by this command: unsupported on v2 (video) + disabled in layer-config
+                skipped_worker_types: requested.filter((t) => !r.layers.includes(t)),
+                tasks: r.layers.map((type) => ({ task_id: r.command_id, type, target_count: layerCount(type) })),
             });
         } catch (err) {
             if (err && err.code === 'layer_disabled') {
-                return res.status(409).json({ error: 'layer_disabled', message: 'All requested layers are disabled in layer-config', disabled_worker_types: ['audio'] });
+                return res.status(409).json({ error: 'layer_disabled', message: 'All requested layers are disabled in layer-config', disabled_worker_types: layers });
             }
             return sendGenError(res, err, 'regenerate');
         }
@@ -233,7 +326,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             if (taskId && UUID_RE.test(String(taskId))) {
                 if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() });
                 const r = await host.orch().cancel({ commandId: String(taskId) }, { cancelledBy: userIdOf(req) || 'cancel-worker' });
-                return res.json({ ok: true, book_id: bookId, cancelled: ['audio'], task_ids: [String(taskId)], jobs_cancelled: r.jobs_cancelled, kept_shared: r.kept_shared });
+                return res.json({ ok: true, book_id: bookId, cancelled: r.layers || [], task_ids: [String(taskId)], jobs_cancelled: r.jobs_cancelled, kept_shared: r.kept_shared });
             }
             if (type === 'cover') return res.json({ ok: true, book_id: bookId, cancelled: ['cover'], task_ids: [] }); // no legacy leases for a v2 book
             if (['audio', 'image', 'video'].includes(type)) {

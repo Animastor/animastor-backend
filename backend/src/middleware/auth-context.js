@@ -54,6 +54,16 @@ function identityOf(req) {
  * auto-provisioned guest. Any lookup failure degrades downward instead of
  * 500-ing every request during a transient PG outage.
  */
+// Sign-in-only write paths: an anonymous request here must not mint a guest
+// identity (the handlers answer 401 instead).
+const NO_GUEST_PROVISION_PATHS = new Set([
+    '/api/v1/book/import',
+    '/api/v1/book/import-txt',
+    '/api/v1/book/import-text',
+    '/api/v1/book/load-vbook',
+    '/api/v1/generate',
+]);
+
 /** Every value of a cookie name, in header order (compat: single-value parser). */
 function readAllCookies(req, name) {
     if (authService.parseCookieHeaders) {
@@ -131,7 +141,8 @@ async function authContext(req, res, next) {
             && !req.path.startsWith('/api/v1/auth')
             && !req.path.startsWith('/api/v1/worker')
             && !req.path.startsWith('/api/v1/ai-connector')
-            && !req.path.startsWith('/api/v1/admin')) {
+            && !req.path.startsWith('/api/v1/admin')
+            && !NO_GUEST_PROVISION_PATHS.has(req.path)) {
             const created = await authService.createGuest();
             req.guest = { guestId: created.guestId };
             req.workspace = { ...created.workspace, status: 'active', expiresAt: created.workspaceExpiresAt };
@@ -231,6 +242,9 @@ function requireBookAccess(bookIdParam = 'bookId') {
         if (!bookId) {
             return res.status(400).json({ error: 'Book ID required' });
         }
+        if (!hasIdentity(req)) {
+            return res.status(401).json({ error: 'Authentication required', code: 'login_required' });
+        }
 
         let workspace = null;
         try {
@@ -240,7 +254,7 @@ function requireBookAccess(bookIdParam = 'bookId') {
                 return res.status(410).json({ error: 'Guest workspace expired', code: 'workspace_expired' });
             }
             console.error(`[AUTH-CONTEXT] checkBookAccess(${bookId}) failed:`, err.message);
-            return next();
+            return res.status(403).json({ error: 'Book ownership could not be verified' }); // fail closed
         }
         if (!workspace) {
             return res.status(403).json({ error: 'Access denied: not a member of the book\'s workspace' });
@@ -258,7 +272,7 @@ function requireBookAccess(bookIdParam = 'bookId') {
  * (fail closed), while pre-auth requests keep flowing.
  */
 async function getAccessibleBookWorkspace(req, bookId) {
-    if (!hasIdentity(req)) return { ok: true, workspace: null, mode: 'pre-auth' };
+    if (!hasIdentity(req)) return { ok: false, status: 401, workspace: null, mode: 'none' };
     try {
         const ws = await checkBookAccess(req, bookId);
         return ws
@@ -307,7 +321,8 @@ async function dedupOwnedByCaller(req, candidateBookId) {
  * @returns {Promise<{allowed:boolean, status?:number, error?:string}>}
  */
 async function importBookAllowed(req, bookId, { diskCopyExists = false } = {}) {
-    if (!hasIdentity(req) || !bookId) return { allowed: true }; // pre-auth: unchanged
+    if (!hasIdentity(req)) return { allowed: false, status: 401, error: 'Sign in required' };
+    if (!bookId) return { allowed: false, status: 400, error: 'invalid book id' };
 
     if (req.guest && req.workspace && req.workspace.status === 'expired') {
         return { allowed: false, status: 410, error: 'Guest workspace expired' };

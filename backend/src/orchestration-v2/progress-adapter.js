@@ -7,7 +7,8 @@
 // exactly that shape, so both fronts show progress without changes:
 //   one row per command × layer, task_id = command_id, scope in the legacy
 //   grammar (whole_book / current_chapter / current_scene),
-//   ready/total = done audio parts + done scene merges / planned parts + scenes.
+//   ready/total = done parts + done scene merges / planned parts + scenes (audio);
+//   image (2a) has no merge: ready/total = done IUs / planned IUs.
 // SSE: every NOTIFY → {type:'progress', layer, command_id, ready, total};
 // a command reaching a terminal status → {type:'generation_complete'} once.
 
@@ -15,6 +16,7 @@
 
 const SCOPE_TO_LEGACY = Object.freeze({ book: 'whole_book', chapter: 'current_chapter', scene: 'current_scene', unit: 'current_scene' });
 const FINISHED_VISIBLE_MS = 10 * 60_000;
+const MERGED_LAYERS = new Set(['audio', 'video']);
 
 function createProgressAdapter({ orch }) {
     const announced = new Map();      // command_id → ts (terminal event sent)
@@ -28,9 +30,10 @@ function createProgressAdapter({ orch }) {
                 const t = c.by_layer[layer] || {};
                 const scenes = c.scenes.filter((s) => s.layer === layer);
                 const all = (t.queued || 0) + (t.running || 0) + (t.done || 0) + (t.failed || 0) + (t.cancelled || 0);
-                // every scene ends with one merge; until it exists it counts as one pending part
+                // audio / video: every scene ends with one merge; until it exists it counts as
+                // one pending part. image (2a): no merge — the IUs are the whole work.
                 const merges = (c.merges && c.merges[layer]) || 0;
-                const total = all + Math.max(0, scenes.length - merges);
+                const total = all + (MERGED_LAYERS.has(layer) ? Math.max(0, scenes.length - merges) : 0);
                 const ready = t.done || 0;
                 const cancelled = c.status === 'cancelled';
                 const failed = c.status === 'failed' || c.status === 'partial';
@@ -67,6 +70,9 @@ function createProgressAdapter({ orch }) {
                     error_code: null,
                     error_message: failed ? (c.error || null) : null,
                     retrying: !failed && !done && !cancelled && (t.retrying || 0) > 0,
+                    // stage 3 (§6.5, §13 п.11 п.9): scenes the command did not do and why —
+                    // {skipped_needs_audio|skipped_image_dirty|skipped_needs_image: [scene_id…]}
+                    skipped: layer === 'video' ? (c.skipped || {}) : {},
                     retry_no: null,
                     retry_max: null,
                     retry_at: null,
