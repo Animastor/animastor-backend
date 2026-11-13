@@ -1,7 +1,7 @@
 {
     "name": "@animastor/player",
-    "version": "0.1.3",
-    "description": "Animastor Player — playback HTTP contour: scene media serving (Range/206/ETag/If-Range), scene data (status/storyboard/timings/waveform), IU media, playback queue and assets-state. Reads book content only through the injected playerModel (VBook boundary); every host dependency arrives as an injected port — no config, no generation, no workflows, no Redis/PG/Redis internals in the package.",
+    "version": "0.1.4",
+    "description": "Animastor Player \u2014 playback HTTP contour: scene media serving (Range/206/ETag/If-Range), scene data (status/storyboard/timings/waveform), IU media, playback queue and assets-state. Reads book content only through the injected playerModel (VBook boundary); every host dependency arrives as an injected port \u2014 no config, no generation, no workflows, no Redis/PG/Redis internals in the package.",
     "keywords": [
         "animastor",
         "player",
@@ -39,7 +39,7 @@
         "url": "https://github.com/Animastor/animastor-backend/issues"
     },
     "dependencies": {
-        "@animastor/vbook-runtime": "^0.1.0"
+        "@animastor/vbook-runtime": "^0.3.1"
     },
     "devDependencies": {
         "chai": "^6.2.2",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 (2026-11-13)
+
+`@animastor/vbook-runtime` ^0.3.1 (input validation + `behavior.json` v2).
+The nested 0.1.0 copy is gone; the reader paths are unchanged.
+
 ## 0.1.3 (2026-10-26)
 
 Stage 143a phase 2c — versioned-pointer readers in the two remaining
