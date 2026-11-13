@@ -149,7 +149,7 @@ describe('auth package boundary guards (@animastor/auth)', () => {
     it('APB-G9: package manifest identity pins', () => {
         const pkg = JSON.parse(fs.readFileSync(AUTH_PKG_JSON, 'utf8'));
         expect(pkg.name, 'package name must be @animastor/auth').to.equal('@animastor/auth');
-        expect(pkg.version, 'package version must be 0.1.0').to.equal('0.1.0');
+        expect(pkg.version, 'package version must be 0.1.1').to.equal('0.1.1');
         expect(pkg.main).to.equal('src/index.cjs');
         expect(pkg.exports && pkg.exports['.']).to.equal('./src/index.cjs');
         expect(pkg.engines && pkg.engines.node, 'engines.node must be >=20').to.match(/>=20/);
