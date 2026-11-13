@@ -64,6 +64,16 @@ describe('book artifacts — scoped removal', () => {
         expect(fs.existsSync(path.join(out, 'ba_ch-2_sc-2.mp3'))).to.equal(false);
     });
 
+    it('build-scoped and preserved entries', () => {
+        touch(path.join(out, 'build_ba', 'ba_ch-1_sc-1.mp3'));
+        touch(path.join(out, 'build_ba', 'voices', 'v1', 'ref.wav'));
+        removeBookArtifacts({ outputDir: out, booksDir: books, bookId: 'ba', buildIds: ['build_ba'], buildScoped: ['voices'], preserve: ['voices'] });
+        expect(fs.existsSync(path.join(out, 'build_ba', 'voices', 'v1', 'ref.wav'))).to.equal(true);
+        expect(fs.existsSync(path.join(out, 'build_ba', 'ba_ch-1_sc-1.mp3'))).to.equal(false);
+        removeBookArtifacts({ outputDir: out, booksDir: books, bookId: 'ba', buildIds: ['build_ba'], buildScoped: ['voices'] });
+        expect(fs.existsSync(path.join(out, 'build_ba'))).to.equal(false);
+    });
+
     it('invalid book id → nothing removed', () => {
         touch(path.join(out, 'build_x', 'f'));
         const r = removeBookArtifacts({ outputDir: out, booksDir: books, bookId: '..', buildIds: ['build_x'] });
