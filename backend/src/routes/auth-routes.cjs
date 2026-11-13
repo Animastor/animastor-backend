@@ -28,6 +28,15 @@ module.exports = function(app, _redis, deps) {
         return proto.split(',')[0].trim() === 'https';
     }
 
+    // Identity responses are never cacheable. A browser HTTP cache that
+    // answers /auth/me with a pre-logout body is the "sticky account" trap
+    // (reports/2026-11-06/web-auth-sticky-recon.md §4): after logout a refresh
+    // must go to the server, not to the cache.
+    app.use('/api/v1/auth', (req, res, next) => {
+        res.setHeader('Cache-Control', 'no-store');
+        next();
+    });
+
     app.post('/api/v1/auth/register', async (req, res) => {
         try {
             const { username, password, email } = req.body || {};
@@ -61,7 +70,14 @@ module.exports = function(app, _redis, deps) {
         try {
             const { username, password } = req.body || {};
             const result = await authService.login({ username, password });
-            res.setHeader('Set-Cookie', authService.sessionCookieHeader(result.session.token, { secure: isSecure(req) }));
+            const secure = isSecure(req);
+            // A successful login also sweeps stale HOST-ONLY sid/gid (written
+            // before COOKIE_DOMAIN was configured): a Domain= cookie cannot
+            // replace them, and they shadow the fresh session on this host.
+            res.setHeader('Set-Cookie', [
+                authService.sessionCookieHeader(result.session.token, { secure }),
+                ...authService.clearHostOnlyCookieHeaders({ secure }),
+            ]);
             res.json({
                 authenticated: true,
                 user: result.user,
@@ -79,6 +95,8 @@ module.exports = function(app, _redis, deps) {
     app.post('/api/v1/auth/logout', async (req, res) => {
         try {
             const secure = isSecure(req);
+            // Host-only leftovers survive a Domain= clear — send both variants.
+            const hostOnlyClears = authService.clearHostOnlyCookieHeaders({ secure });
             const cookies = [];
             const sessionToken = authService.readCookie(req, authService.SESSION_COOKIE_NAME);
             if (sessionToken) {
@@ -88,11 +106,11 @@ module.exports = function(app, _redis, deps) {
             const guestToken = authService.readCookie(req, authService.GUEST_COOKIE_NAME);
             if (guestToken) {
                 await guestRepo.revokeByToken(guestToken).catch(() => {});
-                cookies.push(authService.clearGuestCookieHeader({ secure }));
+                cookies.push(authService.clearGuestCookieHeader({ secure }), ...hostOnlyClears);
                 res.setHeader('Set-Cookie', cookies);
                 return res.json({ ok: true, guest: true });
             }
-            cookies.push(authService.clearGuestCookieHeader({ secure }));
+            cookies.push(authService.clearGuestCookieHeader({ secure }), ...hostOnlyClears);
             res.setHeader('Set-Cookie', cookies);
             res.json({ ok: true });
         } catch (err) {
@@ -101,6 +119,7 @@ module.exports = function(app, _redis, deps) {
             res.setHeader('Set-Cookie', [
                 authService.clearSessionCookieHeader({ secure: isSecure(req) }),
                 authService.clearGuestCookieHeader({ secure: isSecure(req) }),
+                ...authService.clearHostOnlyCookieHeaders({ secure: isSecure(req) }),
             ]);
             res.json({ ok: true });
         }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.1 — 2026-11-13
+
+### Fixed
+
+- **Duplicate session cookies.** New `parseCookieHeaders(cookieHeader, name)`
+  returns every value of a cookie name in header order; a host-only leftover
+  and a `Domain=` cookie are separate browser records sent in one header.
+- **Host-only sweep.** New `clearHostOnlyCookieHeaders(names, options)` builds
+  `Set-Cookie` headers that expire the host-only copy (`Max-Age=0`, no `Domain=`)
+  while the domain-scoped cookie stays untouched.
+- Both are additive; the frozen 12-name API keeps its signatures. The host now
+  uses them in `authContext` and login/logout.
+
 ## 0.1.0 — 2026-09-21
 
 ### Initial publishable release

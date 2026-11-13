@@ -80,6 +80,46 @@ function parseCookieHeader(header, name) {
     return null;
 }
 
+/**
+ * EVERY value of a cookie name, in header order.
+ * RFC 6265 keeps a host-only cookie and a Domain= cookie with the same name
+ * as separate records; a browser sends both, and the first one may be a
+ * stale/revoked leftover. Callers that must not trust the first match use
+ * this to try the whole list.
+ * @param {string} header - raw Cookie header value (may be null/undefined)
+ * @param {string} name - cookie name to extract
+ * @returns {string[]} decoded values in header order (empty when none)
+ */
+function parseCookieHeaders(header, name) {
+    const out = [];
+    if (!header) return out;
+    for (const part of header.split(';')) {
+        const eq = part.indexOf('=');
+        if (eq === -1) continue;
+        if (part.slice(0, eq).trim() !== name) continue;
+        const raw = part.slice(eq + 1).trim();
+        try { out.push(decodeURIComponent(raw)); } catch (_) { out.push(raw); }
+    }
+    return out;
+}
+
+/**
+ * Host-only clearing pair for stale cookies written before COOKIE_DOMAIN was
+ * configured. A Domain= clear header cannot delete a host-only record (it is
+ * a different cookie), so login/logout responses carry BOTH variants.
+ * Without a configured domain the Domain= variant IS the host-only one —
+ * nothing extra is emitted.
+ * @returns {string[]} 0 headers (no domain) or [clear sid, clear gid] host-only
+ */
+function clearHostOnlyCookieHeaders({ secure } = {}, cfg = {}) {
+    if (!cfg.cookieDomain) return [];
+    const hostOnly = { ...cfg, cookieDomain: '' };
+    return [
+        clearSessionCookieHeader({ secure }, hostOnly),
+        clearGuestCookieHeader({ secure }, hostOnly),
+    ];
+}
+
 module.exports = {
     SESSION_COOKIE_NAME,
     GUEST_COOKIE_NAME,
@@ -92,4 +132,6 @@ module.exports = {
     guestCookieHeader,
     clearGuestCookieHeader,
     parseCookieHeader,
+    parseCookieHeaders,
+    clearHostOnlyCookieHeaders,
 };
