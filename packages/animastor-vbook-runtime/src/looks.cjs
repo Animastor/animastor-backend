@@ -17,6 +17,8 @@
 
 'use strict';
 
+const { findHero } = require('./heroes.cjs');
+
 const LOOK_FIELDS = Object.freeze(['appearance', 'clothes', 'video_tokens']);
 const BASE_LOOK_ID = 'base';
 
@@ -48,22 +50,21 @@ function baseLookOf(hero) {
     return base;
 }
 
-function findHero(book, heroId) {
-    const heroes = book && Array.isArray(book.heroes) ? book.heroes : [];
-    return heroes.find((h) => h && typeof h === 'object' && h.id === heroId) || null;
+function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
 function findLook(hero, lookId) {
     const looks = Array.isArray(hero.looks) ? hero.looks : [];
-    return looks.find((l) => l && typeof l === 'object' && l.id === lookId) || null;
+    return looks.find((l) => isPlainObject(l) && l.id === lookId) || null;
 }
 
 function hasOwn(obj, key) {
-    return !!obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key);
+    return isPlainObject(obj) && Object.prototype.hasOwnProperty.call(obj, key);
 }
 
 function assignment(map, heroId) {
-    if (!map || typeof map !== 'object' || !hasOwn(map, heroId)) return null;
+    if (!hasOwn(map, heroId)) return null;
     const value = map[heroId];
     return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -92,7 +93,7 @@ function sameField(field, a, b) {
  */
 function resolveHeroLook(book, chapter, scene, heroId) {
     const hero = findHero(book, heroId);
-    if (!hero || !hero.passport || typeof hero.passport !== 'object') return null;
+    if (!hero || !isPlainObject(hero.passport)) return null;
 
     const base = baseLookOf(hero);
     const warnings = [];
@@ -124,24 +125,21 @@ function resolveHeroLook(book, chapter, scene, heroId) {
     for (const field of LOOK_FIELDS) result[field] = base[field];
 
     if (chosen.look) {
+        // A look never inherits another look: only its own `fields` are read.
         const fields = chosen.look.fields;
-        if (fields && typeof fields === 'object') {
-            for (const field of LOOK_FIELDS) {
-                if (hasOwn(fields, field)) result[field] = cloneValue(field, fields[field]);
-            }
+        for (const field of LOOK_FIELDS) {
+            if (hasOwn(fields, field)) result[field] = cloneValue(field, fields[field]);
         }
     }
 
     const patched = [];
-    const patch = scene && scene.look_patch && typeof scene.look_patch === 'object'
-        ? scene.look_patch[heroId]
-        : null;
-    if (patch && typeof patch === 'object') {
-        for (const field of LOOK_FIELDS) {
-            if (!hasOwn(patch, field)) continue;
-            result[field] = cloneValue(field, patch[field]);
-            patched.push(field);
-        }
+    // Own keys only: a hero id such as "constructor" must not pick up
+    // Object.prototype members of scene.look_patch.
+    const patch = scene && hasOwn(scene.look_patch, heroId) ? scene.look_patch[heroId] : null;
+    for (const field of LOOK_FIELDS) {
+        if (!hasOwn(patch, field)) continue;
+        result[field] = cloneValue(field, patch[field]);
+        patched.push(field);
     }
 
     const changed = LOOK_FIELDS.filter((field) => !sameField(field, result[field], base[field]));

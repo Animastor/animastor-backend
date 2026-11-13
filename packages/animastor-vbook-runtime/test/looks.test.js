@@ -150,6 +150,64 @@ describe('resolveHeroLook', () => {
         expect(result.warnings).to.deep.equal(['unknown_look']);
     });
 
+    it('unknown look in the scene AND in the chapter: base, one warning per dangling reference', () => {
+        const book = makeBook();
+        const result = resolveHeroLook(book, { looks: { woland: 'gone' } }, { looks: { woland: 'ghost_look' } }, 'woland');
+        expect(result).to.deep.include({ look_id: 'base', source: 'base', clothes: 'black suit' });
+        expect(result.warnings).to.deep.equal(['unknown_look', 'unknown_look']);
+    });
+
+    it('look_patch applies over the base passport when no look is assigned', () => {
+        const book = makeBook();
+        const scene = { look_patch: { woland: { video_tokens: ['monocle'] } } };
+        const result = resolveHeroLook(book, {}, scene, 'woland');
+        expect(result).to.deep.include({ look_id: 'base', source: 'base', clothes: 'black suit' });
+        expect(result.video_tokens).to.deep.equal(['monocle']);
+        expect(result.patched).to.deep.equal(['video_tokens']);
+        expect(result.changed).to.deep.equal(['video_tokens']);
+        expect(result.base.video_tokens).to.deep.equal(['dark hair', 'black suit']);
+    });
+
+    it('"base" in the scene keeps look_patch but drops the chapter look entirely', () => {
+        const book = makeBook();
+        const chapter = { looks: { woland: 'coat' } };
+        const scene = { looks: { woland: 'base' }, look_patch: { woland: { clothes: 'bathrobe' } } };
+        const result = resolveHeroLook(book, chapter, scene, 'woland');
+        expect(result).to.deep.include({ look_id: 'base', source: 'base', clothes: 'bathrobe' });
+        expect(result.video_tokens).to.deep.equal(['dark hair', 'black suit']); // not the coat tokens
+        expect(result.image_ref).to.equal(null);
+    });
+
+    it('a look does not inherit another look: only its own fields override the passport', () => {
+        const book = makeBook();
+        // "beard" changes appearance only; nothing of "coat" leaks in, even with
+        // a (non-format) pointer to it.
+        book.heroes[0].looks[1].base = 'coat';
+        book.heroes[0].looks[1].extends = 'coat';
+        const result = resolveHeroLook(book, { looks: { woland: 'coat' } }, { looks: { woland: 'beard' } }, 'woland');
+        expect(result.clothes).to.equal('black suit');
+        expect(result.video_tokens).to.deep.equal(['dark hair', 'black suit']);
+        expect(result.changed).to.deep.equal(['appearance']);
+    });
+
+    it('assignments of other heroes and prototype keys are ignored', () => {
+        const book = makeBook();
+        book.heroes.push({ id: 'constructor', passport: { appearance: 'plain', clothes: 'grey', video_tokens: ['x'] } });
+        const scene = { looks: { margarita: 'coat' }, look_patch: { margarita: { clothes: 'cloak' } } };
+        expect(resolveHeroLook(book, {}, scene, 'woland')).to.deep.include({ look_id: 'base', clothes: 'black suit' });
+        const proto = resolveHeroLook(book, { looks: {} }, { looks: {}, look_patch: {} }, 'constructor');
+        expect(proto).to.deep.include({ look_id: 'base', source: 'base', clothes: 'grey' });
+        expect(proto.patched).to.deep.equal([]);
+        expect(proto.warnings).to.deep.equal([]);
+    });
+
+    it('a passport that is not an object means "no passport"', () => {
+        const book = makeBook();
+        book.heroes.push({ id: 'odd', passport: ['tall'] }, { id: 'nul', passport: null });
+        expect(resolveHeroLook(book, {}, {}, 'odd')).to.equal(null);
+        expect(resolveHeroLook(book, {}, {}, 'nul')).to.equal(null);
+    });
+
     it('hero without passport or an unknown hero returns null', () => {
         const book = makeBook();
         book.heroes.push({ id: 'episodic', voice: { timbre: 'quiet' } });
