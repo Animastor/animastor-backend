@@ -233,6 +233,8 @@ describe('T6: contour routes do not gain new implementation-detail deps', () => 
     const BASELINE = {
         'routes/generation-routes.cjs': [
             '../middleware/auth-context',
+            // Upload limits + sign-in requirement for /generate (input guard).
+            '../middleware/input-guard',
             '../video/video-timeline',
             '../storage/postgres/repositories/book-repo',
             '../storage/postgres/repositories/task-repo',

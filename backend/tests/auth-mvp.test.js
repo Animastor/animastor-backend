@@ -432,8 +432,10 @@ describe('Authentication MVP', () => {
             expect(await dedupOwnedByCaller(bobReq(), bobBookId)).to.equal(true);
         });
 
-        it('importBookAllowed: pre-auth and owner pass, foreign denied', async () => {
-            expect((await importBookAllowed({}, aliceBookId)).allowed).to.equal(true);
+        it('importBookAllowed: no identity → 401, owner passes, foreign denied', async () => {
+            const anon = await importBookAllowed({}, aliceBookId);
+            expect(anon.allowed).to.equal(false);
+            expect(anon.status).to.equal(401);
             expect((await importBookAllowed(aliceReq(), aliceBookId)).allowed).to.equal(true);
             const denied = await importBookAllowed(bobReq(), aliceBookId);
             expect(denied.allowed).to.equal(false);
@@ -443,8 +445,8 @@ describe('Authentication MVP', () => {
         it('importBookAllowed: disk copy without ownership fails CLOSED for authed', async () => {
             const ghostId = `ghost-disk-${stamp}`;
             expect((await importBookAllowed(aliceReq(), ghostId, { diskCopyExists: true })).allowed).to.equal(false);
-            // pre-auth keeps the historical open behaviour (no identity yet)
-            expect((await importBookAllowed({}, ghostId, { diskCopyExists: true })).allowed).to.equal(true);
+            // no identity: refused as well (import is sign-in only)
+            expect((await importBookAllowed({}, ghostId, { diskCopyExists: true })).allowed).to.equal(false);
         });
     });
 

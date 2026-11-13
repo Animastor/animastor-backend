@@ -22,6 +22,7 @@ const path = require('path');
 const fs = require('fs');
 
 const config = require('../config/runtime-config');
+const { isValidBookId, isValidBuildId, joinInside } = require('@animastor/vbook-runtime/safe-paths');
 const sceneAssetsRepo = require('../storage/postgres/repositories/scene-assets-repo');
 const iuRepo = require('../storage/postgres/repositories/iu-repo');
 // 2026-11-04: silence is explicitly marked; a placeholder file never becomes
@@ -205,7 +206,11 @@ async function ensurePlaceholderAudio(buildId, bookId, chapterId, sceneId) {
     // such a file, and it was registered as real audio (sc-4bb85e02,
     // 2026-11-04). 'ready' is written ONLY by the fenced-commit publication
     // path (replacePlaceholderWithRealAudio with a commit proof).
-    const audioPath = path.join(config.OUTPUT_DIR, buildId, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
+    if (!isValidBuildId(buildId) || !isValidBookId(bookId)) {
+        warn(`Placeholder skipped: invalid id for ${bookId}`);
+        return { created: false, path: null, durationSec: 0, reason: 'invalid_id' };
+    }
+    const audioPath = joinInside(config.OUTPUT_DIR, buildId, artifactNaming.sceneAudioName(bookId, chapterId, sceneId));
     if (fs.existsSync(audioPath)) {
         const stats = fs.statSync(audioPath);
         if (!isPlaceholderAudioFile(audioPath)) {
@@ -545,7 +550,11 @@ async function recoverMissingPlaceholders(buildId, bookId) {
         result.checked = scenes.length;
         log(`[RECOVER] Checking ${scenes.length} scenes for ${bookId}...`);
 
-        const outputDir = path.join(config.OUTPUT_DIR, buildId);
+        if (!isValidBuildId(buildId) || !isValidBookId(bookId)) {
+            log(`[RECOVER] Book ${bookId}: invalid id, skipping`);
+            return result;
+        }
+        const outputDir = joinInside(config.OUTPUT_DIR, buildId);
         const needsRecovery = [];
 
         for (const s of scenes) {

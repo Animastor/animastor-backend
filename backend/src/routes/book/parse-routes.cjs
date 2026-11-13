@@ -70,7 +70,7 @@ module.exports = function registerParseRoutes(app, ctx) {
     });
 
     // POST /api/v1/book/import-text — create a draft book from raw AI text.
-    app.post('/api/v1/book/import-text', async (req, res) => {
+    app.post('/api/v1/book/import-text', require('../../middleware/input-guard').requireUser, async (req, res) => {
         try {
             const { text, title } = req.body;
             if (!text) return res.status(400).json({ error: 'text is required' });

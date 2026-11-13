@@ -4,6 +4,7 @@
 // All /api/v1/debug/* endpoints.
 
 const path = require('path');
+const { isValidBuildId, joinInside } = require('@animastor/vbook-runtime/safe-paths');
 // S-4: filename grammar composed from the canonical owner (bytes unchanged)
 const artifactNaming = require('@animastor/generation').artifactNaming;
 const fs = require('fs');
@@ -90,8 +91,9 @@ module.exports = function(app, redis, deps) {
         try {
             const { bookId, chapterId, sceneId } = req.params;
             const buildId = req.query.build_id || 'default';
+            if (!isValidBuildId(buildId)) return res.status(400).json({ error: 'invalid build id' });
 
-            const dir = path.join(OUTPUT_DIR, buildId);
+            const dir = joinInside(OUTPUT_DIR, buildId);
             let files = [];
             try { files = fs.readdirSync(dir).filter(f => f.startsWith(artifactNaming.scenePrefix(bookId, chapterId, sceneId))); } catch (_) {}
 
