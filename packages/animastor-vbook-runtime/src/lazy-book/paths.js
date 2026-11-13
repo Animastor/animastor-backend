@@ -3,7 +3,9 @@ const crypto = require('crypto');
 const { getBooksRoot } = require('../books-root');
 
 function getBooksDir() { return getBooksRoot(); }
-function getBookDir(bookId) { return path.join(getBooksDir(), bookId); }
+const { assertBookId, joinInside } = require('../safe-paths');
+
+function getBookDir(bookId) { assertBookId(bookId); return joinInside(getBooksDir(), bookId); }
 function getSourcePath(bookDir) { return path.join(bookDir, 'source.txt'); }
 function getManifestPath(bookDir) { return path.join(bookDir, 'manifest.json'); }
 function getBookMetaPath(bookDir) { return path.join(bookDir, 'book.json'); }

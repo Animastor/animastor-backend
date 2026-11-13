@@ -10,6 +10,7 @@
         "./behavior-schema.cjs": "./src/behavior-schema.cjs",
         "./voice": "./src/voice.js",
         "./books-root": "./src/books-root.js",
+        "./safe-paths": "./src/safe-paths.js",
         "./character-identity": "./src/character-identity.js",
         "./snake-guard": "./src/snake-guard.js",
         "./scene-title-utils": "./src/scene-title-utils.js",

@@ -7,6 +7,9 @@ Character voice port + voice references (animastor-docs
 
 ### Added
 
+- Stricter input validation for book storage (same change as 0.2.1 / 0.3.1,
+  see 0.3.1 below).
+
 - `src/voice.js` (subpath export `./voice`, also `voice` on the root) — the ONE
   access point to a character's voice: `getCharacterVoice`, `listVoiceIds`,
   `setCharacterVoiceReference`, `setCharacterVoiceDescription`,
@@ -23,6 +26,18 @@ Character voice port + voice references (animastor-docs
   `reference` link (`voices/<id>/<candidate>.wav`, sha256, source,
   verification, locked). Audio files are never part of the bundle.
 
+## 0.3.1 (2026-11-13)
+
+Stricter input validation for book storage.
+
+- Book ids and build ids are checked against a fixed grammar before any disk
+  access; resolved paths must stay inside the configured root
+  (`./safe-paths`: `assertBookId`, `assertBuildId`, `assertInside`, `joinInside`).
+- `.vbook` import accepts only the format 3.1 file set; other entries are
+  skipped and never written; malformed archives are refused. Archive size and
+  entry count are limited.
+- `resetBook` removes only a book directory inside the books root.
+- Book export skips links.
 ## 0.3.0 (2026-11-10, unpublished)
 
 behavior.json schema v2 (behaviour rules, phase 0 — animastor-docs
