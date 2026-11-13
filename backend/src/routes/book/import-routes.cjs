@@ -87,6 +87,8 @@ module.exports = function(app, redis, deps) {
     //  - importBookAllowed: a bundle re-import must never touch a book owned
     //    by a foreign workspace (bundle book_id is client-controlled).
     const { importBookAllowed, hasIdentity } = require('../../middleware/auth-context');
+    // Import is for signed-in users only; uploads are size-limited.
+    const { requireUser, singleUpload } = require('../../middleware/input-guard');
     const bookRepo = require('../../storage/postgres/repositories/book-repo');
 
     // ── Identity-scoped TXT dedup ─────────────────────────────────────────
@@ -212,16 +214,19 @@ module.exports = function(app, redis, deps) {
 // ======================================================
 // UNIFIED IMPORT — server-side format detection
 // ======================================================
-app.post('/api/v1/book/import', multer().single('file'), async (req, res) => {
+app.post('/api/v1/book/import', requireUser, singleUpload('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'file missing' });
 
         const buf = req.file.buffer;
         const format = detectFileFormat(buf);
 
+        if (format === 'invalid-archive') {
+            return res.status(400).json({ error: 'unsupported archive', code: 'invalid_archive' });
+        }
         if (format === 'vbook') {
             // ── VBOOK path — same logic as /load-vbook ──
-            const files = book.extractBookBundle(buf);
+            const files = book.extractBookBundle(buf, { log });
             log('[UNIFIED-IMPORT] vbook bundle loaded:', Object.keys(files));
 
             const bookData = book.buildBookFromBundle(files);
@@ -385,41 +390,44 @@ app.post('/api/v1/book/import', multer().single('file'), async (req, res) => {
             });
         }
     } catch (err) {
-        console.error('UNIFIED-IMPORT ERROR:', err);
+        if (err && err.status === 400) console.warn(`[UNIFIED-IMPORT] refused: ${err.code || 'invalid input'}`); else console.error('UNIFIED-IMPORT ERROR:', err);
         return res.status(400).json({ error: err.message || 'unknown error' });
     }
 });
 
 /**
- * Detect file format from buffer: 'vbook' if it's a valid ZIP containing
- * manifest.json and book.json, otherwise 'txt'.
+ * Detect file format from buffer:
+ *  - not a ZIP                                 → 'txt'
+ *  - ZIP with manifest.json + book.json        → 'vbook'
+ *  - any other ZIP (or a ZIP that is refused)  → 'invalid-archive'
+ * The archive is only listed here (no decompression).
  */
 function detectFileFormat(buf) {
     // Check ZIP magic bytes (PK\x03\x04)
     if (buf.length < 4 || buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
         return 'txt';
     }
-
     try {
-        // Use extractBookBundle to attempt reading as vbook — it will throw if invalid
-        const files = book.extractBookBundle(buf);
-        if (files && files['manifest.json'] && files['book.json']) {
-            return 'vbook';
+        if (typeof book.inspectBookBundle === 'function') {
+            const { payload } = book.inspectBookBundle(buf);
+            const names = new Set(payload.map((e) => e.entryName));
+            return names.has('manifest.json') && names.has('book.json') ? 'vbook' : 'invalid-archive';
         }
-        return 'txt';
+        const files = book.extractBookBundle(buf);
+        return files && files['manifest.json'] && files['book.json'] ? 'vbook' : 'invalid-archive';
     } catch (e) {
-        return 'txt';
+        return 'invalid-archive';
     }
 }
 
 // ======================================================
 // LOAD VBOOK
 // ======================================================
-    app.post('/api/v1/book/load-vbook', multer().single('file'), async (req, res) => {
+    app.post('/api/v1/book/load-vbook', requireUser, singleUpload('file'), async (req, res) => {
         try {
             if (!req.file) return res.status(400).json({ error: 'file missing' });
 
-            const files = book.extractBookBundle(req.file.buffer);
+            const files = book.extractBookBundle(req.file.buffer, { log });
             log('[LOAD-VBOOK] bundle loaded:', Object.keys(files));
 
             const bookData = book.buildBookFromBundle(files);
@@ -514,7 +522,7 @@ function detectFileFormat(buf) {
                 was_existing: !!existingBook,
             });
         } catch (err) {
-            console.error('LOAD-VBOOK ERROR:', err);
+            if (err && err.status === 400) console.warn(`[LOAD-VBOOK] refused: ${err.code || 'invalid input'}`); else console.error('LOAD-VBOOK ERROR:', err);
             return res.status(400).json({ error: err.message || 'unknown error' });
         }
     });
@@ -571,7 +579,7 @@ function detectFileFormat(buf) {
     // ======================================================
     // IMPORT TXT
     // ======================================================
-    app.post('/api/v1/book/import-txt', multer().single('file'), async (req, res) => {
+    app.post('/api/v1/book/import-txt', requireUser, singleUpload('file'), async (req, res) => {
         try {
             if (!req.file) return res.status(400).json({ error: 'file missing' });
             if (req.guest && req.workspace && req.workspace.status === 'expired') {

@@ -347,56 +347,22 @@ describe('TXT Import Ownership Dedup', () => {
         });
     });
 
-    describe('Scenario 3: guest creates new book for same TXT', () => {
-        let guestCookie;
-        let guestBookId;
-
-        it('no cookie → auto-provisioned guest → new book', async () => {
+    describe('Scenario 3: import is sign-in only (no guest import)', () => {
+        it('no cookie → 401, no guest identity minted, no book', async () => {
             const result = await importTxt(null);
-            expect(result.status).to.equal(200);
-            expect(result.body.dedup).to.not.equal(true);
-            guestBookId = result.body.book_id;
-            cleanupBookIds.add(guestBookId);
-
-            // Must be a different book from sureg's and user B's
-            for (const otherId of cleanupBookIds) {
-                if (otherId === guestBookId) continue;
-                expect(guestBookId).to.not.equal(otherId);
-            }
-
-            // Capture guest cookie
-            guestCookie = cookieByName(result.setCookie, 'animastor_gid');
-            expect(guestCookie).to.be.a('string').and.to.include('animastor_gid=');
-
-            // Guest workspace should be temporary
-            const wsResult = await query(
-                `SELECT workspace_id FROM books WHERE book_id = $1`,
-                [guestBookId]
-            );
-            expect(wsResult.rows.length).to.equal(1);
-            const guestWsId = wsResult.rows[0].workspace_id;
-
-            const wsType = await query(
-                `SELECT type FROM workspaces WHERE id = $1`,
-                [guestWsId]
-            );
-            expect(wsType.rows[0]?.type).to.equal('temporary');
-
-            // Find guest_id for cleanup
-            const guestResult = await query(
-                `SELECT guest_id FROM guests WHERE workspace_id = $1`,
-                [guestWsId]
-            );
-            if (guestResult.rows.length > 0) {
-                cleanupGuestIds.push(guestResult.rows[0].guest_id);
-            }
+            expect(result.status).to.equal(401);
+            expect(cookieByName(result.setCookie, 'animastor_gid')).to.equal(null);
         });
 
-        it('guest re-import with cookie → dedup returns own book', async () => {
+        it('guest identity → 401, no book', async () => {
+            const authService = require('../src/auth/auth-service');
+            const created = await authService.createGuest();
+            cleanupGuestIds.push(created.guestId);
+            const guestCookie = authService.guestCookieHeader(created.token, { secure: false }).split(';')[0];
             const result = await importTxt(guestCookie);
-            expect(result.status).to.equal(200);
-            expect(result.body.book_id).to.equal(guestBookId);
-            expect(result.body.dedup).to.equal(true);
+            expect(result.status).to.equal(401);
+            const rows = await query(`SELECT count(*)::int AS n FROM books WHERE workspace_id = $1`, [created.workspace.id]);
+            expect(rows.rows[0].n).to.equal(0);
         });
     });
 

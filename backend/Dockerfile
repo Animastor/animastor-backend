@@ -10,4 +10,10 @@ RUN npm install -g npm@11 && npm install --omit=dev --ignore-scripts
 
 COPY . .
 
+# Run unprivileged. /app stays root-owned and read-only for the process;
+# writable state lives only in the mounted data volumes and /tmp.
+# (Compose may pin the uid:gid to the owner of the host data directories.)
+ENV HOME=/tmp
+USER node
+
 CMD ["node", "src/backend.cjs"]

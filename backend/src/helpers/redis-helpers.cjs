@@ -9,6 +9,7 @@ const state = require('../state');
 // S-4: filename grammar composed from the canonical owner (bytes unchanged)
 const artifactNaming = require('@animastor/generation').artifactNaming;
 const config = require('../config/runtime-config');
+const { isValidBookId, isValidBuildId, joinInside } = require('@animastor/vbook-runtime/safe-paths');
 
 module.exports = function(redis, deps = {}) {
     // Stage 63: startup disk recovery is gated on the book registry. The
@@ -174,7 +175,11 @@ module.exports = function(redis, deps = {}) {
     }
 
     async function recoverChunksFromDisk(bookId, buildId, scenes) {
-        const dir = path.join(config.OUTPUT_DIR, buildId);
+        if (!isValidBuildId(buildId) || !isValidBookId(bookId)) {
+            log('Recovery: invalid id, skipped');
+            return [];
+        }
+        const dir = joinInside(config.OUTPUT_DIR, buildId);
         if (!fs.existsSync(dir)) {
             log('Recovery: output dir not found:', dir);
             return [];
