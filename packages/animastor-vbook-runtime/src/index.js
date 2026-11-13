@@ -63,6 +63,8 @@ const { validateBundleFile } = require('./bundle-validator.cjs');
 const behaviorSchema = require('./behavior-schema.cjs');
 const voice = require('./voice');
 const looks = require('./looks.cjs');
+const heroes = require('./heroes.cjs');
+const characterStore = require('./character-store.cjs');
 const { getBooksRoot } = require('./books-root');
 
 // Last line of defense before disk: every bundle resource that saveBookBundle
@@ -1026,6 +1028,12 @@ module.exports = {
 
     // hero-look resolver (also at ./looks.cjs) — VBOOK_FORMAT_V4 §4a.5
     looks,
+
+    // hero readers (also at ./heroes.cjs) — VBOOK_FORMAT_V4 §8.1
+    heroes,
+
+    // characters/ store (also at ./character-store.cjs) — VBOOK_FORMAT_V4 §3, §4
+    characterStore,
 
     // Path/input safety
     safePaths,
