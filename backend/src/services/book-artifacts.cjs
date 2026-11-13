@@ -53,10 +53,13 @@ function isPlainDir(p) {
  * @param {string} opts.booksDir
  * @param {string} opts.bookId
  * @param {Iterable<string>} [opts.buildIds]  build ids recorded for the book
+ * @param {string[]} [opts.buildScoped] entry names that belong to the build
+ *        directory itself (not to a book by prefix), e.g. a per-build folder
+ * @param {string[]} [opts.preserve] entry names never removed (cache clear)
  * @param {(msg: string) => void} [opts.log]
  * @returns {{ removedDirs: number, removedEntries: number, skipped: number }}
  */
-function removeBookArtifacts({ outputDir, booksDir, bookId, buildIds = [], log = () => {} }) {
+function removeBookArtifacts({ outputDir, booksDir, bookId, buildIds = [], buildScoped = [], preserve = [], log = () => {} }) {
     const out = { removedDirs: 0, removedEntries: 0, skipped: 0 };
     if (!isValidBookId(bookId) || !outputDir) return out;
     const bookIds = listBookIds(booksDir);
@@ -69,14 +72,21 @@ function removeBookArtifacts({ outputDir, booksDir, bookId, buildIds = [], log =
         try { buildPath = joinInside(outputDir, buildId); } catch (_) { out.skipped++; return; }
         if (!isPlainDir(buildPath)) return;
         const entries = fs.readdirSync(buildPath);
-        const foreign = entries.filter((e) => !e.startsWith('.') && !mine(e));
+        const foreign = entries.filter((e) => !e.startsWith('.') && !buildScoped.includes(e) && !mine(e));
         if (foreign.length === 0) {
-            fs.rmSync(buildPath, { recursive: true, force: true });
-            out.removedDirs++;
+            if (preserve.length === 0) {
+                fs.rmSync(buildPath, { recursive: true, force: true });
+                out.removedDirs++;
+                return;
+            }
+            for (const e of entries) {
+                if (preserve.includes(e)) continue;
+                try { fs.rmSync(path.join(buildPath, e), { recursive: true, force: true }); out.removedEntries++; } catch (_) { /* best effort */ }
+            }
             return;
         }
         for (const e of entries) {
-            if (e.startsWith('.') || !mine(e)) continue;
+            if (e.startsWith('.') || preserve.includes(e) || !mine(e)) continue;
             try { fs.rmSync(path.join(buildPath, e), { recursive: true, force: true }); out.removedEntries++; } catch (_) { /* best effort */ }
         }
         log(`[ARTIFACTS] ${buildId}: kept ${foreign.length} entr${foreign.length === 1 ? 'y' : 'ies'} of other books`);
