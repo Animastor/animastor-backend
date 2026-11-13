@@ -62,6 +62,7 @@ const {
 const { validateBundleFile } = require('./bundle-validator.cjs');
 const behaviorSchema = require('./behavior-schema.cjs');
 const voice = require('./voice');
+const looks = require('./looks.cjs');
 const { getBooksRoot } = require('./books-root');
 
 // Last line of defense before disk: every bundle resource that saveBookBundle
@@ -1022,6 +1023,9 @@ module.exports = {
 
     // character voice port (also at ./voice) — VOICE_REFERENCES.md
     voice,
+
+    // hero-look resolver (also at ./looks.cjs) — VBOOK_FORMAT_V4 §4a.5
+    looks,
 
     // Path/input safety
     safePaths,
