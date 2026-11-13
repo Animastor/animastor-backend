@@ -21,6 +21,13 @@ const path = require('path');
 const os = require('os');
 
 require('./vbook-test-bindings.cjs');
+// The real entity-cleanup resolves the purge stage list from the generation
+// media registry (S-2). The registry needs the host GenerationConfig port,
+// which the composition root (backend.cjs) binds before startup; outside the
+// backend mocha config that wiring is missing, so bind it here exactly as the
+// backend test fixture does — otherwise listMediaTypes() is empty and only
+// the IU-cleanup assertions would see `stages: []`.
+require('../../../backend/tests/generation-test-bindings.cjs');
 const bookModule = require('../../../backend/src/book/index');
 const config = require('../../../backend/src/config/runtime-config');
 
@@ -147,7 +154,7 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
         }, null, 2));
 
         fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({
-            hero: { instruction: 'A calm male voice.' },
+            hero: { timbre: 'A calm male voice.', manner: 'Speaks calmly.', timbre_source: 'user' },
         }));
 
         registerRoutes();
@@ -303,13 +310,19 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
         const res = invoke(VOICE_POST, { bookId }, {
             id: 'woland',
             name: 'Woland',
-            instruction: 'A calm deep voice with a foreign accent.',
+            timbre: 'A calm deep voice with a foreign accent.',
+            manner: 'Speaks slowly and deliberately.',
         });
         expect(res.statusCode).to.equal(200);
         expect(res.body).to.include({ saved: true, voice_id: 'woland' });
         const voices = readVoices();
-        expect(voices.woland.instruction).to.equal('A calm deep voice with a foreign accent.');
-        expect(voices.hero.instruction).to.equal('A calm male voice.');
+        // Voice contract v2 (VOICE_REFERENCES.md): timbre + manner, no legacy
+        // `instruction`; the entry is created as a user-sourced timbre.
+        expect(voices.woland.timbre).to.equal('A calm deep voice with a foreign accent.');
+        expect(voices.woland.manner).to.equal('Speaks slowly and deliberately.');
+        expect(voices.woland.timbre_source).to.equal('user');
+        expect(voices.hero.timbre).to.equal('A calm male voice.');
+        expect(voices.hero.manner).to.equal('Speaks calmly.');
     });
 
     it('POST voice rejects duplicates and DELETE removes the whole entry', () => {
@@ -327,7 +340,7 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
     it('a freshly loaded book sees entities added through the routes', () => {
         invoke(CHAR_POST, { bookId }, { id: 'kisa', name: 'Kisa Vorobyaninov' });
         invoke(LOC_POST, { bookId }, { id: 'stargorod', name: 'Stargorod' });
-        invoke(VOICE_POST, { bookId }, { id: 'kisa', name: 'Kisa', instruction: 'A nervous voice.' });
+        invoke(VOICE_POST, { bookId }, { id: 'kisa', name: 'Kisa', timbre: 'A nervous voice.' });
 
         const fresh = bookModule.loadBook(bookId);
         expect(fresh.characters.some(c => c.id === 'kisa')).to.equal(true);
