@@ -20,8 +20,15 @@
 // Legacy single-file format is still readable for migration:
 //   /data/books/<bookId>.json
 //
-// ── behavior.json — Character Behavior contract (schema v2.1) ────────────
-// Map: character_id → behavior object. The object is SCHEMA-TOLERANT:
+// ── behavior.json — schema v2 (see ./behavior-schema.cjs) ────────────────
+// Disk and memory: {schema_version: 2, rules: [...], characters: {<id>: …}}.
+// A file without schema_version is the legacy v2.1 flat map and is migrated
+// on load (every top-level key = a character entry); saves are always v2.
+// HTTP responses project it back to the flat map + read-only behavior_rules
+// (projectBookBehaviorsForApi). Character entries (characters.<id>) follow
+// the v2.1 Character Behavior contract below.
+//
+// Character entry: character_id → behavior object. The object is SCHEMA-TOLERANT:
 // unknown keys (including future fields) are preserved on every load/save
 // round-trip. Fields:
 //
@@ -53,6 +60,7 @@ const {
 } = safePaths;
 
 const { validateBundleFile } = require('./bundle-validator.cjs');
+const behaviorSchema = require('./behavior-schema.cjs');
 const { getBooksRoot } = require('./books-root');
 
 // Last line of defense before disk: every bundle resource that saveBookBundle
@@ -302,10 +310,10 @@ function buildBookFromBundle(rawFiles) {
 
     // Behavior (optional, per-character behavior keyed by character_id)
     const behaviorKey = findFile("behavior.json");
-    let behaviors = {};
+    let behaviors = behaviorSchema.normalizeBehaviors({});
     if (behaviorKey) {
         try {
-            behaviors = JSON.parse(files[behaviorKey]);
+            behaviors = behaviorSchema.normalizeBehaviors(JSON.parse(files[behaviorKey]));
         } catch {
             throw new Error("Invalid JSON in behavior.json")
         }
@@ -615,11 +623,11 @@ function saveBookBundle(book, files) {
         fs.unlinkSync(voPath);
     }
 
-    // Save behavior.json — always persists (created as {} during book creation).
-    // Empty object is kept on disk so the AI-agent can always discover and
-    // populate it via edit_book without needing to create the file first.
+    // Save behavior.json — always persists, always schema v2 (a legacy v2.1
+    // flat map is migrated here). Kept on disk even when empty so the
+    // AI-agent can always discover and populate it via edit_book.
     const bhPath = path.join(bookDir, 'behavior.json');
-    fs.writeFileSync(bhPath, JSON.stringify(book.behaviors || {}, null, 2));
+    fs.writeFileSync(bhPath, JSON.stringify(behaviorSchema.normalizeBehaviors(book.behaviors), null, 2));
 
     // Save characters.json (optional)
     const charPath = path.join(bookDir, 'characters.json');
@@ -745,10 +753,11 @@ function loadBookFromDir(bookId, bookDir) {
 
         // Optional behavior.json — load as top-level key (per-character behavior
         // keyed by character_id, same pattern as voices.json)
-        let behaviors = {};
+        // Migrated to schema v2 in memory (legacy v2.1 file → characters).
+        let behaviors = behaviorSchema.normalizeBehaviors({});
         const behaviorPath = path.join(bookDir, 'behavior.json');
         if (fs.existsSync(behaviorPath)) {
-            behaviors = JSON.parse(fs.readFileSync(behaviorPath, 'utf8'));
+            behaviors = behaviorSchema.normalizeBehaviors(JSON.parse(fs.readFileSync(behaviorPath, 'utf8')));
         }
 
         // Optional characters.json
@@ -1006,6 +1015,9 @@ module.exports = {
     collectSceneList,
     collectSceneUnits,
     findSceneRuntimeData,
+
+    // behavior.json schema v2 helpers (also at ./behavior-schema.cjs)
+    behaviorSchema,
 
     // Path/input safety
     safePaths,

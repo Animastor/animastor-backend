@@ -1,9 +1,11 @@
 // ======================================================
-// BEHAVIOR CRUD ROUTES — manual Behavior editor (schema v2.1)
+// BEHAVIOR CRUD ROUTES — manual Behavior editor (behavior.json schema v2)
 // ======================================================
 // Verifies the endpoints the Editors use for the Behaviors tab:
-//   1. behavior.json mirrors voices.json: a map keyed by the EXISTING
-//      character_id (no id transliteration — the key is a character id).
+//   1. behavior.json v2 keeps entries under `characters`, keyed by the
+//      EXISTING character_id (no id transliteration); `rules` and
+//      `schema_version` are never touched by these routes; a legacy v2.1
+//      flat file is migrated on the first write.
 //      Fields: baseline (string), quirks (string[]), reactions
 //      ([{trigger, reaction}]) — the pass-1 `instruction` field is gone.
 //   2. POST /behaviors requires character_id (400), an existing character
@@ -157,14 +159,24 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
     });
 
-    function readBehaviorsFile() {
+    function readBehaviorsDoc() {
         return JSON.parse(fs.readFileSync(path.join(bookDir, 'behavior.json'), 'utf8'));
+    }
+    function writeBehaviorsDoc(doc) {
+        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify(doc, null, 2));
+    }
+    // Character entries of the on-disk v2 document (asserts the schema).
+    function readBehaviorsFile() {
+        const doc = readBehaviorsDoc();
+        expect(doc.schema_version).to.equal(2);
+        expect(doc.rules).to.be.an('array');
+        return doc.characters;
     }
     // When the LAST behavior is deleted, saveBookBundle unlinks the registry
     // file (empty collection → file removed). loadBook is the canonical read
     // path — it defaults to an empty map for an absent file.
     function loadedBehaviors() {
-        return bookModule.loadBook(bookId).behaviors || {};
+        return bookModule.loadBook(bookId).behaviors.characters;
     }
 
     const BEH_POST = 'POST /api/v1/book/:bookId/behaviors';
@@ -242,9 +254,9 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
     it('PATCH updates baseline and keeps unknown keys (schema-tolerant storage)', () => {
         invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'first draft' });
         // A future schema writes an extra key straight into behavior.json.
-        const behaviors = readBehaviorsFile();
-        behaviors.hero.gestures = 'minimal';
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify(behaviors, null, 2));
+        const doc = readBehaviorsDoc();
+        doc.characters.hero.gestures = 'minimal';
+        writeBehaviorsDoc(doc);
 
         const res = invoke(BEH_PATCH, { bookId, characterId: 'hero' }, {
             fields: { baseline: 'edited baseline' },
@@ -276,9 +288,9 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
     it('PATCHing one field never rewrites sibling fields (future per-reaction keys survive untouched cards)', () => {
         invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'seed' });
         const reactions = [{ trigger: 'x', reaction: 'y', intensity: 0.7 }];
-        const behaviors = readBehaviorsFile();
-        behaviors.hero.reactions = reactions;
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify(behaviors, null, 2));
+        const doc = readBehaviorsDoc();
+        doc.characters.hero.reactions = reactions;
+        writeBehaviorsDoc(doc);
 
         invoke(BEH_PATCH, { bookId, characterId: 'hero' }, { fields: { baseline: 'b' } });
         expect(readBehaviorsFile().hero.reactions).to.deep.equal(reactions);
@@ -287,7 +299,7 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
     // ======================================================
     // DELETE — remove behavior / character
     // ======================================================
-    it('DELETE removes the whole behavior entry; the file stays as {} when empty', () => {
+    it('DELETE removes the whole behavior entry; the file stays (empty characters) when empty', () => {
         invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'a' });
         invoke(BEH_POST, { bookId }, { character_id: 'sidekick', baseline: 'b' });
 
@@ -296,7 +308,7 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
         expect(loadedBehaviors().sidekick.baseline).to.equal('b');
 
         invoke(BEH_DEL, { bookId, characterId: 'sidekick' });
-        // behavior.json persists as empty {} (always present after book creation)
+        // behavior.json persists as an empty v2 document (always present after book creation)
         expect(fs.existsSync(path.join(bookDir, 'behavior.json'))).to.equal(true);
         expect(loadedBehaviors()).to.deep.equal({});
     });
@@ -334,12 +346,39 @@ describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
         bookModule.addDirToZip(zip, bookDir, '');
         const built = bookModule.buildBookFromBundle(bookModule.extractBookBundle(zip.toBuffer()));
 
+        // A v2.1 file inside the bundle is migrated to schema v2 on import.
         expect(built.behaviors).to.deep.equal({
-            hero: {
-                baseline: 'Composed.',
-                quirks: ['adjusts his tie'],
-                reactions: [{ trigger: 'is contradicted', reaction: 'smiles coldly' }],
+            schema_version: 2,
+            rules: [],
+            characters: {
+                hero: {
+                    baseline: 'Composed.',
+                    quirks: ['adjusts his tie'],
+                    reactions: [{ trigger: 'is contradicted', reaction: 'smiles coldly' }],
+                },
             },
         });
+    });
+
+    it('DELETE character also removes its scope:"character" rules; global and other heroes\' rules stay', () => {
+        const g = { id: 'g', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
+        const h = { id: 'h', scope: 'character', character_id: 'hero', when: { emotion: ['sad'] }, then: { action: 'x' } };
+        const k = { id: 'k', scope: 'character', character_id: 'sidekick', when: { emotion: ['sad'] }, then: { action: 'y' } };
+        writeBehaviorsDoc({ schema_version: 2, rules: [g, h, k], characters: { hero: { baseline: 'a' } } });
+        expect(invoke(CHAR_DEL, { bookId, characterId: 'hero' }).statusCode).to.equal(200);
+        expect(readBehaviorsDoc()).to.deep.equal({ schema_version: 2, rules: [g, k], characters: {} });
+    });
+
+    it('routes never touch rules / schema_version of a v2 document', () => {
+        const rule = { id: 'r1', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
+        writeBehaviorsDoc({ schema_version: 2, rules: [rule], characters: {} });
+        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'a' });
+        invoke(BEH_PATCH, { bookId, characterId: 'hero' }, { fields: { baseline: 'b' } });
+        invoke(BEH_POST, { bookId }, { character_id: 'sidekick' });
+        invoke(BEH_DEL, { bookId, characterId: 'sidekick' });
+        expect(readBehaviorsDoc()).to.deep.equal({ schema_version: 2, rules: [rule], characters: { hero: { baseline: 'b' } } });
+        // reserved keys are not character ids
+        expect(invoke(BEH_PATCH, { bookId, characterId: 'rules' }, { fields: { x: 1 } }).statusCode).to.equal(404);
+        expect(invoke(BEH_DEL, { bookId, characterId: 'schema_version' }).statusCode).to.equal(404);
     });
 });

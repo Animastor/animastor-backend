@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 (2026-11-10, unpublished)
+
+- Prompt Dependency Registry: explicit unit fields of the behaviour feature —
+  `unit.behaviour` → `video` only; `unit.state` and `unit.behaviour_locked` →
+  no layer. Previously they hit the "unknown unit field → all layers"
+  catch-all. No API change (patch, so `@animastor/orchestration`'s
+  `^0.1.0` range keeps a single deduped copy).
+
 ## 0.1.1 (2026-09-26)
 
 The dirty-grammar tier (scene-change → dirty-layer grammar) adopted from the

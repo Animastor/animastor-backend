@@ -11,6 +11,7 @@
 
 const aiCaller = require('./ai-caller');
 const imageUtils = require('./image-utils');
+const { sanitizeUnitState } = require('./behaviour-emotions');
 const promptProfileLoader = require('../prompt-profile-loader');
 const {
     createStep, completeStep, failStep, updateSession,
@@ -991,6 +992,11 @@ async function stepCreateVisuals(sessionId, scene, units, sceneIndex, characters
                 result.video = {
                     action,
                 };
+                // unit.state — per-IU character emotions (behaviour matcher
+                // input). Host-validated: unknown character ids and emotions
+                // outside the fixed vocabulary are dropped; empty → omitted.
+                const state = sanitizeUnitState(vu.state, knownIds);
+                if (Object.keys(state).length > 0) result.state = state;
                 return result;
             }            const fallbackPrompt = imageUtils.getFallbackImage(u.text, characters, { ...scene, participants: scene.participants }, locDisplay);
                 return {

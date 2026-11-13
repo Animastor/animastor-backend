@@ -14,6 +14,7 @@ const { mergeCharacterLists, isPlaceholderCharacter } = require('../../utils/cha
 const { sanitizeEnvironment } = require('../../utils/snake-guard');
 const layerConfig = require('../layer-config');
 const pipelineSteps = require('./pipeline-steps');
+const behaviourApply = require('./behaviour-apply');
 const { needsVideoActionReconciliation } = pipelineSteps;
 const { splitLongUnits } = require('./unit-splitter');
 const textUtils = require('./text-utils');
@@ -100,6 +101,20 @@ function applySceneVideoTokens(enrichedScenes, videoTokens, characters) {
             changed = true;
         }
         if (changed) scene.passport = scenePassport;
+    }
+}
+
+// Behaviour rules hook shared by runPipeline and processCachedScenes
+// (behaviour-apply.js). Never fails the window: an error leaves the IU
+// without unit.behaviour.
+function applyWindowBehaviours(enrichedScenes, bookId, characters) {
+    try {
+        let bookDir = null;
+        if (bookId && typeof lazyBook.getBookDir === 'function') bookDir = lazyBook.getBookDir(bookId);
+        return behaviourApply.applyBehavioursToWindow(enrichedScenes, { bookId, characters, bookDir });
+    } catch (err) {
+        console.warn(`[BEHAVIOUR] skipped for ${bookId}: ${err.message}`);
+        return { rules: 0, applied: 0 };
     }
 }
 
@@ -992,6 +1007,8 @@ if (characters.length > 0) {
         pipelineSteps.applyRepairToScenes(enrichedScenes, repaired);
     }
 
+    // ── Behaviour rules (deterministic, after every LLM step, before save) ──
+    applyWindowBehaviours(enrichedScenes, bookId, characters);
 
     return {
         characters,
@@ -1350,6 +1367,8 @@ async function processCachedScenes(sessionId, scenes, characters, locations, men
         pipelineSteps.applyRepairToScenes(enrichedScenes, repaired);
     }
 
+    // ── Behaviour rules — same hook as runPipeline ──
+    applyWindowBehaviours(enrichedScenes, bookId, characters);
 
     console.log(`[CACHED-SCENES] Done processing ${enrichedScenes.length} cached scenes`);
     return {
@@ -1368,4 +1387,5 @@ module.exports = {
     processCachedScenes,
     // Exported for tests
     applySceneVideoTokens,
+    applyWindowBehaviours,
 };

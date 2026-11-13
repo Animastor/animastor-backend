@@ -13,7 +13,8 @@
 //   bible.json      — object (optional)
 //   locations.json  — object keyed by location id (optional)
 //   voices.json     — object keyed by voice id (optional)
-//   behavior.json   — object keyed by character_id (optional)
+//   behavior.json   — schema v2 {schema_version:2, rules[], characters{}}
+//                     or legacy v2.1 object keyed by character_id (optional)
 //   characters.json — array of characters (optional)
 //   chapters/*      — objects with canonical chapter_id (optional)
 //
@@ -129,6 +130,36 @@ function validateLocations(locations, errors) {
 function validateBehaviors(behaviors, errors) {
     if (!isPlainObject(behaviors)) {
         errors.push(`behaviors: must be a JSON object keyed by character_id (got ${Array.isArray(behaviors) ? 'array' : typeof behaviors})`);
+        return;
+    }
+    // Legacy v2.1 (no schema_version): flat map, migrated on load/save.
+    if (behaviors.schema_version == null) return;
+    // Schema v2 (architecture/VBOOK_BEHAVIOUR.md).
+    if (behaviors.schema_version !== 2) {
+        errors.push(`behaviors.schema_version: unsupported value ${JSON.stringify(behaviors.schema_version)} (expected 2)`);
+    }
+    if (behaviors.characters !== undefined && !isPlainObject(behaviors.characters)) {
+        errors.push('behaviors.characters: must be a JSON object keyed by character_id');
+    }
+    if (behaviors.rules !== undefined) {
+        if (!Array.isArray(behaviors.rules)) {
+            errors.push('behaviors.rules: must be an array');
+        } else {
+            const seen = new Set();
+            behaviors.rules.forEach((r, i) => {
+                if (!isPlainObject(r)) {
+                    errors.push(`behaviors.rules[${i}]: must be an object`);
+                    return;
+                }
+                if (typeof r.id !== 'string' || !r.id.trim()) {
+                    errors.push(`behaviors.rules[${i}].id: must be a non-empty string`);
+                } else if (seen.has(r.id)) {
+                    errors.push(`behaviors.rules[${i}].id: duplicate "${r.id}"`);
+                } else {
+                    seen.add(r.id);
+                }
+            });
+        }
     }
 }
 

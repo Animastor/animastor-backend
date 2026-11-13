@@ -142,7 +142,7 @@ keeps storage, filesystem, provider and transport concerns on the host side.
 
 ## Versioning / release
 
-- Current version: `0.1.1` (see CHANGELOG.md).
+- Current version: `0.2.0` (see CHANGELOG.md).
 - SemVer: the four public factories + `buildChatRequestExtras`, the root-only export map, the
   `AssistantPorts` shape and the `/api/v1/ai/*` HTTP/SSE contract are the
   public contract — breaking any of them requires a major bump.
