@@ -1,6 +1,6 @@
 {
     "name": "@animastor/vbook-runtime",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "description": "VBook Runtime — canonical VBook 3.1 bundle/book model: multi-file bundle CRUD, draft/import lifecycle, lazy parse windows, bundle validation, canonical id grammar and path layout. Owns bundle/book canonical state; the host owns the filesystem root (booksRoot), snapshots, deletion orchestration and Redis/PG/GPU Hub.",
     "main": "src/index.js",
     "exports": {
@@ -9,6 +9,7 @@
         "./bundle-validator.cjs": "./src/bundle-validator.cjs",
         "./behavior-schema.cjs": "./src/behavior-schema.cjs",
         "./books-root": "./src/books-root.js",
+        "./safe-paths": "./src/safe-paths.js",
         "./character-identity": "./src/character-identity.js",
         "./snake-guard": "./src/snake-guard.js",
         "./scene-title-utils": "./src/scene-title-utils.js",

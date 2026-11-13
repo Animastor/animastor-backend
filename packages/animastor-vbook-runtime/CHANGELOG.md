@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 (2026-11-13)
+
+Stricter input validation for book storage.
+
+- Book ids and build ids are checked against a fixed grammar before any disk
+  access; resolved paths must stay inside the configured root
+  (`./safe-paths`: `assertBookId`, `assertBuildId`, `assertInside`, `joinInside`).
+- `.vbook` import accepts only the format 3.1 file set; other entries are
+  skipped and never written; malformed archives are refused. Archive size and
+  entry count are limited.
+- `resetBook` removes only a book directory inside the books root.
+- Book export skips links.
 ## 0.3.0 (2026-11-10, unpublished)
 
 behavior.json schema v2 (behaviour rules, phase 0 — animastor-docs
