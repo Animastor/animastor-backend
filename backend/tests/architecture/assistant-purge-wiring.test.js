@@ -115,6 +115,9 @@ function buildComposition({ sessionRepo, order }) {
             // (scene-scoped, fail-closed) injected into routeDeps.
             case './services/regenerate-hub-sweep.cjs':
                 return require('../../src/services/regenerate-hub-sweep.cjs');
+            // Scoped build-output cleanup port injected into the deletion cascade.
+            case './services/book-artifacts.cjs':
+                return { removeBookArtifacts: () => { order.push('artifacts'); return { removedDirs: 0, removedEntries: 0, skipped: 0 }; } };
             default:
                 throw new Error(`composition slice required an unexpected module: ${spec}`);
         }

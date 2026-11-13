@@ -51,6 +51,9 @@ const CANCELLED_WORKERS_TTL_SEC = 3600;
  *                     cascade must not own the agent_sessions SQL — the
  *                     same frozen port implementation serves cancel-worker
  *                     and the generation routes)
+ *   removeBookArtifacts - scoped output cleanup port (services/book-artifacts;
+ *                     injected from backend.cjs). Without it the cascade
+ *                     leaves build output on disk (never removes blindly).
  *   purgeAssistantForBook - Assistant-data purge port (required; the
  *                     cascade must not know the ai_chat_sessions table —
  *                     the future @animastor/assistant owns that data)
@@ -63,6 +66,7 @@ function createBookDeletion(deps) {
         setCancelFlag = null,
         agentSessionControl = null,
         purgeAssistantForBook = null,
+        removeBookArtifacts = null,
     } = deps;
 
     /**
@@ -143,7 +147,8 @@ function createBookDeletion(deps) {
         // Scoped removal: validated build ids, only this book's artifacts
         // (never another book's files in a shared or same-prefix location).
         try {
-            require('./book-artifacts.cjs').removeBookArtifacts({
+            if (typeof removeBookArtifacts !== 'function') throw new Error('removeBookArtifacts port not injected');
+            removeBookArtifacts({
                 outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, log,
                 // voices/ (VOICE_REFERENCES.md) belongs to the build dir itself
                 buildScoped: require('../utils/build-dir').PRESERVED_ENTRIES,
