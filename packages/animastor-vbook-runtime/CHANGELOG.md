@@ -38,6 +38,11 @@ Stricter input validation for book storage.
   entry count are limited.
 - `resetBook` removes only a book directory inside the books root.
 - Book export skips links.
+## 0.2.1 (2026-11-13)
+
+Same input-validation fix, published as 0.2.1 for the incident hotfix; see
+0.3.1 above for the full list.
+
 ## 0.3.0 (2026-11-10, unpublished)
 
 behavior.json schema v2 (behaviour rules, phase 0 — animastor-docs
