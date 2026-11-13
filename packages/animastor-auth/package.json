@@ -1,6 +1,6 @@
 {
   "name": "@animastor/auth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Animastor Auth — the identity/session/authorization domain of the Animastor backend, physically extracted from the host: registration (with guest→account in-place conversion), login/logout, server-side session and guest-identity semantics, the canonical book-access decision layer, the cookie grammar (animastor_sid/animastor_gid) and the scrypt password primitives. The package reaches persistence, the registration unit-of-work, the book-ownership resolver and configuration ONLY through injected ports and a normalized config object — no Express, no PostgreSQL, no process.env, no filesystem inside.",
   "keywords": [
     "animastor",
