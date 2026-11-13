@@ -150,8 +150,6 @@ function createBookDeletion(deps) {
             if (typeof removeBookArtifacts !== 'function') throw new Error('removeBookArtifacts port not injected');
             removeBookArtifacts({
                 outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, log,
-                // voices/ (VOICE_REFERENCES.md) belongs to the build dir itself
-                buildScoped: require('../utils/build-dir').PRESERVED_ENTRIES,
             });
         } catch (artErr) {
             console.warn(`[DELETE-BOOK] artifact cleanup failed for ${bookId}: ${artErr.message}`);

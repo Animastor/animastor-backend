@@ -627,7 +627,10 @@ const routeDeps = {
     bookDeletion: createBookDeletion({
         book, redis, config, storage,
         // Scoped build-output cleanup (validated ids, only this book's files).
-        removeBookArtifacts: require('./services/book-artifacts.cjs').removeBookArtifacts,
+        // voices/ (VOICE_REFERENCES.md) belongs to the build dir itself: removed with the book.
+        removeBookArtifacts: (opts) => require('./services/book-artifacts.cjs').removeBookArtifacts({
+            ...opts, buildScoped: require('./utils/build-dir').PRESERVED_ENTRIES,
+        }),
         getAllChunks, getChunk, cleanBookRedisKeys,
         // Stage 116 (D4): queue-idempotency port (injected — the Book Model
         // layer must not depend on backend/src/helpers).
