@@ -13,6 +13,8 @@
 
 'use strict';
 
+const { normalizeForMatch } = require('./character-identity');
+
 const CANONICAL_ID_RE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 const MAX_HERO_ID_LENGTH = 64;
 const NARRATOR_ID = 'narrator';
@@ -23,9 +25,21 @@ const RESERVED_HERO_IDS = Object.freeze([
     'behavior', 'behaviour', 'mentions', 'index',
 ]);
 
+// Grammar only: one path segment, lower-case snake_case, up to 64 characters.
+// A canonical id never contains a separator, a dot or a non-ASCII character,
+// so it is safe as a file name — but it may still be reserved (below).
 function isCanonicalHeroId(id) {
     if (typeof id !== 'string' || id.length > MAX_HERO_ID_LENGTH) return false;
     return CANONICAL_ID_RE.test(id);
+}
+
+function isReservedHeroId(id) {
+    return RESERVED_HERO_IDS.includes(id);
+}
+
+// An id a hero may actually carry: canonical grammar and not reserved.
+function isValidHeroId(id) {
+    return isCanonicalHeroId(id) && !isReservedHeroId(id);
 }
 
 function heroList(book) {
@@ -60,27 +74,36 @@ function voiceInstruct(hero) {
         .join(' ');
 }
 
-// Alias → hero id, built on the fly (§7). An alias claimed by two heroes is
-// ambiguous: it is left out of the map and reported.
+// Alias → hero id, built on the fly (§7). Keys keep the author's spelling;
+// two spellings are the SAME alias when they are equal after normalizeForMatch
+// ("Юрий" / "юрий "), which is also how duplicates inside one hero are judged.
+// An alias claimed by two heroes is ambiguous: every spelling of it is left
+// out of the map and it is reported once (first spelling seen).
 function buildAliasIndex(heroes) {
-    const index = Object.create(null);
-    const claimedBy = Object.create(null);
-    const ambiguous = [];
+    const groups = new Map(); // normalized alias → { owners:Set<id>, spellings:[[spelling, id]] }
 
     for (const hero of Array.isArray(heroes) ? heroes : []) {
         if (!isPlainObject(hero) || typeof hero.id !== 'string') continue;
         const aliases = Array.isArray(hero.aliases) ? hero.aliases : [];
         for (const alias of aliases) {
             if (typeof alias !== 'string' || !alias.trim()) continue;
-            const key = alias.trim();
-            if (claimedBy[key] && claimedBy[key] !== hero.id) {
-                if (!ambiguous.includes(key)) ambiguous.push(key);
-                delete index[key];
-                continue;
-            }
-            claimedBy[key] = hero.id;
-            index[key] = hero.id;
+            const spelling = alias.trim();
+            const key = normalizeForMatch(spelling) || spelling.toLowerCase();
+            let group = groups.get(key);
+            if (!group) { group = { owners: new Set(), spellings: [] }; groups.set(key, group); }
+            group.owners.add(hero.id);
+            group.spellings.push([spelling, hero.id]);
         }
+    }
+
+    const index = Object.create(null);
+    const ambiguous = [];
+    for (const group of groups.values()) {
+        if (group.owners.size > 1) {
+            ambiguous.push(group.spellings[0][0]);
+            continue;
+        }
+        for (const [spelling, id] of group.spellings) index[spelling] = id;
     }
 
     return { index, ambiguous };
@@ -125,6 +148,8 @@ module.exports = {
     NARRATOR_ID,
     RESERVED_HERO_IDS,
     isCanonicalHeroId,
+    isReservedHeroId,
+    isValidHeroId,
     findHero,
     passportHeroes,
     narrator,

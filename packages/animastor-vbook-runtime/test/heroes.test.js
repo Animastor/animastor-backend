@@ -9,6 +9,8 @@ const {
     CANONICAL_ID_RE,
     RESERVED_HERO_IDS,
     isCanonicalHeroId,
+    isReservedHeroId,
+    isValidHeroId,
     findHero,
     passportHeroes,
     narrator,
@@ -55,6 +57,27 @@ describe('heroes helpers', () => {
         expect(RESERVED_HERO_IDS).to.include('behaviour');
     });
 
+    it('an id is one safe path segment: no separators, dots, upper case or non-ASCII', () => {
+        for (const bad of ['../x', 'a/b', 'a\\b', 'a.b', '.a', 'a b', 'Юра', 'yura\n', 'a__b', '_a', 'a_', 'a-b', null, 42, undefined, {}]) {
+            expect(isCanonicalHeroId(bad), JSON.stringify(bad)).to.equal(false);
+        }
+    });
+
+    it('reserved ids match the ADR list (§4) and the narrator id is not one of them', () => {
+        expect([...RESERVED_HERO_IDS].sort()).to.deep.equal([
+            'behavior', 'behaviour', 'bible', 'book', 'characters', 'index',
+            'locations', 'manifest', 'mentions', 'voices',
+        ]);
+        for (const id of RESERVED_HERO_IDS) {
+            expect(isCanonicalHeroId(id), id).to.equal(true);   // grammar passes…
+            expect(isReservedHeroId(id), id).to.equal(true);
+            expect(isValidHeroId(id), id).to.equal(false);      // …but a hero cannot carry it
+        }
+        // characters/narrator.json is the narrator's file: its id must stay usable
+        expect(isReservedHeroId('narrator')).to.equal(false);
+        expect(isValidHeroId('narrator')).to.equal(true);
+    });
+
     it('findHero / passportHeroes / narrator', () => {
         const book = makeBook();
         expect(findHero(book, 'yura').name).to.equal('Юра');
@@ -80,6 +103,33 @@ describe('heroes helpers', () => {
         expect(index['Юра']).to.equal('yura');
         expect(index['Юрий']).to.equal(undefined);
         expect(ambiguous).to.deep.equal(['Юрий']);
+    });
+
+    it('buildAliasIndex compares aliases after normalizeForMatch and drops every spelling of an ambiguous one', () => {
+        const { index, ambiguous } = buildAliasIndex([
+            { id: 'a', aliases: ['Юрий', 'Юра', 'Юрий'] },
+            { id: 'b', aliases: ['юрий '] },
+            { id: 'c', aliases: ['ЮРИЙ', 'constructor'] },
+        ]);
+        expect(Object.keys(index).sort()).to.deep.equal(['constructor', 'Юра']);
+        expect(index['Юра']).to.equal('a');
+        expect(index.constructor).to.equal('c');           // prototype keys are plain data
+        expect(ambiguous).to.deep.equal(['Юрий']);         // reported once
+        expect(buildAliasIndex(null)).to.deep.equal({ index: Object.create(null), ambiguous: [] });
+    });
+
+    it('buildAliasIndex does not mutate the heroes', () => {
+        const heroes = [{ id: 'a', aliases: [' Юрий '] }, { id: 'b', aliases: ['Юрий'] }];
+        const before = JSON.stringify(heroes);
+        buildAliasIndex(heroes);
+        expect(JSON.stringify(heroes)).to.equal(before);
+    });
+
+    it('voiceInstruct ignores non-string parts and never reads a legacy instruction field', () => {
+        expect(voiceInstruct({ voice: { timbre: 'deep', manner: null } })).to.equal('deep');
+        expect(voiceInstruct({ voice: { timbre: 42, manner: ' calm ' } })).to.equal('calm');
+        expect(voiceInstruct({ voice: { instruction: 'legacy 3.1 text' } })).to.equal('');
+        expect(voiceInstruct({ voice: [] })).to.equal('');
     });
 
     it('heroRules derives scope/character_id and skips duplicate ids', () => {
