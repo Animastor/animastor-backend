@@ -206,9 +206,10 @@ module.exports = function registerRecentBooksRoutes(app, _redis, deps) {
 
     app.get('/api/v1/books', async (req, res) => {
         try {
-            // Pre-auth: req.workspace is always null → all books. Once auth
-            // lands, req.workspace.id restricts the list to the caller.
+            // The list is always scoped to the caller's workspace; a request
+            // without identity (no workspace) sees no books.
             const workspaceId = req.workspace?.id || null;
+            if (!workspaceId) return res.json({ books: [] });
 
             const books = await collectRecentBooks({
                 bookSourceRepo,

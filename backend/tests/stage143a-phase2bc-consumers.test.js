@@ -608,6 +608,9 @@ describe('stage143a phase2bc — /book/:id/storyboard union (isolated PG)', func
 
     function makeServer(root) {
         const app = express();
+        // Exports are sign-in only: a signed-in owner (ownership guard is
+        // mounted in backend.cjs, outside this route-level test).
+        app.use((req, _res, next) => { req.user = { userId: 'u-test', username: 'owner' }; next(); });
         exportRoutes(app, null, {
             config: { OUTPUT_DIR: root, BOOKS_DIR: path.join(root, 'books') },
             book: {

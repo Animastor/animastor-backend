@@ -16,6 +16,8 @@ const path = require('path');
 const fs = require('fs');
 const AdmZip = require('adm-zip');
 const videoMerge = require('../../video/video-merge');
+const { isValidBookId, isValidBuildId, joinInside } = require('@animastor/vbook-runtime/safe-paths');
+const { requireUser } = require('../../middleware/input-guard');
 
 module.exports = function(app, redis, deps) {
     const { config, book, audio, utils } = deps;
@@ -25,10 +27,14 @@ module.exports = function(app, redis, deps) {
 
     // Load the book, resolve its build_id from the manifest, and collect ordered
     // scenes. Returns null when the book does not exist on disk.
+    // Exports are for signed-in owners only (ownership is checked by the
+    // /api/v1/book/:bookId guard); ids are validated before any disk access.
     function loadContext(bookId, requestedBuildId) {
+        if (!isValidBookId(bookId)) return null;
         const loaded = book.loadBook(bookId);
         if (!loaded) return null;
         const buildId = (loaded.manifest && loaded.manifest.build_id) || requestedBuildId || 'default';
+        if (!isValidBuildId(buildId)) return null;
         const scenes = book.collectScenes(loaded);
         return { loaded, buildId, scenes };
     }
@@ -51,11 +57,14 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // DOWNLOAD BOOK (.vbook bundle)
     // ======================================================
-    app.get('/api/v1/book/:bookId/download', async (req, res) => {
+    app.get('/api/v1/book/:bookId/download', requireUser, async (req, res) => {
         try {
             const { bookId } = req.params;
-            const bookDir = path.join(BOOKS_DIR, bookId);
-            if (!fs.existsSync(bookDir)) return res.status(404).json({ error: 'book not found' });
+            if (!isValidBookId(bookId)) return res.status(400).json({ error: 'invalid book id' });
+            const bookDir = joinInside(BOOKS_DIR, bookId);
+            let st = null;
+            try { st = fs.lstatSync(bookDir); } catch (_) { st = null; }
+            if (!st || !st.isDirectory()) return res.status(404).json({ error: 'book not found' });
 
             const zip = new AdmZip();
             book.addDirToZip(zip, bookDir, '');
@@ -70,13 +79,13 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // DOWNLOAD STORYBOARD (.zip of build images)
     // ======================================================
-    app.get('/api/v1/book/:bookId/storyboard', async (req, res) => {
+    app.get('/api/v1/book/:bookId/storyboard', requireUser, async (req, res) => {
         try {
             const { bookId } = req.params;
             const ctx = loadContext(bookId, req.query.build_id);
             if (!ctx) return res.status(404).json({ error: 'book not found' });
 
-            const dir = path.join(OUTPUT_DIR, ctx.buildId);
+            const dir = joinInside(OUTPUT_DIR, ctx.buildId);
             if (!fs.existsSync(dir)) return res.status(404).json({ error: 'no build output for this book' });
 
             const pointerRepo = require('../../storage/postgres/repositories/iu-image-pointer-repo');
@@ -151,7 +160,7 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // DOWNLOAD AUDIO (merged .mp3)
     // ======================================================
-    app.get('/api/v1/book/:bookId/audio', async (req, res) => {
+    app.get('/api/v1/book/:bookId/audio', requireUser, async (req, res) => {
         try {
             const { bookId } = req.params;
             const ctx = loadContext(bookId, req.query.build_id);
@@ -171,13 +180,13 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // EXPORT VIDEO (merged scene videos + book audio → final .mp4)
     // ======================================================
-    app.get('/api/v1/book/:bookId/export', async (req, res) => {
+    app.get('/api/v1/book/:bookId/export', requireUser, async (req, res) => {
         try {
             const { bookId } = req.params;
             const ctx = loadContext(bookId, req.query.build_id);
             if (!ctx) return res.status(404).json({ error: 'book not found' });
 
-            const dir = path.join(OUTPUT_DIR, ctx.buildId);
+            const dir = joinInside(OUTPUT_DIR, ctx.buildId);
             if (!fs.existsSync(dir)) return res.status(404).json({ error: 'no build output for this book' });
 
             // Export builds from the pipeline SOURCE clips (_gN.mp4, master

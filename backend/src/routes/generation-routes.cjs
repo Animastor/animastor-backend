@@ -100,11 +100,12 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // GENERATE (legacy full-book endpoint)
     // ======================================================
-    app.post('/api/v1/generate', multer().single('file'), async (req, res) => {
+    const { requireUser, singleUpload } = require('../middleware/input-guard');
+    app.post('/api/v1/generate', requireUser, singleUpload('file'), async (req, res) => {
         try {
             if (!req.file) return res.status(400).json({ error: 'file missing' });
 
-            const files = book.extractBookBundle(req.file.buffer);
+            const files = book.extractBookBundle(req.file.buffer, { log });
             log('📦 bundle loaded:', Object.keys(files));
             const bookData = book.buildBookFromBundle(files);
             const bookId = bookData.manifest.book_id;

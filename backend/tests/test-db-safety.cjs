@@ -58,10 +58,28 @@ function checkRedis(env) {
     }
 }
 
+// Outbound service URLs: tests never reach external services. runtime-config
+// defaults HUB_URL to the production hub, so an unset value is pinned to a
+// closed loopback port here; an explicit non-loopback host is refused.
+const EXTERNAL_URL_VARS = ['HUB_URL', 'AI_API_BASE_URL'];
+const CLOSED_LOCAL_URL = 'http://127.0.0.1:9';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+function checkExternal(env) {
+    for (const name of EXTERNAL_URL_VARS) {
+        const value = env[name];
+        if (value === undefined || value === '') { env[name] = CLOSED_LOCAL_URL; continue; }
+        let host;
+        try { host = new URL(value).hostname; } catch (_) { fail(`${name} is not a valid URL`); }
+        if (!LOOPBACK_HOSTS.has(host)) fail(`${name} points at a non-loopback host (${host})`);
+    }
+}
+
 checkPostgres(process.env);
 checkRedis(process.env);
+checkExternal(process.env);
 
 // Arms the second guard in src/storage/postgres/database (NODE_ENV=test).
 if (!process.env.NODE_ENV) process.env.NODE_ENV = 'test';
 
-module.exports = { checkPostgres, checkRedis };
+module.exports = { checkPostgres, checkRedis, checkExternal };

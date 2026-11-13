@@ -51,6 +51,9 @@ const CANCELLED_WORKERS_TTL_SEC = 3600;
  *                     cascade must not own the agent_sessions SQL — the
  *                     same frozen port implementation serves cancel-worker
  *                     and the generation routes)
+ *   removeBookArtifacts - scoped output cleanup port (services/book-artifacts;
+ *                     injected from backend.cjs). Without it the cascade
+ *                     leaves build output on disk (never removes blindly).
  *   purgeAssistantForBook - Assistant-data purge port (required; the
  *                     cascade must not know the ai_chat_sessions table —
  *                     the future @animastor/assistant owns that data)
@@ -63,6 +66,7 @@ function createBookDeletion(deps) {
         setCancelFlag = null,
         agentSessionControl = null,
         purgeAssistantForBook = null,
+        removeBookArtifacts = null,
     } = deps;
 
     /**
@@ -140,19 +144,15 @@ function createBookDeletion(deps) {
                 if (chunk?.build_id) buildIds.add(chunk.build_id);
             } catch (_) {}
         }
-        for (const buildId of buildIds) {
-            const buildPath = path.join(OUTPUT_DIR, buildId);
-            if (fs.existsSync(buildPath)) {
-                try { fs.rmSync(buildPath, { recursive: true, force: true }); } catch (_) {}
-            }
-        }
-        if (fs.existsSync(OUTPUT_DIR)) {
-            for (const entry of fs.readdirSync(OUTPUT_DIR)) {
-                if (entry.startsWith(bookId)) {
-                    const entryPath = path.join(OUTPUT_DIR, entry);
-                    try { fs.rmSync(entryPath, { recursive: true, force: true }); } catch (_) {}
-                }
-            }
+        // Scoped removal: validated build ids, only this book's artifacts
+        // (never another book's files in a shared or same-prefix location).
+        try {
+            if (typeof removeBookArtifacts !== 'function') throw new Error('removeBookArtifacts port not injected');
+            removeBookArtifacts({
+                outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, log,
+            });
+        } catch (artErr) {
+            console.warn(`[DELETE-BOOK] artifact cleanup failed for ${bookId}: ${artErr.message}`);
         }
 
         // ── 4. Runtime / ephemeral state (Redis) ──

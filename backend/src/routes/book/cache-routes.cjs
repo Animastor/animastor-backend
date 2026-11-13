@@ -74,13 +74,13 @@ module.exports = function registerCacheRoutes(app, ctx) {
 
             // Clean up build directories
             const OUTPUT_DIR = config.OUTPUT_DIR;
-            for (const buildId of buildIds) {
-                const buildPath = path.join(OUTPUT_DIR, buildId);
-                if (fs.existsSync(buildPath)) {
-                    try { fs.rmSync(buildPath, { recursive: true, force: true }); } catch (e) {
-                        console.warn('[CACHE] Failed to delete build dir:', buildPath);
-                    }
-                }
+            try {
+                require('../../services/book-artifacts.cjs').removeBookArtifacts({
+                    outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds,
+                    log: (m) => console.warn(`[CACHE] ${m}`),
+                });
+            } catch (e) {
+                console.warn(`[CACHE] Failed to clean build output for ${bookId}: ${e.message}`);
             }
 
             // Clean up ALL Redis keys for this book using the comprehensive helper

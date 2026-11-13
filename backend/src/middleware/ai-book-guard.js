@@ -47,7 +47,7 @@ function configureAiBookGuard(repo) {
 
 const aiBookGuard = async (req, res, next) => {
     const { hasIdentity, checkBookAccess, WorkspaceExpiredError } = require('./auth-context');
-    if (!hasIdentity(req)) return next(); // pre-auth compatibility
+    if (!hasIdentity(req)) return res.status(401).json({ error: 'Authentication required', code: 'login_required' });
     try {
         const queryBookId = (req.query && req.query.book_id) || null;
         const bodyBookId = (req.body && req.body.book_id) || null;
