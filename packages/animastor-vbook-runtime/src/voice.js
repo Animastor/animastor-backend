@@ -280,10 +280,13 @@ function referenceState(buildDir, reference, characterId) {
 // friend, …"). A reference must be neutral, so such sentences are dropped:
 //   • sentences containing quoted text («…», “…”, "…", '…' around a word);
 //   • conditional sentences (when / whenever / if / unless / as soon as,
-//     когда / если / как только, wenn / falls / sobald).
+//     когда / если / как только, wenn / falls / sobald);
+//   • sentences tied to particular words of the text, quoted or not
+//     ("on the word …", "на слове …", "на фразе …", "beim Wort …") — since v2.
 // The result is shown to the user and may be edited (timbre_source 'cleaned' →
 // 'user'). Rule changes bump CLEANUP_RULES_VERSION.
-const CLEANUP_RULES_VERSION = 1;
+const CLEANUP_RULES_VERSION = 2;
+const ON_WORD_RE = /(^|[^\p{L}])(on the (word|words|phrase|line)|at the (word|words|phrase|line)|на (слове|словах|фразе|реплике)|beim wort|bei den worten)(?=$|[^\p{L}])/iu;
 const QUOTED_RE = /[«“„]|"[^"]+"|(^|[\s(])'[^'\s][^']*'/u;
 const CONDITIONAL_RE = /(^|[^\p{L}])(when|whenever|if|unless|as soon as|когда|если|как только|wenn|falls|sobald)(?=$|[^\p{L}])/iu;
 
@@ -303,7 +306,7 @@ function cleanVoiceDescription(text) {
     const kept = [];
     const removed = [];
     for (const s of splitSentences(text)) {
-        if (QUOTED_RE.test(s) || CONDITIONAL_RE.test(s)) removed.push(s);
+        if (QUOTED_RE.test(s) || CONDITIONAL_RE.test(s) || ON_WORD_RE.test(s)) removed.push(s);
         else kept.push(s);
     }
     return { timbre: kept.join(' '), removed, rules_version: CLEANUP_RULES_VERSION };
@@ -313,6 +316,78 @@ function cleanVoiceDescription(text) {
 function voiceFromDescription(text) {
     const { timbre } = cleanVoiceDescription(text);
     return { timbre, manner: '', timbre_source: 'cleaned' };
+}
+
+// ── a voice as the analysis returned it → the voice block of a hero ──────
+const VOICE_TEXT_MAX = 2000;
+
+function cleanField(value) {
+    if (typeof value !== 'string' || !value.trim()) return { text: '', removed: [] };
+    const cleaned = cleanVoiceDescription(value);
+    return { text: cleaned.timbre.slice(0, VOICE_TEXT_MAX).trim(), removed: cleaned.removed };
+}
+
+/**
+ * Turn what the voice step of the analysis returned for one character into
+ * { timbre, manner, timbre_source } — or refuse it.
+ *
+ * Accepted shapes:
+ *   { timbre, manner }      the v4 contract. timbre — WHO sounds (sex, age,
+ *                           timbre, accent); manner — how the character
+ *                           usually speaks. manner may be missing.
+ *   "one description"       the 3.1-era single string, or { instruction: "…" }
+ *                           from a model that ignored the contract: the whole
+ *                           text is treated as timbre.
+ * Situational and plot-bound sentences are dropped from BOTH fields by the
+ * cleanup rules — a reference is designed from this text and must be neutral.
+ * timbre_source: 'analysis' when the text is the model's as it is, 'cleaned'
+ * when a rule removed something or the shape had to be repaired.
+ *
+ * @returns {{ voice: {timbre: string, manner: string, timbre_source: string}|null,
+ *             removed: string[], reason: string|null }}
+ *   voice === null → nothing is written; reason: 'empty' | 'bad_shape' |
+ *   'timbre_empty' (only situational text, or a manner without a timbre)
+ */
+function voiceFromAnalysis(raw) {
+    let timbreRaw = '';
+    let mannerRaw = '';
+    let repaired = false;
+    if (typeof raw === 'string') {
+        timbreRaw = raw; repaired = true;
+    } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        timbreRaw = typeof raw.timbre === 'string' ? raw.timbre : '';
+        mannerRaw = typeof raw.manner === 'string' ? raw.manner : '';
+        if (!timbreRaw.trim() && typeof raw.instruction === 'string') { timbreRaw = raw.instruction; repaired = true; }
+    } else if (raw === undefined || raw === null) {
+        return { voice: null, removed: [], reason: 'empty' };
+    } else {
+        return { voice: null, removed: [], reason: 'bad_shape' };
+    }
+    if (!timbreRaw.trim() && !mannerRaw.trim()) return { voice: null, removed: [], reason: 'empty' };
+
+    const timbre = cleanField(timbreRaw);
+    const manner = cleanField(mannerRaw);
+    const removed = [...timbre.removed, ...manner.removed];
+    if (!timbre.text) return { voice: null, removed, reason: 'timbre_empty' };
+    return {
+        voice: {
+            timbre: timbre.text,
+            manner: manner.text,
+            timbre_source: repaired || removed.length > 0 ? 'cleaned' : 'analysis',
+        },
+        removed,
+        reason: null,
+    };
+}
+
+/**
+ * May the analysis change this voice at all? Never when a person edited it
+ * (timbre_source 'user') or a reference is locked on it.
+ */
+function isVoiceProtected(voice) {
+    if (!voice || typeof voice !== 'object') return false;
+    if (voice.timbre_source === 'user') return true;
+    return !!(voice.reference && typeof voice.reference === 'object' && voice.reference.locked === true);
 }
 
 module.exports = {
@@ -328,6 +403,8 @@ module.exports = {
     voiceDesignDescription,
     cleanVoiceDescription,
     voiceFromDescription,
+    voiceFromAnalysis,
+    isVoiceProtected,
     referenceProblem,
     isReferenceVerified,
     resolveReferenceFile,

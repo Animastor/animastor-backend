@@ -60,7 +60,6 @@ function analysisWindow() {
         characters: [
             { id: 'yura', name: 'Юра', role: 'protagonist', appearance: 'man in his thirties, short dark hair', clothes: 'brown leather jacket', video_tokens: ['man', 'dark hair'], voice: 'A warm low male voice. When angry, it hardens.' },
             { id: 'anna', name: 'Анна', appearance: 'tall woman, red hair', clothes: 'green dress', video_tokens: ['woman', 'red hair'], voice: { timbre: 'A clear female voice.', manner: 'Speaks quickly.' } },
-            { id: 'Анна-2', name: 'Двойник', appearance: 'a woman who looks like Anna', clothes: 'grey coat' },
             { id: 'ghost', name: 'Голос', appearance: null },
         ],
         locations: [{ id: 'room', name: 'Комната', description: 'a small room' }],
@@ -138,6 +137,7 @@ describe('VBook 4 format — acceptance of step 1 (package level)', () => {
             const yura = vbook.heroes.findHero(book, 'yura');
             expect(yura).to.deep.equal({
                 schema: 'animastor.character/1', id: 'yura', name: 'Юра', role: 'protagonist',
+                aliases: ['Юрий'],   // from the mentions of the window (§7)
                 passport: { appearance: 'man in his thirties, short dark hair', clothes: 'brown leather jacket', video_tokens: ['man', 'dark hair'] },
                 voice: { timbre: 'A warm low male voice.', manner: '', timbre_source: 'cleaned' },
             });
@@ -146,11 +146,12 @@ describe('VBook 4 format — acceptance of step 1 (package level)', () => {
             expect(vbook.voice.getCharacterVoice(book, 'narrator').timbre).to.not.equal('');
         });
 
-        it('1.1 a character without a described appearance or with a non-canonical id gets no file', () => {
+        it('1.1 a character without a described appearance gets no file (id normalisation: hero-analysis-window.test.js)', () => {
             const { bookId } = lazyBook.createDraftBook(SOURCE, lazyBook.SourceType.TXT, 'zima.txt');
             const result = lazyBook.createFromAnalysis(bookId, analysisWindow());
             expect(fs.readdirSync(path.join(books, bookId, 'characters')).sort()).to.deep.equal(['anna.json', 'narrator.json', 'yura.json']);
-            expect(result.skippedHeroes.map((s) => s.reason)).to.deep.equal(['invalid_hero_id']);
+            expect(result.skippedHeroes).to.deep.equal([]);
+            expect(result.newHeroes).to.deep.equal(['yura', 'anna']);
             expect(result.heroes).to.equal(3);
         });
 
