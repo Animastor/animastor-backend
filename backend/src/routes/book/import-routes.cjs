@@ -439,7 +439,8 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
                 // N4: server decides readiness so the client doesn't match state strings.
                 return res.json({
                     book_id: bookId, state: draft.manifest.state, ready: true,
-                    characters: draft.characters.length,
+                    // "characters" of a book = heroes with a passport (VBOOK_FORMAT_V4 §4)
+                    characters: book.heroes.passportHeroes(draft).length,
                     locations: Object.keys(draft.locations || {}).length,
                     scenes: draft.chapters.reduce((sum, ch) => sum + (ch.scenes?.length || 0), 0),
                 });
