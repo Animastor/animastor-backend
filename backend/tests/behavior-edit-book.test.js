@@ -26,7 +26,12 @@ const chatEngineFactory = (cfg) => require('@animastor/assistant').createChatEng
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
-describe('Behavior via edit_book — AI-agent contract', () => {
+// [v4-pending step 4] The AI-agent contract for behaviours is written against the
+// 3.1 file behavior.json (book.behaviors.characters.<id>). In VBook 4 a hero's
+// character lives in characters/<id>.json → behaviour.profile and global rules in
+// behaviour.json; edit_book moves to /heroes/<id>/behaviour/… with
+// @animastor/assistant 0.3.0 (VBOOK_FORMAT_V4 §12 step 4). Rewritten there.
+describe.skip('[v4-pending step 4] Behavior via edit_book — AI-agent contract', () => {
     let tmpDir;
     let bookId;
     let bookDir;

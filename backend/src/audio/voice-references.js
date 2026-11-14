@@ -8,8 +8,8 @@
 //   build_<book_id>/voices/<character_id>/<candidate_id>.json  candidate metadata
 //   build_<book_id>/voices/<character_id>/uploads/<candidate_id>.<ext>  user upload (source)
 //
-// The .vbook keeps only the text link + metadata (voices.json[id].reference,
-// through the @animastor/vbook-runtime voice port). sha256 is computed HERE,
+// The .vbook keeps only the text link + metadata (characters/<id>.json →
+// voice.reference, through the @animastor/vbook-runtime voice port). sha256 is computed HERE,
 // over the stored file — exactly the bytes LoadAudio receives on the worker.
 //
 // Pure helpers (no I/O) are exported for tests: normaliseTranscript,
@@ -22,6 +22,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const voicePort = require('@animastor/vbook-runtime/voice');
+const { joinInside } = require('@animastor/vbook-runtime/safe-paths');
 const { inspectWav } = require('@animastor/orchestration').gen.media;
 
 const PHRASES_PATH = path.resolve(__dirname, '../../ai/voice-reference-phrases.json');
@@ -164,23 +165,34 @@ function assertSafeId(id, what) {
     return id;
 }
 
+// Every path is built with joinInside on top of the id grammar: an id is one
+// safe segment, and the joined path is re-checked to stay inside its folder
+// (build_<book_id>/voices/<character_id>/). A stored reference link becomes a
+// path only through the voice port's resolveReferenceFile, which refuses
+// absolute paths, "..", backslashes and links into another hero's folder.
 function createPaths(outputDir) {
-    const voicesDir = (buildId) => path.join(outputDir, assertSafeId(buildId, 'build_id'), 'voices');
-    const voiceDir = (buildId, voiceId) => path.join(voicesDir(buildId), assertSafeId(voiceId, 'character_id'));
+    const buildDir = (buildId) => joinInside(outputDir, assertSafeId(buildId, 'build_id'));
+    const voicesDir = (buildId) => joinInside(buildDir(buildId), 'voices');
+    const voiceDir = (buildId, voiceId) => joinInside(voicesDir(buildId), assertSafeId(voiceId, 'character_id'));
     return {
         voicesDir,
         voiceDir,
-        candidateWav: (buildId, voiceId, candId) => path.join(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.wav`),
-        candidateJson: (buildId, voiceId, candId) => path.join(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.json`),
-        uploadDir: (buildId, voiceId) => path.join(voiceDir(buildId, voiceId), 'uploads'),
-        /** voices/<id>/<cand>.wav — the link stored in voices.json (relative to the build folder) */
+        candidateWav: (buildId, voiceId, candId) => joinInside(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.wav`),
+        candidateJson: (buildId, voiceId, candId) => joinInside(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.json`),
+        uploadDir: (buildId, voiceId) => joinInside(voiceDir(buildId, voiceId), 'uploads'),
+        /** voices/<id>/<cand>.wav — the link stored in the hero file (relative to the build folder) */
         relativeFile: (voiceId, candId) => `voices/${assertSafeId(voiceId, 'character_id')}/${assertSafeId(candId, 'candidate_id')}.wav`,
-        /** absolute path of a reference link (rejects anything outside voices/) */
+        /** absolute path of a reference link (rejects anything outside voices/<id>/) */
         resolveLink: (buildId, link) => {
             if (typeof link !== 'string' || !/^voices\/[A-Za-z0-9_-]{1,128}\/[A-Za-z0-9_-]{1,128}\.wav$/.test(link)) {
                 throw new VoiceReferenceError('bad_reference', 409, `bad reference link ${JSON.stringify(link)}`);
             }
-            return path.join(outputDir, assertSafeId(buildId, 'build_id'), link);
+            try {
+                return voicePort.resolveReferenceFile(buildDir(buildId), { file: link });
+            } catch (err) {
+                if (err instanceof VoiceReferenceError) throw err;
+                throw new VoiceReferenceError('bad_reference', 409, `bad reference link ${JSON.stringify(link)}`);
+            }
         },
     };
 }

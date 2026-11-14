@@ -1,7 +1,7 @@
 // ======================================================
 // ANIMASTOR BACKEND — BOOK EXPORT / DOWNLOAD ROUTES
 // ======================================================
-// GET /api/v1/book/:bookId/download   → .vbook bundle (book dir zipped)
+// GET /api/v1/book/:bookId/download   → .vbook bundle (format whitelist, VBook 4)
 // GET /api/v1/book/:bookId/storyboard → .zip of the build's images
 // GET /api/v1/book/:bookId/audio      → merged book .mp3
 // GET /api/v1/book/:bookId/export     → merged + muxed final .mp4
@@ -18,6 +18,7 @@ const AdmZip = require('adm-zip');
 const videoMerge = require('../../video/video-merge');
 const { isValidBookId, isValidBuildId, joinInside } = require('@animastor/vbook-runtime/safe-paths');
 const { requireUser } = require('../../middleware/input-guard');
+const { importRefusal } = require('../../services/vbook-import.cjs');
 
 module.exports = function(app, redis, deps) {
     const { config, book, audio, utils } = deps;
@@ -57,6 +58,13 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // DOWNLOAD BOOK (.vbook bundle)
     // ======================================================
+    // The archive is built by the format whitelist through the same serializer
+    // that saves a book (book.exportBookBundle) — never "the book directory as
+    // it is": stray files, links and anything outside VBOOK_FORMAT_V4 §3 stay
+    // on the server.
+    //   409 unsupported_vbook_version — the book is VBook 3.1 / has no version;
+    //   409 hero_file_broken + issues — a hero file is broken (§10.3);
+    //       ?skip_broken=1 exports the book without those heroes.
     app.get('/api/v1/book/:bookId/download', requireUser, async (req, res) => {
         try {
             const { bookId } = req.params;
@@ -66,11 +74,25 @@ module.exports = function(app, redis, deps) {
             try { st = fs.lstatSync(bookDir); } catch (_) { st = null; }
             if (!st || !st.isDirectory()) return res.status(404).json({ error: 'book not found' });
 
-            const zip = new AdmZip();
-            book.addDirToZip(zip, bookDir, '');
-            const buf = zip.toBuffer();
-            log(`[EXPORT] vbook ${bookId} (${buf.length} bytes)`);
-            sendBuffer(res, buf, 'application/zip', `${bookId}.vbook`);
+            const skipBroken = req.query.skip_broken === '1' || req.query.skip_broken === 'true';
+            let exported;
+            try {
+                exported = book.exportBookBundle(bookId, { skipBroken });
+            } catch (exportErr) {
+                const refusal = importRefusal(exportErr, req, 409);
+                if (refusal.body.error === 'hero_file_broken') refusal.status = 409;
+                if (refusal.body.error === 'unsupported_vbook_version' || refusal.body.error === 'hero_file_broken') {
+                    return res.status(refusal.status).json(refusal.body);
+                }
+                throw exportErr;
+            }
+            if (!exported) return res.status(404).json({ error: 'book not found' });
+            if (exported.skipped.length > 0) {
+                log(`[EXPORT] vbook ${bookId}: ${exported.skipped.length} broken hero file(s) skipped`);
+                res.setHeader('X-Animastor-Skipped-Heroes', String(exported.skipped.length));
+            }
+            log(`[EXPORT] vbook ${bookId} (${exported.buffer.length} bytes, ${exported.files.length} files)`);
+            sendBuffer(res, exported.buffer, 'application/zip', `${bookId}.vbook`);
         } catch (err) {
             res.status(500).json({ error: err.message });
         }

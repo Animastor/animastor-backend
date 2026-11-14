@@ -234,12 +234,12 @@ describe('Layer Config Persistence (Кирпич №2)', () => {
             structure: { chapters_order: [] },
             layer_config: { image_enabled: false },
         });
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ book_id: bookId, build_id: 'b1' }));
+        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ vbook_version: 4, book_id: bookId, build_id: 'b1' }));
         fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
 
         // Editor rewrite: book object WITHOUT layer_config (e.g. cached before PUT)
         book.saveBookBundle(
-            { manifest: { book_id: bookId }, book: { structure: { chapters_order: [] } }, chapters: [] },
+            { manifest: { vbook_version: 4, book_id: bookId }, book: { structure: { chapters_order: [] } }, chapters: [] },
             null
         );
 
@@ -248,23 +248,27 @@ describe('Layer Config Persistence (Кирпич №2)', () => {
         expect(meta.layer_config.image_enabled).to.be.false;
     });
 
-    it('saveBookBundle() raw-files re-import preserves the durable layer_config', () => {
+    it('saveBookBundle() re-import of an archive without layer_config preserves the durable copy', () => {
         const bookId = 'lc-reimport-1';
         const bookDir = writeBookDir(bookId, {
             structure: { chapters_order: [] },
             layer_config: { video_enabled: false },
         });
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ book_id: bookId, build_id: 'b1' }));
+        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ vbook_version: 4, book_id: bookId, build_id: 'b1' }));
 
-        // Re-import bundle whose book.json has NO layer_config (export made
-        // before Кирпич №2) — the durable copy must survive the raw-file write.
-        book.saveBookBundle(
-            { manifest: { book_id: bookId }, book: { structure: { chapters_order: [] } }, chapters: [] },
-            {
-                'manifest.json': JSON.stringify({ book_id: bookId }),
-                'book.json': JSON.stringify({ structure: { chapters_order: [] } }),
-            }
-        );
+        // Re-import of a bundle whose book.json has NO layer_config (export
+        // made before Кирпич №2). VBook 4 has no raw-files mode: the importer
+        // builds the book object from the archive files and saves the object —
+        // the durable copy must survive that write as well.
+        const CH = 'ch-0a0a0a0a';
+        const imported = book.buildBookFromBundle({
+            'manifest.json': JSON.stringify({ vbook_version: 4, book_id: bookId }),
+            'book.json': JSON.stringify({ structure: { chapters_order: [`${CH}.json`] } }),
+            [`chapters/${CH}.json`]: JSON.stringify({ chapter_id: CH, scenes: [] }),
+        });
+        expect(imported.book).to.not.have.property('layer_config');
+        book.saveBookBundle(imported);
+        expect(() => book.saveBookBundle(imported, { 'book.json': '{}' })).to.throw(/saves the book object only/);
 
         const meta = JSON.parse(fs.readFileSync(path.join(bookDir, 'book.json'), 'utf8'));
         expect(meta.layer_config).to.be.an('object');

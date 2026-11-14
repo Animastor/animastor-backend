@@ -21,6 +21,14 @@ const config = require('../src/config/runtime-config');
 // Override BOOKS_DIR to a temp directory
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
+// VBook 4 fixture: one file per hero (characters/<id>.json) — VBOOK_FORMAT_V4 §3.
+function writeHero(bookDir, hero) {
+    const dir = path.join(bookDir, 'characters');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${hero.id}.json`), JSON.stringify({ schema: 'animastor.character/1', ...hero }, null, 2));
+}
+const readHero = (bookDir, id) => JSON.parse(fs.readFileSync(path.join(bookDir, 'characters', `${id}.json`), 'utf8'));
+
 describe('PATCH /api/v1/book/:bookId/metadata', () => {
 
     let tmpDir;
@@ -82,7 +90,7 @@ describe('PATCH /api/v1/book/:bookId/metadata', () => {
         // Create manifest.json
         fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
             book_id: bookId,
-            vbook_version: '3.1',
+            vbook_version: 4,
             build_id: 'build-test',
             state: 'BOOTSTRAPPED',
             created_at: new Date().toISOString(),
@@ -111,22 +119,15 @@ describe('PATCH /api/v1/book/:bookId/metadata', () => {
             },
         }, null, 2));
 
-        // Create characters.json (to verify it's NOT touched)
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            { id: 'hero', name: 'Hero', passport: { appearance: 'Tall, dark hair' } },
-            { id: 'sidekick', name: 'Sidekick', passport: { appearance: 'Short, glasses' } },
-        ], null, 2));
+        // Hero files (to verify they are NOT touched): two characters and the narrator
+        writeHero(bookDir, { id: 'narrator', role: 'narrator', voice: { timbre: 'Deep calm narrative voice', manner: '' } });
+        writeHero(bookDir, { id: 'hero', name: 'Hero', passport: { appearance: 'Tall, dark hair' }, voice: { timbre: 'Heroic male voice', manner: '' } });
+        writeHero(bookDir, { id: 'sidekick', name: 'Sidekick', passport: { appearance: 'Short, glasses' } });
 
         // Create locations.json
         fs.writeFileSync(path.join(bookDir, 'locations.json'), JSON.stringify({
             main_street: { description: 'Main street in the city' },
             forest: { description: 'Dark forest' },
-        }, null, 2));
-
-        // Create voices.json
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({
-            narrator: { instruction: 'Deep calm narrative voice' },
-            hero: { instruction: 'Heroic male voice' },
         }, null, 2));
     });
 
@@ -257,13 +258,19 @@ describe('PATCH /api/v1/book/:bookId/metadata', () => {
     // ======================================================
     // Test 10: Characters.json NOT touched
     // ======================================================
-    it('does not modify characters.json', () => {
+    it('does not modify the hero files (characters/<id>.json)', () => {
+        const before = fs.readdirSync(path.join(bookDir, 'characters')).sort()
+            .map((n) => [n, fs.readFileSync(path.join(bookDir, 'characters', n), 'utf8')]);
         applyMetadataPatch(bookId, { country: 'USSR' });
 
-        const chars = JSON.parse(fs.readFileSync(path.join(bookDir, 'characters.json'), 'utf8'));
-        expect(chars).to.have.length(2);
-        expect(chars[0].id).to.equal('hero');
-        expect(chars[0].passport.appearance).to.equal('Tall, dark hair');
+        const after = fs.readdirSync(path.join(bookDir, 'characters')).sort()
+            .map((n) => [n, fs.readFileSync(path.join(bookDir, 'characters', n), 'utf8')]);
+        expect(after).to.deep.equal(before);
+        expect(after.map(([n]) => n)).to.deep.equal(['hero.json', 'narrator.json', 'sidekick.json']);
+        expect(readHero(bookDir, 'hero').passport.appearance).to.equal('Tall, dark hair');
+        for (const legacy of ['characters.json', 'voices.json', 'behavior.json', 'mentions.json']) {
+            expect(fs.existsSync(path.join(bookDir, legacy)), legacy).to.equal(false);
+        }
     });
 
     // ======================================================
@@ -280,12 +287,11 @@ describe('PATCH /api/v1/book/:bookId/metadata', () => {
     // ======================================================
     // Test 12: Voices.json NOT touched
     // ======================================================
-    it('does not modify voices.json', () => {
+    it('does not modify the voices of the heroes', () => {
         applyMetadataPatch(bookId, { country: 'USSR' });
 
-        const voices = JSON.parse(fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8'));
-        expect(voices.narrator.instruction).to.equal('Deep calm narrative voice');
-        expect(voices.hero.instruction).to.equal('Heroic male voice');
+        expect(readHero(bookDir, 'narrator').voice.timbre).to.equal('Deep calm narrative voice');
+        expect(readHero(bookDir, 'hero').voice.timbre).to.equal('Heroic male voice');
     });
 
     // ======================================================

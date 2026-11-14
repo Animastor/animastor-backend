@@ -96,8 +96,7 @@ function bookJson(bookId, buildId, prompts = {}) {
     const b = 'Лиса остановилась у реки и долго смотрит на лёд.';
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { timbre: 'calm male narrator', manner: '' } },
-        characters: [],
+        heroes: [{ schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'calm male narrator', manner: '' } }],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
                 // one short narration → ONE TTS chunk bound to the first unit (the BA case):

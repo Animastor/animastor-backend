@@ -23,6 +23,19 @@ function withInfo(buf, meta) {
     return out;
 }
 
+// VBook 4 storage (VBOOK_FORMAT_V4 §5.2): a voice is the `voice` block of a hero
+// file — book.heroes[].voice. The port and every assertion below are the ones of
+// the voice-reference task; only where the fixture keeps the voice has changed.
+function v4Book(base, voices) {
+    return {
+        ...base,
+        heroes: Object.entries(voices).map(([id, voice]) => ({
+            schema: 'animastor.character/1', id, ...(id === 'narrator' ? { role: 'narrator' } : {}), voice,
+        })),
+    };
+}
+const voiceOf = (book, id) => book.heroes.find((h) => h.id === id).voice;
+
 describe('voice references — strict transcript comparison (policy v1)', () => {
     it('normalises NFC, case, ё→е, punctuation, whitespace', () => {
         expect(vr.normaliseTranscript('  Ёлка, «зелёная»!\n Да…  ')).to.equal('елка зеленая да');
@@ -81,14 +94,14 @@ describe('voice references — WAV, paths, sha256, status', () => {
 
     it('referenceStatus: missing / unlocked / file_missing / sha_mismatch / ok; requireReferences lists all', () => {
         const svc = vr.createVoiceReferences({ outputDir: out });
-        const book = { manifest: { build_id: 'build_b' }, voices: { narrator: { timbre: 't' }, anna: { timbre: 'a' } } };
+        const book = v4Book({ manifest: { build_id: 'build_b' } }, { narrator: { timbre: 't' }, anna: { timbre: 'a' } });
         expect(svc.referenceStatus(book, 'narrator').status).to.equal('missing');
         const ref = lockReference(book, out, 'narrator');
         expect(svc.referenceStatus(book, 'narrator').status).to.equal('ok');
         expect(svc.referenceInput(book, 'narrator')).to.include({ name: ref.name, sha256: ref.sha256, path: ref.path });
-        book.voices.narrator.reference.locked = false;
+        voiceOf(book, 'narrator').reference.locked = false;
         expect(svc.referenceStatus(book, 'narrator').status).to.equal('unlocked');
-        book.voices.narrator.reference.locked = true;
+        voiceOf(book, 'narrator').reference.locked = true;
         fs.appendFileSync(ref.path, 'x');
         expect(svc.referenceStatus(book, 'narrator').status).to.equal('sha_mismatch');
         fs.unlinkSync(ref.path);
@@ -100,7 +113,7 @@ describe('voice references — WAV, paths, sha256, status', () => {
 
     it('designed candidate: duration bounds and transcript decide verification; select needs passed', () => {
         const svc = vr.createVoiceReferences({ outputDir: out });
-        const book = { manifest: { build_id: 'build_b' }, book: { language: 'ru' }, voices: { anna: { timbre: 'Warm.' } } };
+        const book = v4Book({ manifest: { build_id: 'build_b' }, book: { language: 'ru' } }, { anna: { timbre: 'Warm.' } });
         const provider = require('@animastor/generation').comfyuiProvider;
         const units = svc.planCandidates(book, 'b', { mode: 'design', character_ids: ['anna'], count: 2 }, { ...provider, assembleVoiceReferenceWorkflow: (spec) => ({ spec }) });
         expect(units).to.have.length(2);
@@ -123,7 +136,7 @@ describe('voice references — WAV, paths, sha256, status', () => {
 
     it('uploaded sample: stored under uploads/, transcribe job with input file, ref_text = ASR proposal or the user text', () => {
         const svc = vr.createVoiceReferences({ outputDir: out });
-        const book = { manifest: { build_id: 'build_b' }, book: { language: 'ru' }, voices: { anna: { timbre: 'Warm.' } } };
+        const book = v4Book({ manifest: { build_id: 'build_b' }, book: { language: 'ru' } }, { anna: { timbre: 'Warm.' } });
         expect(() => svc.storeUpload(book, 'anna', Buffer.from('x'), 'text/plain')).to.throw().with.property('status', 415);
         const scope = svc.storeUpload(book, 'anna', toneWav(6), 'audio/wav');
         expect(scope.upload.file).to.match(/^voices\/anna\/uploads\/c[0-9a-z]+\.wav$/);
@@ -156,7 +169,7 @@ describe('voice references — WAV, paths, sha256, status', () => {
 });
 
 describe('voices of a scene (generation.js)', () => {
-    const book = { voices: { narrator: { timbre: 'n' }, anna: { timbre: 'a' } }, book: { defaults: {} } };
+    const book = v4Book({ book: { defaults: {} } }, { narrator: { timbre: 'n' }, anna: { timbre: 'a' } });
     it('characters with a voice entry use their voice; episodic speakers and narration → narrator', () => {
         const segs = [
             { segment_type: 'narration', text: 'Текст.' },

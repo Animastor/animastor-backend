@@ -5,10 +5,10 @@ const TEST_BOOK_ID = 'test-book-phaseB-source';
 
 function buildBook({ bookId, chapters }) {
     return {
-        manifest: { book_id: bookId, vbook_version: '3.1' },
+        manifest: { book_id: bookId, vbook_version: 4 },
         book: { book_id: bookId, title: bookId, structure: { chapters_order: [] } },
         bible: { version: '3.0' },
-        characters: [],
+        heroes: [],
         chapters,
     };
 }

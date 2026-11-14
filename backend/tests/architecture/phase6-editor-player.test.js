@@ -101,12 +101,14 @@ describe('T2: Editor facade contract (read / modify / commit)', () => {
         const fake = { loadBook: (id) => { loaded.push(id); return { book_id: id }; } };
         const em = createEditorModel({
             bookModel: fake,
-            persistBook: (b, files) => { committed.push([b.book_id, files]); return b; },
+            persistBook: (b, ...rest) => { committed.push([b.book_id, rest.length]); return b; },
         });
         const book = em.read('b1');
         expect(loaded).to.deep.equal(['b1']);
-        em.commit(book, null);
-        expect(committed).to.deep.equal([['b1', null]]);
+        // VBook 4: the writer takes the book object only — the raw-files
+        // argument of 3.1 is gone and the facade does not forward one.
+        em.commit(book, { 'manifest.json': '{}' });
+        expect(committed).to.deep.equal([['b1', 0]]);
     });
 
     it('rejects construction without the canonical bundle writer', () => {
@@ -182,10 +184,22 @@ describe('T5: Editor/Player contours load through the facades', () => {
         // playerModel.
         const src = readSource(path.join(BACKEND_SRC, 'routes', 'generation-routes.cjs'));
         const direct = [...src.matchAll(/\bbook\.loadBook\s*\(/g)].length;
-        expect(direct, 'routes/generation-routes.cjs direct book.loadBook count grew').to.equal(3);
-        expect(src).to.match(/diskCopyExists: !!book\.loadBook\(bookId\)/);
-        expect(src).to.match(/const existingBook = book\.loadBook\(bookId\);/);
-        expect(src).to.match(/const loadedBook = book\.loadBook\(bookId\);/);
+        // VBook 4 step 1: the import leg went to services/vbook-import.cjs (the
+        // one importer of three routes); this file no longer loads books itself.
+        expect(direct, 'routes/generation-routes.cjs direct book.loadBook count grew').to.equal(0);
+        expect(src).to.match(/vbookImporter\.importVbookArchive\(req, req\.file\.buffer/);
+        // The pinned import leg — existing copy, cross-workspace guard, reload
+        // after save — is the importer's, in one place for all three routes.
+        const importer = readSource(path.join(BACKEND_SRC, 'services', 'vbook-import.cjs'));
+        expect([...importer.matchAll(/\bbook\.loadBook\s*\(/g)].length, 'services/vbook-import.cjs direct book.loadBook count grew').to.equal(2);
+        expect(importer).to.match(/existingBook = book\.loadBook\(bookId\);/);
+        expect(importer).to.match(/diskCopyExists: !!existingBook \|\| !!existingUnsupported/);
+        expect(importer).to.match(/const loadedBook = book\.loadBook\(bookId\);/);
+        expect(importer).to.match(/book\.saveBookBundle\(bookData\);/);
+        for (const route of ['routes/generation-routes.cjs', 'routes/book/import-routes.cjs']) {
+            const routeSrc = readSource(path.join(BACKEND_SRC, ...route.split('/')));
+            expect(routeSrc, `${route} must not extract/save a bundle itself`).to.not.match(/\b(extractBookBundle|buildBookFromBundle|saveBookBundle)\s*\(/);
+        }
         expect(src).to.not.match(/playerModel\.loadBook/);
 
         // The playback read sites must go through the Player boundary.
@@ -235,6 +249,8 @@ describe('T6: contour routes do not gain new implementation-detail deps', () => 
             '../middleware/auth-context',
             // Upload limits + sign-in requirement for /generate (input guard).
             '../middleware/input-guard',
+            // VBook 4 step 1: the one .vbook importer shared with routes/book/import-routes.cjs.
+            '../services/vbook-import.cjs',
             '../video/video-timeline',
             '../storage/postgres/repositories/book-repo',
             '../storage/postgres/repositories/task-repo',
@@ -261,10 +277,14 @@ describe('T6: contour routes do not gain new implementation-detail deps', () => 
             // with the split (audit F3).
             './scene-patch-utils.cjs',
             './read-recovery.cjs',
+            // VBook 4 step 1: gate of the 3.1 entity routes; deleted with them in step 4.
+            './vbook4-pending.cjs',
         ],
         'packages/animastor-editor/src/entity-crud-routes.cjs': [
             './entity-id.js',
             './scene-patch-utils.cjs',
+            // VBook 4 step 1: gate of the 3.1 entity routes; deleted with them in step 4.
+            './vbook4-pending.cjs',
             // The id grammar is the VBook runtime package export (bare
             // specifier — not a relative edge, not scanned here).
         ],

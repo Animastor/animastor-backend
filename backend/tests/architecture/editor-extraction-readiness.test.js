@@ -294,8 +294,8 @@ describe('E6: package require closure reaches only intra-package files + builtin
 });
 
 // ── E7 — Editor package boundary (post-move) ──────────────────────────────
-describe('E7: the editor package is carried by exactly the 9 src files', () => {
-    it('packages/animastor-editor/src/** contains exactly the nine package files (no strays)', () => {
+describe('E7: the editor package is carried by exactly its src files', () => {
+    it('packages/animastor-editor/src/** contains exactly the package files (no strays)', () => {
         const files = listSourceFiles(EDITOR_DIR).map((f) => rel(f)).sort();
         expect(files).to.deep.equal([
             'packages/animastor-editor/src/cyr-latin-map.js',
@@ -307,6 +307,9 @@ describe('E7: the editor package is carried by exactly the 9 src files', () => {
             'packages/animastor-editor/src/index.cjs',
             'packages/animastor-editor/src/read-recovery.cjs',
             'packages/animastor-editor/src/scene-patch-utils.cjs',
+            // VBook 4 step 1: gate of the 3.1 /characters, /voices, /behaviors
+            // routes — temporary, deleted with those routes in step 4.
+            'packages/animastor-editor/src/vbook4-pending.cjs',
         ]);
     });
 

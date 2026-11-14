@@ -564,8 +564,12 @@ describe('video-workflows — behaviour phrases in the storyboard line', () => {
     });
 });
 
-describe('behavior.json schema v2 — disk / memory / API', () => {
-    const schema = require('@animastor/vbook-runtime/behavior-schema.cjs');
+// [v4-pending step 3] behavior-schema.cjs (the 3.1 behavior.json v2 document and
+// its flat API projection) was removed by VBook 4 step 1: behaviours now live in
+// behaviour.json (globals) and in hero files. VBOOK_FORMAT_V4 §12 step 3 requires
+// this file to be green on v4 — these cases are rewritten there, not deleted.
+describe.skip('[v4-pending step 3] behavior.json schema v2 — disk / memory / API', () => {
+    const schema = (() => { try { return require('@animastor/vbook-runtime/behavior-schema.cjs'); } catch (_) { return null; } })();
     const config = require('../src/config/runtime-config');
     const bookModule = require('../src/book/index');
     const ORIG = config.BOOKS_DIR;
@@ -649,7 +653,10 @@ describe('behavior.json schema v2 — disk / memory / API', () => {
     });
 });
 
-describe('editor routes — flat API map in, v2 on disk (rules survive)', () => {
+// [v4-pending step 4] GET/PUT /book with the flat `behaviors` map and
+// PATCH /behaviors/<id> are the 3.1 editor API. VBook 4 answers with heroes and
+// behaviour; the hero API (§8.2) is @animastor/editor 0.5.0, step 4.
+describe.skip('[v4-pending step 4] editor routes — flat API map in, v2 on disk (rules survive)', () => {
     const config = require('../src/config/runtime-config');
     const bookModule = require('../src/book/index');
     const ORIG = config.BOOKS_DIR;
@@ -765,7 +772,9 @@ describe('editor routes — flat API map in, v2 on disk (rules survive)', () => 
     });
 });
 
-describe('assistant edit_book — behaviours in characters.<id>', () => {
+// [v4-pending step 4] edit_book paths /behaviors/characters/<id> belong to 3.1;
+// @animastor/assistant 0.3.0 retargets them to /heroes/<id>/behaviour/….
+describe.skip('[v4-pending step 4] assistant edit_book — behaviours in characters.<id>', () => {
     const createChatEngine = (cfg) => require('@animastor/assistant').createChatEngine(cfg, {
         validateBundleObject: require('../src/book/bundle-validator.cjs').validateBundleObject,
         aiProfile: null,

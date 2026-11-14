@@ -20,6 +20,14 @@ const config = require('../src/config/runtime-config');
 // Override BOOKS_DIR to a temp directory
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
+// VBook 4 fixture: one file per hero (characters/<id>.json) — VBOOK_FORMAT_V4 §3.
+function writeHero(bookDir, hero) {
+    const dir = path.join(bookDir, 'characters');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${hero.id}.json`), JSON.stringify({ schema: 'animastor.character/1', ...hero }, null, 2));
+}
+const readHero = (bookDir, id) => JSON.parse(fs.readFileSync(path.join(bookDir, 'characters', `${id}.json`), 'utf8'));
+
 describe('AI Editor Mode — edit_book tool', () => {
 
     let tmpDir;
@@ -40,7 +48,7 @@ describe('AI Editor Mode — edit_book tool', () => {
         // Create manifest.json
         fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
             book_id: bookId,
-            vbook_version: '3.1',
+            vbook_version: 4,
             build_id: 'build-test',
             state: 'BOOTSTRAPPED',
             created_at: new Date().toISOString(),
@@ -70,19 +78,13 @@ describe('AI Editor Mode — edit_book tool', () => {
             }
         }, null, 2));
 
-        // Create characters.json
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            { id: 'hero', name: 'Hero' }
-        ], null, 2));
+        // Hero files: one character and the narrator
+        writeHero(bookDir, { id: 'narrator', role: 'narrator', voice: { timbre: 'Deep calm voice', manner: '' } });
+        writeHero(bookDir, { id: 'hero', name: 'Hero' });
 
         // Create locations.json
         fs.writeFileSync(path.join(bookDir, 'locations.json'), JSON.stringify({
             main_street: { description: 'Main street in the city' }
-        }, null, 2));
-
-        // Create voices.json
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({
-            narrator: { instruction: 'Deep calm voice' }
         }, null, 2));
     });
 
@@ -239,18 +241,17 @@ describe('AI Editor Mode — edit_book tool', () => {
     // ======================================================
     // Test 8: saveBookBundle preserves characters.json
     // ======================================================
-    it('saveBookBundle preserves characters.json without bible fields', async () => {
+    it('saveBookBundle preserves the hero files without bible fields', async () => {
         const bookData = bookModule.loadBook(bookId);
         bookData.bible.country = 'USSR';
         bookModule.saveBookBundle(bookData);
 
-        const charContent = JSON.parse(
-            fs.readFileSync(path.join(bookDir, 'characters.json'), 'utf8')
-        );
-        expect(charContent).to.be.an('array');
-        expect(charContent[0].id).to.equal('hero');
-        // No bible fields leaked into characters.json
-        expect(charContent[0]).to.not.have.property('country');
+        expect(fs.readdirSync(path.join(bookDir, 'characters')).sort()).to.deep.equal(['hero.json', 'narrator.json']);
+        const hero = readHero(bookDir, 'hero');
+        expect(hero.id).to.equal('hero');
+        // No bible fields leaked into the hero file
+        expect(hero).to.not.have.property('country');
+        expect(fs.existsSync(path.join(bookDir, 'characters.json'))).to.equal(false);
     });
 
     // ======================================================
@@ -270,15 +271,13 @@ describe('AI Editor Mode — edit_book tool', () => {
     // ======================================================
     // Test 10: saveBookBundle preserves voices.json
     // ======================================================
-    it('saveBookBundle preserves voices.json correctly', async () => {
+    it('saveBookBundle preserves the narrator voice (hero file) correctly', async () => {
         const bookData = bookModule.loadBook(bookId);
         bookData.bible.country = 'USSR';
         bookModule.saveBookBundle(bookData);
 
-        const voicesContent = JSON.parse(
-            fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8')
-        );
-        expect(voicesContent.narrator.instruction).to.equal('Deep calm voice');
+        expect(readHero(bookDir, 'narrator').voice.timbre).to.equal('Deep calm voice');
+        expect(fs.existsSync(path.join(bookDir, 'voices.json'))).to.equal(false);
     });
 
     // ======================================================

@@ -1,90 +1,46 @@
 // ======================================================
-// VBOOK BUNDLE 3.1 — validator ↔ schema contract sync (audit A1)
+// VBOOK BUNDLE 4 — validator ↔ schema contract sync (audit A1)
 // ======================================================
-// Closes the Phase-1 open item "C1 JSON Schema pending": the schema at
-// packages/animastor-vbook-runtime/schemas/vbook-bundle-3.1.schema.json is
-// pinned to bundle-validator.cjs rule by rule. What the validator rejects,
-// the schema rejects, and vice versa — with the documented strictness
-// deltas explicitly baselined (see the schema description):
-//   D1  manifest vbook_version/state/source — schema-strict enums; the
-//       validator stays lenient (in-memory/legacy drafts); production
+// The schemas at packages/animastor-vbook-runtime/schemas/ —
+// vbook-bundle-4.schema.json (the in-memory book) and
+// character-1.schema.json (a hero file, normative copy from animastor-docs,
+// architecture/VBOOK_FORMAT_V4.md) — are pinned to bundle-validator.cjs rule
+// by rule. What the validator rejects, the schema rejects, and vice versa —
+// with the documented strictness deltas explicitly baselined (see the schema
+// description):
+//   D1  manifest vbook_version/state/source — schema-strict; the validator
+//       stays lenient and the version is enforced by
+//       assertSupportedVbookVersion on load, save and import; production
 //       manifest writers are pinned below instead;
 //   D2  unit-id grammar — schema-strict; the validator's unit scan is
 //       currently a no-op (its collect filter pre-selects matching ids),
 //       recorded as a conscious validator gap, NOT silently drifted;
 //   D3  JSON-serializability (NaN/circular) — validator-side pre-write
-//       hardening; unexpressable in a schema of parsed JSON.
-// Docs: docs/03-audit/VBOOK_EXTRACTION_READINESS_AUDIT.md §4.2,
-//       docs/architecture/VBOOK_RUNTIME_RELOCATION_CHECKLIST.md
+//       hardening; unexpressable in a schema of parsed JSON;
+//   D4  uniqueness (hero ids in heroes[], rule ids in behaviour.rules) and the
+//       beyond-schema rules of a hero file — validator-only.
+// The 3.1 schema is gone together with the format: VBook 3.1 is not readable.
 
 const { expect } = require('chai');
 const fs = require('fs');
 const path = require('path');
+const Ajv2020 = require('ajv/dist/2020');
 const { REPO_ROOT } = require('./helpers');
 
-const SCHEMA_PATH = path.join(REPO_ROOT, 'packages', 'animastor-vbook-runtime', 'schemas', 'vbook-bundle-3.1.schema.json');
+const SCHEMAS_DIR = path.join(REPO_ROOT, 'packages', 'animastor-vbook-runtime', 'schemas');
+const SCHEMA_PATH = path.join(SCHEMAS_DIR, 'vbook-bundle-4.schema.json');
+const CHARACTER_SCHEMA_PATH = path.join(SCHEMAS_DIR, 'character-1.schema.json');
 const schema = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
+const characterSchema = JSON.parse(fs.readFileSync(CHARACTER_SCHEMA_PATH, 'utf8'));
 
 const validator = require('@animastor/vbook-runtime/bundle-validator.cjs');
 
-// ── Minimal JSON Schema evaluator (draft 2020-12 subset used by the file) ─
-function resolveRef(ref) {
-    expect(ref.startsWith('#/$defs/'), `unsupported $ref: ${ref}`).to.equal(true);
-    return schema.$defs[ref.slice('#/$defs/'.length)];
-}
-
-function typeOf(v) {
-    if (v === null) return 'null';
-    if (Array.isArray(v)) return 'array';
-    return typeof v;
-}
-
-function checkType(v, t) {
-    const types = Array.isArray(t) ? t : [t];
-    return types.some((one) => {
-        if (one === 'integer') return typeof v === 'number' && Number.isInteger(v);
-        if (one === 'number') return typeof v === 'number' && Number.isFinite(v);
-        return typeOf(v) === one;
-    });
-}
-
-function validates(node, value) {
-    if (node === true) return true;
-    if (node === false) return false;
-    if (node.$ref) return validates(resolveRef(node.$ref), value);
-    if (node.anyOf) return node.anyOf.some((sub) => validates(sub, value));
-    if (node.not) return !validates(node.not, value);
-    if ('const' in node) return JSON.stringify(value) === JSON.stringify(node.const);
-    if (node.enum) return node.enum.some((opt) => JSON.stringify(opt) === JSON.stringify(value));
-    if (node.type) {
-        if (!checkType(value, node.type)) return false;
-    }
-    if (typeOf(value) === 'string') {
-        if (node.pattern && !(new RegExp(node.pattern)).test(value)) return false;
-        if (typeof node.minLength === 'number' && value.length < node.minLength) return false;
-    }
-    if (typeOf(value) === 'array') {
-        if (node.items && !value.every((item) => validates(node.items, item))) return false;
-    }
-    if (typeOf(value) === 'object') {
-        for (const key of node.required || []) {
-            if (!(key in value)) return false;
-        }
-        for (const [key, sub] of Object.entries(node.properties || {})) {
-            if (key in value && !validates(sub, value[key])) return false;
-        }
-        if (node.additionalProperties && typeof node.additionalProperties === 'object') {
-            const declared = new Set(Object.keys(node.properties || {}));
-            for (const [key, item] of Object.entries(value)) {
-                if (!declared.has(key) && !validates(node.additionalProperties, item)) return false;
-            }
-        }
-    }
-    return true;
-}
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+ajv.addSchema(characterSchema);
+const schemaAccepts = ajv.compile(schema);
 
 function schemaRejects(value) {
-    return !validates(schema, value);
+    return !schemaAccepts(value);
 }
 
 // ── Shared fixture base (matches the in-memory post-build bundle shape) ──
@@ -93,9 +49,8 @@ function baseBundle() {
         manifest: { book_id: 'b1' },
         book: null,
         locations: {},
-        voices: {},
-        behaviors: {},
-        characters: [],
+        behaviour: { schema: 'animastor.behaviour-globals/1', rules: [] },
+        heroes: [{ schema: 'animastor.character/1', id: 'narrator', role: 'narrator' }],
     };
 }
 
@@ -103,10 +58,14 @@ function validatorVerdict(bundle) {
     return validator.validateBundleObject(bundle).valid;
 }
 
-describe('vbook-bundle-3.1: schema exists and mirrors the validator (audit A1)', () => {
-    it('the canonical schema file is present in the future package', () => {
-        expect(fs.existsSync(SCHEMA_PATH), 'vbook-bundle-3.1.schema.json must exist before the physical move').to.equal(true);
-        expect(schema.$id).to.include('vbook-bundle-3.1');
+const HERO = (extra = {}) => ({ schema: 'animastor.character/1', id: 'v1', ...extra });
+const REF = (extra = {}) => ({ file: 'voices/v1/c1.wav', ref_text: 'Фраза.', source: 'designed', model: 'm', seed: 3, sha256: 'a'.repeat(64), verification: 'passed', locked: true, ...extra });
+
+describe('vbook-bundle-4: schema exists and mirrors the validator (audit A1)', () => {
+    it('the canonical schema files are present in the package; the 3.1 schema is gone', () => {
+        expect(schema.$id).to.include('vbook-bundle-4');
+        expect(characterSchema.title).to.equal('animastor.character/1');
+        expect(fs.readdirSync(SCHEMAS_DIR).sort()).to.deep.equal(['character-1.schema.json', 'vbook-bundle-4.schema.json']);
     });
 
     // Two-way equivalence battery: every probe mutates one rule family.
@@ -124,17 +83,34 @@ describe('vbook-bundle-3.1: schema exists and mirrors the validator (audit A1)',
         ['locations missing', (b) => { delete b.locations; }],
         ['locations is an array', (b) => { b.locations = []; }],
         ['locations is null', (b) => { b.locations = null; }],
-        ['voices missing', (b) => { delete b.voices; }],
-        ['voices entry not an object', (b) => { b.voices = { v1: 'x' }; }],
-        ['voices.timbre not a string', (b) => { b.voices = { v1: { timbre: 5 } }; }],
-        ['voices.timbre_source unknown', (b) => { b.voices = { v1: { timbre: 't', timbre_source: 'llm' } }; }],
-        ['voices.reference valid', (b) => { b.voices = { v1: { timbre: 't', reference: { file: 'voices/v1/c1.wav', ref_text: 'Фраза.', source: 'designed', model: 'm', seed: 3, sha256: 'a'.repeat(64), verification: 'passed', locked: true } } }; }],
-        ['voices.reference bad sha256', (b) => { b.voices = { v1: { timbre: 't', reference: { file: 'voices/v1/c1.wav', ref_text: 'x', source: 'designed', sha256: 'xyz', verification: 'passed', locked: true } } }; }],
-        ['voices.reference file outside voices/', (b) => { b.voices = { v1: { timbre: 't', reference: { file: '../c1.wav', ref_text: 'x', source: 'uploaded', sha256: 'a'.repeat(64), verification: 'passed', locked: false } } }; }],
-        ['behaviors is a string', (b) => { b.behaviors = 'x'; }],
-        ['characters missing', (b) => { delete b.characters; }],
-        ['characters is an object', (b) => { b.characters = {}; }],
-        ['characters entry not an object', (b) => { b.characters = [{ id: 'a' }, 'oops']; }],
+        ['heroes missing', (b) => { delete b.heroes; }],
+        ['heroes is an object', (b) => { b.heroes = {}; }],
+        ['hero not an object', (b) => { b.heroes = [HERO(), 'oops']; }],
+        ['hero without schema marker', (b) => { b.heroes = [{ id: 'v1' }]; }],
+        ['hero id outside the grammar', (b) => { b.heroes = [HERO({ id: '../x' })]; }],
+        ['hero id reserved', (b) => { b.heroes = [HERO({ id: 'book' })]; }],
+        ['hero voice not an object', (b) => { b.heroes = [HERO({ voice: 'x' })]; }],
+        ['hero voice.timbre not a string', (b) => { b.heroes = [HERO({ voice: { timbre: 5 } })]; }],
+        ['hero voice.reference valid', (b) => { b.heroes = [HERO({ voice: { timbre: 't', reference: REF() } })]; }],
+        ['hero voice.reference bad sha256', (b) => { b.heroes = [HERO({ voice: { reference: REF({ sha256: 'xyz' }) } })]; }],
+        ['hero voice.reference file outside voices/', (b) => { b.heroes = [HERO({ voice: { reference: REF({ file: '../c1.wav' }) } })]; }],
+        ['hero voice.reference absolute file', (b) => { b.heroes = [HERO({ voice: { reference: REF({ file: '/voices/v1/c1.wav' }) } })]; }],
+        ['hero looks without passport', (b) => { b.heroes = [HERO({ looks: [{ id: 'coat', label: 'x', fields: { clothes: 'c' } }] })]; }],
+        ['hero behaviour with a foreign key', (b) => { b.heroes = [HERO({ behaviour: { baseline: 'x' } })]; }],
+        ['behaviour missing', (b) => { delete b.behaviour; }],
+        ['behaviour is a string', (b) => { b.behaviour = 'x'; }],
+        ['behaviour of the 3.1 shape', (b) => { b.behaviour = { schema_version: 2, rules: [], characters: {} }; }],
+        ['behaviour rule with scope', (b) => { b.behaviour.rules = [{ id: 'r', scope: 'global' }]; }],
+        ['3.1 map characters present', (b) => { b.characters = []; }],
+        ['3.1 map voices present', (b) => { b.voices = {}; }],
+        ['3.1 map behaviors present', (b) => { b.behaviors = {}; }],
+        ['3.1 map mentions present', (b) => { b.mentions = {}; }],
+        ['chapter.looks valid', (b) => { b.chapters = [{ chapter_id: 'ch-000001', looks: { v1: 'coat' }, scenes: [] }]; }],
+        ['chapter.looks not an object', (b) => { b.chapters = [{ looks: ['coat'], scenes: [] }]; }],
+        ['scene.looks value not an id', (b) => { b.chapters = [{ scenes: [{ looks: { v1: 'In Coat' } }] }]; }],
+        ['scene.look_patch valid', (b) => { b.chapters = [{ scenes: [{ look_patch: { v1: { clothes: 'robe' } } }] }]; }],
+        ['scene.look_patch unknown field', (b) => { b.chapters = [{ scenes: [{ look_patch: { v1: { hat: 'x' } } }] }]; }],
+        ['scene.look_patch empty value', (b) => { b.chapters = [{ scenes: [{ look_patch: { v1: { clothes: '' } } }] }]; }],
         ['chapters missing (optional)', (b) => { delete b.chapters; }],
         ['chapters is a string', (b) => { b.chapters = 'x'; }],
         ['chapter not an object', (b) => { b.chapters = ['x']; }],
@@ -159,7 +135,8 @@ describe('vbook-bundle-3.1: schema exists and mirrors the validator (audit A1)',
 
     it('the canonical bundle passes both sides', () => {
         const bundle = baseBundle();
-        bundle.book = { book_id: 'b1', version: '3.0', structure: { chapters_order: ['chapters/ch-000001.json'] } };
+        bundle.manifest.vbook_version = 4;
+        bundle.book = { book_id: 'b1', structure: { chapters_order: ['ch-000001.json'], characters_order: ['narrator'] } };
         bundle.chapters = [{
             chapter_id: 'ch-000001',
             scenes: [{ scene_id: 'sc-000001', participants: ['c1', 'c2'], units: [{ id: 'iu-000001' }] }],
@@ -172,26 +149,56 @@ describe('vbook-bundle-3.1: schema exists and mirrors the validator (audit A1)',
     describe('documented delta D1: manifest production fields (schema-strict, producer-pinned)', () => {
         it('schema rejects a wrong vbook_version / state / source value the validator tolerates', () => {
             const bundle = baseBundle();
-            bundle.manifest.vbook_version = '3.0';
-            expect(validatorVerdict(bundle), 'validator is lenient by design (legacy bundles)').to.equal(true);
-            expect(schemaRejects(bundle), 'schema freezes the production contract').to.equal(true);
+            for (const version of ['3.1', '3.0', 3, '5', 4.5]) {
+                bundle.manifest.vbook_version = version;
+                expect(validatorVerdict(bundle), 'the validator leaves the version to assertSupportedVbookVersion').to.equal(true);
+                expect(schemaRejects(bundle), `schema freezes the production contract (${version})`).to.equal(true);
+            }
+            for (const version of [4, '4', '4.1']) {
+                bundle.manifest.vbook_version = version;
+                expect(schemaRejects(bundle), `readable version ${version}`).to.equal(false);
+            }
         });
 
-        it('producers emit vbook_version 3.1 with enum-conforming state/source', () => {
+        it('the version gate itself refuses what the schema refuses', () => {
+            const { isSupportedVbookVersion } = require('@animastor/vbook-runtime/vbook-version.cjs');
+            for (const version of ['3.1', '3.0', 3, '5', 4.5, undefined, null, '']) {
+                expect(isSupportedVbookVersion({ vbook_version: version }), String(version)).to.equal(false);
+            }
+            for (const version of [4, '4', '4.1']) expect(isSupportedVbookVersion({ vbook_version: version })).to.equal(true);
+        });
+
+        it('producers emit the integer vbook_version 4 with enum-conforming state/source', () => {
             const draftSrc = fs.readFileSync(path.join(REPO_ROOT, 'packages', 'animastor-vbook-runtime', 'src', 'lazy-book', 'draft.js'), 'utf8');
-            expect(draftSrc).to.match(/vbook_version:\s*'3\.1'/);
+            expect(draftSrc).to.match(/vbook_version:\s*SUPPORTED_VBOOK_VERSION/);
+            expect(require('@animastor/vbook-runtime/vbook-version.cjs').SUPPORTED_VBOOK_VERSION).to.equal(4);
             expect(draftSrc).to.match(/source:\s*sourceType/);
             expect(draftSrc).to.match(/state:\s*BookState\.RAW_IMPORTED/);
             // The blank-book producer lives in the @animastor/editor package
             // since the Phase 4 move (docs/architecture/editor-module-extraction-audit.md).
             const crudSrc = fs.readFileSync(path.join(REPO_ROOT, 'packages', 'animastor-editor', 'src', 'entity-crud-routes.cjs'), 'utf8');
-            expect(crudSrc).to.match(/vbook_version:\s*'3\.1'/);
+            expect(crudSrc).to.match(/vbook_version:\s*4,/);
+            for (const src of [draftSrc, crudSrc]) expect(src).to.not.match(/vbook_version:\s*'3/);
         });
 
         it('constants enums stay in sync with the schema enums', () => {
             const constants = require('@animastor/vbook-runtime/lazy-book/constants');
             expect(Object.values(constants.BookState).sort()).to.deep.equal([...schema.$defs.manifest.properties.state.enum].sort());
             expect(Object.values(constants.SourceType).sort()).to.deep.equal([...schema.$defs.manifest.properties.source.enum].sort());
+        });
+    });
+
+    // ── D4 — uniqueness is validator-only ────────────────────────────────
+    describe('documented delta D4: uniqueness is validator-only', () => {
+        it('duplicate hero ids and duplicate global rule ids pass the schema and fail the validator', () => {
+            const dupHero = baseBundle();
+            dupHero.heroes.push(dupHero.heroes[0]);
+            expect(schemaRejects(dupHero)).to.equal(false);
+            expect(validatorVerdict(dupHero)).to.equal(false);
+            const dupRule = baseBundle();
+            dupRule.behaviour.rules = [{ id: 'r' }, { id: 'r' }];
+            expect(schemaRejects(dupRule)).to.equal(false);
+            expect(validatorVerdict(dupRule)).to.equal(false);
         });
     });
 

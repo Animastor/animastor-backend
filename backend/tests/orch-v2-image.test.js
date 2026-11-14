@@ -65,8 +65,7 @@ function bookJson(bookId, buildId) {
     const long = (n) => `Сцена ${n}: достаточно длинный текст повествования, чтобы обойтись без режима добивки коротких фраз.`;
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { timbre: 'calm male narrator', manner: '' } },
-        characters: [],
+        heroes: [{ schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'calm male narrator', manner: '' } }],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
                 { scene_id: 'sc-1', type: 'narration', audio: { full_text: long(1) },

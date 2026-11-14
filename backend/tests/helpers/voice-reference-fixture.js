@@ -1,6 +1,7 @@
 // Test helper (VOICE_REFERENCES.md): a LOCKED, verified voice reference for a
 // fixture book — a real canonical WAV (pcm_s16le mono 24 kHz) in the content
-// folder OUTPUT_DIR/<build_id>/voices/<id>/<cand>.wav + the voices.json link.
+// folder OUTPUT_DIR/<build_id>/voices/<id>/<cand>.wav + the link in the hero's
+// `voice` block (VBook 4: book.heroes[].voice, file characters/<id>.json).
 'use strict';
 
 const fs = require('fs');
@@ -22,7 +23,8 @@ function toneWav(seconds = 5, rate = 24000) {
 }
 
 /**
- * Write the reference file and set book.voices[voiceId] = {timbre, manner, reference}.
+ * Write the reference file and set the voice of hero `voiceId` to
+ * {timbre, manner, reference}; the hero is created when the book has none.
  * @returns {{path:string, sha256:string, name:string}}
  */
 function lockReference(book, outputDir, voiceId = 'narrator', { candidateId = 'cfix', refText = REF_TEXT } = {}) {
@@ -33,8 +35,13 @@ function lockReference(book, outputDir, voiceId = 'narrator', { candidateId = 'c
     const buf = toneWav();
     fs.writeFileSync(abs, buf);
     const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-    book.voices = book.voices || {};
-    book.voices[voiceId] = {
+    if (!Array.isArray(book.heroes)) book.heroes = [];
+    let hero = book.heroes.find((h) => h && h.id === voiceId);
+    if (!hero) {
+        hero = { schema: 'animastor.character/1', id: voiceId, ...(voiceId === 'narrator' ? { role: 'narrator' } : {}) };
+        book.heroes.push(hero);
+    }
+    hero.voice = {
         timbre: 'Calm male voice.', manner: voiceId === 'narrator' ? 'Slow narration.' : '', timbre_source: 'user',
         reference: { file: rel, ref_text: refText, source: 'designed', model: 'Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign', seed: 1, sha256, verification: 'passed', locked: true, candidate_id: candidateId },
     };

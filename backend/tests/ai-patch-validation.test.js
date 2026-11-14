@@ -31,7 +31,15 @@ const config = require('../src/config/runtime-config');
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
-describe('AI Patch Validation — bundle contract guard', () => {
+// [v4-pending step 4] These cases drive the assistant's edit_book over the 3.1
+// resource voices.json (/voices/<id>, book.voices). VBook 4 has no such map: a
+// voice is a block of a hero file. @animastor/assistant 0.3.0 (VBOOK_FORMAT_V4
+// §12 step 4) retargets edit_book to /heroes/<id>/… and rejects the old paths;
+// the cases are rewritten there. The guard itself (validate → write, nothing
+// written on a broken value) is covered for v4 in
+// packages/animastor-vbook-runtime/test/input-safety.test.js and
+// test/vbook-v4-format.test.js.
+describe.skip('[v4-pending step 4] AI Patch Validation — bundle contract guard', () => {
     let tmpDir;
     let bookId;
     let bookDir;

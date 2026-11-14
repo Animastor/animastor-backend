@@ -58,7 +58,7 @@ describe('architecture: VBook manifest contract', () => {
     it('manifest.json is required for a loadable canonical bundle', () => {
         // buildBookFromBundle throws when manifest.json is missing.
         const build = read(bookPath);
-        expect(build).to.match(/manifest\.json not found/);
+        expect(build).to.match(/manifest\.json must be in the archive root/);
     });
 
     it('manifest.book_id is enforced as the canonical id at build time', () => {
@@ -82,9 +82,12 @@ describe('architecture: VBook manifest contract', () => {
         expect(v).to.include('book.json');
         expect(v).to.include('bible.json');
         expect(v).to.include('locations.json');
-        expect(v).to.include('voices.json');
-        expect(v).to.include('behavior.json');
-        expect(v).to.include('characters.json');
+        // VBook 4: one file per hero + behaviour.json; the 3.1 files are named
+        // only to be refused.
+        expect(v).to.include('behaviour.json');
+        expect(v).to.include('characters/');
+        expect(v).to.include('validateCharacterFile');
+        expect(v).to.include('not a VBook 4 file');
         // Validator enforces chapter scene.participants shape (the field that
         // historically broke canonical state via model hallucination).
         expect(v).to.include('participants');
@@ -131,14 +134,16 @@ describe('architecture: VBook canonical bundle contract', () => {
 
     it('chapter files are stored under chapters/ and referenced by chapters_order', () => {
         const save = read(bookPath);
-        expect(save).to.match(/chapters\/ subdirectory/);
+        expect(save).to.match(/exact files chapters\/<name> listed in chapters_order/);
         expect(save).to.match(/structure\.chapters_order/);
     });
 
-    it('behavior.json is always persisted as the per-character behavior contract', () => {
+    it('behaviour.json is always present: created with the book and by every save', () => {
         const save = read(bookPath);
-        // behavior.json is always written (created as {} during book creation).
-        expect(save).to.match(/behavior\.json.*always persists/);
+        // behaviour.json (book-level defaults + global rules, VBOOK_FORMAT_V4 §6.3)
+        // is written when given and created when missing.
+        expect(save).to.match(/a missing file is created so a book always has it/);
+        expect(save).to.not.match(/behavior\.json/);
     });
 
     it('canonical bundle is not PG-owned — PG is derived/ownership only', () => {

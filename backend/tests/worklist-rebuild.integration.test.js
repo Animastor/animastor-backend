@@ -170,7 +170,7 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
     function writeBook(bookId, buildId = 'b1') {
         const bookDir = path.join(tmpBooks, bookId);
         fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ book_id: bookId, build_id: buildId }));
+        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ vbook_version: 4, book_id: bookId, build_id: buildId }));
         fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
             structure: { chapters_order: [`${CHAPTER}.json`] },
         }));

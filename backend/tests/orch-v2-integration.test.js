@@ -46,12 +46,14 @@ async function fixtureDecodePcm(filePath) {
     throw Object.assign(new Error('no recorded decode'), { code: 'EDECODE' });
 }
 
+// VBook 4: a voice is the `voice` block of a hero (book.heroes[].voice).
+const voiceOf = (b, id) => b.heroes.find((h) => h.id === id).voice;
+
 function bookJson(bookId, buildId) {
     const long = (n) => `Сцена ${n}: достаточно длинный текст повествования, чтобы обойтись без режима добивки коротких фраз.`;
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { timbre: 'calm male narrator', manner: '' } },
-        characters: [],
+        heroes: [{ schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'calm male narrator', manner: '' } }],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
                 { scene_id: 'sc-1', type: 'narration', audio: { full_text: long(1) } },
@@ -486,7 +488,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     });
 
     it('нет закреплённого референса / sha256 не совпал → 409 voice_reference_required, работ нет (без фолбэка)', async () => {
-        delete books.get(bookId).voices.narrator.reference;
+        delete voiceOf(books.get(bookId), 'narrator').reference;
         const r1 = await runScene('ch-1', 'sc-1');
         expect(r1.status).to.equal(409);
         expect(r1.body).to.include({ code: 'voice_reference_required' });
@@ -516,7 +518,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     it('референсы голоса: кандидаты по явной команде → воркер → строгая сверка → закрепление; «Очистить кэш» не трогает voices/', async () => {
         const b = books.get(bookId);
         b.book = { language: 'ru' };
-        b.voices.anna = { timbre: 'Warm female voice.', manner: 'Teasing.', timbre_source: 'user' };
+        b.heroes.push({ schema: 'animastor.character/1', id: 'anna', voice: { timbre: 'Warm female voice.', manner: 'Teasing.', timbre_source: 'user' } });
         const phrase = require('../ai/voice-reference-phrases.json').ru.conversational.text;
 
         expect((await api('POST', `/api/v1/book/${bookId}/voices/references/candidates`, { character_ids: ['anna'] })).body.code).to.equal('no_user_action');
@@ -564,8 +566,8 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect((await api('POST', `/api/v1/book/${bookId}/voices/anna/reference`, { candidate_id: t2.unit_key })).body.code).to.equal('candidate_not_verified');
         const lock = await api('POST', `/api/v1/book/${bookId}/voices/anna/reference`, { candidate_id: t1.unit_key });
         expect(lock.status).to.equal(200);
-        expect(b.voices.anna.reference).to.include({ file: `voices/anna/${t1.unit_key}.wav`, ref_text: phrase, source: 'designed', sha256: good.sha256, verification: 'passed', locked: true });
-        expect(b.voices.anna.reference.seed).to.equal(t1.params['71'].inputs.seed);
+        expect(voiceOf(b, 'anna').reference).to.include({ file: `voices/anna/${t1.unit_key}.wav`, ref_text: phrase, source: 'designed', sha256: good.sha256, verification: 'passed', locked: true });
+        expect(voiceOf(b, 'anna').reference.seed).to.equal(t1.params['71'].inputs.seed);
         expect((await api('DELETE', `/api/v1/book/${bookId}/voices/anna/references/candidates/${t1.unit_key}`)).body.code).to.equal('candidate_locked');
         expect((await api('DELETE', `/api/v1/book/${bookId}/voices/anna/references/candidates/${t2.unit_key}`)).status).to.equal(200);
 
@@ -575,6 +577,6 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect(fs.existsSync(path.join(config.OUTPUT_DIR, buildId, 'voices', 'anna', `${t1.unit_key}.wav`))).to.equal(true);
 
         expect((await api('DELETE', `/api/v1/book/${bookId}/voices/anna/reference`)).status).to.equal(200);
-        expect(b.voices.anna).to.not.have.property('reference');
+        expect(voiceOf(b, 'anna')).to.not.have.property('reference');
     });
 });

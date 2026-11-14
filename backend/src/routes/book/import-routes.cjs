@@ -90,6 +90,8 @@ module.exports = function(app, redis, deps) {
     // Import is for signed-in users only; uploads are size-limited.
     const { requireUser, singleUpload } = require('../../middleware/input-guard');
     const bookRepo = require('../../storage/postgres/repositories/book-repo');
+    // The one .vbook importer (VBOOK_FORMAT_V4 §11.2 Н15).
+    const vbookImporter = require('../../services/vbook-import.cjs').createVbookImporter({ book, importBookAllowed, log });
 
     // ── Identity-scoped TXT dedup ─────────────────────────────────────────
     // Candidates come from two indexes:
@@ -145,7 +147,20 @@ module.exports = function(app, redis, deps) {
         // Pick the most-progressed owned book that is actually on disk.
         let best = null;
         for (const bookId of candidates) {
-            const status = lazyBook.getBookStatus(bookId);
+            let status = null;
+            try {
+                status = lazyBook.getBookStatus(bookId);
+            } catch (statusErr) {
+                // A copy that exists but is not VBook 4 (VBOOK_FORMAT_V4 §9) is
+                // never a dedup hit: "import the source text again" must give
+                // the user a NEW v4 book. The old copy and its registry rows
+                // are left alone — deleting it is the owner's explicit action.
+                if (statusErr && statusErr.code === 'UNSUPPORTED_VBOOK_VERSION') {
+                    log(`[${tag}] DEDUP: book ${bookId} is not VBook 4 — not reused`);
+                    continue;
+                }
+                throw statusErr;
+            }
             if (!status || !status.state) {
                 try { await bookSourceRepo.deleteByBookId(bookId); } catch (_) {}
                 log(`[${tag}] DEDUP: book ${bookId} not on disk — cleaned up reference`);
@@ -221,109 +236,9 @@ app.post('/api/v1/book/import', requireUser, singleUpload('file'), async (req, r
         const buf = req.file.buffer;
         const format = detectFileFormat(buf);
 
-        if (format === 'invalid-archive') {
-            return res.status(400).json({ error: 'unsupported archive', code: 'invalid_archive' });
-        }
         if (format === 'vbook') {
-            // ── VBOOK path — same logic as /load-vbook ──
-            const files = book.extractBookBundle(buf, { log });
-            log('[UNIFIED-IMPORT] vbook bundle loaded:', Object.keys(files));
-
-            const bookData = book.buildBookFromBundle(files);
-            const bookId = bookData.manifest.book_id;
-            const buildId = bookData.manifest.build_id || 'default';
-
-            const existingBook = book.loadBook(bookId);
-
-            // Cross-workspace guard (authenticated): a bundle re-import must
-            // never touch or reveal a book that belongs elsewhere — neither
-            // the disk copy nor the ownership registry (bundle ids are
-            // client-controlled). Pre-auth imports keep historical behaviour.
-            const unifiedImportCheck = await importBookAllowed(req, bookId, { diskCopyExists: !!existingBook });
-            if (!unifiedImportCheck.allowed) {
-                log(`[UNIFIED-IMPORT] Book ${bookId} import rejected (${unifiedImportCheck.error})`);
-                return res.status(unifiedImportCheck.status).json({ error: unifiedImportCheck.error });
-            }
-            let loadedBook;
-            if (existingBook) {
-                log(`[UNIFIED-IMPORT] Book ${bookId} already exists — keeping existing (edited) version`);
-                loadedBook = existingBook;
-
-                const existingScenes = book.collectScenes(existingBook);
-                const chunks = await getAllChunks(bookId);
-                if (chunks.length === 0) {
-                    log(`[UNIFIED-IMPORT] No chunks in Redis — attempting recovery from disk for ${existingScenes.length} scenes`);
-                    const recovered = await recoverChunksFromDisk(bookId, buildId, existingScenes);
-                    if (recovered.length > 0) {
-                        log(`[UNIFIED-IMPORT] Recovered ${recovered.length}/${existingScenes.length} chunks from disk for ${bookId}`);
-                        await redis.set(config.BOOK_SCENE_TOTAL(bookId), existingScenes.length);
-                        await redis.set(config.BOOK_SCENE_NEXT(bookId), recovered.length);
-                    } else {
-                        log(`[UNIFIED-IMPORT] No files on disk for ${bookId} — generation needed`);
-                    }
-                } else {
-                    log(`[UNIFIED-IMPORT] Found ${chunks.length} chunks in Redis for ${bookId}`);
-                }
-            } else {
-                await book.resetBook(bookId);
-                book.saveBookBundle(bookData, files);
-                loadedBook = book.loadBook(bookId);
-                log(`[UNIFIED-IMPORT] Loaded book from disk: ${bookId}, chapters: ${loadedBook?.chapters?.length}`);
-            }
-
-            const scenes = book.collectScenes(loadedBook || bookData);
-            const chapterCount = loadedBook?.chapters?.length || bookData.chapters?.length || 0;
-            const sceneCount = scenes.length;
-            const title = bookData.manifest?.title || loadedBook?.manifest?.title || bookId;
-
-            log(`[UNIFIED-IMPORT] ${bookId}: ${chapterCount} chapters, ${sceneCount} scenes`);
-
-            const existingChunksAfterLoad = await getAllChunks(bookId);
-            if (existingChunksAfterLoad.length === 0) {
-                log(`[UNIFIED-IMPORT] Creating chunks + placeholder audio for ${scenes.length} scenes...`);
-                for (const s of scenes) {
-                    const chunkId = artifactNaming.sceneChunkAudioName(bookId, s.chapter_id, s.scene_id, 1).replace(/\.mp3$/, '');
-                    try {
-                        await saveChunk(chunkId, {
-                            build_id: buildId, book_id: bookId, scene_order: s.scene_order || 0,
-                            chapter_id: s.chapter_id, scene_id: s.scene_id, chunk_index: '0001',
-                            expected_chunk_count: 1, scene_type: s.scene_type || 'narration',
-                            audio: true, audio_status: 'placeholder', image: false, video: false,
-                            video_status: 'pending', padded_text: false,
-                        });
-                    } catch (chunkErr) {
-                        console.warn(`[UNIFIED-IMPORT] Failed to create chunk ${chunkId}: ${chunkErr.message}`);
-                    }
-                }
-                const phScenes = scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id }));
-                const phResult = await placeholderAudio.ensureAllPlaceholderAudio(buildId, bookId, phScenes);
-                log(`[UNIFIED-IMPORT] Placeholder audio: ${phResult.created} created, ${phResult.skipped} skipped`);
-                try {
-                    await redis.set(config.BOOK_SCENE_TOTAL(bookId), scenes.length);
-                    await redis.set(config.BOOK_SCENE_NEXT(bookId), scenes.length);
-                } catch (idxErr) {
-                    console.warn(`[UNIFIED-IMPORT] Failed to set scene index: ${idxErr.message}`);
-                }
-            } else {
-                log(`[UNIFIED-IMPORT] ${existingChunksAfterLoad.length} chunks exist — async placeholder generation`);
-                setImmediate(async () => {
-                    try {
-                        const phScenes = scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id }));
-                        const phResult = await placeholderAudio.ensureAllPlaceholderAudio(buildId, bookId, phScenes);
-                        log(`[UNIFIED-IMPORT] Placeholder audio: ${phResult.created} created, ${phResult.skipped} skipped`);
-                    } catch (phErr) {
-                        console.warn(`[UNIFIED-IMPORT] Placeholder audio generation failed: ${phErr.message}`);
-                    }
-                });
-            }
-
-            await attachBookWorkspace(bookId, title, req.workspace?.id);
-            return res.json({
-                format: 'vbook',
-                book_id: bookId, build_id: buildId, title,
-                chapter_count: chapterCount, scene_count: sceneCount,
-                was_existing: !!existingBook,
-            });
+            // ── VBOOK path — the one importer (services/vbook-import.cjs) ──
+            return await handleVbookUpload(req, res, buf, 'UNIFIED-IMPORT', { format: 'vbook' });
         } else {
             // ── TXT path — same logic as /import-txt ──
             if (req.guest && req.workspace && req.workspace.status === 'expired') {
@@ -397,27 +312,101 @@ app.post('/api/v1/book/import', requireUser, singleUpload('file'), async (req, r
 
 /**
  * Detect file format from buffer:
- *  - not a ZIP                                 → 'txt'
- *  - ZIP with manifest.json + book.json        → 'vbook'
- *  - any other ZIP (or a ZIP that is refused)  → 'invalid-archive'
- * The archive is only listed here (no decompression).
+ *  - not a ZIP → 'txt'
+ *  - a ZIP     → 'vbook'
+ * Whether the archive is a valid VBook 4 bundle is the importer's question:
+ * it answers with a specific code (manifest_not_in_root,
+ * unsupported_vbook_version, hero_file_broken, invalid_archive, …). A ZIP is
+ * never imported as text.
  */
 function detectFileFormat(buf) {
     // Check ZIP magic bytes (PK\x03\x04)
     if (buf.length < 4 || buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
         return 'txt';
     }
-    try {
-        if (typeof book.inspectBookBundle === 'function') {
-            const { payload } = book.inspectBookBundle(buf);
-            const names = new Set(payload.map((e) => e.entryName));
-            return names.has('manifest.json') && names.has('book.json') ? 'vbook' : 'invalid-archive';
+    return 'vbook';
+}
+
+/**
+ * Import an uploaded .vbook and answer the request. Shared by
+ * POST /book/import (ZIP upload) and POST /book/load-vbook.
+ */
+async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
+    const result = await vbookImporter.importVbookArchive(req, buf, { tag });
+    if (!result.ok) return res.status(result.status).json(result.body);
+    const { bookId, buildId, bookData, loadedBook, wasExisting } = result;
+
+    if (wasExisting) {
+        const existingScenes = book.collectScenes(loadedBook);
+        const chunks = await getAllChunks(bookId);
+        if (chunks.length === 0) {
+            log(`[${tag}] No chunks in Redis — attempting recovery from disk for ${existingScenes.length} scenes`);
+            const recovered = await recoverChunksFromDisk(bookId, buildId, existingScenes);
+            if (recovered.length > 0) {
+                log(`[${tag}] Recovered ${recovered.length}/${existingScenes.length} chunks from disk for ${bookId}`);
+                await redis.set(config.BOOK_SCENE_TOTAL(bookId), existingScenes.length);
+                await redis.set(config.BOOK_SCENE_NEXT(bookId), recovered.length);
+            } else {
+                log(`[${tag}] No files on disk for ${bookId} — generation needed`);
+            }
+        } else {
+            log(`[${tag}] Found ${chunks.length} chunks in Redis for ${bookId}`);
         }
-        const files = book.extractBookBundle(buf);
-        return files && files['manifest.json'] && files['book.json'] ? 'vbook' : 'invalid-archive';
-    } catch (e) {
-        return 'invalid-archive';
     }
+
+    const scenes = book.collectScenes(loadedBook || bookData);
+    const chapterCount = loadedBook?.chapters?.length || bookData.chapters?.length || 0;
+    const sceneCount = scenes.length;
+    const title = bookData.manifest?.title || loadedBook?.manifest?.title || bookId;
+
+    log(`[${tag}] ${bookId}: ${chapterCount} chapters, ${sceneCount} scenes`);
+
+    const existingChunksAfterLoad = await getAllChunks(bookId);
+    if (existingChunksAfterLoad.length === 0) {
+        log(`[${tag}] Creating chunks + placeholder audio for ${scenes.length} scenes...`);
+        for (const s of scenes) {
+            const chunkId = artifactNaming.sceneChunkAudioName(bookId, s.chapter_id, s.scene_id, 1).replace(/\.mp3$/, '');
+            try {
+                await saveChunk(chunkId, {
+                    build_id: buildId, book_id: bookId, scene_order: s.scene_order || 0,
+                    chapter_id: s.chapter_id, scene_id: s.scene_id, chunk_index: '0001',
+                    expected_chunk_count: 1, scene_type: s.scene_type || 'narration',
+                    audio: true, audio_status: 'placeholder', image: false, video: false,
+                    video_status: 'pending', padded_text: false,
+                });
+            } catch (chunkErr) {
+                console.warn(`[${tag}] Failed to create chunk ${chunkId}: ${chunkErr.message}`);
+            }
+        }
+        const phScenes = scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id }));
+        const phResult = await placeholderAudio.ensureAllPlaceholderAudio(buildId, bookId, phScenes);
+        log(`[${tag}] Placeholder audio: ${phResult.created} created, ${phResult.skipped} skipped`);
+        try {
+            await redis.set(config.BOOK_SCENE_TOTAL(bookId), scenes.length);
+            await redis.set(config.BOOK_SCENE_NEXT(bookId), scenes.length);
+        } catch (idxErr) {
+            console.warn(`[${tag}] Failed to set scene index: ${idxErr.message}`);
+        }
+    } else {
+        log(`[${tag}] ${existingChunksAfterLoad.length} chunks exist — async placeholder generation`);
+        setImmediate(async () => {
+            try {
+                const phScenes = scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id }));
+                const phResult = await placeholderAudio.ensureAllPlaceholderAudio(buildId, bookId, phScenes);
+                log(`[${tag}] Placeholder audio: ${phResult.created} created, ${phResult.skipped} skipped`);
+            } catch (phErr) {
+                console.warn(`[${tag}] Placeholder audio generation failed: ${phErr.message}`);
+            }
+        });
+    }
+
+    await attachBookWorkspace(bookId, title, req.workspace?.id);
+    return res.json({
+        ...extraBody,
+        book_id: bookId, build_id: buildId, title,
+        chapter_count: chapterCount, scene_count: sceneCount,
+        was_existing: wasExisting,
+    });
 }
 
 // ======================================================
@@ -427,100 +416,7 @@ function detectFileFormat(buf) {
         try {
             if (!req.file) return res.status(400).json({ error: 'file missing' });
 
-            const files = book.extractBookBundle(req.file.buffer, { log });
-            log('[LOAD-VBOOK] bundle loaded:', Object.keys(files));
-
-            const bookData = book.buildBookFromBundle(files);
-            const bookId = bookData.manifest.book_id;
-            const buildId = bookData.manifest.build_id || 'default';
-
-            const existingBook = book.loadBook(bookId);
-
-            // Cross-workspace guard for authenticated imports (see /book/import).
-            const loadVbookCheck = await importBookAllowed(req, bookId, { diskCopyExists: !!existingBook });
-            if (!loadVbookCheck.allowed) {
-                log(`[LOAD-VBOOK] Book ${bookId} import rejected (${loadVbookCheck.error})`);
-                return res.status(loadVbookCheck.status).json({ error: loadVbookCheck.error });
-            }
-            let loadedBook;
-            if (existingBook) {
-                log(`[LOAD-VBOOK] Book ${bookId} already exists — keeping existing (edited) version`);
-                loadedBook = existingBook;
-
-                const existingScenes = book.collectScenes(existingBook);
-                const chunks = await getAllChunks(bookId);
-                if (chunks.length === 0) {
-                    log(`[LOAD-VBOOK] No chunks in Redis — attempting recovery from disk for ${existingScenes.length} scenes`);
-                    const recovered = await recoverChunksFromDisk(bookId, buildId, existingScenes);
-                    if (recovered.length > 0) {
-                        log(`[LOAD-VBOOK] Recovered ${recovered.length}/${existingScenes.length} chunks from disk for ${bookId}`);
-                        await redis.set(config.BOOK_SCENE_TOTAL(bookId), existingScenes.length);
-                        await redis.set(config.BOOK_SCENE_NEXT(bookId), recovered.length);
-                    } else {
-                        log(`[LOAD-VBOOK] No files on disk for ${bookId} — generation needed`);
-                    }
-                } else {
-                    log(`[LOAD-VBOOK] Found ${chunks.length} chunks in Redis for ${bookId}`);
-                }
-            } else {
-                await book.resetBook(bookId);
-                book.saveBookBundle(bookData, files);
-                loadedBook = book.loadBook(bookId);
-                console.log(`[LOAD-VBOOK] Loaded book from disk: ${bookId}, chapters: ${loadedBook?.chapters?.length}`);
-            }
-
-            const scenes = book.collectScenes(loadedBook || bookData);
-            const chapterCount = loadedBook?.chapters?.length || bookData.chapters?.length || 0;
-            const sceneCount = scenes.length;
-            const title = bookData.manifest?.title || loadedBook?.manifest?.title || bookId;
-
-            log(`[LOAD-VBOOK] ${bookId}: ${chapterCount} chapters, ${sceneCount} scenes`);
-
-            const existingChunksAfterLoad = await getAllChunks(bookId);
-            if (existingChunksAfterLoad.length === 0) {
-                log(`[LOAD-VBOOK] Creating chunks + placeholder audio for ${scenes.length} scenes...`);
-                for (const s of scenes) {
-                    const chunkId = artifactNaming.sceneChunkAudioName(bookId, s.chapter_id, s.scene_id, 1).replace(/\.mp3$/, '');
-                    try {
-                        await saveChunk(chunkId, {
-                            build_id: buildId, book_id: bookId, scene_order: s.scene_order || 0,
-                            chapter_id: s.chapter_id, scene_id: s.scene_id, chunk_index: '0001',
-                            expected_chunk_count: 1, scene_type: s.scene_type || 'narration',
-                            audio: true, audio_status: 'placeholder', image: false, video: false,
-                            video_status: 'pending', padded_text: false,
-                        });
-                    } catch (chunkErr) {
-                        console.warn(`[LOAD-VBOOK] Failed to create chunk ${chunkId}: ${chunkErr.message}`);
-                    }
-                }
-                const phScenes = scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id }));
-                const phResult = await placeholderAudio.ensureAllPlaceholderAudio(buildId, bookId, phScenes);
-                log(`[LOAD-VBOOK] Placeholder audio: ${phResult.created} created, ${phResult.skipped} skipped`);
-                try {
-                    await redis.set(config.BOOK_SCENE_TOTAL(bookId), scenes.length);
-                    await redis.set(config.BOOK_SCENE_NEXT(bookId), scenes.length);
-                } catch (idxErr) {
-                    console.warn(`[LOAD-VBOOK] Failed to set scene index: ${idxErr.message}`);
-                }
-            } else {
-                log(`[LOAD-VBOOK] ${existingChunksAfterLoad.length} chunks exist — async placeholder generation`);
-                setImmediate(async () => {
-                    try {
-                        const phScenes = scenes.map(s => ({ chapter_id: s.chapter_id, scene_id: s.scene_id }));
-                        const phResult = await placeholderAudio.ensureAllPlaceholderAudio(buildId, bookId, phScenes);
-                        log(`[LOAD-VBOOK] Placeholder audio: ${phResult.created} created, ${phResult.skipped} skipped`);
-                    } catch (phErr) {
-                        console.warn(`[LOAD-VBOOK] Placeholder audio generation failed: ${phErr.message}`);
-                    }
-                });
-            }
-
-            await attachBookWorkspace(bookId, title, req.workspace?.id);
-            return res.json({
-                book_id: bookId, build_id: buildId, title,
-                chapter_count: chapterCount, scene_count: sceneCount,
-                was_existing: !!existingBook,
-            });
+            return await handleVbookUpload(req, res, req.file.buffer, 'LOAD-VBOOK');
         } catch (err) {
             if (err && err.status === 400) console.warn(`[LOAD-VBOOK] refused: ${err.code || 'invalid input'}`); else console.error('LOAD-VBOOK ERROR:', err);
             return res.status(400).json({ error: err.message || 'unknown error' });
