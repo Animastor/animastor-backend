@@ -154,6 +154,113 @@ describe('voice references — WAV, paths, sha256, status', () => {
         expect(ref).to.include({ source: 'uploaded', ref_text: 'Слова из образца, исправленные.', seed: null, model: null });
     });
 
+    // ── paths of uploads: every value that reaches the disk is re-checked ──
+    describe('upload paths cannot leave build_<id>/voices/<voice>/uploads/', () => {
+        const provider = () => ({ ...require('@animastor/generation').comfyuiProvider, assembleVoiceTranscribeWorkflow: (spec) => ({ spec }) });
+        const snapshot = (root) => {
+            const list = [];
+            (function walk(d, rel) {
+                for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                    const r = rel ? `${rel}/${e.name}` : e.name;
+                    if (e.isDirectory()) walk(path.join(d, e.name), r); else list.push(`${r}=${fs.readFileSync(path.join(d, e.name)).length}`);
+                }
+            })(root, '');
+            return list.sort().join('\n');
+        };
+        let svc, book, scope, secret;
+        beforeEach(() => {
+            svc = vr.createVoiceReferences({ outputDir: out });
+            book = v4Book({ manifest: { build_id: 'build_b' }, book: { language: 'ru' } }, { anna: { timbre: 'Warm.' }, boris: { timbre: 'Low.' } });
+            scope = svc.storeUpload(book, 'anna', toneWav(6), 'audio/wav');
+            secret = path.join(out, 'secret.wav');
+            fs.writeFileSync(secret, 'secret');
+        });
+
+        const BAD_BUILD_IDS = ['..', '../x', 'a/b', 'a\\b', '/abs', '', 'build b', null, undefined, 42];
+        for (const buildId of BAD_BUILD_IDS) {
+            it(`build_id ${JSON.stringify(buildId)} is refused by every path builder`, () => {
+                const before = snapshot(out);
+                const bad = (fn) => { try { fn(); } catch (err) { return err.code || err.message; } return null; };
+                expect(bad(() => svc.paths.voiceDir(buildId, 'anna'))).to.equal('bad_request');
+                expect(bad(() => svc.paths.candidateWav(buildId, 'anna', 'c1'))).to.equal('bad_request');
+                expect(bad(() => svc.paths.uploadFile(buildId, 'anna', 'c1', 'wav'))).to.equal('bad_request');
+                expect(bad(() => svc.paths.resolveUpload(buildId, scope.upload.file))).to.equal('bad_request');
+                expect(bad(() => svc.paths.resolveLink(buildId, 'voices/anna/c1.wav'))).to.not.equal(null);
+                expect(bad(() => svc.jobInputFiles({ build_id: buildId, scene_id: 'anna', unit_key: scope.candidate_id, input: { input_files: [{ name: 'n', rel: scope.upload.file }] } }))).to.equal('bad_request');
+                if (buildId) {
+                    const evilBook = v4Book({ manifest: { build_id: buildId }, book: { language: 'ru' } }, { anna: { timbre: 'Warm.' } });
+                    expect(bad(() => svc.storeUpload(evilBook, 'anna', toneWav(6), 'audio/wav'))).to.equal('bad_request');
+                    expect(bad(() => svc.planCandidates(evilBook, 'b', scope, provider()))).to.not.equal(null);
+                }
+                expect(snapshot(out)).to.equal(before);
+            });
+        }
+
+        const BAD_LINKS = [
+            '../secret.wav', 'voices/anna/uploads/../../../../secret.wav', 'voices/anna/uploads/../c1.wav',
+            '/etc/passwd', 'voices\\anna\\uploads\\c1.wav', 'voices/anna/uploads/c1.wav/../x.wav',
+            'voices/anna/uploads/sub/c1.wav', 'voices/anna/c1.wav', 'voices/../uploads/c1.wav', 'voices/anna/uploads/c1',
+            'voices/anna/uploads/c1.exe', 'voices/anna/uploads/c1.sh', 'voices/anna/uploads/c1.WAV', 'voices/anna/uploads/.wav',
+            'voices/anna/uploads/c.1.wav', 'voices/anna/uploads/c1.wav\u0000', '', null, undefined, 7, { file: 'x' },
+        ];
+        for (const link of BAD_LINKS) {
+            it(`upload link ${JSON.stringify(link)} is refused where it is planned and where it is used`, () => {
+                const before = snapshot(out);
+                expect(() => svc.paths.resolveUpload('build_b', link)).to.throw().with.property('code', 'bad_upload_link');
+                // a job row that came back from storage with a tampered link
+                expect(() => svc.jobInputFiles({ build_id: 'build_b', scene_id: 'anna', unit_key: scope.candidate_id, input: { input_files: [{ name: 'n', rel: link }] } }))
+                    .to.throw().with.property('code', 'bad_upload_link');
+                // a command whose scope.voice carries a tampered link: nothing is planned or written
+                expect(() => svc.planCandidates(book, 'b', { ...scope, upload: { ...scope.upload, file: link } }, provider())).to.throw();
+                expect(snapshot(out)).to.equal(before);
+                expect(fs.readFileSync(secret, 'utf8')).to.equal('secret');
+            });
+        }
+
+        it('an extension outside wav|mp3|ogg|flac is refused at upload, at planning and in the path builder', () => {
+            const before = snapshot(out);
+            for (const type of ['text/plain', 'application/x-sh', 'audio/aac', 'video/mp4', '', undefined]) {
+                expect(() => svc.storeUpload(book, 'anna', toneWav(6), type), String(type)).to.throw().with.property('status', 415);
+            }
+            for (const ext of ['exe', 'sh', 'WAV', 'wav/../x', '../wav', '', null, undefined]) {
+                expect(() => svc.paths.uploadFile('build_b', 'anna', 'c1', ext), String(ext)).to.throw().with.property('code', 'bad_request');
+                expect(() => svc.paths.relativeUpload('anna', 'c1', ext), String(ext)).to.throw().with.property('code', 'bad_request');
+                expect(() => svc.planCandidates(book, 'b', { ...scope, upload: { ...scope.upload, ext } }, provider()), String(ext)).to.throw();
+            }
+            expect(snapshot(out)).to.equal(before);
+        });
+
+        it('a link of another voice or another candidate is not this job\'s file', () => {
+            const other = svc.storeUpload(book, 'boris', toneWav(6), 'audio/wav');
+            const job = (rel) => ({ build_id: 'build_b', scene_id: 'anna', unit_key: scope.candidate_id, input: { input_files: [{ name: 'n', rel }] } });
+            expect(svc.jobInputFiles(job(scope.upload.file))[0].path).to.equal(path.join(out, 'build_b', 'voices', 'anna', 'uploads', `${scope.candidate_id}.wav`));
+            expect(() => svc.jobInputFiles(job(other.upload.file))).to.throw().with.property('code', 'bad_upload_link');
+            expect(() => svc.jobInputFiles(job('voices/anna/uploads/cother.wav'))).to.throw().with.property('code', 'bad_upload_link');
+            expect(() => svc.planCandidates(book, 'b', { ...scope, upload: other.upload }, provider())).to.throw().with.property('code', 'bad_upload_link');
+            expect(() => svc.planCandidates(book, 'b', { ...scope, upload: { ...scope.upload, sha256: 'xyz' } }, provider())).to.throw().with.property('code', 'bad_request');
+        });
+
+        it('deleting a candidate never unlinks a file its metadata points at outside its own uploads folder', () => {
+            svc.planCandidates(book, 'b', scope, provider());
+            const metaPath = svc.paths.candidateJson('build_b', 'anna', scope.candidate_id);
+            const upload = path.join(out, 'build_b', scope.upload.file);
+            const boris = svc.storeUpload(book, 'boris', toneWav(6), 'audio/wav');
+            const borisFile = path.join(out, 'build_b', boris.upload.file);
+            for (const file of ['../../../secret.wav', '../secret.wav', boris.upload.file, secret]) {
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                fs.writeFileSync(metaPath, JSON.stringify({ ...meta, status: 'failed', upload: { ...meta.upload, file } }));
+                expect(svc.deleteCandidate(book, 'anna', scope.candidate_id)).to.equal(true);
+                expect(fs.readFileSync(secret, 'utf8'), file).to.equal('secret');
+                expect(fs.existsSync(borisFile), file).to.equal(true);
+                fs.writeFileSync(metaPath, JSON.stringify({ ...meta, status: 'failed' }));
+            }
+            // the untampered metadata does remove the candidate's own upload
+            expect(fs.existsSync(upload)).to.equal(true);
+            expect(svc.deleteCandidate(book, 'anna', scope.candidate_id)).to.equal(true);
+            expect(fs.existsSync(upload)).to.equal(false);
+        });
+    });
+
     it('«Очистить кэш» helper removes generated content but keeps voices/', () => {
         const b = path.join(out, 'build_b');
         fs.mkdirSync(path.join(b, 'voices', 'anna'), { recursive: true });

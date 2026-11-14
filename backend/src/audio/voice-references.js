@@ -34,6 +34,8 @@ const MAX_DURATION_SEC = 20;
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const SAFE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const VOICES_CHAPTER = '_voices';          // gen_jobs.chapter_id of voice_reference jobs
+const UPLOAD_EXTENSIONS = Object.freeze(['wav', 'mp3', 'ogg', 'flac']);
+const UPLOAD_LINK_RE = /^voices\/([A-Za-z0-9_-]{1,128})\/uploads\/([A-Za-z0-9_-]{1,128})\.(wav|mp3|ogg|flac)$/;
 const UPLOAD_EXT = Object.freeze({ 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/ogg': 'ogg', 'audio/flac': 'flac', 'audio/x-flac': 'flac' });
 const DESIGN_MODEL = 'Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign';
 const CLONE_MODEL = 'Qwen/Qwen3-TTS-12Hz-1.7B-Base';
@@ -180,6 +182,31 @@ function createPaths(outputDir) {
         candidateWav: (buildId, voiceId, candId) => joinInside(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.wav`),
         candidateJson: (buildId, voiceId, candId) => joinInside(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.json`),
         uploadDir: (buildId, voiceId) => joinInside(voiceDir(buildId, voiceId), 'uploads'),
+        /** absolute path of a stored upload: <build>/voices/<id>/uploads/<cand>.<wav|mp3|ogg|flac> */
+        uploadFile: (buildId, voiceId, candId, ext) => {
+            if (!UPLOAD_EXTENSIONS.includes(ext)) throw new VoiceReferenceError('bad_request', 400, `upload: unsupported extension ${JSON.stringify(ext)}`);
+            return joinInside(joinInside(voiceDir(buildId, voiceId), 'uploads'), `${assertSafeId(candId, 'candidate_id')}.${ext}`);
+        },
+        /** voices/<id>/uploads/<cand>.<ext> — the link kept in the candidate metadata and the job input */
+        relativeUpload: (voiceId, candId, ext) => {
+            if (!UPLOAD_EXTENSIONS.includes(ext)) throw new VoiceReferenceError('bad_request', 400, `upload: unsupported extension ${JSON.stringify(ext)}`);
+            return `voices/${assertSafeId(voiceId, 'character_id')}/uploads/${assertSafeId(candId, 'candidate_id')}.${ext}`;
+        },
+        /**
+         * Absolute path of an upload link. The link is data that came back from
+         * storage (gen_jobs.input, candidate metadata JSON), so it is checked
+         * again where it is used: exactly voices/<id>/uploads/<cand>.<ext>, no
+         * "..", no backslash, not absolute, and — when the caller knows them —
+         * the same voice and candidate.
+         */
+        resolveUpload: (buildId, link, { voiceId, candId } = {}) => {
+            const m = typeof link === 'string' ? UPLOAD_LINK_RE.exec(link) : null;
+            if (!m) throw new VoiceReferenceError('bad_upload_link', 409, `bad upload link ${JSON.stringify(link)}`);
+            if ((voiceId !== undefined && m[1] !== voiceId) || (candId !== undefined && m[2] !== candId)) {
+                throw new VoiceReferenceError('bad_upload_link', 409, `upload link ${JSON.stringify(link)} does not belong to this candidate`);
+            }
+            return joinInside(joinInside(voiceDir(buildId, m[1]), 'uploads'), `${m[2]}.${m[3]}`);
+        },
         /** voices/<id>/<cand>.wav — the link stored in the hero file (relative to the build folder) */
         relativeFile: (voiceId, candId) => `voices/${assertSafeId(voiceId, 'character_id')}/${assertSafeId(candId, 'candidate_id')}.wav`,
         /** absolute path of a reference link (rejects anything outside voices/<id>/) */
@@ -310,6 +337,13 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
             const id = assertSafeId(voiceScope.character_id, 'character_id');
             const candId = assertSafeId(voiceScope.candidate_id, 'candidate_id');
             const up = voiceScope.upload || {};
+            // scope.voice is opaque to the orchestration package; the host
+            // checks it here before anything is planned or written: the upload
+            // must be THIS candidate's file in THIS voice's uploads folder.
+            if (typeof up.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(up.sha256)) throw new VoiceReferenceError('bad_request', 400, 'upload: sha256 required');
+            if (!UPLOAD_EXTENSIONS.includes(up.ext)) throw new VoiceReferenceError('bad_request', 400, `upload: unsupported extension ${JSON.stringify(up.ext)}`);
+            if (up.file !== paths.relativeUpload(id, candId, up.ext)) throw new VoiceReferenceError('bad_upload_link', 409, `bad upload link ${JSON.stringify(up.file)}`);
+            paths.resolveUpload(buildId, up.file, { voiceId: id, candId });
             const inputName = `vupl_${String(up.sha256).slice(0, 32)}.${up.ext}`;
             const wf = provider.assembleVoiceTranscribeWorkflow({ inputFile: inputName, language: language || 'auto', filenamePrefix: `voices/${id}/${candId}` });
             units.push(unit(buildId, id, candId, wf, provider.WORKFLOW_NAMES.voiceTranscribe, {
@@ -361,7 +395,15 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
     /** Input files of a voice_reference job (uploaded sample) — absolute paths for the claim port. */
     function jobInputFiles(job) {
         const list = (job.input && job.input.input_files) || [];
-        return list.map((f) => ({ name: f.name, path: path.join(outputDir, job.build_id, f.rel), sha256: f.sha256, bytes: f.bytes }));
+        // job.build_id and f.rel come back from gen_jobs: both are re-validated
+        // here (id grammar, upload-link shape, joinInside) — the worker is
+        // handed nothing but a file of this job's voice.
+        return list.map((f) => ({
+            name: f.name,
+            path: paths.resolveUpload(job.build_id, f.rel, { voiceId: job.scene_id, candId: job.unit_key }),
+            sha256: f.sha256,
+            bytes: f.bytes,
+        }));
     }
 
     /**
@@ -479,7 +521,11 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
             try { fs.unlinkSync(p); } catch (_) { /* absent */ }
         }
         if (c.upload && c.upload.file) {
-            try { fs.unlinkSync(path.join(outputDir, buildId, c.upload.file)); } catch (_) { /* absent */ }
+            // c.upload.file was read from the candidate's metadata file: a link
+            // that is not this candidate's own upload is never unlinked.
+            let uploadPath = null;
+            try { uploadPath = paths.resolveUpload(buildId, c.upload.file, { voiceId, candId }); } catch (_) { uploadPath = null; }
+            if (uploadPath) { try { fs.unlinkSync(uploadPath); } catch (_) { /* absent */ } }
         }
         return true;
     }
@@ -496,11 +542,11 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
         const candId = newCandidateId();
         const dir = paths.uploadDir(buildId, voiceId);
         fs.mkdirSync(dir, { recursive: true });
-        const abs = path.join(dir, `${candId}.${ext}`);
+        const abs = paths.uploadFile(buildId, voiceId, candId, ext);
         fs.writeFileSync(abs, buf);
         return {
             mode: 'upload', character_id: voiceId, candidate_id: candId,
-            upload: { file: path.relative(path.join(outputDir, buildId), abs).split(path.sep).join('/'), sha256: sha256(buf), bytes: buf.length, ext },
+            upload: { file: paths.relativeUpload(voiceId, candId, ext), sha256: sha256(buf), bytes: buf.length, ext },
         };
     }
 
