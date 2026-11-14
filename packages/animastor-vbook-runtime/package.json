@@ -1,13 +1,14 @@
 {
     "name": "@animastor/vbook-runtime",
-    "version": "0.4.0",
-    "description": "VBook Runtime — canonical VBook 3.1 bundle/book model: multi-file bundle CRUD, draft/import lifecycle, lazy parse windows, bundle validation, canonical id grammar and path layout. Owns bundle/book canonical state; the host owns the filesystem root (booksRoot), snapshots, deletion orchestration and Redis/PG/GPU Hub.",
+    "version": "0.5.0",
+    "description": "VBook Runtime — canonical VBook 4 book model: one file per hero (characters/<id>.json), atomic hero store, bundle import/export by whitelist, draft/import lifecycle, lazy parse windows, validation, canonical id grammar and path layout. Owns bundle/book canonical state; the host owns the filesystem root (booksRoot), snapshots, deletion orchestration and Redis/PG/GPU Hub.",
     "main": "src/index.js",
     "exports": {
         ".": "./src/index.js",
         "./book-model.cjs": "./src/book-model.cjs",
         "./bundle-validator.cjs": "./src/bundle-validator.cjs",
-        "./behavior-schema.cjs": "./src/behavior-schema.cjs",
+        "./character-validator.cjs": "./src/character-validator.cjs",
+        "./vbook-version.cjs": "./src/vbook-version.cjs",
         "./looks.cjs": "./src/looks.cjs",
         "./heroes.cjs": "./src/heroes.cjs",
         "./character-store.cjs": "./src/character-store.cjs",
@@ -59,6 +60,7 @@
         "adm-zip": "^0.5.10"
     },
     "devDependencies": {
+        "ajv": "^8.20.0",
         "chai": "^6.2.2",
         "mocha": "^11.7.5"
     }

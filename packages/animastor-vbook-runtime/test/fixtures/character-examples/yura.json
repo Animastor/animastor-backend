@@ -1,0 +1,108 @@
+{
+  "schema": "animastor.character/1",
+  "id": "yura",
+  "name": "Юра",
+  "role": "protagonist",
+  "aliases": [
+    "Юрий",
+    "Юрка"
+  ],
+  "passport": {
+    "appearance": "man in his early thirties, short dark hair, tired grey eyes, light stubble",
+    "clothes": "worn brown leather jacket, dark jeans",
+    "video_tokens": [
+      "man",
+      "dark hair",
+      "leather jacket"
+    ]
+  },
+  "looks": [
+    {
+      "id": "coat",
+      "label": "В пальто",
+      "fields": {
+        "clothes": "long dark grey wool coat, scarf",
+        "video_tokens": [
+          "man",
+          "dark hair",
+          "grey coat"
+        ]
+      },
+      "image_ref": null,
+      "notes": "С третьей главы."
+    },
+    {
+      "id": "beard",
+      "label": "С бородой",
+      "fields": {
+        "appearance": "man in his early thirties, short dark hair, thick dark beard, tired grey eyes"
+      },
+      "image_ref": null,
+      "evidence": {
+        "quote": "За зиму он оброс бородой и стал похож на геолога.",
+        "basis": "explicit",
+        "status": "accepted"
+      }
+    }
+  ],
+  "voice": {
+    "timbre": "A Russian male voice in his early thirties, warm low baritone. Native Russian pronunciation.",
+    "manner": "Speaks unhurriedly, with a tired half-smile, pauses before important words.",
+    "reference": {
+      "file": "voices/yura/ref_02.wav",
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "ref_text": "Я вернулся домой поздно вечером, когда город уже затих.",
+      "source": "designed",
+      "model": "qwen3-tts-voicedesign",
+      "seed": 421337,
+      "verification": "passed",
+      "locked": true
+    }
+  },
+  "behaviour": {
+    "profile": {
+      "baseline": "calm, attentive, slow to anger",
+      "quirks": [
+        "rubs the bridge of his nose when thinking"
+      ],
+      "reactions": [
+        {
+          "trigger": "is praised",
+          "reaction": "looks away and changes the subject"
+        }
+      ]
+    },
+    "rules": [
+      {
+        "id": "yura.praised",
+        "when": {
+          "emotion": [
+            "proud",
+            "embarrassed"
+          ],
+          "unit_type": [
+            "dialogue"
+          ]
+        },
+        "then": {
+          "action": "looks away and rubs the bridge of his nose"
+        },
+        "strength": 0.7,
+        "probability": 0.6,
+        "cooldown_iu": 3,
+        "priority": 10,
+        "enabled": true
+      }
+    ]
+  },
+  "image_refs": [
+    {
+      "file": "refs/images/yura/portrait_01.png",
+      "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+      "kind": "portrait",
+      "source": "uploaded",
+      "locked": true
+    }
+  ],
+  "notes": "В третьей главе меняет куртку на пальто — см. passport override сцены."
+}

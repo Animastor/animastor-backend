@@ -1,6 +1,6 @@
 # @animastor/vbook-runtime
 
-Canonical **VBook 3.1** bundle/book runtime: multi-file bundle CRUD, draft/import
+Canonical **VBook 4** bundle/book runtime (one file per hero — `characters/<id>.json`; VBook 3.1 is not readable): multi-file bundle CRUD, draft/import
 lifecycle, lazy parse windows, bundle validation, canonical id grammar and the
 on-disk path layout.
 
@@ -58,9 +58,10 @@ Operations only. Additive changes only from here (C2 model API is internal-v1).
   appearance helpers.
 - **Validation** (`bundle-validator.cjs`): `validateBundleObject`,
   `validateBundleFile`. The de-facto C1 contract; mirrored rule-by-rule by
-  [`schemas/vbook-bundle-3.1.schema.json`](schemas/vbook-bundle-3.1.schema.json).
+  [`schemas/vbook-bundle-4.schema.json`](schemas/vbook-bundle-4.schema.json) and
+  [`schemas/character-1.schema.json`](schemas/character-1.schema.json).
 - **Path/id grammar** (`lazy-book/paths.js`): `getBooksDir`, `getBookDir`,
-  `getSourcePath`, `getManifestPath`, `getBookMetaPath`, `getCharactersPath`,
+  `getSourcePath`, `getManifestPath`, `getBookMetaPath`, `getCharactersDir`, `getBehaviourPath`,
   `getBiblePath`, `getChapterDir`, `getChapterPath`, ... and `chapterId`,
   `sceneId`, `unitId`, `generateBookId`.
 - **Enums** (`lazy-book/constants.js`): `BookState`, `SceneStatus`, `SourceType`,

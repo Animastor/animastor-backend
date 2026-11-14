@@ -24,7 +24,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { isCanonicalHeroId, isReservedHeroId, NARRATOR_ID } = require('./heroes.cjs');
+const { isCanonicalHeroId, isReservedHeroId, sortHeroes, NARRATOR_ID } = require('./heroes.cjs');
 const { validateCharacterFile } = require('./character-validator.cjs');
 const { joinInside } = require('./safe-paths');
 
@@ -194,30 +194,7 @@ function readEntry(dir, name) {
         return { issue: issue(name, 'unreadable', err.code || err.message) };
     }
 
-    let doc;
-    try {
-        doc = JSON.parse(raw);
-    } catch (err) {
-        return { issue: issue(name, 'invalid_json', err.message) };
-    }
-
-    const check = validateCharacterFile(doc, { filename: name });
-    if (!check.valid) {
-        const misnamedOnly = check.errors.every((e) => e.code === 'filename_mismatch');
-        const message = check.errors.slice(0, 5)
-            .map((e) => (e.path ? `${e.path}: ${e.message}` : e.message))
-            .join('; ');
-        return { issue: issue(name, misnamedOnly ? 'filename_mismatch' : 'schema', message, { errors: check.errors }) };
-    }
-
-    const warnings = check.warnings.map((w) => ({
-        file: `${CHARACTER_DIR}/${name}`,
-        hero_id: doc.id,
-        code: w.code,
-        message: w.path ? `${w.path}: ${w.message}` : w.message,
-        blocking: false,
-    }));
-    return { hero: doc, warnings };
+    return parseCharacterText(name, raw);
 }
 
 /**
@@ -255,20 +232,7 @@ function listCharacters(bookDir, options = {}) {
         }
     }
 
-    const order = Array.isArray(options.charactersOrder) ? options.charactersOrder : [];
-    const rank = new Map();
-    order.forEach((id, i) => { if (typeof id === 'string' && !rank.has(id)) rank.set(id, i); });
-    heroes.sort((a, b) => {
-        if (a.id === b.id) return 0;
-        if (a.id === NARRATOR_ID) return -1;
-        if (b.id === NARRATOR_ID) return 1;
-        const ra = rank.has(a.id) ? rank.get(a.id) : Infinity;
-        const rb = rank.has(b.id) ? rank.get(b.id) : Infinity;
-        if (ra !== rb) return ra - rb;
-        return a.id < b.id ? -1 : 1;
-    });
-
-    return { heroes, issues };
+    return { heroes: sortHeroes(heroes, options.charactersOrder), issues };
 }
 
 /**
@@ -385,9 +349,36 @@ function removeCharacter(bookDir, heroId, options = {}) {
     return true;
 }
 
+/** Parse and validate hero-file text that did not come from characters/ (an archive entry). */
+function parseCharacterText(name, raw) {
+    let doc;
+    try {
+        doc = JSON.parse(raw);
+    } catch (err) {
+        return { issue: issue(name, 'invalid_json', err.message) };
+    }
+    const check = validateCharacterFile(doc, { filename: name });
+    if (!check.valid) {
+        const misnamedOnly = check.errors.every((e) => e.code === 'filename_mismatch');
+        const message = check.errors.slice(0, 5)
+            .map((e) => (e.path ? `${e.path}: ${e.message}` : e.message))
+            .join('; ');
+        return { issue: issue(name, misnamedOnly ? 'filename_mismatch' : 'schema', message, { errors: check.errors }) };
+    }
+    const warnings = check.warnings.map((w) => ({
+        file: `${CHARACTER_DIR}/${name}`,
+        hero_id: doc.id,
+        code: w.code,
+        message: w.path ? `${w.path}: ${w.message}` : w.message,
+        blocking: false,
+    }));
+    return { hero: doc, warnings };
+}
+
 module.exports = {
     CHARACTER_DIR,
     HeroStoreError,
+    parseCharacterText,
     charactersDir,
     characterFile,
     serializeCharacter,

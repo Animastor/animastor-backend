@@ -1,0 +1,9 @@
+{
+  "schema": "animastor.character/1",
+  "id": "shop_women",
+  "voice": {
+    "timbre": "A middle-aged Russian female voice, sharp. Native Russian pronunciation.",
+    "manner": "Irritated, clipped phrases."
+  },
+  "name": "Женщина в будочке"
+}

@@ -3,16 +3,27 @@
 // ======================================================
 // Every consumer (audio generation, voice-reference API, editor, analysis
 // writer) reads and writes a character's voice ONLY through these functions.
-// Storage today (format 3.1): voices.json[character_id] =
-//   { timbre, manner, timbre_source, reference }
-// Format v4 (VBOOK_FORMAT_V4, one file per character) moves the same object
-// to characters/<id>.json → voice; only the two accessors below change.
 //
-// The narrator is a character with id "narrator".
-// No legacy `instruction` field is read: voices of format «instruction only»
-// are not supported (owner decision 2026-11-12 — books are regenerated).
+// Storage (VBOOK_FORMAT_V4 §5): the hero file characters/<id>.json →
+//   voice: { timbre, manner, timbre_source?, reference? }
+// in memory book.heroes[].voice. Only the accessors of the "storage" block
+// below know that; the port's names, fields and checks are the ones of the
+// voice-reference task. The 3.1 map voices.json / book.voices is gone.
+//
+// The narrator is the hero with id "narrator".
+// There is no `instruction` field in VBook 4 and none is read.
+//
+// The audio reference itself is content, not part of the .vbook: it lives in
+// build_<book_id>/voices/<hero id>/. resolveReferenceFile is the only way a
+// stored link becomes a path, and it refuses anything outside that folder.
 
 'use strict';
+
+const fs = require('fs');
+const crypto = require('crypto');
+const { findHero, isValidHeroId } = require('./heroes.cjs');
+const { CHARACTER_SCHEMA, VOICE_REFERENCE_FILE_RE } = require('./character-validator.cjs');
+const { joinInside, assertInside } = require('./safe-paths');
 
 const NARRATOR_ID = 'narrator';
 const TIMBRE_SOURCES = Object.freeze(['cleaned', 'user', 'analysis']);
@@ -24,19 +35,43 @@ const SHA256_RE = /^[0-9a-f]{64}$/;
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
 
 // ── storage (the only place that knows where the voice lives) ───────────
-function voiceStore(book, create) {
-    if (!book || typeof book !== 'object') return null;
-    if (!book.voices || typeof book.voices !== 'object' || Array.isArray(book.voices)) {
-        if (!create) return null;
-        book.voices = {};
-    }
-    return book.voices;
+function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
 function rawVoice(book, characterId) {
-    const store = voiceStore(book, false);
-    const v = store ? store[characterId] : null;
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+    const hero = findHero(book, characterId);
+    return hero && isPlainObject(hero.voice) ? hero.voice : null;
+}
+
+/** The hero's voice object, created when missing (and the hero with it). */
+function ensureVoice(book, characterId) {
+    if (!book || typeof book !== 'object') throw Object.assign(new Error('book required'), { code: 'bad_request' });
+    let hero = findHero(book, characterId);
+    if (!hero) {
+        // A speaker with a voice of its own is a hero without a passport (§7).
+        if (!isValidHeroId(characterId)) {
+            throw Object.assign(new Error(`invalid character id ${JSON.stringify(characterId)}`), { code: 'bad_request' });
+        }
+        hero = { schema: CHARACTER_SCHEMA, id: characterId };
+        if (characterId === NARRATOR_ID) hero.role = NARRATOR_ID;
+        if (!Array.isArray(book.heroes)) book.heroes = [];
+        book.heroes.push(hero);
+    }
+    if (!isPlainObject(hero.voice)) hero.voice = {};
+    return hero.voice;
+}
+
+function voiceIds(book) {
+    const list = book && Array.isArray(book.heroes) ? book.heroes : [];
+    return list.filter((h) => isPlainObject(h) && typeof h.id === 'string' && isPlainObject(h.voice)).map((h) => h.id);
+}
+
+/** voices/<id>/… — the folder segment of a reference link, or null */
+function referenceDir(ref) {
+    const file = ref && typeof ref.file === 'string' ? ref.file : '';
+    const parts = file.split('/');
+    return parts.length === 3 && parts[0] === 'voices' ? parts[1] : null;
 }
 
 // ── reference object ─────────────────────────────────────────────────────
@@ -83,20 +118,24 @@ function getCharacterVoice(book, characterId) {
     const v = rawVoice(book, characterId);
     if (!v) return null;
     const hasRef = v.reference !== undefined && v.reference !== null;
+    let problem = hasRef ? referenceProblem(v.reference) : null;
+    // a hero's reference lives in that hero's folder, nobody else's
+    if (hasRef && !problem && referenceDir(v.reference) !== characterId) {
+        problem = `reference.file must be inside voices/${characterId}/`;
+    }
     return {
         id: characterId,
         timbre: str(v.timbre),
         manner: str(v.manner),
         timbre_source: TIMBRE_SOURCES.includes(v.timbre_source) ? v.timbre_source : null,
-        reference: hasRef ? normaliseReference(v.reference) : null,
-        reference_problem: hasRef ? referenceProblem(v.reference) : null,
+        reference: hasRef && !problem ? normaliseReference(v.reference) : null,
+        reference_problem: problem,
     };
 }
 
 /** ids of every voice entry of the book (narrator included when present) */
 function listVoiceIds(book) {
-    const store = voiceStore(book, false);
-    return store ? Object.keys(store).filter((id) => rawVoice(book, id)) : [];
+    return voiceIds(book);
 }
 
 /**
@@ -110,8 +149,19 @@ function setCharacterVoiceReference(book, characterId, reference) {
     if (reference === null) { delete v.reference; return null; }
     const problem = referenceProblem(reference);
     if (problem) throw Object.assign(new Error(problem), { code: 'bad_reference' });
-    v.reference = normaliseReference(reference);
-    return v.reference;
+    if (referenceDir(reference) !== characterId) {
+        throw Object.assign(new Error(`reference.file must be inside voices/${characterId}/`), { code: 'bad_reference' });
+    }
+    const normalised = normaliseReference(reference);
+    // The hero file follows animastor.character/1, where model is a string and
+    // seed an integer: "no value" (an uploaded sample has neither) is stored
+    // as an absent key, not as null. Readers still get null from
+    // getCharacterVoice, exactly as before.
+    const stored = { ...normalised };
+    if (stored.model === null) delete stored.model;
+    if (stored.seed === null) delete stored.seed;
+    v.reference = stored;
+    return normalised;
 }
 
 /**
@@ -120,8 +170,7 @@ function setCharacterVoiceReference(book, characterId, reference) {
  */
 function setCharacterVoiceDescription(book, characterId, { timbre, manner, timbre_source } = {}) {
     if (typeof characterId !== 'string' || !characterId) throw Object.assign(new Error('characterId required'), { code: 'bad_request' });
-    const store = voiceStore(book, true);
-    const v = rawVoice(book, characterId) || (store[characterId] = {});
+    const v = ensureVoice(book, characterId);
     if (timbre !== undefined) v.timbre = str(timbre);
     if (manner !== undefined) v.manner = str(manner);
     if (timbre_source !== undefined) {
@@ -153,6 +202,56 @@ function voiceDesignDescription(voice) {
     if (!voice) return '';
     if (voice.id === NARRATOR_ID) return [voice.timbre, voice.manner].filter(Boolean).join(' ').trim();
     return voice.timbre;
+}
+
+// ── reference file on disk (content folder, never the .vbook) ───────────
+/**
+ * Absolute path of a stored reference link.
+ * The link must be voices/<hero id>/<name>.<wav|flac|mp3|ogg>, relative to
+ * `buildDir` (= <output>/build_<book_id>). Absolute paths, "..", "." and
+ * backslashes are refused, and the resolved path is re-checked to lie inside
+ * <buildDir>/voices/<hero id>/.
+ * @param {string} buildDir
+ * @param {{file: string}} reference
+ * @param {string} [characterId] when given, the link must point into this hero's folder
+ * @returns {string}
+ * @throws {Error} code 'bad_reference'
+ */
+function resolveReferenceFile(buildDir, reference, characterId) {
+    const bad = (why) => Object.assign(new Error(`bad reference link: ${why}`), { code: 'bad_reference' });
+    const file = reference && typeof reference === 'object' ? reference.file : undefined;
+    if (typeof file !== 'string' || !file) throw bad('file is missing');
+    if (file.includes('\\') || file.includes('\0') || file.startsWith('/') || /^[A-Za-z]:/.test(file)) throw bad('not a relative link');
+    if (file.split('/').some((seg) => seg === '..' || seg === '.' || seg === '') || file.includes('..')) throw bad('path traversal');
+    if (!VOICE_REFERENCE_FILE_RE.test(file)) throw bad('must be voices/<hero id>/<name>.<wav|flac|mp3|ogg>');
+    const [, heroId, name] = file.split('/');
+    if (!isValidHeroId(heroId)) throw bad('invalid hero id');
+    if (characterId !== undefined && heroId !== characterId) throw bad(`must be inside voices/${characterId}/`);
+    try {
+        const voiceDir = joinInside(buildDir, 'voices', heroId);
+        return assertInside(voiceDir, joinInside(voiceDir, name));
+    } catch (_) {
+        throw bad('outside the voices folder');
+    }
+}
+
+/**
+ * Computed state of a reference (never stored): 'ok' — the file exists and its
+ * sha256 matches; 'missing' — no link, a bad link or no regular file there;
+ * 'mismatch' — the file changed. Symbolic links are not followed.
+ */
+function referenceState(buildDir, reference, characterId) {
+    let file;
+    try {
+        file = resolveReferenceFile(buildDir, reference, characterId);
+    } catch (_) {
+        return 'missing';
+    }
+    let st = null;
+    try { st = fs.lstatSync(file); } catch (_) { st = null; }
+    if (!st || !st.isFile()) return 'missing';
+    const sha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    return sha === reference.sha256 ? 'ok' : 'mismatch';
 }
 
 // ── rule-based cleanup of an analysis description (no LLM) ──────────────
@@ -210,4 +309,6 @@ module.exports = {
     cleanVoiceDescription,
     voiceFromDescription,
     referenceProblem,
+    resolveReferenceFile,
+    referenceState,
 };

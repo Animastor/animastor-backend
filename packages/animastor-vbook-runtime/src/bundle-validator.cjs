@@ -1,5 +1,5 @@
 // ======================================================
-// ANIMASTOR BACKEND — BUNDLE VALIDATOR
+// ANIMASTOR BACKEND — BUNDLE VALIDATOR (VBook 4)
 // ======================================================
 // Canonical data-contract guard for the book bundle.
 // Runs AFTER AI patch application and BEFORE any disk write,
@@ -7,22 +7,29 @@
 // type that Android's strict parser cannot load) is rejected
 // instead of becoming the new canonical state.
 //
-// Contract mirrors buildBookFromBundle() in src/book/index.js:
-//   manifest.json   — object with book_id (required)
-//   book.json       — object with structure.chapters_order array (required)
-//   bible.json      — object (optional)
-//   locations.json  — object keyed by location id (optional)
-//   voices.json     — object keyed by voice id (optional)
-//   behavior.json   — schema v2 {schema_version:2, rules[], characters{}}
-//                     or legacy v2.1 object keyed by character_id (optional)
-//   characters.json — array of characters (optional)
-//   chapters/*      — objects with canonical chapter_id (optional)
+// Contract (architecture/VBOOK_FORMAT_V4.md §3, §8.1) — the in-memory book:
+//   manifest    — object with book_id (required)
+//   book        — object with structure.chapters_order / characters_order
+//   bible       — object (optional)
+//   locations   — object keyed by location id
+//   behaviour   — behaviour.json: animastor.behaviour-globals/1 (§6.3)
+//   heroes      — array of hero files, animastor.character/1 (§4); ids unique
+//   hero_issues — array (memory / API only, never written)
+//   chapters    — objects with canonical chapter_id; chapter.looks,
+//                 scene.looks, scene.look_patch (§4a)
+// The 3.1 maps characters / voices / behaviors / mentions do not exist: a book
+// object that still carries one is refused, so data is never dropped silently.
 //
-// Generic by design: no Voice.json-specific hardcoding — every
-// resource that AI patches can touch is covered by the same check.
+// The hero-file and behaviour.json validators live in ./character-validator.cjs
+// and are re-exported here (validateCharacterFile, validateBehaviourGlobals).
+// The JSON Schemas are schemas/character-1.schema.json (normative copy from
+// animastor-docs) and schemas/vbook-bundle-4.schema.json.
 'use strict';
 
-const voice = require('./voice');
+const {
+    validateCharacterFile, validateBehaviourGlobals,
+} = require('./character-validator.cjs');
+const { CANONICAL_ID_RE } = require('./heroes.cjs');
 
 const CHAPTER_ID_RE = /^ch-[a-f0-9]{6,}$/;
 const SCENE_ID_RE = /^sc-[a-f0-9]{6,}$/;
@@ -103,89 +110,85 @@ function validateBookMeta(bookMeta, errors) {
     }
 }
 
-function validateVoiceEntry(id, entry, errors) {
-    if (!isPlainObject(entry)) {
-        errors.push(`voices: voice "${id}" must be an object (got ${Array.isArray(entry) ? 'array' : typeof entry})`);
-        return;
-    }
-    for (const k of ['timbre', 'manner']) {
-        if (entry[k] !== undefined && entry[k] !== null && typeof entry[k] !== 'string') {
-            errors.push(`voices: voice "${id}".${k} must be a string`);
-        }
-    }
-    if (entry.timbre_source !== undefined && entry.timbre_source !== null && !voice.TIMBRE_SOURCES.includes(entry.timbre_source)) {
-        errors.push(`voices: voice "${id}".timbre_source must be ${voice.TIMBRE_SOURCES.join('|')}`);
-    }
-    // the audio reference itself lives in the content folder, NOT in the bundle —
-    // only the text link + metadata are validated here (VOICE_REFERENCES.md)
-    if (entry.reference !== undefined && entry.reference !== null) {
-        const problem = voice.referenceProblem(entry.reference);
-        if (problem) errors.push(`voices: voice "${id}".${problem}`);
-    }
-}
-
-function validateVoices(voices, errors) {
-    if (!isPlainObject(voices)) {
-        errors.push(`voices: must be a JSON object keyed by voice id (got ${Array.isArray(voices) ? 'array' : typeof voices})`);
-        return;
-    }
-    for (const [id, entry] of Object.entries(voices)) {
-        validateVoiceEntry(id, entry, errors);
-    }
-}
-
 function validateLocations(locations, errors) {
     if (!isPlainObject(locations)) {
         errors.push(`locations: must be a JSON object keyed by location id (got ${Array.isArray(locations) ? 'array' : typeof locations})`);
     }
 }
 
-function validateBehaviors(behaviors, errors) {
-    if (!isPlainObject(behaviors)) {
-        errors.push(`behaviors: must be a JSON object keyed by character_id (got ${Array.isArray(behaviors) ? 'array' : typeof behaviors})`);
+const REMOVED_KEYS = Object.freeze(['characters', 'voices', 'behaviors', 'mentions']);
+const LOOK_ID_MAX = 64;
+const LOOK_PATCH_KEYS = Object.freeze(['appearance', 'clothes', 'video_tokens']);
+
+function formatIssue(prefix, issue) {
+    return `${prefix}${issue.path ? `.${issue.path}` : ''}: ${issue.message}`;
+}
+
+function validateBehaviour(behaviour, errors) {
+    const check = validateBehaviourGlobals(behaviour);
+    for (const e of check.errors) errors.push(formatIssue('behaviour', e));
+}
+
+function validateHeroes(heroes, errors) {
+    if (!Array.isArray(heroes)) {
+        errors.push(`heroes: must be a JSON array (got ${heroes === null ? 'null' : typeof heroes})`);
         return;
     }
-    // Legacy v2.1 (no schema_version): flat map, migrated on load/save.
-    if (behaviors.schema_version == null) return;
-    // Schema v2 (architecture/VBOOK_BEHAVIOUR.md).
-    if (behaviors.schema_version !== 2) {
-        errors.push(`behaviors.schema_version: unsupported value ${JSON.stringify(behaviors.schema_version)} (expected 2)`);
+    const seen = new Set();
+    heroes.forEach((hero, i) => {
+        const id = isPlainObject(hero) && typeof hero.id === 'string' ? hero.id : null;
+        const label = id ? `heroes[${i}] (${id})` : `heroes[${i}]`;
+        const check = validateCharacterFile(hero);
+        for (const e of check.errors) errors.push(formatIssue(label, e));
+        if (id === null) return;
+        if (seen.has(id)) errors.push(`${label}: duplicate hero id "${id}"`);
+        seen.add(id);
+    });
+}
+
+// chapter.looks / scene.looks: { <hero_id>: <look_id> } (§4a.3).
+function validateLookAssignments(map, label, errors) {
+    if (map === undefined) return;
+    if (!isPlainObject(map)) {
+        errors.push(`${label}: looks must be an object of hero id → look id`);
+        return;
     }
-    if (behaviors.characters !== undefined && !isPlainObject(behaviors.characters)) {
-        errors.push('behaviors.characters: must be a JSON object keyed by character_id');
-    }
-    if (behaviors.rules !== undefined) {
-        if (!Array.isArray(behaviors.rules)) {
-            errors.push('behaviors.rules: must be an array');
-        } else {
-            const seen = new Set();
-            behaviors.rules.forEach((r, i) => {
-                if (!isPlainObject(r)) {
-                    errors.push(`behaviors.rules[${i}]: must be an object`);
-                    return;
-                }
-                if (typeof r.id !== 'string' || !r.id.trim()) {
-                    errors.push(`behaviors.rules[${i}].id: must be a non-empty string`);
-                } else if (seen.has(r.id)) {
-                    errors.push(`behaviors.rules[${i}].id: duplicate "${r.id}"`);
-                } else {
-                    seen.add(r.id);
-                }
-            });
+    for (const [heroId, lookId] of Object.entries(map)) {
+        if (typeof lookId !== 'string' || !CANONICAL_ID_RE.test(lookId) || [...lookId].length > LOOK_ID_MAX) {
+            errors.push(`${label}/looks/${heroId}: must be a look id`);
         }
     }
 }
 
-function validateCharacters(characters, errors) {
-    if (!Array.isArray(characters)) {
-        errors.push(`characters: must be a JSON array (got ${typeof characters})`);
+// scene.look_patch: { <hero_id>: { appearance?, clothes?, video_tokens? } } (§4a.4).
+function validateLookPatch(map, label, errors) {
+    if (map === undefined) return;
+    if (!isPlainObject(map)) {
+        errors.push(`${label}: look_patch must be an object of hero id → fields`);
         return;
     }
-    characters.forEach((ch, i) => {
-        if (!isPlainObject(ch)) {
-            errors.push(`characters[${i}]: must be an object`);
+    for (const [heroId, patch] of Object.entries(map)) {
+        const p = `${label}/look_patch/${heroId}`;
+        if (!isPlainObject(patch)) {
+            errors.push(`${p}: must be an object`);
+            continue;
         }
-    });
+        for (const key of Object.keys(patch)) {
+            if (!LOOK_PATCH_KEYS.includes(key)) errors.push(`${p}/${key}: unexpected key (allowed: ${LOOK_PATCH_KEYS.join(', ')})`);
+        }
+        for (const key of ['appearance', 'clothes']) {
+            if (key in patch && (typeof patch[key] !== 'string' || patch[key].length < 1)) {
+                errors.push(`${p}/${key}: must be a non-empty string`);
+            }
+        }
+        if ('video_tokens' in patch) {
+            const tokens = patch.video_tokens;
+            if (!Array.isArray(tokens) || tokens.length < 1 || tokens.length > 4
+                || tokens.some((t) => typeof t !== 'string' || t.length < 1)) {
+                errors.push(`${p}/video_tokens: must be an array of 1–4 non-empty strings`);
+            }
+        }
+    }
 }
 
 function validateChapters(chapters, errors) {
@@ -204,6 +207,7 @@ function validateChapters(chapters, errors) {
         if (typeof cid === 'string' && !CHAPTER_ID_RE.test(cid)) {
             errors.push(`${label}: invalid chapter_id "${cid}" (expected: ch-XXXXXXXX)`);
         }
+        validateLookAssignments(chapter.looks, label, errors);
         if (chapter.scenes !== undefined && !Array.isArray(chapter.scenes)) {
             errors.push(`${label}: scenes must be an array`);
             return;
@@ -214,6 +218,8 @@ function validateChapters(chapters, errors) {
                 errors.push(`${sceneLabel}: must be an object`);
                 return;
             }
+            validateLookAssignments(scene.looks, sceneLabel, errors);
+            validateLookPatch(scene.look_patch, sceneLabel, errors);
             const sid = scene.scene_id;
             if (typeof sid === 'string' && !SCENE_ID_RE.test(sid)) {
                 errors.push(`${sceneLabel}: invalid scene_id "${sid}" (expected: sc-XXXXXXXX)`);
@@ -245,7 +251,7 @@ function validateChapters(chapters, errors) {
 
 /**
  * Validate a book object (in-memory, post-patch) against the bundle contract.
- * @param {Object} book - {manifest, book, bible, characters, chapters, locations, voices, behaviors}
+ * @param {Object} book - {manifest, book, bible, locations, behaviour, heroes, hero_issues, chapters}
  * @returns {{valid: boolean, errors: string[]}} errors are empty when valid
  */
 function validateBundleObject(book) {
@@ -262,9 +268,14 @@ function validateBundleObject(book) {
         errors.push('bible: must be a JSON object');
     }
     validateLocations(book.locations, errors);
-    validateVoices(book.voices, errors);
-    validateBehaviors(book.behaviors, errors);
-    validateCharacters(book.characters, errors);
+    validateBehaviour(book.behaviour, errors);
+    validateHeroes(book.heroes, errors);
+    if (book.hero_issues !== undefined && !Array.isArray(book.hero_issues)) {
+        errors.push('hero_issues: must be an array');
+    }
+    for (const key of REMOVED_KEYS) {
+        if (key in book) errors.push(`${key}: not part of VBook 4 (heroes live in book.heroes, see VBOOK_FORMAT_V4 §8.1)`);
+    }
     validateChapters(book.chapters, errors);
     return { valid: errors.length === 0, errors };
 }
@@ -279,7 +290,11 @@ function validateBundleObject(book) {
 function validateSceneParticipantsOnly(chapter, errors) {
     if (!chapter || typeof chapter !== 'object' || Array.isArray(chapter)) return;
     const label = 'chapter (per-file)';
-    (chapter.scenes || []).forEach((scene, si) => {
+    validateLookAssignments(chapter.looks, label, errors);
+    (Array.isArray(chapter.scenes) ? chapter.scenes : []).forEach((scene, si) => {
+        if (!isPlainObject(scene)) return;
+        validateLookAssignments(scene.looks, `${label}/scenes[${si}]`, errors);
+        validateLookPatch(scene.look_patch, `${label}/scenes[${si}]`, errors);
         const participants = scene.participants;
         if (participants === undefined || participants === null) return;
         if (!Array.isArray(participants)) {
@@ -297,7 +312,8 @@ function validateSceneParticipantsOnly(chapter, errors) {
 /**
  * Validate one resource value before it is written to a bundle JSON file.
  * Used by saveBookBundle as a last line of defense right before writeFileSync.
- * @param {string} filename - target file name (e.g. 'voices.json')
+ * @param {string} filename - target path inside the book (e.g. 'behaviour.json',
+ *        'characters/yura.json', 'chapter.json')
  * @param {*} data - value to be serialized
  * @returns {{valid: boolean, errors: string[]}}
  */
@@ -309,10 +325,15 @@ function validateBundleFile(filename, data) {
         return { valid: false, errors };
     }
     const name = filename.toLowerCase();
-    if (name === 'voices.json') validateVoices(data, errors);
-    else if (name === 'locations.json') validateLocations(data, errors);
-    else if (name === 'characters.json') validateCharacters(data, errors);
-    else if (name === 'behavior.json') validateBehaviors(data, errors);
+    if (name === 'locations.json') validateLocations(data, errors);
+    else if (name === 'behaviour.json') validateBehaviour(data, errors);
+    else if (name.startsWith('characters/')) {
+        const check = validateCharacterFile(data, { filename: filename.slice('characters/'.length) });
+        for (const e of check.errors) errors.push(formatIssue(filename, e));
+    }
+    else if (['voices.json', 'characters.json', 'behavior.json', 'mentions.json'].includes(name)) {
+        errors.push(`${filename}: not a VBook 4 file`);
+    }
     else if (name === 'bible.json') {
         if (data !== null && !isPlainObject(data)) errors.push('bible.json: must be a JSON object');
     }
@@ -325,4 +346,6 @@ function validateBundleFile(filename, data) {
 module.exports = {
     validateBundleObject,
     validateBundleFile,
+    validateCharacterFile,
+    validateBehaviourGlobals,
 };

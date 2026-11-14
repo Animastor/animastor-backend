@@ -121,7 +121,7 @@ describe('draft lifecycle → bundle round-trip (standalone boot smoke)', () => 
     it('createDraftBook writes manifest + book.json with detected language', () => {
         const draft = lazyBook.createDraftBook(STUB_TEXT, lazyBook.SourceType.TXT, 'probe.txt');
         bookId = draft.bookId;
-        expect(draft.manifest.vbook_version).to.equal('3.1');
+        expect(draft.manifest.vbook_version).to.equal(4);
         expect(draft.manifest.state).to.equal(lazyBook.BookState.RAW_IMPORTED);
         const meta = JSON.parse(fs.readFileSync(lazyBook.getBookMetaPath(lazyBook.getBookDir(bookId)), 'utf8'));
         expect(meta.language).to.be.a('string').with.lengthOf(2);
@@ -160,11 +160,12 @@ describe('draft lifecycle → bundle round-trip (standalone boot smoke)', () => 
         };
         vbook.saveBookBundle({ ...book, chapters: [chapter] }, null);
         const files = {};
-        for (const f of ['manifest.json', 'book.json', 'bible.json', 'locations.json', 'voices.json', 'behavior.json', 'chapters/ch-aaa001.json']) {
+        for (const f of ['manifest.json', 'book.json', 'bible.json', 'locations.json', 'behaviour.json', 'characters/narrator.json', 'chapters/ch-aaa001.json']) {
             const p = path.join(dir, f);
-            if (fs.existsSync(p)) files[f] = fs.readFileSync(p);
+            if (fs.existsSync(p)) files[f] = fs.readFileSync(p, 'utf8');
         }
         const rebuilt = vbook.buildBookFromBundle(files);
+        expect(rebuilt.heroes.map((h) => h.id)).to.deep.equal(['narrator']);
         expect(rebuilt.book.book_id).to.equal(bookId);
         expect(rebuilt.manifest.book_id).to.equal(bookId);
         expect(rebuilt.chapters).to.have.lengthOf(1);
@@ -208,12 +209,12 @@ describe('Book Model facade (C2 internal-v1)', () => {
 describe('bundle-validator (C1 guard)', () => {
     it('validates a canonical bundle object (no errors) and rejects a broken manifest', () => {
         const good = {
-            manifest: { book_id: 'roundtrip-ok', vbook_version: '3.1' },
+            manifest: { book_id: 'roundtrip-ok', vbook_version: 4 },
             book: { book_id: 'roundtrip-ok', structure: { chapters_order: [] } },
-            characters: [],
+            heroes: [{ schema: 'animastor.character/1', id: 'narrator', role: 'narrator' }],
+            hero_issues: [],
             locations: {},
-            voices: {},
-            behaviors: {},
+            behaviour: { schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] },
             chapters: [],
         };
         const verdict = validator.validateBundleObject(good);
@@ -222,9 +223,13 @@ describe('bundle-validator (C1 guard)', () => {
         expect(validator.validateBundleObject(bad).valid).to.equal(false);
     });
 
-    it('validateBundleFile rejects a broken voices resource', () => {
-        const verdict = validator.validateBundleFile('voices.json', { narrator: 'not-an-object' });
-        expect(verdict.valid).to.equal(false);
+    it('validateBundleFile rejects a broken hero file and every 3.1 file name', () => {
+        expect(validator.validateBundleFile('characters/narrator.json', { schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: 'not-an-object' }).valid).to.equal(false);
+        expect(validator.validateBundleFile('characters/narrator.json', { schema: 'animastor.character/1', id: 'narrator', role: 'narrator' }).valid).to.equal(true);
+        for (const name of ['voices.json', 'characters.json', 'behavior.json', 'mentions.json']) {
+            expect(validator.validateBundleFile(name, {}).valid, name).to.equal(false);
+        }
+        expect(validator.validateBundleFile('behaviour.json', { schema: 'animastor.behaviour-globals/1', rules: [{ id: 'a' }, { id: 'a' }] }).valid).to.equal(false);
     });
 });
 

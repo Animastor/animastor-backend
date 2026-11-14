@@ -1,0 +1,405 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://animastor.dev/schemas/vbook-bundle-4.schema.json",
+    "title": "VBook Bundle 4",
+    "description": "VBook 4 bundle contract (architecture/VBOOK_FORMAT_V4.md). Describes the in-memory book object that loadBook returns and saveBookBundle accepts: { manifest, book, bible, locations, behaviour, heroes[], hero_issues[], chapters[] }. On disk and in a .vbook archive the same data is a flat directory: manifest.json, book.json, optional bible.json / locations.json / source.txt, behaviour.json, characters/<id>.json (one file per hero, schema animastor.character/1) and chapters/ch-*.json. There are no characters / voices / behaviors / mentions maps. Mirrors src/bundle-validator.cjs rule by rule; documented strictness deltas: (1) manifest vbook_version/state/source are checked here, while the validator stays lenient and the version is enforced by assertSupportedVbookVersion on load, save and import; (2) unit-id grammar is schema-enforced only; (3) JSON-serializability (NaN/circular) is validator-side pre-write hardening; (4) rules beyond a schema — hero ids unique in heroes[], rule ids unique in behaviour.rules, and the beyond-schema rules of a hero file — are validator-only.",
+    "type": "object",
+    "required": [
+        "manifest",
+        "locations",
+        "behaviour",
+        "heroes"
+    ],
+    "properties": {
+        "manifest": {
+            "$ref": "#/$defs/manifest"
+        },
+        "book": {
+            "$ref": "#/$defs/bookMeta"
+        },
+        "bible": {
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "locations": {
+            "$ref": "#/$defs/stringKeyedMap"
+        },
+        "behaviour": {
+            "$ref": "#/$defs/behaviourGlobals"
+        },
+        "heroes": {
+            "type": "array",
+            "items": {
+                "$ref": "https://animastor.org/docs/architecture/schemas/animastor.character-1.schema.json"
+            }
+        },
+        "hero_issues": {
+            "type": "array",
+            "description": "Load problems of hero files (§10.3). Memory and API only — never written to disk.",
+            "items": {
+                "type": "object"
+            }
+        },
+        "chapters": {
+            "$ref": "#/$defs/chaptersArray"
+        }
+    },
+    "$defs": {
+        "manifest": {
+            "type": "object",
+            "required": [
+                "book_id"
+            ],
+            "properties": {
+                "book_id": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "vbook_version": {
+                    "description": "Writers emit the integer 4. Readers also accept \"4\" and \"4.x\" (VBOOK_FORMAT_V4 §3).",
+                    "anyOf": [
+                        {
+                            "const": 4
+                        },
+                        {
+                            "type": "string",
+                            "pattern": "^4(\\.[0-9]+)?$"
+                        }
+                    ]
+                },
+                "state": {
+                    "enum": [
+                        "RAW_IMPORTED",
+                        "BOOTSTRAPPED",
+                        "ACTIVE"
+                    ]
+                },
+                "source": {
+                    "enum": [
+                        "TXT",
+                        "AI_IMPORT"
+                    ]
+                }
+            }
+        },
+        "bookMeta": {
+            "type": [
+                "object",
+                "null"
+            ],
+            "properties": {
+                "book_id": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "author": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "language": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "structure": {
+                    "type": "object",
+                    "properties": {
+                        "has_prologue": {
+                            "type": "boolean"
+                        },
+                        "has_epilogue": {
+                            "type": "boolean"
+                        },
+                        "chapters_order": {
+                            "anyOf": [
+                                {
+                                    "type": "null"
+                                },
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            ]
+                        },
+                        "characters_order": {
+                            "description": "Display-order hint for heroes; unknown and missing ids are not an error.",
+                            "anyOf": [
+                                {
+                                    "type": "null"
+                                },
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "defaults": {
+                    "type": "object"
+                }
+            }
+        },
+        "stringKeyedMap": {
+            "type": "object"
+        },
+        "behaviourGlobals": {
+            "type": "object",
+            "required": [
+                "schema"
+            ],
+            "description": "behaviour.json — book-level behaviour (VBOOK_FORMAT_V4 §6.3). Rule ids are unique inside the file (validator).",
+            "properties": {
+                "schema": {
+                    "const": "animastor.behaviour-globals/1"
+                },
+                "defaults": {
+                    "type": "object",
+                    "properties": {
+                        "max_per_scene": {
+                            "type": "integer",
+                            "minimum": 0
+                        }
+                    },
+                    "additionalProperties": true
+                },
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/behaviourRule"
+                    }
+                }
+            },
+            "additionalProperties": true
+        },
+        "behaviourRule": {
+            "type": "object",
+            "required": [
+                "id"
+            ],
+            "description": "Global behaviour rule (VBOOK_BEHAVIOUR.md §2.1). Shape only. scope and character_id follow from where the rule is stored and are never written.",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                },
+                "when": {
+                    "type": "object"
+                },
+                "then": {
+                    "type": "object"
+                },
+                "strength": {
+                    "type": "number"
+                },
+                "probability": {
+                    "type": "number"
+                },
+                "cooldown_iu": {
+                    "type": "integer"
+                },
+                "priority": {
+                    "type": "number"
+                },
+                "enabled": {
+                    "type": "boolean"
+                }
+            },
+            "not": {
+                "anyOf": [
+                    {
+                        "required": [
+                            "scope"
+                        ]
+                    },
+                    {
+                        "required": [
+                            "character_id"
+                        ]
+                    }
+                ]
+            },
+            "additionalProperties": true
+        },
+        "lookId": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$",
+            "maxLength": 64
+        },
+        "lookPatch": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Fields that replace the resolved look in ONE scene (VBOOK_FORMAT_V4 §4a.4). Same value rules as a look's fields.",
+            "properties": {
+                "appearance": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "clothes": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "video_tokens": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                }
+            }
+        },
+        "chapterId": {
+            "anyOf": [
+                {
+                    "not": {
+                        "type": "string"
+                    }
+                },
+                {
+                    "type": "string",
+                    "pattern": "^ch-[a-f0-9]{6,}$"
+                }
+            ]
+        },
+        "sceneId": {
+            "anyOf": [
+                {
+                    "not": {
+                        "type": "string"
+                    }
+                },
+                {
+                    "type": "string",
+                    "pattern": "^sc-[a-f0-9]{6,}$"
+                }
+            ]
+        },
+        "unitId": {
+            "anyOf": [
+                {
+                    "not": {
+                        "type": "string"
+                    }
+                },
+                {
+                    "type": "string",
+                    "pattern": "^iu-[a-f0-9]{6,}$"
+                }
+            ]
+        },
+        "participants": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1
+            }
+        },
+        "scene": {
+            "type": "object",
+            "properties": {
+                "scene_id": {
+                    "$ref": "#/$defs/sceneId"
+                },
+                "participants": {
+                    "$ref": "#/$defs/participants"
+                },
+                "units": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "$ref": "#/$defs/unitId"
+                            }
+                        }
+                    }
+                },
+                "looks": {
+                    "type": "object",
+                    "description": "hero id → look id, or \"base\" for the base passport despite the chapter (§4a.3).",
+                    "additionalProperties": {
+                        "$ref": "#/$defs/lookId"
+                    }
+                },
+                "look_patch": {
+                    "type": "object",
+                    "description": "hero id → fields replaced in this scene only (§4a.4).",
+                    "additionalProperties": {
+                        "$ref": "#/$defs/lookPatch"
+                    }
+                }
+            }
+        },
+        "chapter": {
+            "type": "object",
+            "properties": {
+                "chapter_id": {
+                    "$ref": "#/$defs/chapterId"
+                },
+                "scenes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/scene"
+                    }
+                },
+                "looks": {
+                    "type": "object",
+                    "description": "hero id → look id for the whole chapter (§4a.3).",
+                    "additionalProperties": {
+                        "$ref": "#/$defs/lookId"
+                    }
+                }
+            }
+        },
+        "chaptersArray": {
+            "type": [
+                "array",
+                "null"
+            ],
+            "items": {
+                "$ref": "#/$defs/chapter"
+            }
+        }
+    },
+    "not": {
+        "anyOf": [
+            {
+                "required": [
+                    "characters"
+                ]
+            },
+            {
+                "required": [
+                    "voices"
+                ]
+            },
+            {
+                "required": [
+                    "behaviors"
+                ]
+            },
+            {
+                "required": [
+                    "mentions"
+                ]
+            }
+        ]
+    }
+}

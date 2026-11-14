@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.5.0 (2026-11-14, unpublished)
+
+VBook 4 — "one file per hero" (animastor-docs `architecture/VBOOK_FORMAT_V4.md`,
+step 1 of §12). **Breaking: VBook 3.1 is not readable and there is no
+migration.**
+
+### Format
+
+- Layout on disk and in a `.vbook`, by exact path: `manifest.json`
+  (`vbook_version: 4`, integer; `"4"` and `"4.x"` are also read), `book.json`
+  (`structure.chapters_order`, `structure.characters_order`), optional
+  `bible.json` / `locations.json` / `source.txt`, `behaviour.json`,
+  `characters/<id>.json` (schema `animastor.character/1`), `chapters/ch-*.json`.
+  `characters.json`, `voices.json`, `behavior.json`, `mentions.json` are gone.
+- In memory: `{ manifest, book, bible, locations, behaviour, heroes[],
+  hero_issues[], chapters[] }`. `book.characters` / `voices` / `behaviors` /
+  `mentions` are removed; a book object that still carries one is refused.
+
+### Added
+
+- `src/heroes.cjs` — `findHero`, `passportHeroes`, `narrator`, `voiceInstruct`,
+  `buildAliasIndex`, `heroRules`, `sortHeroes`, `collectBookHeroIssues`,
+  `CANONICAL_ID_RE`, `RESERVED_HERO_IDS`, `isCanonicalHeroId`, `isValidHeroId`.
+- `src/looks.cjs` — `resolveHeroLook(book, chapter, scene, heroId)`.
+- `src/character-store.cjs` — the only writer of hero files: `listCharacters`,
+  `inspectCharacter`, `readCharacter`, `writeCharacter`, `updateCharacter`,
+  `removeCharacter`, `atomicWriteFile` / `atomicWriteJson`,
+  `cleanStaleTempFiles`, `HeroStoreError` (`invalid_hero_id`, `reserved_id`,
+  `invalid_character`, `hero_file_broken`, `narrator_required`,
+  `path_is_link`). Paths go through `joinInside`; symbolic links are never
+  followed; writes are temp file → fsync → rename.
+- `src/character-validator.cjs` — `validateCharacterFile(doc, {filename})`,
+  `validateBehaviourGlobals(doc)` (also exported from `bundle-validator.cjs`).
+- `src/vbook-version.cjs` — `assertSupportedVbookVersion(manifest)`,
+  `BookModelError('UNSUPPORTED_VBOOK_VERSION')`, `unsupportedVersionBody`.
+- `exportBookBundle(bookId, {skipBroken})`, `bundleFilesFromBook(book)` — one
+  serializer for save and export; export goes by the format whitelist.
+- Voice port: `resolveReferenceFile(buildDir, ref, heroId?)`,
+  `referenceState(buildDir, ref, heroId?)`.
+- `schemas/character-1.schema.json` (byte copy of the normative schema),
+  `schemas/vbook-bundle-4.schema.json`.
+
+### Changed (breaking)
+
+- `loadBook` / `loadDraftBook` / `bookModel.loadBook` throw
+  `BookModelError('UNSUPPORTED_VBOOK_VERSION')` for a 3.1 book, a book without
+  a version and a newer one; `null` now means only "no such book".
+- `saveBookBundle(book)` saves the object only; the raw-files mode
+  (`saveBookBundle(book, files)`) is removed. Everything is validated before
+  the first write; hero files are written only when changed, and a broken hero
+  file is never overwritten or deleted.
+- `extractBookBundle` / `buildBookFromBundle` take exact paths: no suffix
+  search, no prefix folder (`MANIFEST_NOT_IN_ROOT`), no chapter files in the
+  archive root. An archive with a broken hero file is refused
+  (`HERO_FILE_BROKEN`, status 422, `.issues`).
+- `safe-paths`: the entry whitelist is the v4 layout; `classifyBundleEntry`.
+- Voice port storage: `voices.json[id]` → `characters/<id>.json` → `voice`.
+  Names, fields and checks of the port are unchanged; a reference must point
+  into the hero's own folder; `model` / `seed` without a value are stored as
+  absent keys.
+- lazy-book: a new book is created with `characters/narrator.json` and
+  `behaviour.json`; `create.js` writes heroes through the character store, no
+  longer writes `mentions.json`, keeps the voice of an existing hero, and
+  writes `scene.look_patch` instead of `scene.passport`. `getCharactersPath`,
+  `getMentionsPath`, `getVoicesPath`, `getBehaviorPath` are removed
+  (`getCharactersDir`, `getBehaviourPath`).
+
+### Removed
+
+- `src/behavior-schema.cjs` (subpath `./behavior-schema.cjs`, `behaviorSchema`
+  on the root), `addDirToZip`, `schemas/vbook-bundle-3.1.schema.json`.
+
 ## 0.4.0 (2026-11-12, unpublished)
 
 Character voice port + voice references (animastor-docs

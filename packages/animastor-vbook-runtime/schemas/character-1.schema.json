@@ -1,0 +1,504 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://animastor.org/docs/architecture/schemas/animastor.character-1.schema.json",
+  "title": "animastor.character/1",
+  "description": "Файл героя VBook v4: characters/<id>.json. Нормативное описание — architecture/VBOOK_FORMAT_V4.md §4. Неизвестные ключи сохраняются при чтении и записи; валидатор сообщает о них предупреждением unknown_key.",
+  "type": "object",
+  "required": [
+    "schema",
+    "id"
+  ],
+  "properties": {
+    "schema": {
+      "const": "animastor.character/1"
+    },
+    "id": {
+      "$ref": "#/$defs/characterId"
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "role": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Свободный текст (protagonist, editor, …). Зарезервировано: narrator — диктор; допустим только у героя с id narrator."
+    },
+    "aliases": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "description": "Как автор называет героя в тексте. Уникальны внутри героя после normalizeForMatch; не равны name."
+    },
+    "passport": {
+      "$ref": "#/$defs/passport"
+    },
+    "looks": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/look"
+      },
+      "description": "Именованные облики героя — перекрытия паспорта (VBOOK_FORMAT_V4.md §4a). Только у героя с passport; id обликов уникальны внутри героя (проверяет валидатор)."
+    },
+    "voice": {
+      "$ref": "#/$defs/voice"
+    },
+    "behaviour": {
+      "$ref": "#/$defs/behaviour"
+    },
+    "image_refs": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/imageRef"
+      }
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 10000,
+      "description": "Заметки человека. В промпты не попадают."
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role": {
+            "const": "narrator"
+          }
+        },
+        "required": [
+          "role"
+        ]
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "const": "narrator"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "const": "narrator"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "role": {
+            "const": "narrator"
+          }
+        },
+        "required": [
+          "role"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "looks"
+        ],
+        "properties": {
+          "looks": {
+            "minItems": 1
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "passport"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "characterId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$",
+      "maxLength": 64,
+      "not": {
+        "enum": [
+          "manifest",
+          "book",
+          "bible",
+          "locations",
+          "voices",
+          "characters",
+          "behavior",
+          "behaviour",
+          "mentions",
+          "index"
+        ]
+      },
+      "description": "Канонический snake_case id. Имя файла — ровно <id>.json."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "passport": {
+      "type": "object",
+      "description": "Внешность для картинок и видео. Герой без passport — «только голос».",
+      "properties": {
+        "appearance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "clothes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "video_tokens": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "1–4 коротких визуальных признака."
+        }
+      },
+      "additionalProperties": true
+    },
+    "voice": {
+      "type": "object",
+      "description": "Голос героя. Текст для TTS собирается функцией voiceInstruct: join(timbre, manner).",
+      "properties": {
+        "timbre": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000,
+          "description": "Кто звучит: пол, возраст, тембр, акцент, произношение. Вход создания референса (VoiceDesign)."
+        },
+        "manner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2000,
+          "description": "Как говорит обычно: темп, интонация, речевые привычки. Вход instruct при синтезе."
+        },
+        "reference": {
+          "$ref": "#/$defs/voiceReference"
+        }
+      },
+      "additionalProperties": true
+    },
+    "voiceReference": {
+      "type": "object",
+      "required": [
+        "file",
+        "sha256"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "pattern": "^voices/[a-z0-9_]+/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.(wav|flac|mp3|ogg)$",
+          "description": "Путь относительно build_<book_id>/. Второй сегмент равен id героя (проверяется валидатором, не схемой)."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ref_text": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "source": {
+          "enum": [
+            "designed",
+            "uploaded"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verification": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "pending | passed | failed; значения задаёт задача референсных голосов."
+        },
+        "locked": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "behaviour": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "object",
+          "description": "Характер героя: baseline, quirks, reactions (Character Behavior, VBOOK_BEHAVIOUR.md).",
+          "properties": {
+            "baseline": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "quirks": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
+            "reactions": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "properties": {
+                  "trigger": {
+                    "type": "string"
+                  },
+                  "reaction": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          },
+          "description": "Правила этого героя. scope и character_id в файле не пишутся — следуют из места хранения."
+        }
+      },
+      "additionalProperties": false
+    },
+    "rule": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "description": "Правило поведения, VBOOK_BEHAVIOUR.md §2.1. Здесь проверяется только форма; смысловая валидация (словарь эмоций, clamp) — behaviour-rules.js хоста.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "when": {
+          "type": "object"
+        },
+        "then": {
+          "type": "object"
+        },
+        "strength": {
+          "type": "number"
+        },
+        "probability": {
+          "type": "number"
+        },
+        "cooldown_iu": {
+          "type": "integer"
+        },
+        "priority": {
+          "type": "number"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "scope"
+            ]
+          },
+          {
+            "required": [
+              "character_id"
+            ]
+          }
+        ]
+      },
+      "additionalProperties": true
+    },
+    "imageRef": {
+      "type": "object",
+      "required": [
+        "file",
+        "sha256"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "pattern": "^refs/images/[a-z0-9_]+/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.(png|jpg|jpeg|webp)$",
+          "description": "Путь относительно build_<book_id>/. Третий сегмент равен id героя (проверяется валидатором)."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "kind": {
+          "enum": [
+            "portrait",
+            "full_body",
+            "other"
+          ],
+          "default": "other"
+        },
+        "source": {
+          "enum": [
+            "generated",
+            "uploaded"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "locked": {
+          "type": "boolean",
+          "default": false
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "additionalProperties": true
+    },
+    "lookId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$",
+      "maxLength": 64,
+      "not": {
+        "const": "base"
+      },
+      "description": "Id облика внутри героя. base зарезервирован за базовым паспортом."
+    },
+    "lookFields": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "Поля, которые облик заменяет ЦЕЛИКОМ. Отсутствующее поле берётся из базового паспорта.",
+      "properties": {
+        "appearance": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clothes": {
+          "type": "string",
+          "minLength": 1
+        },
+        "video_tokens": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "look": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "fields"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/lookId"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "fields": {
+          "$ref": "#/$defs/lookFields"
+        },
+        "image_ref": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/imageRef"
+            }
+          ],
+          "description": "Референс-картинка облика; генерация — будущая задача."
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "evidence": {
+          "type": "object",
+          "description": "Откуда облик: цитата из текста (будущая автоматизация, §4a.6).",
+          "properties": {
+            "quote": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "chapter_id": {
+              "type": "string"
+            },
+            "scene_id": {
+              "type": "string"
+            },
+            "unit_id": {
+              "type": "string"
+            },
+            "basis": {
+              "enum": [
+                "explicit",
+                "inferred"
+              ]
+            },
+            "status": {
+              "enum": [
+                "suggested",
+                "accepted"
+              ]
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

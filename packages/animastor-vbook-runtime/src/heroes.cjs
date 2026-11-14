@@ -142,6 +142,47 @@ function heroRules(book) {
     return { rules, duplicates };
 }
 
+// Display order (§3): the narrator first, then ids from book.json's
+// structure.characters_order (a hint — unknown and missing ids are fine),
+// then the rest alphabetically. Returns a new array.
+function sortHeroes(heroes, charactersOrder) {
+    const order = Array.isArray(charactersOrder) ? charactersOrder : [];
+    const rank = new Map();
+    order.forEach((id, i) => { if (typeof id === 'string' && !rank.has(id)) rank.set(id, i); });
+    return [...heroes].sort((a, b) => {
+        if (a.id === b.id) return 0;
+        if (a.id === NARRATOR_ID) return -1;
+        if (b.id === NARRATOR_ID) return 1;
+        const ra = rank.has(a.id) ? rank.get(a.id) : Infinity;
+        const rb = rank.has(b.id) ? rank.get(b.id) : Infinity;
+        if (ra !== rb) return ra - rb;
+        return a.id < b.id ? -1 : 1;
+    });
+}
+
+// Book-level findings about the cast (§10.3), added to hero_issues by the
+// loaders next to the per-file ones:
+//   narrator_missing   (blocking)     — no healthy characters/narrator.json
+//   duplicate_rule_id  (non-blocking) — the later rule is not applied (§6.2)
+//   ambiguous_alias    (non-blocking) — the alias is left out of the index (§7)
+function collectBookHeroIssues(book) {
+    const issues = [];
+    if (!narrator(book)) {
+        issues.push({
+            file: 'characters/narrator.json', hero_id: NARRATOR_ID, code: 'narrator_missing',
+            message: 'the narrator file is missing or broken; narration uses the default voice',
+            blocking: true,
+        });
+    }
+    for (const id of heroRules(book).duplicates) {
+        issues.push({ code: 'duplicate_rule_id', message: `behaviour rule id "${id}" is used more than once; the later rule is not applied`, blocking: false });
+    }
+    for (const alias of buildAliasIndex(heroList(book)).ambiguous) {
+        issues.push({ code: 'ambiguous_alias', message: `alias "${alias}" is claimed by more than one hero`, blocking: false });
+    }
+    return issues;
+}
+
 module.exports = {
     CANONICAL_ID_RE,
     MAX_HERO_ID_LENGTH,
@@ -156,4 +197,6 @@ module.exports = {
     voiceInstruct,
     buildAliasIndex,
     heroRules,
+    sortHeroes,
+    collectBookHeroIssues,
 };

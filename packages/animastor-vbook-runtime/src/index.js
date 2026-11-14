@@ -1,52 +1,37 @@
 // ======================================================
-// Book Module - v2.1.0
+// Book Module — VBook 4
 // ======================================================
 // Handles book loading, saving, and bundle operations.
 // NOT stateful - just pure file/book operations.
 //
-// Storage format (v2.1): multi-file directory structure
-// Cover is a standard chapter stored in chapters/ directory
-// with chapter_title: "Обложка". No standalone cover.json.
+// Format (architecture/VBOOK_FORMAT_V4.md §3) — the same flat layout on disk
+// and inside a .vbook archive, addressed by EXACT path:
 //
 //   /data/books/<bookId>/
-//     manifest.json
-//     book.json
+//     manifest.json         vbook_version: 4
+//     book.json             structure.chapters_order + structure.characters_order
 //     bible.json            (optional)
-//     characters.json       (optional)
-//     behavior.json         (always present — per-character behavior keyed by character_id, starts as {})
+//     locations.json        (optional)
+//     behaviour.json        book-level behaviour: defaults + global rules (§6.3)
+//     characters/
+//       narrator.json       the narrator is a hero; created with the book
+//       <id>.json           one file per hero — animastor.character/1 (§4)
 //     chapters/
-//       ch-XXXXXXXX.json    (one per chapter, Cover is first)
+//       ch-XXXXXXXX.json    one per chapter; the cover is a regular chapter
+//     source.txt            (optional) source text, needed to continue analysis
 //
-// Legacy single-file format is still readable for migration:
-//   /data/books/<bookId>.json
+// In memory (§8.1):
+//   { manifest, book, bible, locations, behaviour, heroes[], hero_issues[], chapters[] }
+// There are no characters / voices / behaviors / mentions maps: readers use the
+// helpers in ./heroes.cjs, ./looks.cjs and the voice port (./voice).
 //
-// ── behavior.json — schema v2 (see ./behavior-schema.cjs) ────────────────
-// Disk and memory: {schema_version: 2, rules: [...], characters: {<id>: …}}.
-// A file without schema_version is the legacy v2.1 flat map and is migrated
-// on load (every top-level key = a character entry); saves are always v2.
-// HTTP responses project it back to the flat map + read-only behavior_rules
-// (projectBookBehaviorsForApi). Character entries (characters.<id>) follow
-// the v2.1 Character Behavior contract below.
+// VBook 3.1 is not readable and there is no migration (§9): every loader and
+// the importer call assertSupportedVbookVersion and fail with
+// BookModelError('UNSUPPORTED_VBOOK_VERSION').
 //
-// Character entry: character_id → behavior object. The object is SCHEMA-TOLERANT:
-// unknown keys (including future fields) are preserved on every load/save
-// round-trip. Fields:
-//
-//   baseline    : string?                  — how the character behaves NORMALLY
-//   quirks      : string[]?                — recurring habits (one entry each)
-//   reactions   : [{trigger, reaction}]?   — trigger → reaction patterns
-//                                            (trigger: what happens to/around
-//                                             the character; reaction: what the
-//                                             character does)
-//
-// Deliberately deferred (do NOT add in the editor pass): frequency/intensity,
-// priority, extraction from book text, runtime interpretation, state machines.
-// Editors (web + Android) edit quirks/reactions as line-based text: one entry
-// per line, reactions use "trigger → reaction" (also "->"). An untouched card
-// never rewrites the stored array, so future per-reaction keys added by other
-// tools survive; the editor replaces the array only when its text changed.
-// POST /behaviors seeds {baseline}; all other fields are edited via
-// PATCH /behaviors/{characterId} (fields merged via setDeep, passthrough).
+// One serializer: bundleFilesFromBook(book) turns the model into the exact
+// file set. saveBookBundle writes that set, exportBookBundle zips it — so
+// export → import → export yields the same files.
 
 const fs = require('fs');
 const path = require('path');
@@ -54,54 +39,36 @@ const zlib = require('zlib');
 const AdmZip = require('adm-zip');
 const safePaths = require('./safe-paths');
 const {
-    InvalidInputError, BUNDLE_LIMITS,
+    InvalidInputError, BUNDLE_LIMITS, CHAPTERS_PREFIX, CHARACTERS_PREFIX,
     assertBookId, assertBuildId, isValidBookId, joinInside, assertInside,
-    isUnsafeEntryName, isAllowedBundleEntry, isChapterFileName,
+    isUnsafeEntryName, classifyBundleEntry, isChapterFileName,
 } = safePaths;
 
-const { validateBundleFile } = require('./bundle-validator.cjs');
-const behaviorSchema = require('./behavior-schema.cjs');
+const {
+    validateBundleFile, validateCharacterFile, validateBehaviourGlobals,
+} = require('./bundle-validator.cjs');
+const { emptyBehaviourGlobals } = require('./character-validator.cjs');
+const vbookVersion = require('./vbook-version.cjs');
+const { assertSupportedVbookVersion, BookModelError, SUPPORTED_VBOOK_VERSION } = vbookVersion;
 const voice = require('./voice');
 const looks = require('./looks.cjs');
 const heroes = require('./heroes.cjs');
 const characterStore = require('./character-store.cjs');
+const { HeroStoreError } = characterStore;
 const { getBooksRoot } = require('./books-root');
 
-// Last line of defense before disk: every bundle resource that saveBookBundle
-// is about to write must satisfy the canonical JSON contract. A failure THROWS
-// before the FIRST write — previous valid state on disk stays untouched and
-// callers report the error instead of a successful save.
-function assertBundleFilesWritable(book) {
-    const candidates = [
-        ['manifest.json', book.manifest],
-        ['book.json', book.book ?? {}],
-        ['bible.json', book.bible],
-        ['locations.json', book.locations],
-        ['voices.json', book.voices],
-        ['behavior.json', book.behaviors],
-        ['characters.json', book.characters],
-    ];
-    for (const [filename, data] of candidates) {
-        if (data === undefined || data === null) continue;
-        const check = validateBundleFile(filename, data);
-        if (!check.valid) {
-            throw new Error(`Bundle validation failed (${filename}): ${check.errors.join('; ')}`);
-        }
-    }
-    if (Array.isArray(book.chapters)) {
-        for (let i = 0; i < book.chapters.length; i++) {
-            const chapter = book.chapters[i];
-            const label = `chapters/${chapter?.chapter_id ?? i}.json`;
-            if (chapter === null || typeof chapter !== 'object' || Array.isArray(chapter)) {
-                throw new Error(`Bundle validation failed (${label}): chapter must be an object`);
-            }
-            const check = validateBundleFile('chapter.json', chapter);
-            if (!check.valid) {
-                throw new Error(`Bundle validation failed (${label}): ${check.errors.join('; ')}`);
-            }
-        }
-    }
+function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
+
+const MANIFEST_FILE = 'manifest.json';
+const BOOK_FILE = 'book.json';
+const BIBLE_FILE = 'bible.json';
+const LOCATIONS_FILE = 'locations.json';
+const BEHAVIOUR_FILE = 'behaviour.json';
+const SOURCE_FILE = 'source.txt';
+
+const toJson = (value) => JSON.stringify(value, null, 2);
 
 // ======================================================
 // PATH HELPERS
@@ -124,15 +91,94 @@ function getBookPath(bookId) {
 }
 
 function getChapterDir(bookDir) {
-    return path.join(bookDir, 'chapters');
-}
-
-function getChapterPath(bookDir, chapterFile) {
-    return path.join(getChapterDir(bookDir), chapterFile);
+    return joinInside(bookDir, 'chapters');
 }
 
 // ======================================================
-// BOOK BUNDLE OPERATIONS
+// VALIDATION BEFORE WRITE
+// ======================================================
+
+function heroProblemList(issues) {
+    return issues.map((i) => `${i.file} (${i.code})`).join(', ');
+}
+
+// Last line of defense before disk: everything saveBookBundle is about to
+// write must satisfy the format. A failure THROWS before the FIRST write —
+// the previous valid state on disk stays untouched and callers report the
+// error instead of a successful save.
+function assertBundleFilesWritable(book, bookDir) {
+    assertSupportedVbookVersion(book.manifest);
+    const candidates = [
+        [MANIFEST_FILE, book.manifest],
+        [BOOK_FILE, book.book ?? {}],
+        [BIBLE_FILE, book.bible],
+        [LOCATIONS_FILE, book.locations],
+        [BEHAVIOUR_FILE, book.behaviour],
+    ];
+    for (const [filename, data] of candidates) {
+        if (data === undefined || data === null) continue;
+        const check = validateBundleFile(filename, data);
+        if (!check.valid) {
+            throw new Error(`Bundle validation failed (${filename}): ${check.errors.join('; ')}`);
+        }
+    }
+    for (const key of ['characters', 'voices', 'behaviors', 'mentions']) {
+        if (book[key] !== undefined) {
+            throw new Error(`Bundle validation failed: book.${key} is not part of VBook 4 — heroes live in book.heroes`);
+        }
+    }
+
+    if (book.heroes !== undefined) {
+        if (!Array.isArray(book.heroes)) {
+            throw new Error('Bundle validation failed (heroes): must be an array');
+        }
+        const seen = new Set();
+        for (const hero of book.heroes) {
+            const id = isPlainObject(hero) ? hero.id : undefined;
+            if (!heroes.isCanonicalHeroId(id)) {
+                throw new Error(`Bundle validation failed (heroes): invalid hero id ${JSON.stringify(id)}`);
+            }
+            const filename = `${CHARACTERS_PREFIX}${id}.json`;
+            const check = validateBundleFile(filename, hero);
+            if (!check.valid) {
+                throw new Error(`Bundle validation failed (${filename}): ${check.errors.join('; ')}`);
+            }
+            if (seen.has(id)) {
+                throw new Error(`Bundle validation failed (${filename}): duplicate hero id`);
+            }
+            seen.add(id);
+            // A broken file under this id is never overwritten (§10.3).
+            if (bookDir) {
+                const found = characterStore.inspectCharacter(bookDir, id);
+                if (found.state === 'broken') {
+                    throw new HeroStoreError('hero_file_broken',
+                        `Bundle validation failed (${filename}): the file on disk is broken (${found.issue.code}) — fix or delete it first`,
+                        { hero_id: id, issues: [found.issue] });
+                }
+            }
+        }
+    }
+
+    if (Array.isArray(book.chapters)) {
+        for (let i = 0; i < book.chapters.length; i++) {
+            const chapter = book.chapters[i];
+            const label = `chapters/${chapter?.chapter_id ?? i}.json`;
+            if (chapter === null || typeof chapter !== 'object' || Array.isArray(chapter)) {
+                throw new Error(`Bundle validation failed (${label}): chapter must be an object`);
+            }
+            const check = validateBundleFile('chapter.json', chapter);
+            if (!check.valid) {
+                throw new Error(`Bundle validation failed (${label}): ${check.errors.join('; ')}`);
+            }
+            if (!safePaths.isSafeChapterFile(`${chapter.chapter_id}.json`)) {
+                throw new InvalidInputError('INVALID_BUNDLE', 'invalid chapter id');
+            }
+        }
+    }
+}
+
+// ======================================================
+// BOOK BUNDLE OPERATIONS (.vbook archive)
 // ======================================================
 
 /**
@@ -140,7 +186,10 @@ function getChapterPath(bookDir, chapterFile) {
  * Throws InvalidInputError for archives that must be refused as a whole
  * (unsafe names, symlinks, encryption, duplicates, size/count limits).
  * @param {Buffer} buffer
- * @returns {{ zip: AdmZip, entries: object[], payload: object[], skipped: number }}
+ * @returns {{ zip: AdmZip, entries: object[], payload: object[], skipped: number,
+ *             skippedNames: string[], badCharacters: string[], hasRootManifest: boolean }}
+ *          payload — whitelisted format-4 entries; badCharacters — entries below
+ *          characters/ that are not a hero file (the importer refuses them)
  */
 function inspectBookBundle(buffer, limits = BUNDLE_LIMITS) {
     let zip;
@@ -155,7 +204,8 @@ function inspectBookBundle(buffer, limits = BUNDLE_LIMITS) {
     }
     const seen = new Set();
     const payload = [];
-    let skipped = 0;
+    const skippedNames = [];
+    const badCharacters = [];
     let total = 0;
     for (const entry of entries) {
         const name = entry.entryName;
@@ -175,7 +225,9 @@ function inspectBookBundle(buffer, limits = BUNDLE_LIMITS) {
         }
         seen.add(key);
         if (entry.isDirectory) continue;
-        if (!isAllowedBundleEntry(name)) { skipped++; continue; }
+        const kind = classifyBundleEntry(name);
+        if (kind === 'bad_character') { badCharacters.push(name); continue; }
+        if (kind === null) { skippedNames.push(name); continue; }
         const size = entry.header ? entry.header.size : 0;
         if (!(size >= 0) || size > limits.maxEntryBytes) {
             throw new InvalidInputError('ARCHIVE_TOO_LARGE', 'archive entry too large');
@@ -186,7 +238,13 @@ function inspectBookBundle(buffer, limits = BUNDLE_LIMITS) {
         }
         payload.push(entry);
     }
-    return { zip, entries, payload, skipped };
+    return {
+        zip, entries, payload,
+        skipped: skippedNames.length,
+        skippedNames,
+        badCharacters,
+        hasRootManifest: payload.some((e) => e.entryName === MANIFEST_FILE),
+    };
 }
 
 /** Decompress one entry with a hard output cap (declared sizes can lie). */
@@ -211,17 +269,31 @@ function readEntryCapped(entry, cap) {
     return out;
 }
 
+function manifestNotInRoot() {
+    return new InvalidInputError('MANIFEST_NOT_IN_ROOT',
+        'manifest.json must be in the archive root (a .vbook has no top-level folder)');
+}
+
+function brokenHeroesError(issues) {
+    return new InvalidInputError('HERO_FILE_BROKEN',
+        `broken hero file${issues.length === 1 ? '' : 's'}: ${heroProblemList(issues)}`,
+        { status: 422, issues });
+}
+
 /**
- * Extract book bundle from buffer.
- * Only whitelisted format-3.1 entries are returned; other entries are
- * skipped (counted, never written). Unsafe archives are refused.
+ * Extract a .vbook archive into { <exact path>: <text> }.
+ * Only whitelisted format-4 entries are returned; other entries are skipped
+ * (counted, never written). Refused as a whole: unsafe archives, an archive
+ * without manifest.json in its root (MANIFEST_NOT_IN_ROOT) and an archive with
+ * something below characters/ that is not a hero file (HERO_FILE_BROKEN).
  * @param {Buffer} buffer - The zipped bundle buffer
  * @param {object} [opts] - { log?: (msg) => void, limits? }
- * @returns {Object} - Object with file contents keyed by filename (string values like backend expects)
+ * @returns {Object} file contents keyed by exact archive path
  */
 function extractBookBundle(buffer, opts = {}) {
     const limits = opts.limits || BUNDLE_LIMITS;
-    const { payload, skipped } = inspectBookBundle(buffer, limits);
+    const { payload, skipped, badCharacters, hasRootManifest } = inspectBookBundle(buffer, limits);
+    if (!hasRootManifest) throw manifestNotInRoot();
     const files = {};
     let total = 0;
     for (const entry of payload) {
@@ -232,6 +304,14 @@ function extractBookBundle(buffer, opts = {}) {
         }
         files[entry.entryName] = data.toString('utf8');
     }
+    if (badCharacters.length > 0) {
+        // Version first: a 3.1 archive must be told "unsupported version", not
+        // "broken hero file", whatever else it carries.
+        assertSupportedVbookVersion(parseManifest(files));
+        throw brokenHeroesError(badCharacters.map((name) => ({
+            file: name, code: 'filename_mismatch', message: 'a hero file must be named characters/<id>.json', blocking: true,
+        })));
+    }
     if (skipped > 0) {
         const log = typeof opts.log === 'function' ? opts.log : console.warn;
         log(`[VBOOK] ${skipped} archive entr${skipped === 1 ? 'y' : 'ies'} outside the bundle format skipped`);
@@ -239,410 +319,324 @@ function extractBookBundle(buffer, opts = {}) {
     return files;
 }
 
-/**
- * Build book from extracted bundle.
- * @param {Object} rawFiles - Object with file contents keyed by filename
- * @returns {Object} - The built book object with full metadata
- */
-function buildBookFromBundle(rawFiles) {
-    const normalize = (p) =>
-        p
-            .replace(/\\\\/g, "/")
-            .replace(/\r/g, "")
-            .replace(/^(\.\/)+/, "")
-            .trim()
-    const files = {}
-    Object.entries(rawFiles).forEach(([k, v]) => {
-        files[normalize(k)] = v
-    })
-    const keys = Object.keys(files)
-
-    const findFile = (name) =>
-        keys.find(k => k.toLowerCase().endsWith(name))
-
-    // Manifest
-    const manifestKey = findFile("manifest.json")
-    if (!manifestKey) {
-        throw new Error("manifest.json not found. Files: " + keys.join(", "))
-    }
-    let manifest
+function parseJsonFile(files, name) {
     try {
-        manifest = JSON.parse(files[manifestKey])
+        return JSON.parse(files[name]);
     } catch {
-        throw new Error("Invalid JSON in manifest.json")
+        throw new Error(`Invalid JSON in ${name}`);
     }
-    if (!manifest.book_id) {
-        throw new Error("manifest.book_id missing")
-    }
-    assertBookId(manifest.book_id)
-    if (manifest.build_id !== undefined && manifest.build_id !== null) {
-        assertBuildId(manifest.build_id)
-    }
+}
 
-    // Bible, locations & characters
-    const bibleKey = findFile("bible.json")
-    const locationsKey = findFile("locations.json")
-    const charactersKey = findFile("characters.json")
-    let bible = {}
-    let characters = []
-    if (bibleKey) {
-        try {
-            bible = JSON.parse(files[bibleKey])
-        } catch {
-            throw new Error("Invalid JSON in bible.json")
-        }
-    }
-    let locations = {};
-    if (locationsKey) {
-        try {
-            locations = JSON.parse(files[locationsKey]);
-        } catch {
-            throw new Error("Invalid JSON in locations.json")
-        }
-    }
+function parseManifest(files) {
+    if (typeof files[MANIFEST_FILE] !== 'string') throw manifestNotInRoot();
+    const manifest = parseJsonFile(files, MANIFEST_FILE);
+    if (!isPlainObject(manifest)) throw new Error('manifest.json must contain a JSON object');
+    return manifest;
+}
 
-    // Voices
-    const voicesKey = findFile("voices.json");
-    let voices = {};
-    if (voicesKey) {
-        try {
-            voices = JSON.parse(files[voicesKey]);
-        } catch {
-            throw new Error("Invalid JSON in voices.json")
-        }
-    }
-
-    // Behavior (optional, per-character behavior keyed by character_id)
-    const behaviorKey = findFile("behavior.json");
-    let behaviors = behaviorSchema.normalizeBehaviors({});
-    if (behaviorKey) {
-        try {
-            behaviors = behaviorSchema.normalizeBehaviors(JSON.parse(files[behaviorKey]));
-        } catch {
-            throw new Error("Invalid JSON in behavior.json")
-        }
-    }
-    if (charactersKey) {
-        try {
-            characters = JSON.parse(files[charactersKey])
-        } catch {
-            throw new Error("Invalid JSON in characters.json")
-        }
-    }
-
-    // Book metadata
-    const bookKey = findFile("book.json")
-    if (!bookKey) {
-        throw new Error("book.json not found. Files: " + keys.join(", "))
-    }
-    let parsedBook
-    try {
-        parsedBook = JSON.parse(files[bookKey])
-    } catch {
-        throw new Error("Invalid JSON in book.json")
-    }
-    if (!parsedBook.structure?.chapters_order) {
-        throw new Error("book.structure.chapters_order missing")
-    }
-
-    // Chapters
-    if (!Array.isArray(parsedBook.structure.chapters_order)) {
-        throw new Error("book.structure.chapters_order must be an array")
-    }
-    const chapters = parsedBook.structure.chapters_order.map(file => {
-        const base = typeof file === "string" ? file.replace(/^chapters\//, "") : ""
-        if (!isChapterFileName(base)) {
-            throw new InvalidInputError("INVALID_BUNDLE", "invalid chapter file name in chapters_order")
-        }
-        const fullKey = keys.find(k => k === "chapters/" + base) || keys.find(k => k === base)
-        if (!fullKey) {
-            throw new Error("Missing chapter file: " + file)
-        }
-        try {
-            return JSON.parse(files[fullKey])
-        } catch {
-            throw new Error("Invalid JSON in " + fullKey)
-        }
-    })
-    if (!chapters.length) {
-        throw new Error("No chapters loaded")
-    }
-
-    // CANONICAL ID VALIDATION — format: sc-XXXXXXXX, ch-XXXXXXXX, iu-XXXXXXXX
-    function assertCanonicalChapterId(id) {
-        if (!id || !/^ch-[a-f0-9]{6,}$/.test(id)) {
-            throw new Error("Invalid chapter_id: " + id + " (expected: ch-XXXXXXXX)")
-        }
-    }
-    function assertCanonicalSceneId(id) {
-        if (!id || !/^sc-[a-f0-9]{6,}$/.test(id)) {
-            throw new Error("Invalid scene_id: " + id + " (expected: sc-XXXXXXXX)")
-        }
-    }
-    function assertCanonicalUnitId(id) {
-        if (!id || !/^iu-[a-f0-9]{6,}$/.test(id)) {
-            throw new Error("Invalid unit_id: " + id + " (expected: iu-XXXXXXXX)")
-        }
-    }
-
+// CANONICAL ID VALIDATION — format: sc-XXXXXXXX, ch-XXXXXXXX, iu-XXXXXXXX
+function assertCanonicalIds(chapters) {
     for (const chapter of chapters) {
-        assertCanonicalChapterId(chapter.chapter_id)
-        if (chapter.scenes) {
-            for (const scene of chapter.scenes) {
-                assertCanonicalSceneId(scene.scene_id)
-                const allUnits = collectSceneUnits(scene)
-                for (const unit of allUnits) {
-                    assertCanonicalUnitId(unit.id)
+        const cid = chapter && chapter.chapter_id;
+        if (!cid || !/^ch-[a-f0-9]{6,}$/.test(cid)) {
+            throw new Error("Invalid chapter_id: " + cid + " (expected: ch-XXXXXXXX)");
+        }
+        if (!chapter.scenes) continue;
+        for (const scene of chapter.scenes) {
+            const sid = scene && scene.scene_id;
+            if (!sid || !/^sc-[a-f0-9]{6,}$/.test(sid)) {
+                throw new Error("Invalid scene_id: " + sid + " (expected: sc-XXXXXXXX)");
+            }
+            for (const unit of collectSceneUnits(scene)) {
+                if (!unit.id || !/^iu-[a-f0-9]{6,}$/.test(unit.id)) {
+                    throw new Error("Invalid unit_id: " + unit.id + " (expected: iu-XXXXXXXX)");
                 }
             }
         }
     }
+}
 
-    return {
+/**
+ * Build the in-memory book from extracted archive files.
+ * Exact paths only: files are never searched by suffix or under a prefix.
+ * @param {Object} files - { <exact path>: <text> } from extractBookBundle
+ * @returns {Object} { manifest, book, bible, locations, behaviour, heroes,
+ *                     hero_issues, chapters, sourceText? }
+ * @throws {InvalidInputError} MANIFEST_NOT_IN_ROOT | INVALID_BOOK_ID | INVALID_BUNDLE |
+ *                             HERO_FILE_BROKEN (status 422, .issues)
+ * @throws {BookModelError} UNSUPPORTED_VBOOK_VERSION (3.1, no version, newer)
+ */
+function buildBookFromBundle(files) {
+    if (!isPlainObject(files)) throw manifestNotInRoot();
+    const keys = Object.keys(files);
+
+    const manifest = parseManifest(files);
+    if (!manifest.book_id) {
+        throw new Error("manifest.book_id missing");
+    }
+    assertBookId(manifest.book_id);
+    if (manifest.build_id !== undefined && manifest.build_id !== null) {
+        assertBuildId(manifest.build_id);
+    }
+    assertSupportedVbookVersion(manifest);
+
+    if (typeof files[BOOK_FILE] !== 'string') {
+        throw new Error("book.json not found. Files: " + keys.join(", "));
+    }
+    const parsedBook = parseJsonFile(files, BOOK_FILE);
+    if (!parsedBook || !parsedBook.structure?.chapters_order) {
+        throw new Error("book.structure.chapters_order missing");
+    }
+    if (!Array.isArray(parsedBook.structure.chapters_order)) {
+        throw new Error("book.structure.chapters_order must be an array");
+    }
+
+    let bible = {};
+    if (typeof files[BIBLE_FILE] === 'string') {
+        bible = parseJsonFile(files, BIBLE_FILE);
+        if (!isPlainObject(bible)) throw new Error('bible.json must contain a JSON object');
+    }
+    let locations = {};
+    if (typeof files[LOCATIONS_FILE] === 'string') {
+        locations = parseJsonFile(files, LOCATIONS_FILE);
+        if (!isPlainObject(locations)) throw new Error('locations.json must contain a JSON object');
+    }
+
+    let behaviour = emptyBehaviourGlobals();
+    if (typeof files[BEHAVIOUR_FILE] === 'string') {
+        behaviour = parseJsonFile(files, BEHAVIOUR_FILE);
+        const check = validateBehaviourGlobals(behaviour);
+        if (!check.valid) {
+            throw new InvalidInputError('INVALID_BUNDLE',
+                `behaviour.json: ${check.errors.map((e) => (e.path ? `${e.path}: ${e.message}` : e.message)).join('; ')}`);
+        }
+    }
+
+    // Heroes: one file each. An archive with a broken hero file is refused
+    // as a whole — import is an explicit act on a file that can be fixed.
+    const heroList = [];
+    const heroWarnings = [];
+    const broken = [];
+    for (const key of keys.filter((k) => k.startsWith(CHARACTERS_PREFIX)).sort()) {
+        if (classifyBundleEntry(key) !== 'character') {
+            if (classifyBundleEntry(key) === 'bad_character') {
+                broken.push({ file: key, code: 'filename_mismatch', message: 'a hero file must be named characters/<id>.json', blocking: true });
+            }
+            continue;
+        }
+        const entry = characterStore.parseCharacterText(key.slice(CHARACTERS_PREFIX.length), files[key]);
+        if (entry.issue) broken.push(entry.issue);
+        else { heroList.push(entry.hero); heroWarnings.push(...entry.warnings); }
+    }
+    if (broken.length > 0) throw brokenHeroesError(broken);
+
+    const chapters = parsedBook.structure.chapters_order.map(file => {
+        if (!isChapterFileName(file)) {
+            throw new InvalidInputError("INVALID_BUNDLE", "invalid chapter file name in chapters_order");
+        }
+        const key = CHAPTERS_PREFIX + file;
+        if (typeof files[key] !== 'string') {
+            throw new Error("Missing chapter file: " + key);
+        }
+        return parseJsonFile(files, key);
+    });
+    if (!chapters.length) {
+        throw new Error("No chapters loaded");
+    }
+    assertCanonicalIds(chapters);
+
+    const book = {
         manifest,
         book: parsedBook,
         bible,
-        characters,
-        chapters,
         locations,
-        voices,
-        behaviors
-    }
+        behaviour,
+        heroes: heroes.sortHeroes(heroList, parsedBook.structure.characters_order),
+        hero_issues: [],
+        chapters,
+    };
+    book.hero_issues = [...heroWarnings, ...heroes.collectBookHeroIssues(book)];
+    if (typeof files[SOURCE_FILE] === 'string') book.sourceText = files[SOURCE_FILE];
+    return book;
 }
 
 // ======================================================
-// DIRECTORY HELPERS
+// THE ONE SERIALIZER: model → exact file set
 // ======================================================
 
 /**
- * Recursively add directory contents to a ZIP archive.
- * @param {AdmZip} zip
- * @param {string} dirPath - Absolute path on disk
- * @param {string} zipPath - Prefix path inside ZIP
+ * The canonical files of a book: { <exact path>: <text> }, in archive order.
+ * Used by saveBookBundle (what gets written) and exportBookBundle (what gets
+ * zipped). Rules:
+ *  - manifest.vbook_version "4" is written as the integer 4;
+ *  - book.json: chapters_order follows book.chapters (when there are any) and
+ *    characters_order follows book.heroes (when heroes are given);
+ *  - bible.json is written without `locations`, and neither bible.json nor
+ *    locations.json is written when empty;
+ *  - behaviour.json and one characters/<id>.json per hero;
+ *  - hero_issues is never written.
+ * @param {Object} book
+ * @param {{ bookMeta?: object }} [options] bookMeta — a prepared copy of book.json
  */
-function addDirToZip(zip, dirPath, zipPath) {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-        const fullPath = path.join(dirPath, entry.name);
-        const entryZipPath = zipPath ? `${zipPath}/${entry.name}` : entry.name;
-        // Dirent types come from lstat semantics: symlinks are neither
-        // directories nor files here and are never followed or exported.
-        if (entry.isSymbolicLink()) {
-            continue;
-        } else if (entry.isDirectory()) {
-            addDirToZip(zip, fullPath, entryZipPath);
-        } else if (entry.isFile()) {
-            zip.addFile(entryZipPath, fs.readFileSync(fullPath));
-        }
+function bundleFilesFromBook(book, options = {}) {
+    const files = {};
+
+    const manifest = { ...book.manifest };
+    if (manifest.vbook_version === String(SUPPORTED_VBOOK_VERSION)) manifest.vbook_version = SUPPORTED_VBOOK_VERSION;
+    files[MANIFEST_FILE] = toJson(manifest);
+
+    const bookMeta = options.bookMeta
+        ? options.bookMeta
+        : (book.book ? JSON.parse(JSON.stringify(book.book)) : {});
+    if (!isPlainObject(bookMeta.structure)) bookMeta.structure = {};
+    // ⚠️ Only overwrite chapters_order when book.chapters is non-empty.
+    // Lazy books keep chapters as files on disk; a save with an empty chapters
+    // array (e.g. from a stale GET response) would otherwise destroy the
+    // existing chapters_order and make all chapters invisible.
+    const chapterFilenames = (book.chapters || []).map(ch => `${ch.chapter_id}.json`);
+    if (chapterFilenames.length > 0) bookMeta.structure.chapters_order = chapterFilenames;
+    if (Array.isArray(book.heroes)) bookMeta.structure.characters_order = book.heroes.map((h) => h.id);
+    files[BOOK_FILE] = toJson(bookMeta);
+
+    if (book.bible && Object.keys(book.bible).length > 0) {
+        const { locations: _bibleLocs, ...bibleWithoutLocations } = book.bible;
+        files[BIBLE_FILE] = toJson(bibleWithoutLocations);
     }
+    if (book.locations && Object.keys(book.locations).length > 0) {
+        files[LOCATIONS_FILE] = toJson(book.locations);
+    }
+    files[BEHAVIOUR_FILE] = toJson(isPlainObject(book.behaviour) ? book.behaviour : emptyBehaviourGlobals());
+
+    for (const hero of Array.isArray(book.heroes) ? book.heroes : []) {
+        files[`${CHARACTERS_PREFIX}${hero.id}.json`] = characterStore.serializeCharacter(hero);
+    }
+    for (const chapter of book.chapters || []) {
+        files[`${CHAPTERS_PREFIX}${chapter.chapter_id}.json`] = toJson(chapter);
+    }
+    if (typeof book.sourceText === 'string') files[SOURCE_FILE] = book.sourceText;
+    return files;
 }
 
 // ======================================================
-// BOOK PERSISTENCE (multi-file format, v2)
+// BOOK PERSISTENCE
 // ======================================================
 
+function readTextNoFollow(file) {
+    const st = lstatOrNull(file);
+    if (!st || !st.isFile()) return null;
+    return fs.readFileSync(file, 'utf8');
+}
+
+function lstatOrNull(p) {
+    try { return fs.lstatSync(p); } catch (_) { return null; }
+}
+
 /**
- * Save book bundle to disk using multi-file format.
- * @param {Object} book - The book object {manifest, book, bible, characters, chapters}
- * @param {Object|null} files - Optional raw file contents from extractBookBundle.
- *        When provided, files are written with original content preserving formatting.
- *        When null, book object is serialised into individual files.
+ * Save the book to disk. Object path only: the model is validated as a whole
+ * BEFORE the first write, then written through the one serializer.
+ *
+ *  - manifest.json, book.json, bible.json, locations.json and behaviour.json
+ *    are written atomically (temp file → fsync → rename);
+ *  - heroes go through the character store: a hero file is written only when
+ *    its serialization differs from disk, and removed only when it reads
+ *    successfully and its id is not in book.heroes. The narrator's file and
+ *    broken files are never removed here;
+ *  - `book.heroes === undefined` leaves the cast on disk untouched;
+ *  - source.txt is written only when book.sourceText is a string, never removed.
+ *
+ * @param {Object} book - { manifest, book, bible, locations, behaviour, heroes, chapters }
  */
-function saveBookBundle(book, files) {
+function saveBookBundle(book, ...rest) {
+    if (rest.length > 0 && rest[0] !== undefined && rest[0] !== null) {
+        // The raw-files mode of 3.1 wrote archive entries to disk verbatim.
+        throw new Error('saveBookBundle(book, files) is gone: VBook 4 saves the book object only');
+    }
     const bookId = book.manifest?.book_id;
     if (!bookId) {
         throw new Error('Book ID not found in manifest');
     }
 
     const booksDir = getBooksDir();
+    const bookDir = getBookDir(bookId);
+    assertNotLink(bookDir);
+
+    // Validate the complete bundle BEFORE the first write (validate → write,
+    // never write → discover).
+    assertBundleFilesWritable(book, bookDir);
+
     if (!fs.existsSync(booksDir)) {
         fs.mkdirSync(booksDir, { recursive: true });
     }
-
-    const bookDir = getBookDir(bookId);
-    assertNotLink(bookDir);
     if (!fs.existsSync(bookDir)) {
         fs.mkdirSync(bookDir, { recursive: true });
     }
-
-    // When raw files map is provided, write them in canonical multi-file format:
-    // non-chapter files → book root, chapter files → chapters/ subdirectory.
-    if (files && typeof files === 'object' && Object.keys(files).length > 0) {
-        const normalize = (p) =>
-            p.replace(/\\\\/g, "/").replace(/\r/g, "").replace(/^(\.\/)+/, "").trim()
-
-        // Кирпич №2 (Persistent Layer Configuration): ре-импорт пишет book.json
-        // verbatim из бандла, который может не содержать layer_config (экспорт
-        // сделан до этого кирпича). Захватываем durable-копию ДО перезаписи,
-        // чтобы после неё не потерять конфиг отключённых слоёв.
-        let existingLayerConfig = null;
-        const priorMetaPath = path.join(bookDir, 'book.json');
-        if (fs.existsSync(priorMetaPath)) {
-            try {
-                const prior = JSON.parse(fs.readFileSync(priorMetaPath, 'utf8'));
-                if (prior && prior.layer_config && typeof prior.layer_config === 'object') {
-                    existingLayerConfig = prior.layer_config;
-                }
-            } catch (_) { /* best-effort */ }
-        }
-
-        // Determine which files are chapters from book.structure.chapters_order
-        const chaptersOrder = book.book?.structure?.chapters_order || [];
-        const chapterBasenames = new Set(
-            chaptersOrder.map(cf => cf.split('/').pop())
-        );
-        const rootBasenames = new Set(
-            ['manifest.json', 'book.json', 'bible.json', 'locations.json', 'voices.json', 'characters.json', 'behavior.json']
-        );
-
-        // Validate the complete write set BEFORE the first write: only
-        // whitelisted format entries, every target strictly inside bookDir.
-        const writes = [];
-        let skippedEntries = 0;
-        for (const [filePath, content] of Object.entries(files)) {
-            if (isUnsafeEntryName(filePath)) {
-                throw new InvalidInputError('INVALID_ARCHIVE_ENTRY', 'archive contains an invalid entry name');
-            }
-            const normalized = normalize(filePath);
-            if (!isAllowedBundleEntry(normalized)) { skippedEntries++; continue; }
-            const basename = normalized.split('/').pop();
-
-            let targetPath;
-            if (isChapterFileName(basename) && (chapterBasenames.has(basename) || normalized.startsWith('chapters/'))) {
-                // Chapter file → chapters/ subdirectory
-                targetPath = joinInside(bookDir, 'chapters', basename);
-            } else if (isChapterFileName(basename)) {
-                targetPath = joinInside(bookDir, 'chapters', basename);
-            } else {
-                targetPath = joinInside(bookDir, basename);
-            }
-            writes.push([targetPath, content]);
-        }
-        if (skippedEntries > 0) {
-            console.warn(`[SAVE] ${bookId}: ${skippedEntries} non-format entr${skippedEntries === 1 ? 'y' : 'ies'} not written`);
-        }
-        for (const [targetPath, content] of writes) {
-            const dir = path.dirname(targetPath);
-            assertNotLink(dir);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            assertNotLink(targetPath);
-            fs.writeFileSync(targetPath, content);
-        }
-
-        // Ensure chapters_order in book.json references filenames without path,
-        // and restore the durable layer_config captured before the rewrite.
-        const bookMetaPath = path.join(bookDir, 'book.json');
-        if (fs.existsSync(bookMetaPath)) {
-            try {
-                const bookMeta = JSON.parse(fs.readFileSync(bookMetaPath, 'utf8'));
-                if (bookMeta.structure?.chapters_order) {
-                    bookMeta.structure.chapters_order = bookMeta.structure.chapters_order.map(
-                        cf => cf.split('/').pop()
-                    );
-                }
-                // Кирпич №2: ре-импорт не должен уничтожать durable layer_config
-                if (existingLayerConfig && !bookMeta.layer_config) {
-                    bookMeta.layer_config = existingLayerConfig;
-                }
-                fs.writeFileSync(bookMetaPath, JSON.stringify(bookMeta, null, 2));
-            } catch (e) {
-                // Ignore book.json rewrite errors
-            }
-        }
-
-        console.log(`[SAVE] Book: ${bookId} (from raw files, canonical format)`);
-        return;
-    }
-
-    // Object-mode save: validate the complete bundle contract BEFORE the
-    // first writeFileSync (validate → write, never write → discover).
-    // Raw-files mode above is verbatim import content — validated at import.
-    assertBundleFilesWritable(book);
+    const charactersDir = characterStore.charactersDir(bookDir);
+    assertNotLink(charactersDir);
+    characterStore.cleanStaleTempFiles(bookDir);
+    characterStore.cleanStaleTempFiles(charactersDir);
 
     console.log(`[SAVE] Book: ${bookId}, chapters: ${book.chapters?.length}`);
 
-    // Save manifest.json
-    fs.writeFileSync(
-        path.join(bookDir, 'manifest.json'),
-        JSON.stringify(book.manifest, null, 2)
-    );
-
-    // Save book.json with chapters_order synced to actual chapters.
-    // ⚠️ Only overwrite chapters_order when book.chapters is non-empty.
-    // Lazy books keep chapters as files on disk; calling saveBookBundle
-    // with an empty chapters array (e.g. from a stale GET response) would
-    // destroy the existing chapters_order and make all chapters invisible.
-    const bookMeta = book.book ? JSON.parse(JSON.stringify(book.book)) : {};
-    if (!bookMeta.structure) bookMeta.structure = {};
     // Кирпич №2 (Persistent Layer Configuration): durable layer_config живёт в
     // book.json. Редактор может перезаписать book.json из объекта без этого
     // поля (например, закешированного до последнего PUT layer-config) — не
     // даём durable-копии потеряться при перезаписи.
+    const bookMeta = book.book ? JSON.parse(JSON.stringify(book.book)) : {};
     if (!bookMeta.layer_config) {
         try {
-            const onDiskMetaPath = path.join(bookDir, 'book.json');
-            if (fs.existsSync(onDiskMetaPath)) {
-                const onDisk = JSON.parse(fs.readFileSync(onDiskMetaPath, 'utf8'));
-                if (onDisk && onDisk.layer_config && typeof onDisk.layer_config === 'object') {
-                    bookMeta.layer_config = onDisk.layer_config;
-                }
+            const onDiskText = readTextNoFollow(joinInside(bookDir, BOOK_FILE));
+            const onDisk = onDiskText ? JSON.parse(onDiskText) : null;
+            if (onDisk && onDisk.layer_config && typeof onDisk.layer_config === 'object') {
+                bookMeta.layer_config = onDisk.layer_config;
             }
         } catch (_) { /* best-effort */ }
     }
-    const chapterFilenames = (book.chapters || []).map(ch => `${ch.chapter_id}.json`);
-    if (chapterFilenames.length > 0) {
-        bookMeta.structure.chapters_order = chapterFilenames;
-    }
-    fs.writeFileSync(
-        path.join(bookDir, 'book.json'),
-        JSON.stringify(bookMeta, null, 2)
-    );
 
-    // Save bible.json (optional, without locations)
-    const biblePath = path.join(bookDir, 'bible.json');
-    if (book.bible && Object.keys(book.bible).length > 0) {
-        const { locations: _bibleLocs, ...bibleWithoutLocations } = book.bible;
-        fs.writeFileSync(biblePath, JSON.stringify(bibleWithoutLocations, null, 2));
-    } else if (fs.existsSync(biblePath)) {
-        fs.unlinkSync(biblePath);
+    const files = bundleFilesFromBook(book, { bookMeta });
+    const writeRoot = (name) => {
+        const target = joinInside(bookDir, name);
+        if (files[name] !== undefined) {
+            characterStore.atomicWriteFile(target, files[name]);
+        } else if ((name === BIBLE_FILE || name === LOCATIONS_FILE) && lstatOrNull(target)) {
+            assertNotLink(target);
+            fs.unlinkSync(target);
+        }
+    };
+    writeRoot(MANIFEST_FILE);
+    writeRoot(BOOK_FILE);
+    writeRoot(BIBLE_FILE);
+    writeRoot(LOCATIONS_FILE);
+    // behaviour.json: an explicit value is written; without one the file on
+    // disk stays, and a missing file is created so a book always has it.
+    if (isPlainObject(book.behaviour) || !lstatOrNull(joinInside(bookDir, BEHAVIOUR_FILE))) {
+        writeRoot(BEHAVIOUR_FILE);
     }
-
-    // Save locations.json separately
-    const locsPath = path.join(bookDir, 'locations.json');
-    const hasLocations = book.locations && Object.keys(book.locations).length > 0;
-    if (hasLocations) {
-        fs.writeFileSync(locsPath, JSON.stringify(book.locations, null, 2));
-    } else if (fs.existsSync(locsPath)) {
-        fs.unlinkSync(locsPath);
-    }
-
-    // Save voices.json separately
-    const voPath = path.join(bookDir, 'voices.json');
-    const hasVoices = book.voices && Object.keys(book.voices).length > 0;
-    if (hasVoices) {
-        fs.writeFileSync(voPath, JSON.stringify(book.voices, null, 2));
-    } else if (fs.existsSync(voPath)) {
-        fs.unlinkSync(voPath);
+    if (files[SOURCE_FILE] !== undefined) {
+        const target = joinInside(bookDir, SOURCE_FILE);
+        if (readTextNoFollow(target) !== files[SOURCE_FILE]) {
+            characterStore.atomicWriteFile(target, files[SOURCE_FILE]);
+        }
     }
 
-    // Save behavior.json — always persists, always schema v2 (a legacy v2.1
-    // flat map is migrated here). Kept on disk even when empty so the
-    // AI-agent can always discover and populate it via edit_book.
-    const bhPath = path.join(bookDir, 'behavior.json');
-    fs.writeFileSync(bhPath, JSON.stringify(behaviorSchema.normalizeBehaviors(book.behaviors), null, 2));
-
-    // Save characters.json (optional)
-    const charPath = path.join(bookDir, 'characters.json');
-    if (book.characters && book.characters.length > 0) {
-        fs.writeFileSync(charPath, JSON.stringify(book.characters, null, 2));
-    } else if (fs.existsSync(charPath)) {
-        fs.unlinkSync(charPath);
+    // Heroes — only through the character store.
+    if (Array.isArray(book.heroes)) {
+        const wanted = new Set();
+        for (const hero of book.heroes) {
+            wanted.add(hero.id);
+            const onDisk = readTextNoFollow(characterStore.characterFile(bookDir, hero.id));
+            if (onDisk !== characterStore.serializeCharacter(hero)) {
+                characterStore.writeCharacter(bookDir, hero);
+            }
+        }
+        for (const onDisk of characterStore.listCharacters(bookDir).heroes) {
+            if (wanted.has(onDisk.id) || onDisk.id === heroes.NARRATOR_ID) continue;
+            characterStore.removeCharacter(bookDir, onDisk.id);
+        }
     }
 
-    // Save chapters
+    // Chapters
     const chaptersDir = getChapterDir(bookDir);
+    assertNotLink(chaptersDir);
     if (!fs.existsSync(chaptersDir)) {
         fs.mkdirSync(chaptersDir, { recursive: true });
     }
@@ -650,26 +644,22 @@ function saveBookBundle(book, files) {
     const activeChapterFiles = new Set();
     for (const chapter of book.chapters || []) {
         const chapterFile = `${chapter.chapter_id}.json`;
-        if (!safePaths.isSafeChapterFile(chapterFile)) {
-            throw new InvalidInputError('INVALID_BUNDLE', 'invalid chapter id');
-        }
         activeChapterFiles.add(chapterFile);
-        fs.writeFileSync(
-            joinInside(chaptersDir, chapterFile),
-            JSON.stringify(chapter, null, 2)
-        );
+        const target = joinInside(chaptersDir, chapterFile);
+        assertNotLink(target);
+        fs.writeFileSync(target, files[`${CHAPTERS_PREFIX}${chapterFile}`]);
     }
 
     // Clean up orphaned chapter files — ONLY when we have a known chapter list.
     // If chapters array is empty (e.g. from a stale/corrupted load), we don't know
     // which files belong, so NEVER delete anything to avoid data loss.
-    if (chapterFilenames.length > 0) {
+    if (activeChapterFiles.size > 0) {
         try {
             const existingFiles = fs.readdirSync(chaptersDir);
             for (const f of existingFiles) {
                 if (!activeChapterFiles.has(f)) {
                     const fp = path.join(chaptersDir, f);
-                    if (fs.statSync(fp).isFile()) {
+                    if (fs.lstatSync(fp).isFile()) {
                         fs.unlinkSync(fp);
                     }
                 }
@@ -681,117 +671,149 @@ function saveBookBundle(book, files) {
 }
 
 /**
- * Load book from disk (multi-file directory or legacy single JSON).
+ * Load book from disk.
  * @param {string} bookId - The book ID to load
- * @returns {Object|null} - The loaded book {manifest, book, bible, characters, chapters}
+ * @returns {Object|null} { manifest, book, bible, locations, behaviour, heroes,
+ *          hero_issues, chapters }; null ONLY when there is no such book (or it
+ *          cannot be read at all)
+ * @throws {BookModelError} UNSUPPORTED_VBOOK_VERSION — the book exists but is
+ *         VBook 3.1, has no version or was written by a newer Animastor
  */
 function loadBook(bookId) {
     if (!isValidBookId(bookId)) return null;
     const bookDir = getBookDir(bookId);
     const bookPath = getBookPath(bookId);
 
-    // Multi-file directory format
-    if (fs.existsSync(bookDir)) {
-        try {
-            const stat = fs.statSync(bookDir);
-            if (stat.isDirectory()) {
-                return loadBookFromDir(bookId, bookDir);
-            }
-        } catch (e) {
-            // Fall through to single-file check
-        }
+    const dirStat = lstatOrNull(bookDir);
+    if (dirStat && dirStat.isDirectory()) {
+        return loadBookFromDir(bookId, bookDir);
     }
 
-    // Legacy single-file format (for migration)
-    if (fs.existsSync(bookPath)) {
+    // Pre-3.1 single-file books (<bookId>.json): never VBook 4.
+    const fileStat = lstatOrNull(bookPath);
+    if (fileStat && fileStat.isFile()) {
+        let legacy = null;
         try {
-            const content = fs.readFileSync(bookPath, 'utf8');
-            return JSON.parse(content);
+            legacy = JSON.parse(fs.readFileSync(bookPath, 'utf8'));
         } catch (err) {
             console.error(`Failed to load book ${bookId}:`, err.message);
             return null;
         }
+        assertSupportedVbookVersion(legacy && legacy.manifest);
+        return null;
     }
 
     return null;
 }
 
 /**
- * Load book from multi-file directory.
+ * Read manifest.json + book.json of a book directory and check the version.
+ * @returns {{ manifest: object, bookMeta: object }|null} null when either file is absent
+ * @throws {BookModelError} UNSUPPORTED_VBOOK_VERSION
+ */
+function readBookHead(bookDir) {
+    const manifestText = readTextNoFollow(joinInside(bookDir, MANIFEST_FILE));
+    const bookMetaText = readTextNoFollow(joinInside(bookDir, BOOK_FILE));
+    if (manifestText === null || bookMetaText === null) return null;
+    const manifest = JSON.parse(manifestText);
+    assertSupportedVbookVersion(manifest);
+    return { manifest, bookMeta: JSON.parse(bookMetaText) };
+}
+
+/**
+ * Read the parts of a book that the full loader and the draft loader share:
+ * bible, locations, behaviour and the cast (heroes + hero_issues).
+ */
+function readBookBody(bookDir, bookMeta) {
+    const readObject = (name, fallback) => {
+        const text = readTextNoFollow(joinInside(bookDir, name));
+        return text === null ? fallback : JSON.parse(text);
+    };
+    const bible = readObject(BIBLE_FILE, {});
+    const locations = readObject(LOCATIONS_FILE, {});
+    const behaviour = readObject(BEHAVIOUR_FILE, null) ?? emptyBehaviourGlobals();
+    const behaviourCheck = validateBehaviourGlobals(behaviour);
+    if (!behaviourCheck.valid) {
+        throw new Error(`behaviour.json: ${behaviourCheck.errors.map((e) => (e.path ? `${e.path}: ${e.message}` : e.message)).join('; ')}`);
+    }
+
+    const cast = characterStore.listCharacters(bookDir, {
+        charactersOrder: bookMeta && bookMeta.structure ? bookMeta.structure.characters_order : null,
+    });
+    const body = { bible, locations, behaviour, heroes: cast.heroes, hero_issues: [] };
+    body.hero_issues = [...cast.issues, ...heroes.collectBookHeroIssues(body)];
+    for (const problem of cast.issues) {
+        if (problem.blocking) console.warn(`[VBOOK] broken hero file ${problem.file}: ${problem.code} — ${problem.message}`);
+    }
+    return body;
+}
+
+/**
+ * Load book from its directory.
  * @param {string} bookId
  * @param {string} bookDir
  * @returns {Object|null}
+ * @throws {BookModelError} UNSUPPORTED_VBOOK_VERSION
  */
 function loadBookFromDir(bookId, bookDir) {
     try {
-        const manifestPath = path.join(bookDir, 'manifest.json');
-        const bookMetaPath = path.join(bookDir, 'book.json');
+        const head = readBookHead(bookDir);
+        if (!head) return null;
+        const { manifest, bookMeta } = head;
+        const body = readBookBody(bookDir, bookMeta);
 
-        if (!fs.existsSync(manifestPath) || !fs.existsSync(bookMetaPath)) {
-            return null;
-        }
-
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        const bookMeta = JSON.parse(fs.readFileSync(bookMetaPath, 'utf8'));
-
-        // Optional bible.json
-        let bible = {};
-        const biblePath = path.join(bookDir, 'bible.json');
-        if (fs.existsSync(biblePath)) {
-            bible = JSON.parse(fs.readFileSync(biblePath, 'utf8'));
-        }
-
-        // Optional locations.json — load as top-level key
-        let locations = {};
-        const locationsPath = path.join(bookDir, 'locations.json');
-        if (fs.existsSync(locationsPath)) {
-            locations = JSON.parse(fs.readFileSync(locationsPath, 'utf8'));
-        }
-
-        // Optional voices.json — load as top-level key
-        let voices = {};
-        const voicesPath = path.join(bookDir, 'voices.json');
-        if (fs.existsSync(voicesPath)) {
-            voices = JSON.parse(fs.readFileSync(voicesPath, 'utf8'));
-        }
-
-        // Optional behavior.json — load as top-level key (per-character behavior
-        // keyed by character_id, same pattern as voices.json)
-        // Migrated to schema v2 in memory (legacy v2.1 file → characters).
-        let behaviors = behaviorSchema.normalizeBehaviors({});
-        const behaviorPath = path.join(bookDir, 'behavior.json');
-        if (fs.existsSync(behaviorPath)) {
-            behaviors = behaviorSchema.normalizeBehaviors(JSON.parse(fs.readFileSync(behaviorPath, 'utf8')));
-        }
-
-        // Optional characters.json
-        let characters = [];
-        const charPath = path.join(bookDir, 'characters.json');
-        if (fs.existsSync(charPath)) {
-            characters = JSON.parse(fs.readFileSync(charPath, 'utf8'));
-        }
-
-        // Chapters: look in chapters/ subdirectory first, fall back to root
+        // Chapters: exact files chapters/<name> listed in chapters_order.
         const chaptersDir = getChapterDir(bookDir);
         const chapters = [];
         const chaptersOrder = bookMeta.structure?.chapters_order || [];
-
         for (const chapterFile of chaptersOrder) {
-            const basename = chapterFile.split('/').pop();
-            let cp = path.join(chaptersDir, basename);
-            if (!fs.existsSync(cp)) {
-                cp = path.join(bookDir, basename);
-            }
-            if (fs.existsSync(cp)) {
-                chapters.push(JSON.parse(fs.readFileSync(cp, 'utf8')));
-            }
+            if (!safePaths.isSafeChapterFile(chapterFile)) continue;
+            const text = readTextNoFollow(joinInside(chaptersDir, chapterFile));
+            if (text !== null) chapters.push(JSON.parse(text));
         }
 
-        return { manifest, book: bookMeta, bible, characters, chapters, locations, voices, behaviors };
+        return {
+            manifest,
+            book: bookMeta,
+            bible: body.bible,
+            locations: body.locations,
+            behaviour: body.behaviour,
+            heroes: body.heroes,
+            hero_issues: body.hero_issues,
+            chapters,
+        };
     } catch (err) {
+        if (err instanceof BookModelError) throw err;
         console.error(`Failed to load book from dir ${bookId}:`, err.message);
         return null;
     }
+}
+
+/**
+ * Export a book as a .vbook archive — by the format whitelist, through the
+ * same serializer as saveBookBundle (never "the directory as it is").
+ * @param {string} bookId
+ * @param {{ skipBroken?: boolean }} [options]
+ * @returns {{ buffer: Buffer, files: string[], skipped: object[] }|null} null when there is no such book
+ * @throws {BookModelError} UNSUPPORTED_VBOOK_VERSION
+ * @throws {HeroStoreError} hero_file_broken (.details.issues) unless skipBroken
+ */
+function exportBookBundle(bookId, options = {}) {
+    const book = loadBook(bookId);
+    if (!book) return null;
+    const broken = book.hero_issues.filter((i) => i.blocking && i.file && i.code !== 'narrator_missing');
+    if (broken.length > 0 && !options.skipBroken) {
+        throw new HeroStoreError('hero_file_broken',
+            `broken hero file${broken.length === 1 ? '' : 's'}: ${heroProblemList(broken)}`,
+            { issues: broken });
+    }
+    const sourceText = readTextNoFollow(joinInside(getBookDir(bookId), SOURCE_FILE));
+    const files = bundleFilesFromBook(sourceText === null ? book : { ...book, sourceText });
+    const zip = new AdmZip();
+    for (const [name, text] of Object.entries(files)) {
+        zip.addFile(name, Buffer.from(text, 'utf8'));
+    }
+    return { buffer: zip.toBuffer(), files: Object.keys(files), skipped: broken };
 }
 
 /** Refuse to operate on a symlink (lstat, does not follow). */
@@ -803,7 +825,7 @@ function assertNotLink(p) {
     }
 }
 
-const BOOK_DIR_MARKERS = ['manifest.json', 'book.json', 'source.txt', 'chapters'];
+const BOOK_DIR_MARKERS = ['manifest.json', 'book.json', 'source.txt', 'chapters', 'characters'];
 
 /**
  * Reset book (delete from disk).
@@ -1003,25 +1025,26 @@ module.exports = {
     inspectBookBundle,
     extractBookBundle,
     buildBookFromBundle,
+    bundleFilesFromBook,
+    exportBookBundle,
     saveBookBundle,
-    
+
     // Persistence
     loadBook,
     resetBook,
-    
-    // ZIP helpers
-    addDirToZip,
-    
+    readBookHead,
+    readBookBody,
 
-    
     // Scene collection
     collectScenes,
     collectSceneList,
     collectSceneUnits,
     findSceneRuntimeData,
 
-    // behavior.json schema v2 helpers (also at ./behavior-schema.cjs)
-    behaviorSchema,
+    // format version gate (also at ./vbook-version.cjs) — VBOOK_FORMAT_V4 §9
+    vbookVersion,
+    assertSupportedVbookVersion,
+    BookModelError,
 
     // character voice port (also at ./voice) — VOICE_REFERENCES.md
     voice,
@@ -1032,7 +1055,7 @@ module.exports = {
     // hero readers (also at ./heroes.cjs) — VBOOK_FORMAT_V4 §8.1
     heroes,
 
-    // characters/ store (also at ./character-store.cjs) — VBOOK_FORMAT_V4 §3, §4
+    // characters/ store (also at ./character-store.cjs) — VBOOK_FORMAT_V4 §3, §4, §10
     characterStore,
 
     // Path/input safety

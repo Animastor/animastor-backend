@@ -5,8 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const { BookState, SceneStatus } = require('./constants');
-const { normalizeBehaviors } = require('../behavior-schema.cjs');
-const { getBookDir, getChapterDir, getBookMetaPath, getCharactersPath, getMentionsPath, getBiblePath, getLocationsPath, getVoicesPath, getBehaviorPath, chapterId, sceneId, unitId } = require('./paths');
+const { getBookDir, getChapterDir, getBookMetaPath, getBiblePath, getLocationsPath, chapterId, sceneId, unitId } = require('./paths');
 const { detectLanguage } = require('@animastor/parser');
 const { findCanonicalCharacter, isGenericCharacter, isPlaceholderCharacter, hasRealAppearance } = require('../character-identity');
 const { sanitizeParticipants, findCanonicalId, canonicalizeMixedScriptId, isFantasySnakeToken, sanitizeEnvironment } = require('../snake-guard');
@@ -15,6 +14,46 @@ const metadata = require('./metadata');
 const chapterUtils = require('./chapter-utils');
 const appearance = require('./appearance');
 const { voiceFromDescription } = require('../voice');
+const characterStore = require('../character-store.cjs');
+const { CHARACTER_SCHEMA } = require('../character-validator.cjs');
+const { passportHeroes, isValidHeroId, NARRATOR_ID } = require('../heroes.cjs');
+const { LOOK_FIELDS } = require('../looks.cjs');
+
+// The analysis hands over a voice either as one description string (3.1-era
+// step, cleaned by rules) or — once the analysis step is moved to v4 — as
+// { timbre, manner }. There is no `instruction` in VBook 4.
+function voiceFromAnalysis(raw) {
+    if (typeof raw === 'string' && raw.trim()) return voiceFromDescription(raw);
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const timbre = typeof raw.timbre === 'string' ? raw.timbre.trim() : '';
+        const manner = typeof raw.manner === 'string' ? raw.manner.trim() : '';
+        if (timbre || manner) return { timbre, manner, timbre_source: 'analysis' };
+    }
+    return null;
+}
+
+// scene.look_patch[hero_id] (VBOOK_FORMAT_V4 §4a.4): only the three look
+// fields, only non-empty values, only for heroes of the book. Anything else
+// the analysis put there is dropped at this write barrier.
+function sanitizeLookPatch(raw, knownHeroIds) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const out = {};
+    for (const [heroId, patch] of Object.entries(raw)) {
+        if (!knownHeroIds.has(heroId) || !patch || typeof patch !== 'object' || Array.isArray(patch)) continue;
+        const clean = {};
+        for (const field of LOOK_FIELDS) {
+            if (!Object.prototype.hasOwnProperty.call(patch, field)) continue;
+            if (field === 'video_tokens') {
+                const tokens = appearance.sanitizeVideoTokens(patch[field]);
+                if (tokens && tokens.length > 0) clean[field] = tokens;
+            } else if (typeof patch[field] === 'string' && patch[field].trim()) {
+                clean[field] = patch[field].trim();
+            }
+        }
+        if (Object.keys(clean).length > 0) out[heroId] = clean;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
 
 function createFromAnalysis(bookId, analysis, options = {}) {
     const { maxScenes, chapterTitle } = options;
@@ -80,25 +119,20 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     let existingLocations = {};
 
     if (!isFirstWindow) {
-        try {
-            const charPath = getCharactersPath(bookDir);
-            if (fs.existsSync(charPath)) {
-                existingCharacters = JSON.parse(fs.readFileSync(charPath, 'utf8'));
-                // Load-time placeholder filter (same rule as runPipeline): a
-                // legacy 'unknown'/'unnamed' that older code once wrote into
-                // characters.json has no real information and must not re-enter
-                // the registry or scene.participants. A character with a REAL
-                // appearance keeps its id even when it looks like a placeholder
-                // word ('neizvestnyy' — the mysterious stranger is a real
-                // literary character).
-                const filtered = existingCharacters.filter(c => !isPlaceholderCharacter(c));
-                if (filtered.length !== existingCharacters.length) {
-                    console.warn(`[LAZY-BOOK] Filtered ${existingCharacters.length - filtered.length} placeholder character(s) from existing registry`);
-                    existingCharacters = filtered;
-                }
-            }
-        } catch (e) {
-            console.warn(`[LAZY-BOOK] Failed to load existing characters: ${e.message}`);
+        // The registry of characters = heroes with a passport (§4). Hero files
+        // are read through the character store; a broken file is simply not
+        // part of the registry (it is reported in hero_issues and left alone).
+        //
+        // Load-time placeholder filter (same rule as runPipeline): a legacy
+        // 'unknown'/'unnamed' has no real information and must not re-enter
+        // the registry or scene.participants. A character with a REAL
+        // appearance keeps its id even when it looks like a placeholder word
+        // ('neizvestnyy' — the mysterious stranger is a real literary character).
+        existingCharacters = passportHeroes(d);
+        const filtered = existingCharacters.filter(c => !isPlaceholderCharacter(c));
+        if (filtered.length !== existingCharacters.length) {
+            console.warn(`[LAZY-BOOK] Filtered ${existingCharacters.length - filtered.length} placeholder character(s) from existing registry`);
+            existingCharacters = filtered;
         }
         try {
             // Load existing locations from separate file
@@ -119,9 +153,11 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
 
     const existingIds = new Set(existingCharacters.map(c => c.id));
     const mergedCharacters = [...existingCharacters];
-
-    const defaultVoiceRu = 'A mature Russian male voice. Deep, calm, reflective. Native Russian pronunciation.';
-    const defaultVoiceEn = 'A mature male voice. Deep, calm, reflective. Native English pronunciation.';
+    // New heroes of this window (not yet on disk) and the voices the analysis
+    // proposed, keyed by the FINAL hero id.
+    const newHeroes = [];
+    const proposedVoices = new Map();
+    const skippedHeroes = [];
 
     for (const ch of (analysis.characters || [])) {
         // Chimera id (mixed-script / wrong transliteration / typo / noise suffix)
@@ -140,6 +176,8 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
             }
             return canonical || mixed;
         })();
+        const proposedVoice = voiceFromAnalysis(ch.voice);
+        if (proposedVoice && !proposedVoices.has(charId)) proposedVoices.set(charId, proposedVoice);
         if (existingIds.has(charId)) continue;
         // Placeholder ids/names ('unknown', 'unnamed', 'Unidentified', …) are
         // NEVER real characters — absence of information ≠ a fictitious
@@ -203,15 +241,18 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
             videoTokens = frag ? [frag] : [];
         }
 
-        const voiceInstruction = ch.voice
-            ? ch.voice
-            : (mergedCharacters.length === 0
-                ? (language === 'ru' ? defaultVoiceRu : defaultVoiceEn)
-                : (language === 'ru'
-                    ? `A Russian ${mergedCharacters.length < 3 ? 'male' : 'character'} voice matching ${ch.name}. Natural intonation.`
-                    : `A character voice matching ${ch.name}. Natural intonation.`));
+        // A hero id is the file name characters/<id>.json: canonical snake_case
+        // and not reserved (§4). Until the analysis normalises its ids (step 2 of
+        // VBOOK_FORMAT_V4 §12) a hero with any other id is NOT written — it is
+        // reported, and its scenes keep the participant as a natural designation.
+        if (!isValidHeroId(charId)) {
+            console.warn(`[LAZY-BOOK] Skipping hero with a non-canonical or reserved id ${JSON.stringify(charId)} — cannot be a characters/<id>.json file`);
+            skippedHeroes.push({ id: charId, name: ch.name || null, reason: 'invalid_hero_id' });
+            continue;
+        }
 
-        mergedCharacters.push({
+        const hero = {
+            schema: CHARACTER_SCHEMA,
             id: charId,
             name: ch.name,
             role: ch.role || 'minor',
@@ -222,10 +263,9 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
                     ? videoTokens
                     : [`${ch.name.toLowerCase()} character, period clothing, distinctive appearance`],
             },
-            voice: {
-                instruction: voiceInstruction,
-            },
-        });
+        };
+        mergedCharacters.push(hero);
+        newHeroes.push(hero);
         existingIds.add(charId);
     }
 
@@ -255,14 +295,6 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         }
     }
 
-    // Default narrator voice (VOICE_REFERENCES.md): timbre + constant narrator
-    // manner — the reference is designed from both, the clone copies the manner.
-    const narratorVoice = language === 'ru'
-        ? { timbre: 'A mature Russian male voice. Deep, calm, reflective, slightly melancholic. Native Russian pronunciation.',
-            manner: 'Slow literary narration, soft authority, philosophical tone.', timbre_source: 'analysis' }
-        : { timbre: 'A mature male voice. Deep, calm, reflective. Native English pronunciation.',
-            manner: 'Slow literary narration, soft authority.', timbre_source: 'analysis' };
-
     const bible = {
         version: '3.0',
         locations,
@@ -276,111 +308,58 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         },
     };
 
-    let mergedMentions = {};
-    try {
-        const mPath = getMentionsPath(bookDir);
-        if (fs.existsSync(mPath)) {
-            mergedMentions = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-        }
-    } catch (_) {}
-    // Chimera barrier for mentions: the alias target must be a real character id
-    // (or confidently canonicalize to one). A mention pointing at a chimera id
-    // ("mikhail_berлиоз") is aligned to the canonical id; a mention pointing at a
-    // non-existent character is dropped — a broken alias never enters the book.
-    const mentionCharIds = new Set(mergedCharacters.map(c => c.id).filter(Boolean));
-    const mentionLowerIds = new Set([...mentionCharIds].map(id => id.toLowerCase()));
-    if (analysis.mentions && typeof analysis.mentions === 'object') {
-        for (const [alias, charId] of Object.entries(analysis.mentions)) {
-            if (mergedMentions[alias]) continue;
-            const target = String(charId);
-            const low = target.toLowerCase();
-            if (mentionLowerIds.has(low)) {
-                mergedMentions[alias] = target;
-            } else {
-                const canonical = findCanonicalId(target, mentionCharIds);
-                if (canonical) {
-                    console.warn(`[LAZY-BOOK] Mention "${alias}" → ${target} canonicalized to ${canonical}`);
-                    mergedMentions[alias] = canonical;
-                } else if (isFantasySnakeToken(target, mentionCharIds)) {
-                    console.warn(`[LAZY-BOOK] Dropping mention "${alias}" → ${target} — no such character in characters.json`);
-                } else {
-                    mergedMentions[alias] = target; // natural designation target — keep
-                }
-            }
+    // ── Heroes → characters/<id>.json, through the character store ──
+    // mentions.json does not exist in VBook 4 (§7): aliases live in the hero
+    // file and are written from mentions by the analysis step (step 2); until
+    // then mentions stay in PG only and nothing of them is written here.
+    //
+    // Only a character with a real appearance OR real clothes becomes a hero
+    // with a passport (shared predicate — looks at the whole aggregate, not at
+    // the name alone). A dialogue-only participant without a described
+    // appearance is NOT a character: it gets no file and no voice; the audio
+    // pipeline voices such speakers with the narrator.
+    const describedIds = new Set(mergedCharacters.filter(c => hasRealAppearance(c)).map(c => c.id));
+    for (const hero of newHeroes) {
+        if (!describedIds.has(hero.id)) continue;
+        const voice = proposedVoices.get(hero.id);
+        const file = voice ? { ...hero, voice } : hero;
+        try {
+            characterStore.writeCharacter(bookDir, file);
+        } catch (err) {
+            // A broken file under this id (§10.3) or an invalid hero: never
+            // overwritten, never fatal for the window.
+            console.warn(`[LAZY-BOOK] Hero "${hero.id}" not written: ${err.message}`);
+            skippedHeroes.push({ id: hero.id, name: hero.name || null, reason: err.code || 'write_failed' });
+            describedIds.delete(hero.id);
         }
     }
-    if (Object.keys(mergedMentions).length > 0) {
-        fs.writeFileSync(getMentionsPath(bookDir), JSON.stringify(mergedMentions, null, 2));
+    // A hero that already exists keeps its voice: a later window never
+    // replaces a description the user may have edited, nor a locked
+    // reference. A voice is added only where there was none.
+    for (const hero of existingCharacters) {
+        const voice = proposedVoices.get(hero.id);
+        if (!voice || hero.voice) continue;
+        try {
+            characterStore.updateCharacter(bookDir, hero.id, (current) => (current.voice ? current : { ...current, voice }));
+        } catch (err) {
+            console.warn(`[LAZY-BOOK] Voice of "${hero.id}" not written: ${err.message}`);
+        }
+    }
+    if (describedIds.size < mergedCharacters.length) {
+        console.log(`[LAZY-BOOK] Filtered characters: ${describedIds.size} with passport out of ${mergedCharacters.length} total`);
     }
 
-    const passportChars = mergedCharacters.filter(c => {
-        // A character counts as visually described when it has a real appearance
-        // OR real clothes (the agent may provide one without the other). Shared
-        // predicate — looks at the whole aggregate (passport/appearance/clothes/
-        // description), not at the name alone.
-        return hasRealAppearance(c);
-    }).map(c => {
-        // Strip voice — voices live in voices.json only
-        const { voice, ...charWithoutVoice } = c;
-        return charWithoutVoice;
-    });
-    fs.writeFileSync(getCharactersPath(bookDir), JSON.stringify(passportChars, null, 2));
-    if (passportChars.length < mergedCharacters.length) {
-        console.log(`[LAZY-BOOK] Filtered characters: ${passportChars.length} with passport out of ${mergedCharacters.length} total`);
-    }
+    // The narrator and behaviour.json are created with the book; heal a book
+    // that lost them (a broken narrator.json is left alone).
+    try { draft.ensureNarrator(bookDir, language); } catch (e) { console.warn(`[LAZY-BOOK] Narrator not created: ${e.message}`); }
+    draft.ensureBehaviourGlobals(bookDir);
 
     // Save locations to separate file
     fs.writeFileSync(getLocationsPath(bookDir), JSON.stringify(locations, null, 2));
 
-    // Save all voices to separate file (narrator + characters)
-    // voices.json — single source of truth. For subsequent windows, load existing
-    // and only add/update voices for NEW characters from the current window.
-    // Old characters keep their existing voices untouched.
-    let voices = { narrator: { ...narratorVoice } };
-    try {
-        const vPath = getVoicesPath(bookDir);
-        if (fs.existsSync(vPath)) {
-            const existing = JSON.parse(fs.readFileSync(vPath, 'utf8')) || {};
-            voices = { narrator: { ...narratorVoice }, ...existing };
-        }
-    } catch (e) {
-        console.warn(`[LAZY-BOOK] Failed to load existing voices: ${e.message}`);
-    }
-    // Add/update voices for characters from the current window.
-    // stepGenerateVoices sets ch.voice as a STRING (voices[id].instruction),
-    // not as { instruction: string }. Handle both formats.
-    // ONLY characters that keep a real passport (passportChars — described
-    // appearance/clothes) get a voice entry. A dialogue-only participant
-    // without a described appearance is NOT a character: it must not get an
-    // orphan voice (no id in characters.json). The audio pipeline falls back
-    // to a default voice for such speakers automatically.
-    const passportIds = new Set(passportChars.map(c => c.id));
-    for (const ch of (analysis.characters || [])) {
-        if (!ch.id) continue;
-        if (!passportIds.has(ch.id)) continue;
-        // the analysis writes one description string (ch.voice); it is split by
-        // the rule-based cleanup (voice port) — situational sentences dropped,
-        // timbre_source 'cleaned' until the user reviews it
-        const vi = typeof ch.voice === 'string' ? ch.voice : ch.voice?.instruction;
-        if (vi) {
-            voices[ch.id] = voiceFromDescription(vi);
-        }
-    }
-    fs.writeFileSync(getVoicesPath(bookDir), JSON.stringify(voices, null, 2));
-
     // Save bible.json without locations and narrator
     const { locations: _bibleLocs, narrator: _bibleNarrator, ...bibleWithoutExtra } = bible;
     fs.writeFileSync(getBiblePath(bookDir), JSON.stringify(bibleWithoutExtra, null, 2));
-
-    // Create behavior.json on first window if it does not exist yet.
-    // Starts as an empty schema-v2 document — behavior entries are added later
-    // by the user (Editor tab) or by the AI-agent via edit_book tool.
-    if (isFirstWindow) {
-        const bhPath = getBehaviorPath(bookDir);
-        if (!fs.existsSync(bhPath)) {
-            fs.writeFileSync(bhPath, JSON.stringify(normalizeBehaviors({}), null, 2));
-        }
-    }
 
     const chDir = getChapterDir(bookDir);
     if (!fs.existsSync(chDir)) fs.mkdirSync(chDir, { recursive: true });
@@ -589,7 +568,7 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         const sceneParticipants = sanitizeParticipants(
             aiScene.characters_present || aiScene.participants || [],
             knownParticipantIds,
-            {            onDrop: (p) => console.warn(`[LAZY-BOOK] Dropped fantasy participant "${p}" in scene "${(aiScene.title || '').slice(0, 40)}" — not in characters.json`),
+            {            onDrop: (p) => console.warn(`[LAZY-BOOK] Dropped fantasy participant "${p}" in scene "${(aiScene.title || '').slice(0, 40)}" — not a hero of the book`),
             onReplace: (from, to) => console.warn(`[LAZY-BOOK] Participant "${from}" → canonical id "${to}" in scene "${(aiScene.title || '').slice(0, 40)}"`),
         }
         );
@@ -678,11 +657,13 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
                 if (!aiScene.location.id) return aiScene.location;
                 return { ...aiScene.location, id: canonicalizeMixedScriptId(aiScene.location.id) };
             })(),
-            // scene.passport[charId] — scene-level character passport overrides
-            // (e.g. video_tokens chosen by the passport-reconciliation agent).
-            // Must be passed through explicitly — the scene constructor does not
-            // copy unknown fields.
-            passport: aiScene.passport || undefined,
+            // scene.look_patch[hero_id] — one-scene replacement of look fields
+            // (§4a.4), e.g. video_tokens chosen by the passport-reconciliation
+            // agent. scene.passport does not exist in VBook 4: until that agent
+            // writes look_patch itself (step 2) its `passport` output is read as
+            // one. Must be passed through explicitly — the scene constructor
+            // does not copy unknown fields.
+            look_patch: sanitizeLookPatch(aiScene.look_patch || aiScene.passport, describedIds),
             source_start: aiScene.source_start ?? null,
             source_end: aiScene.source_end ?? null,
             audio: audioConfig,
@@ -709,6 +690,11 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     const existingFiles = fs.readdirSync(chDir).filter(f => f.endsWith('.json'))
         .sort((a, b) => chapterSortKey(a) - chapterSortKey(b));
     bookMeta.structure.chapters_order = existingFiles;
+    // Display-order hint (§3): the cast as it is on disk now, in registry order.
+    const castOnDisk = characterStore.listCharacters(bookDir, {
+        charactersOrder: [NARRATOR_ID, ...mergedCharacters.map(c => c.id)],
+    });
+    bookMeta.structure.characters_order = castOnDisk.heroes.map(h => h.id);
     fs.writeFileSync(getBookMetaPath(bookDir), JSON.stringify(bookMeta, null, 2));
 
     const bookState = isFirstWindow ? BookState.BOOTSTRAPPED : BookState.BOOTSTRAPPED;
@@ -723,6 +709,8 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         author: bookMeta.author,
         language,
         characters: mergedCharacters.length,
+        heroes: castOnDisk.heroes.length,
+        skippedHeroes,
         locations: Object.keys(locations).length,
         chapter: chapterObj,
         scenes: chapterObj.scenes.length,
