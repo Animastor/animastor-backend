@@ -39,7 +39,7 @@
         "url": "https://github.com/Animastor/animastor-backend/issues"
     },
     "dependencies": {
-        "@animastor/vbook-runtime": "^0.4.0"
+        "@animastor/vbook-runtime": "^0.5.0"
     },
     "devDependencies": {
         "chai": "^6.2.2",

@@ -2,8 +2,9 @@
 // vbook-version — the ONE place that decides whether a book can be opened
 // ======================================================
 // VBook 4 is the only supported format; there is no migration from 3.1
-// (VBOOK_FORMAT_V4 §1, §9). The loader, the draft loader, import and snapshot
-// restore all call assertSupportedVbookVersion(manifest) and report the same
+// (VBOOK_FORMAT_V4 §1, §9). The loader, the draft loader, the importer and the
+// host's restore of a saved book copy all call
+// assertSupportedVbookVersion(manifest) and report the same
 // typed error, which HTTP routes turn into one body:
 //
 //   { error: "unsupported_vbook_version", vbook_version: "3.1", supported: 4, message }

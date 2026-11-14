@@ -7,13 +7,15 @@
 // type that Android's strict parser cannot load) is rejected
 // instead of becoming the new canonical state.
 //
-// Contract (architecture/VBOOK_FORMAT_V4.md §3, §8.1) — the in-memory book:
-//   manifest    — object with book_id (required)
-//   book        — object with structure.chapters_order / characters_order
-//   bible       — object (optional)
-//   locations   — object keyed by location id
+// Contract (architecture/VBOOK_FORMAT_V4.md §3, §8.1) — the in-memory book
+// and the file each part is stored in:
+//   manifest    — manifest.json: object with book_id (required)
+//   book        — book.json: structure.chapters_order / characters_order
+//   bible       — bible.json: object (optional)
+//   locations   — locations.json: object keyed by location id
 //   behaviour   — behaviour.json: animastor.behaviour-globals/1 (§6.3)
-//   heroes      — array of hero files, animastor.character/1 (§4); ids unique
+//   heroes      — characters/<id>.json: array of hero files,
+//                 animastor.character/1 (§4); ids unique
 //   hero_issues — array (memory / API only, never written)
 //   chapters    — objects with canonical chapter_id; chapter.looks,
 //                 scene.looks, scene.look_patch (§4a)

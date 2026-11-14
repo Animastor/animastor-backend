@@ -47,7 +47,12 @@ function createResponse() {
     };
 }
 
-describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
+// [v4-pending step 4] POST/PATCH/DELETE /behaviors edit the 3.1 file
+// behavior.json (book.behaviors.characters.<id>). In VBook 4 a hero's character
+// is behaviour.profile of its own file and the routes are replaced by
+// PATCH /heroes/<id> (behaviour.profile.*) and /heroes/<id>/rules
+// (VBOOK_FORMAT_V4 §8.2) in @animastor/editor 0.5.0, step 4.
+describe.skip('[v4-pending step 4] BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
     let tmpDir;
     let bookId;
     let bookDir;

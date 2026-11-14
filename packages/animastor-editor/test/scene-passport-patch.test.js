@@ -95,7 +95,13 @@ function createBookDiff() {
     return bookDiffFactory({}, {}, deps);
 }
 
-describe('Scene PATCH — scene.passport overrides', () => {
+// [v4-pending step 4] scene.passport does not exist in VBook 4. The scene PATCH
+// takes looks.<hero_id> and look_patch.<hero_id>.<field> instead
+// (VBOOK_FORMAT_V4 §4a.4, §8.2) and the resolver is resolveHeroLook (covered in
+// packages/animastor-vbook-runtime/test/looks.test.js); the route is
+// @animastor/editor 0.5.0, step 4, and this file also calls resolvePassport of
+// prompt-builder.js, which step 3 removes.
+describe.skip('[v4-pending step 4] Scene PATCH — scene.passport overrides', () => {
 
     let tmpDir;
     let bookId;

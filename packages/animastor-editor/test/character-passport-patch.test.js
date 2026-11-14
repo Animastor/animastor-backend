@@ -27,7 +27,10 @@ const promptBuilder = require('../../../backend/src/image/prompt-builder');
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
-describe('PATCH CHARACTER — global passport persistence', () => {
+// [v4-pending step 4] PATCH /characters/<id> edits book.characters[i].passport of
+// 3.1. VBook 4: PATCH /heroes/<id> with passport.* paths (VBOOK_FORMAT_V4 §8.2),
+// @animastor/editor 0.5.0, step 4.
+describe.skip('[v4-pending step 4] PATCH CHARACTER — global passport persistence', () => {
 
     let tmpDir;
     let bookId;

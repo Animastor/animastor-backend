@@ -16,12 +16,18 @@
 const { setDeep, findUnitInScene, normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cjs');
 const { recoverMissingRedisChunks } = require('./read-recovery.cjs');
 const voiceModel = require('@animastor/vbook-runtime/voice');
-// behavior.json schema v2 (disk + memory) ⇄ API flat map + behavior_rules.
+// VBook 4 (VBOOK_FORMAT_V4): the model is { manifest, book, bible, locations,
+// behaviour, heroes, hero_issues, chapters }. The 3.1 entity routes below are
+// gated until the hero API of step 4 replaces them (see ./vbook4-pending.cjs).
+const { behaviorCharacters, legacyEntityGate, legacyBodyKeys } = require('./vbook4-pending.cjs');
 const {
-    behaviorCharacters,
-    projectBookBehaviorsForApi,
-    mergeIncomingBehaviors,
-} = require('@animastor/vbook-runtime/behavior-schema.cjs');
+    isUnsupportedVersionError, unsupportedVersionBody,
+} = require('@animastor/vbook-runtime/vbook-version.cjs');
+
+function requestLanguage(req) {
+    const header = req && req.headers ? req.headers['accept-language'] : '';
+    return /^\s*ru/i.test(String(header || '')) ? 'ru' : 'en';
+}
 
 // ── Editor-save prompt guard ─────────────────────────────────────────
 // A frame prompt (image.prompt / video.action) longer than the ceiling is almost
@@ -80,7 +86,18 @@ module.exports = function(app, redis, deps) {
     app.get('/api/v1/book/:bookId', async (req, res) => {
         try {
             const { bookId } = req.params;
-            const bookData = editorModel.read(bookId);
+            let bookData;
+            try {
+                bookData = editorModel.read(bookId);
+            } catch (readErr) {
+                // A book that exists but is VBook 3.1 (or has no version, or is
+                // newer): 409 with the same body the importer answers with
+                // (VBOOK_FORMAT_V4 §9). Nothing on disk is touched.
+                if (isUnsupportedVersionError(readErr)) {
+                    return res.status(409).json(unsupportedVersionBody(readErr, requestLanguage(req)));
+                }
+                throw readErr;
+            }
             if (!bookData) return res.status(404).json({ error: 'Book not found' });
 
             // ── Enrich chapters (F5+F7): fill missing chapter_title + compute display indices ──
@@ -154,10 +171,10 @@ module.exports = function(app, redis, deps) {
                 console.warn(`[BOOK-RECOVER] ${bookId}: chunk recovery failed: ${chunkErr.message}`);
             }
 
-            // API contract: `behaviors` is the flat character map (v2.1 shape,
-            // released clients parse it as Map<character_id, entry>) and
-            // `behavior_rules` the read-only rule list; memory/disk stay v2.
-            return res.json(projectBookBehaviorsForApi(bookData));
+            // VBook 4: the model as it is — { manifest, book, bible, locations,
+            // behaviour, heroes, hero_issues, chapters, scene_list }. There is
+            // no compatible projection of characters / voices / behaviors (§1.5).
+            return res.json(bookData);
         } catch (err) {
             console.error('[GET BOOK] Error:', err.message);
             return res.status(500).json({ error: err.message });
@@ -189,52 +206,40 @@ module.exports = function(app, redis, deps) {
                 return res.status(400).json({ error: 'bookId mismatch' });
             }
 
-            const oldBook = editorModel.read(bookId);
+            // VBook 4 has no characters / voices / behaviors maps: a body that
+            // still carries one comes from a 3.1 client and is refused as a
+            // whole — never saved with those fields silently dropped.
+            const legacy = legacyBodyKeys(updatedBookData);
+            if (legacy.length > 0) {
+                return res.status(400).json({
+                    error: 'legacy_fields',
+                    fields: legacy,
+                    message: 'characters, voices and behaviors are not part of VBook 4 — heroes live in `heroes`',
+                });
+            }
+            // hero_issues is computed on load and never stored.
+            delete updatedBookData.hero_issues;
 
-            // behaviors: clients send the flat API map (or omit it). Fold it
-            // into the stored v2 document — rules and schema_version are never
-            // lost; an absent field keeps the stored behaviours. The read-only
-            // projection key never reaches the model.
-            delete updatedBookData.behavior_rules;
-            updatedBookData.behaviors = mergeIncomingBehaviors(oldBook ? oldBook.behaviors : null, updatedBookData.behaviors);
+            let oldBook;
+            try {
+                oldBook = editorModel.read(bookId);
+            } catch (readErr) {
+                if (isUnsupportedVersionError(readErr)) {
+                    return res.status(409).json(unsupportedVersionBody(readErr, requestLanguage(req)));
+                }
+                throw readErr;
+            }
 
             if (oldBook) {
-                const oldChars = oldBook.characters;
-                if (updatedBookData.characters && Array.isArray(updatedBookData.characters)) {
-                    if (updatedBookData.characters.length === 0 && oldChars && oldChars.length > 0) {
-                        updatedBookData.characters = oldChars;
-                        log(`[UPDATE BOOK] ${bookId}: preserved ${oldChars.length} character passports from existing book (empty array)`);
-                    } else if (oldChars && oldChars.length > 0) {
-                        let mergedCount = 0;
-                        const mergedChars = updatedBookData.characters.map(incomingChar => {
-                            const oldChar = oldChars.find(c => c && c.id === incomingChar.id);
-                            if (oldChar && oldChar.passport) {
-                                const ip = incomingChar.passport;
-                                const hasPassportData = ip && (
-                                    ip.appearance || ip.clothes
-                                );
-                                if (!hasPassportData) {
-                                    mergedCount++;
-                                    return { ...incomingChar, passport: oldChar.passport };
-                                }
-                            }
-                            return incomingChar;
-                        });
-                        for (const oldChar of oldChars) {
-                            if (oldChar && !mergedChars.find(c => c && c.id === oldChar.id)) {
-                                mergedChars.push(oldChar);
-                            }
-                        }
-                        if (mergedCount > 0 || mergedChars.length > updatedBookData.characters.length) {
-                            updatedBookData.characters = mergedChars;
-                            log(`[UPDATE BOOK] ${bookId}: deep-merged passport data for ${mergedCount} characters, added ${mergedChars.length - updatedBookData.characters.length} missing`);
-                        }
-                    }
-                } else if (!updatedBookData.characters) {
-                    if (oldChars && oldChars.length > 0) {
-                        updatedBookData.characters = oldChars;
-                        log(`[UPDATE BOOK] ${bookId}: preserved ${oldChars.length} character passports from existing book (null)`);
-                    }
+                // A body without `heroes` does not change the cast. An EMPTY
+                // list against a non-empty cast is a stale response, not a wish
+                // to delete everyone (the same guard `characters` had) — §8.2.
+                if (Array.isArray(updatedBookData.heroes) && updatedBookData.heroes.length === 0
+                    && Array.isArray(oldBook.heroes) && oldBook.heroes.length > 0) {
+                    return res.status(400).json({ error: 'heroes_empty', message: 'an empty heroes list would delete every hero of the book' });
+                }
+                if (updatedBookData.behaviour === undefined || updatedBookData.behaviour === null) {
+                    delete updatedBookData.behaviour; // keep behaviour.json as it is on disk
                 }
                 if (!updatedBookData.bible || (typeof updatedBookData.bible === 'object' && Object.keys(updatedBookData.bible).length === 0)) {
                     if (oldBook.bible && Object.keys(oldBook.bible).length > 0) {
@@ -604,7 +609,7 @@ module.exports = function(app, redis, deps) {
     // routes char.*/voice.* keys into the scene object (setDeep junk) —
     // this endpoint makes character/voice edits actually persist (06 §15).
     // ======================================================
-    app.patch('/api/v1/book/:bookId/characters/:characterId', async (req, res) => {
+    app.patch('/api/v1/book/:bookId/characters/:characterId', legacyEntityGate, async (req, res) => {
         try {
             const { bookId, characterId } = req.params;
             const { fields } = req.body;
@@ -663,7 +668,7 @@ module.exports = function(app, redis, deps) {
     // ======================================================
     // PATCH BOOK VOICE (timbre / manner) — targeted edit.
     // ======================================================
-    app.patch('/api/v1/book/:bookId/voices/:voiceId', async (req, res) => {
+    app.patch('/api/v1/book/:bookId/voices/:voiceId', legacyEntityGate, async (req, res) => {
         try {
             const { bookId, voiceId } = req.params;
             const { fields } = req.body;
@@ -729,7 +734,7 @@ module.exports = function(app, redis, deps) {
     // never invalidates ready assets. Fields are merged via setDeep
     // (unknown keys pass through so a future extension survives round-trips).
     // ======================================================
-    app.patch('/api/v1/book/:bookId/behaviors/:characterId', async (req, res) => {
+    app.patch('/api/v1/book/:bookId/behaviors/:characterId', legacyEntityGate, async (req, res) => {
         try {
             const { bookId, characterId } = req.params;
             const { fields } = req.body;

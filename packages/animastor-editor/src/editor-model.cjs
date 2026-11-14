@@ -43,8 +43,9 @@ function createEditorModel(deps = {}) {
         read(bookId, options) {
             return model.loadBook(bookId, options);
         },
-        commit(book, files = null) {
-            return persist(book, files);
+        // VBook 4 saves the book object only (the raw-files mode is gone).
+        commit(book) {
+            return persist(book);
         },
     };
 }

@@ -30,9 +30,11 @@ const { normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cj
 // The project's single hex-id generator (lazy-book paths): ch-<hex8> / sc-<hex8>
 // / iu-<hex8>. No second generator is ever introduced on the clients.
 const { chapterId, sceneId, unitId, generateBookId } = require('@animastor/vbook-runtime/lazy-book/paths');
-// behavior.json schema v2: entries live under behaviors.characters.<id>
-// (rules are untouched by these routes). Legacy v2.1 maps are migrated in place.
-const { behaviorCharacters, removeCharacterBehaviors } = require('@animastor/vbook-runtime/behavior-schema.cjs');
+// VBook 4: the /characters, /voices, /behaviors routes below edited the 3.1
+// maps and are gated (409) until the hero API of step 4 replaces them.
+const { behaviorCharacters, removeCharacterBehaviors, legacyEntityGate } = require('./vbook4-pending.cjs');
+const { emptyBehaviourGlobals } = require('@animastor/vbook-runtime/character-validator.cjs');
+const { defaultNarrator } = require('@animastor/vbook-runtime/lazy-book/draft');
 const voiceModel = require('@animastor/vbook-runtime/voice');
 
 // (redis is not destructured: purge/ownership legs arrive via editorPorts)
@@ -105,7 +107,7 @@ module.exports = function (app, redis, deps) {
     // ======================================================
     // CHARACTERS — add / delete
     // ======================================================
-    app.post('/api/v1/book/:bookId/characters', (req, res) => {
+    app.post('/api/v1/book/:bookId/characters', legacyEntityGate, (req, res) => {
         try {
             const { bookId } = req.params;
             const { id, name, passport } = req.body || {};
@@ -139,7 +141,7 @@ module.exports = function (app, redis, deps) {
         }
     });
 
-    app.delete('/api/v1/book/:bookId/characters/:characterId', (req, res) => {
+    app.delete('/api/v1/book/:bookId/characters/:characterId', legacyEntityGate, (req, res) => {
         try {
             const { bookId, characterId } = req.params;
             const oldBook = loadBook(bookId);
@@ -231,7 +233,7 @@ module.exports = function (app, redis, deps) {
     // ======================================================
     // VOICES — add / delete
     // ======================================================
-    app.post('/api/v1/book/:bookId/voices', (req, res) => {
+    app.post('/api/v1/book/:bookId/voices', legacyEntityGate, (req, res) => {
         try {
             const { bookId } = req.params;
             const body = req.body || {};
@@ -268,7 +270,7 @@ module.exports = function (app, redis, deps) {
         }
     });
 
-    app.delete('/api/v1/book/:bookId/voices/:voiceId', (req, res) => {
+    app.delete('/api/v1/book/:bookId/voices/:voiceId', legacyEntityGate, (req, res) => {
         try {
             const { bookId, voiceId } = req.params;
             const oldBook = loadBook(bookId);
@@ -298,7 +300,7 @@ module.exports = function (app, redis, deps) {
     // to a character that must already exist — no id transliteration here,
     // the key is a character id, not a free-form entity id.
     // ======================================================
-    app.post('/api/v1/book/:bookId/behaviors', (req, res) => {
+    app.post('/api/v1/book/:bookId/behaviors', legacyEntityGate, (req, res) => {
         try {
             const { bookId } = req.params;
             const body = req.body || {};
@@ -336,7 +338,7 @@ module.exports = function (app, redis, deps) {
         }
     });
 
-    app.delete('/api/v1/book/:bookId/behaviors/:characterId', (req, res) => {
+    app.delete('/api/v1/book/:bookId/behaviors/:characterId', legacyEntityGate, (req, res) => {
         try {
             const { bookId, characterId } = req.params;
             const oldBook = loadBook(bookId);
@@ -709,23 +711,24 @@ module.exports = function (app, redis, deps) {
 
             const blankBook = {
                 manifest: {
-                    vbook_version: '3.1',
+                    vbook_version: 4,
                     book_id: bookId,
                     build_id: `manual_${Date.now()}`,
                     created_at: now,
                 },
                 book: {
                     book_id: bookId,
-                    version: '3.0',
                     title: label,
                     author: '',
                     language,
-                    structure: { chapters_order: [chFile] },
+                    structure: { chapters_order: [chFile], characters_order: ['narrator'] },
                     defaults: { narration_voice: 'narrator' },
                 },
                 bible: {},
-                characters: [],
-                voices: {},
+                // A v4 book is born with the narrator's file and behaviour.json
+                // (VBOOK_FORMAT_V4 §4, §6.3).
+                heroes: [defaultNarrator(language)],
+                behaviour: emptyBehaviourGlobals(),
                 locations: {},
                 chapters: [{
                     chapter_id: chFile.replace('.json', ''),
