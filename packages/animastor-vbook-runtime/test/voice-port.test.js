@@ -114,12 +114,12 @@ describe('voice port (VOICE_REFERENCES.md) on VBook 4 storage', () => {
         it('resolveReferenceFile maps a link into build_<id>/voices/<hero>/ and nowhere else', () => {
             expect(voice.resolveReferenceFile(buildDir, { file: 'voices/anna/c1.wav' }))
                 .to.equal(path.join(buildDir, 'voices', 'anna', 'c1.wav'));
-            expect(voice.resolveReferenceFile(buildDir, { file: 'voices/anna/ref_02.flac' }, 'anna'))
-                .to.equal(path.join(buildDir, 'voices', 'anna', 'ref_02.flac'));
+            expect(voice.resolveReferenceFile(buildDir, { file: 'voices/anna/ref_02.wav' }, 'anna'))
+                .to.equal(path.join(buildDir, 'voices', 'anna', 'ref_02.wav'));
             const bad = [
                 '../secret.wav', 'voices/anna/../../../secret.wav', 'voices/../secret.wav', '/etc/passwd',
                 path.join(sandbox, 'secret.wav'), 'voices\\anna\\c1.wav', 'voices/anna/..\\c1.wav', 'C:/voices/anna/c1.wav',
-                'voices/anna/c1.exe', 'voices/anna/c1', 'voices/anna/sub/c1.wav', 'voices/Anna/c1.wav', 'voices/Юра/c1.wav',
+                'voices/anna/c1.exe', 'voices/anna/c1.flac', 'voices/anna/c1.mp3', 'voices/anna/c1.ogg', 'voices/anna/c.1.wav', 'voices/anna/c1', 'voices/anna/sub/c1.wav', 'voices/Anna/c1.wav', 'voices/Юра/c1.wav',
                 'voices//c1.wav', 'voices/anna/a..b.wav', 'voices/anna/./c1.wav', 'voices/book/c1.wav', 'refs/anna/c1.wav', '', null, 42,
             ];
             for (const file of bad) {

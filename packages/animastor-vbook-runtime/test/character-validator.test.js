@@ -20,9 +20,10 @@ const BUNDLE_SCHEMA_PATH = path.join(__dirname, '..', 'schemas', 'vbook-bundle-4
 const EXAMPLES_DIR = path.join(__dirname, 'fixtures', 'character-examples');
 const DOCS_ROOT = process.env.ANIMASTOR_DOCS_ROOT || path.resolve(__dirname, '../../../../animastor-docs');
 const DOCS_SCHEMAS = path.join(DOCS_ROOT, 'architecture', 'schemas');
-// sha256 of architecture/schemas in animastor-docs, branch design/vbook-v4 (ba19f69)
+// sha256 of architecture/schemas in animastor-docs, branch design/vbook-v4
+// (schema: after the owner's decisions В1/В3/В4 of 14.11; examples: ba19f69)
 const PINNED = {
-    'animastor.character-1.schema.json': 'a7042a017495c50177e10621d87016d4cec9322869c8c2cd83935aef2d5e083a',
+    'animastor.character-1.schema.json': 'f758994d88d1433cd82a22a24b75a3a7f09df081154b0876ebc3ebb9bf99c7e1',
     'examples/narrator.json': '23e83d39207fe5a07fecfbfa85dfb03eaf7a93fcf9e4fcd0a2d85fa658529215',
     'examples/shop_women.json': '639b44d4b817745305de157b3998393ddd2605a3bc751a6a5b8743e20afcc5de',
     'examples/yura.json': 'fd21db3499040caf17b83374e7878938f812dfdd8312fb9d74709e92995f697f',
@@ -41,7 +42,11 @@ const SHA = 'a'.repeat(64);
 const base = (extra = {}) => ({ schema: 'animastor.character/1', id: 'yura', ...extra });
 const passport = { appearance: 'tall', clothes: 'coat', video_tokens: ['man'] };
 const look = (extra = {}) => ({ id: 'coat', label: 'В пальто', fields: { clothes: 'grey coat' }, ...extra });
-const reference = (extra = {}) => ({ file: 'voices/yura/ref_01.wav', sha256: SHA, ...extra });
+// A reference as the voice port writes it (owner's decision В1): .wav only;
+// file, sha256, ref_text, source, locked are required; verification is required
+// for a designed reference.
+const reference = (extra = {}) => ({ file: 'voices/yura/ref_01.wav', sha256: SHA, ref_text: 'Фраза.', source: 'designed', verification: 'passed', locked: true, ...extra });
+const without = (obj, ...keys) => Object.fromEntries(Object.entries(obj).filter(([k]) => !keys.includes(k)));
 const imageRef = (extra = {}) => ({ file: 'refs/images/yura/p_01.png', sha256: SHA, ...extra });
 const rule = (extra = {}) => ({ id: 'r1', when: { emotion: ['proud'] }, then: { action: 'nods' }, ...extra });
 
@@ -56,8 +61,14 @@ const VALID = [
     ['looks with a passport', base({ passport, looks: [look(), look({ id: 'beard', fields: { appearance: 'beard', video_tokens: ['beard'] }, image_ref: null, notes: '', evidence: { quote: 'q', basis: 'explicit', status: 'accepted' } })] })],
     ['look with an image_ref', base({ passport, looks: [look({ image_ref: imageRef() })] })],
     ['voice with null fields', base({ voice: { timbre: null, manner: null } })],
-    ['voice with a full reference', base({ voice: { timbre: 't', manner: 'm', timbre_source: 'analysis', reference: reference({ ref_text: 'x', source: 'designed', model: 'q', seed: 0, verification: 'passed', locked: true, candidate_id: 'c1', language: 'Russian' }) } })],
-    ['reference formats', base({ voice: { reference: reference({ file: 'voices/yura/Take-2.final.ogg' }) } })],
+    ['voice with a full reference', base({ voice: { timbre: 't', manner: 'm', timbre_source: 'analysis', reference: reference({ model: 'q', seed: 0, candidate_id: 'c1', language: 'Russian' }) } })],
+    ['reference with the minimal designed set', base({ voice: { reference: reference() } })],
+    ['reference file name with dash and underscore', base({ voice: { reference: reference({ file: 'voices/yura/Take-2_final.wav' }) } })],
+    ['designed reference that failed verification (kept, not usable)', base({ voice: { reference: reference({ verification: 'failed', locked: false }) } })],
+    ['uploaded reference confirmed by a person', base({ voice: { reference: reference({ source: 'uploaded', verification: 'user' }) } })],
+    ['uploaded reference without verification', base({ voice: { reference: without(reference({ source: 'uploaded' }), 'verification') } })],
+    ['uploaded reference that passed the automatic check', base({ voice: { reference: reference({ source: 'uploaded', verification: 'passed' }) } })],
+    ...['analysis', 'cleaned', 'user'].map((src) => [`timbre_source ${src}`, base({ voice: { timbre: 't', timbre_source: src } })]),
     ['behaviour profile and rules', base({ behaviour: { profile: { baseline: 'calm', quirks: ['q'], reactions: [{ trigger: 't', reaction: 'r', extra: 1 }] }, rules: [rule({ strength: 0.5, probability: 1, cooldown_iu: 2, priority: 3, enabled: false, custom: 'x' })] } })],
     ['behaviour profile with nulls', base({ behaviour: { profile: { baseline: null, quirks: null, reactions: null } } })],
     ['empty behaviour', base({ behaviour: {} })],
@@ -123,8 +134,20 @@ const INVALID = [
     ['voice.manner too long', base({ voice: { manner: 'x'.repeat(2001) } })],
     ['reference not an object', base({ voice: { reference: 'voices/yura/a.wav' } })],
     ['reference null', base({ voice: { reference: null } })],
-    ['reference without file', base({ voice: { reference: { sha256: SHA } } })],
-    ['reference without sha256', base({ voice: { reference: { file: 'voices/yura/a.wav' } } })],
+    ...['file', 'sha256', 'ref_text', 'source', 'locked'].map((key) => [`reference without ${key}`, base({ voice: { reference: without(reference(), key) } })]),
+    ['designed reference without verification', base({ voice: { reference: without(reference(), 'verification') } })],
+    ['designed reference with verification "user"', base({ voice: { reference: reference({ verification: 'user' }) } })],
+    ['reference verification unknown', base({ voice: { reference: reference({ source: 'uploaded', verification: 'maybe' }) } })],
+    ['reference ref_text empty', base({ voice: { reference: reference({ ref_text: '' }) } })],
+    ['reference ref_text blank', base({ voice: { reference: reference({ ref_text: '   ' }) } })],
+    ['reference ref_text not a string', base({ voice: { reference: reference({ ref_text: 5 }) } })],
+    ...['flac', 'mp3', 'ogg', 'WAV', 'wav.exe'].map((ext) => [`reference file .${ext} (only .wav)`, base({ voice: { reference: reference({ file: `voices/yura/a.${ext}` }) } })]),
+    ['reference file with ".." inside the name', base({ voice: { reference: reference({ file: 'voices/yura/a..b.wav' }) } })],
+    ['reference file with a dot inside the name', base({ voice: { reference: reference({ file: 'voices/yura/a.b.wav' }) } })],
+    ['timbre_source unknown', base({ voice: { timbre: 't', timbre_source: 'llm' } })],
+    ['image ref with ".." inside the name', base({ image_refs: [imageRef({ file: 'refs/images/yura/a..b.png' })] })],
+    ['reserved id chapters', base({ id: 'chapters' })],
+    ['reserved id source', base({ id: 'source' })],
     ['reference sha256 upper case', base({ voice: { reference: reference({ sha256: 'A'.repeat(64) }) } })],
     ['reference sha256 short', base({ voice: { reference: reference({ sha256: 'abc' }) } })],
     ['reference file absolute', base({ voice: { reference: reference({ file: '/voices/yura/a.wav' }) } })],
@@ -168,7 +191,6 @@ const INVALID = [
 // Schema accepts, the validator refuses — the rules "beyond the schema" of §10.2.
 const BEYOND_SCHEMA = [
     ['reference in another hero\'s folder', base({ voice: { reference: reference({ file: 'voices/anna/a.wav' }) } }), 'reference_dir_mismatch'],
-    ['".." inside a reference file name', base({ voice: { reference: reference({ file: 'voices/yura/a..b.wav' }) } }), 'reference_path'],
     ['image ref in another hero\'s folder', base({ image_refs: [imageRef({ file: 'refs/images/anna/p.png' })] }), 'reference_dir_mismatch'],
     ['look image_ref in another hero\'s folder', base({ passport, looks: [look({ image_ref: imageRef({ file: 'refs/images/anna/p.png' }) })] }), 'reference_dir_mismatch'],
     ['aliases equal after normalizeForMatch', base({ aliases: ['Юрий', ' юрий', 'Юрка'] }), 'duplicate_alias'],
@@ -211,7 +233,7 @@ describe('validateCharacterFile — приёмка 1.5', () => {
     });
 
     describe('the schema in the package is the normative one', () => {
-        it('the copy and the example fixtures have the pinned sha256 (design/vbook-v4 ba19f69)', () => {
+        it('the copy and the example fixtures have the pinned sha256 (design/vbook-v4)', () => {
             expect(sha256(SCHEMA_PATH)).to.equal(PINNED['animastor.character-1.schema.json']);
             for (const name of ['narrator', 'shop_women', 'yura']) {
                 expect(sha256(path.join(EXAMPLES_DIR, `${name}.json`)), name).to.equal(PINNED[`examples/${name}.json`]);

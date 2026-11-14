@@ -65,8 +65,8 @@ describe('heroes helpers', () => {
 
     it('reserved ids match the ADR list (§4) and the narrator id is not one of them', () => {
         expect([...RESERVED_HERO_IDS].sort()).to.deep.equal([
-            'behavior', 'behaviour', 'bible', 'book', 'characters', 'index',
-            'locations', 'manifest', 'mentions', 'voices',
+            'behavior', 'behaviour', 'bible', 'book', 'chapters', 'characters', 'index',
+            'locations', 'manifest', 'mentions', 'source', 'voices',
         ]);
         for (const id of RESERVED_HERO_IDS) {
             expect(isCanonicalHeroId(id), id).to.equal(true);   // grammar passes…

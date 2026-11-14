@@ -64,7 +64,9 @@ module.exports = function(app, redis, deps) {
     // on the server.
     //   409 unsupported_vbook_version — the book is VBook 3.1 / has no version;
     //   409 hero_file_broken + issues — a hero file is broken (§10.3);
-    //       ?skip_broken=1 exports the book without those heroes.
+    //   409 behaviour_file_broken + issues — only behaviour.json is broken (В5);
+    //       ?skip_broken=1 exports the book without those heroes and with the
+    //       default behaviour rules.
     app.get('/api/v1/book/:bookId/download', requireUser, async (req, res) => {
         try {
             const { bookId } = req.params;
@@ -80,16 +82,19 @@ module.exports = function(app, redis, deps) {
                 exported = book.exportBookBundle(bookId, { skipBroken });
             } catch (exportErr) {
                 const refusal = importRefusal(exportErr, req, 409);
-                if (refusal.body.error === 'hero_file_broken') refusal.status = 409;
-                if (refusal.body.error === 'unsupported_vbook_version' || refusal.body.error === 'hero_file_broken') {
+                const brokenFile = refusal.body.error === 'hero_file_broken' || refusal.body.error === 'behaviour_file_broken';
+                if (brokenFile) refusal.status = 409;
+                if (refusal.body.error === 'unsupported_vbook_version' || brokenFile) {
                     return res.status(refusal.status).json(refusal.body);
                 }
                 throw exportErr;
             }
             if (!exported) return res.status(404).json({ error: 'book not found' });
             if (exported.skipped.length > 0) {
-                log(`[EXPORT] vbook ${bookId}: ${exported.skipped.length} broken hero file(s) skipped`);
-                res.setHeader('X-Animastor-Skipped-Heroes', String(exported.skipped.length));
+                const skippedHeroes = exported.skipped.filter((i) => i.file !== 'behaviour.json').length;
+                log(`[EXPORT] vbook ${bookId}: ${exported.skipped.length} broken file(s) skipped`);
+                res.setHeader('X-Animastor-Skipped-Heroes', String(skippedHeroes));
+                res.setHeader('X-Animastor-Skipped-Files', String(exported.skipped.length));
             }
             log(`[EXPORT] vbook ${bookId} (${exported.buffer.length} bytes, ${exported.files.length} files)`);
             sendBuffer(res, exported.buffer, 'application/zip', `${bookId}.vbook`);

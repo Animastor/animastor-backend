@@ -27,7 +27,11 @@ const CHARACTER_SCHEMA = 'animastor.character/1';
 const BEHAVIOUR_GLOBALS_SCHEMA = 'animastor.behaviour-globals/1';
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
-const VOICE_REFERENCE_FILE_RE = /^voices\/[a-z0-9_]+\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(wav|flac|mp3|ogg)$/;
+// voice.reference — the same rules as the voice port (owner's decision В1,
+// 14.11): .wav only, a name without dots (so ".." cannot occur).
+const VOICE_REFERENCE_FILE_RE = /^voices\/[a-z0-9_]+\/[A-Za-z0-9_-]{1,128}\.wav$/;
+const REFERENCE_SOURCES = Object.freeze(['designed', 'uploaded']);
+const TIMBRE_SOURCES = Object.freeze(['analysis', 'cleaned', 'user']);
 const IMAGE_REF_FILE_RE = /^refs\/images\/[a-z0-9_]+\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(png|jpg|jpeg|webp)$/;
 const LOOK_FIELD_KEYS = Object.freeze(['appearance', 'clothes', 'video_tokens']);
 const BASE_LOOK_ID = 'base';
@@ -171,8 +175,7 @@ function checkPassport(report, passport) {
 
 // A reference link is a relative path of exactly three (voices) or four (images)
 // segments below build_<book_id>/. Absolute paths, "..", "." and backslashes
-// are refused here even where the schema pattern alone would let a ".." pass
-// inside a file name ("a..b.wav").
+// are refused; the schema forbids ".." inside a file name as well (В3).
 function checkReferencePath(report, file, path, { pattern, dirIndex, heroId, shape }) {
     if (typeof file !== 'string') {
         report.schema(path, `must be a string (got ${describe(file)})`);
@@ -183,7 +186,7 @@ function checkReferencePath(report, file, path, { pattern, dirIndex, heroId, sha
         return;
     }
     if (file.includes('..')) {
-        report.error('reference_path', path, 'must not contain ".."');
+        report.schema(path, 'must not contain ".."');
         return;
     }
     const dir = file.split('/')[dirIndex];
@@ -195,23 +198,33 @@ function checkReferencePath(report, file, path, { pattern, dirIndex, heroId, sha
 function checkVoiceReference(report, ref, heroId) {
     const path = 'voice.reference';
     if (!checkObject(report, ref, path)) return;
-    for (const key of ['file', 'sha256']) {
+    for (const key of ['file', 'sha256', 'ref_text', 'source', 'locked']) {
         if (!hasOwn(ref, key)) report.schema(`${path}.${key}`, 'is required');
     }
     if (hasOwn(ref, 'file')) {
         checkReferencePath(report, ref.file, `${path}.file`, {
             pattern: VOICE_REFERENCE_FILE_RE, dirIndex: 1, heroId,
-            shape: 'voices/<hero id>/<name>.<wav|flac|mp3|ogg>',
+            shape: 'voices/<hero id>/<name>.wav',
         });
     }
     if (hasOwn(ref, 'sha256') && (typeof ref.sha256 !== 'string' || !SHA256_RE.test(ref.sha256))) {
         report.schema(`${path}.sha256`, 'must be 64 lowercase hex characters');
     }
-    if (hasOwn(ref, 'ref_text')) checkString(report, ref.ref_text, `${path}.ref_text`, { max: 2000 });
-    if (hasOwn(ref, 'source')) checkEnum(report, ref.source, `${path}.source`, ['designed', 'uploaded']);
+    if (hasOwn(ref, 'ref_text') && checkString(report, ref.ref_text, `${path}.ref_text`, { min: 1, max: 2000 }) && !/\S/.test(ref.ref_text)) {
+        report.schema(`${path}.ref_text`, 'must not be blank');
+    }
+    if (hasOwn(ref, 'source')) checkEnum(report, ref.source, `${path}.source`, REFERENCE_SOURCES);
     if (hasOwn(ref, 'model')) checkString(report, ref.model, `${path}.model`, { max: 200 });
     if (hasOwn(ref, 'seed')) checkInteger(report, ref.seed, `${path}.seed`, { min: 0 });
-    if (hasOwn(ref, 'verification')) checkString(report, ref.verification, `${path}.verification`, { max: 40 });
+    // verification: a designed reference must carry the result of the automatic
+    // transcript check; for an uploaded sample it is optional and may be "user"
+    // (a person confirmed the text).
+    if (hasOwn(ref, 'verification')) {
+        checkEnum(report, ref.verification, `${path}.verification`,
+            ref.source === 'designed' ? ['passed', 'failed'] : ['passed', 'failed', 'user']);
+    } else if (ref.source === 'designed') {
+        report.schema(`${path}.verification`, 'is required for a designed reference');
+    }
     if (hasOwn(ref, 'locked')) checkBoolean(report, ref.locked, `${path}.locked`);
     warnUnknownKeys(report, ref, KNOWN_KEYS.reference, path);
 }
@@ -221,6 +234,7 @@ function checkVoice(report, voice, heroId) {
     for (const key of ['timbre', 'manner']) {
         if (hasOwn(voice, key)) checkString(report, voice[key], `voice.${key}`, { max: 2000, nullable: true });
     }
+    if (hasOwn(voice, 'timbre_source')) checkEnum(report, voice.timbre_source, 'voice.timbre_source', TIMBRE_SOURCES);
     if (hasOwn(voice, 'reference')) checkVoiceReference(report, voice.reference, heroId);
     warnUnknownKeys(report, voice, KNOWN_KEYS.voice, 'voice');
 }
@@ -485,6 +499,8 @@ module.exports = {
     BEHAVIOUR_GLOBALS_SCHEMA,
     VOICE_REFERENCE_FILE_RE,
     IMAGE_REF_FILE_RE,
+    REFERENCE_SOURCES,
+    TIMBRE_SOURCES,
     validateCharacterFile,
     validateBehaviourGlobals,
     emptyBehaviourGlobals,

@@ -12,6 +12,11 @@
 // the book — the resolver moves on to the next source in order and reports
 // `unknown_look` in warnings, so a dangling reference is visible but harmless.
 //
+// An EMPTY value in a look's fields or in look_patch (an empty or blank string,
+// no usable tokens) is not "no clothes" — the format has no empty values
+// (§4a.2). It is treated as absent: the field keeps what the previous layer
+// gave it, and the resolver reports `empty_value` (owner's decision В6).
+//
 // Consumers keep their own non-look logic (placeholder stripping, token
 // de-duplication between participants); they only ask this function for the look.
 
@@ -59,6 +64,10 @@ function findLook(hero, lookId) {
     return looks.find((l) => isPlainObject(l) && l.id === lookId) || null;
 }
 
+function isEmptyValue(field, value) {
+    return field === 'video_tokens' ? value.length === 0 : value === '';
+}
+
 function hasOwn(obj, key) {
     return isPlainObject(obj) && Object.prototype.hasOwnProperty.call(obj, key);
 }
@@ -88,7 +97,7 @@ function sameField(field, a, b) {
  *   appearance: string, clothes: string, video_tokens: string[],
  *   base: { appearance: string, clothes: string, video_tokens: string[] },
  *   changed: string[], patched: string[],
- *   image_ref: object|null, warnings: string[]
+ *   image_ref: object|null, warnings: string[]   // unknown_look | empty_value
  * }}
  */
 function resolveHeroLook(book, chapter, scene, heroId) {
@@ -128,7 +137,10 @@ function resolveHeroLook(book, chapter, scene, heroId) {
         // A look never inherits another look: only its own `fields` are read.
         const fields = chosen.look.fields;
         for (const field of LOOK_FIELDS) {
-            if (hasOwn(fields, field)) result[field] = cloneValue(field, fields[field]);
+            if (!hasOwn(fields, field)) continue;
+            const value = cloneValue(field, fields[field]);
+            if (isEmptyValue(field, value)) { warnings.push('empty_value'); continue; }
+            result[field] = value;
         }
     }
 
@@ -138,7 +150,9 @@ function resolveHeroLook(book, chapter, scene, heroId) {
     const patch = scene && hasOwn(scene.look_patch, heroId) ? scene.look_patch[heroId] : null;
     for (const field of LOOK_FIELDS) {
         if (!hasOwn(patch, field)) continue;
-        result[field] = cloneValue(field, patch[field]);
+        const value = cloneValue(field, patch[field]);
+        if (isEmptyValue(field, value)) { warnings.push('empty_value'); continue; }
+        result[field] = value;
         patched.push(field);
     }
 

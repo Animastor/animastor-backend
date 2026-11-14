@@ -22,7 +22,7 @@ const NARRATOR_ID = 'narrator';
 // Reserved ids cannot be a hero id: they name files/directories of the book.
 const RESERVED_HERO_IDS = Object.freeze([
     'manifest', 'book', 'bible', 'locations', 'voices', 'characters',
-    'behavior', 'behaviour', 'mentions', 'index',
+    'behavior', 'behaviour', 'mentions', 'index', 'chapters', 'source',
 ]);
 
 // Grammar only: one path segment, lower-case snake_case, up to 64 characters.
@@ -162,7 +162,9 @@ function sortHeroes(heroes, charactersOrder) {
 
 // Book-level findings about the cast (§10.3), added to hero_issues by the
 // loaders next to the per-file ones:
-//   narrator_missing   (blocking)     — no healthy characters/narrator.json
+//   narrator_missing   (non-blocking) — no healthy characters/narrator.json. The
+//                        book opens, saves and exports; synthesis refuses
+//                        (there is no narrator voice to clone) — owner, В8
 //   duplicate_rule_id  (non-blocking) — the later rule is not applied (§6.2)
 //   ambiguous_alias    (non-blocking) — the alias is left out of the index (§7)
 function collectBookHeroIssues(book) {
@@ -170,8 +172,8 @@ function collectBookHeroIssues(book) {
     if (!narrator(book)) {
         issues.push({
             file: 'characters/narrator.json', hero_id: NARRATOR_ID, code: 'narrator_missing',
-            message: 'the narrator file is missing or broken; narration uses the default voice',
-            blocking: true,
+            message: 'the narrator file is missing or broken; narration cannot be synthesized until it is created',
+            blocking: false,
         });
     }
     for (const id of heroRules(book).duplicates) {

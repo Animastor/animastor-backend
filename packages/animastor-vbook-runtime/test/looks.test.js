@@ -208,6 +208,64 @@ describe('resolveHeroLook', () => {
         expect(resolveHeroLook(book, {}, {}, 'nul')).to.equal(null);
     });
 
+    // ── owner's decision В6: an empty value is an absent value, with a warning ──
+    describe('empty values in fields / look_patch (В6)', () => {
+        const EMPTY = { appearance: ['', '   ', '\n\t'], clothes: ['', '  '], video_tokens: [[], ['', '  '], [null, 7]] };
+
+        for (const [field, values] of Object.entries(EMPTY)) {
+            for (const value of values) {
+                it(`look.fields.${field} = ${JSON.stringify(value)} keeps the base value and warns`, () => {
+                    const book = makeBook();
+                    book.heroes[0].looks.push({ id: 'odd', label: 'Странный', fields: { [field]: value, ...(field === 'clothes' ? {} : { clothes: 'robe' }) } });
+                    const result = resolveHeroLook(book, { looks: { woland: 'odd' } }, {}, 'woland');
+                    expect(result[field]).to.deep.equal(result.base[field]);
+                    expect(result.changed).to.not.include(field);
+                    expect(result.warnings).to.deep.equal(['empty_value']);
+                    expect(result).to.include({ look_id: 'odd', source: 'chapter' });
+                    if (field !== 'clothes') expect(result.clothes).to.equal('robe'); // the other field of the look still applies
+                });
+
+                it(`look_patch.${field} = ${JSON.stringify(value)} keeps the look's value and warns`, () => {
+                    const book = makeBook();
+                    const chapter = { looks: { woland: 'coat' } };
+                    const withoutPatch = resolveHeroLook(book, chapter, {}, 'woland');
+                    const result = resolveHeroLook(book, chapter, { look_patch: { woland: { [field]: value } } }, 'woland');
+                    expect(result[field]).to.deep.equal(withoutPatch[field]);
+                    expect(result.patched).to.deep.equal([]);
+                    expect(result.warnings).to.deep.equal(['empty_value']);
+                });
+            }
+        }
+
+        it('an empty value never wipes a field: "no clothes" has to be written in words', () => {
+            const book = makeBook();
+            const scene = { look_patch: { woland: { clothes: '', appearance: ' ', video_tokens: [] } } };
+            const result = resolveHeroLook(book, {}, scene, 'woland');
+            expect(result).to.deep.include({ appearance: 'tall, dark hair', clothes: 'black suit' });
+            expect(result.video_tokens).to.deep.equal(['dark hair', 'black suit']);
+            expect(result.changed).to.deep.equal([]);
+            expect(result.warnings).to.deep.equal(['empty_value', 'empty_value', 'empty_value']);
+            expect(resolveHeroLook(book, {}, { look_patch: { woland: { clothes: 'no clothes, wrapped in a towel' } } }, 'woland').clothes)
+                .to.equal('no clothes, wrapped in a towel');
+        });
+
+        it('a non-empty value next to an empty one still applies; tokens are trimmed, blanks dropped', () => {
+            const book = makeBook();
+            const scene = { look_patch: { woland: { clothes: '', video_tokens: [' monocle ', '', 'cane'] } } };
+            const result = resolveHeroLook(book, {}, scene, 'woland');
+            expect(result.video_tokens).to.deep.equal(['monocle', 'cane']);
+            expect(result.patched).to.deep.equal(['video_tokens']);
+            expect(result.warnings).to.deep.equal(['empty_value']);
+        });
+
+        it('a base passport with empty fields stays what it is (emptiness there is not a warning)', () => {
+            const book = makeBook();
+            const result = resolveHeroLook(book, {}, {}, 'narrator');
+            expect(result).to.deep.include({ appearance: 'invisible', clothes: '' });
+            expect(result.warnings).to.deep.equal([]);
+        });
+    });
+
     it('hero without passport or an unknown hero returns null', () => {
         const book = makeBook();
         book.heroes.push({ id: 'episodic', voice: { timbre: 'quiet' } });

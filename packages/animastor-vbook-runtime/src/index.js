@@ -564,6 +564,19 @@ function saveBookBundle(book, ...rest) {
     // never write → discover).
     assertBundleFilesWritable(book, bookDir);
 
+    // A broken behaviour.json is left as it is (§10.3 for heroes, В5 for this
+    // file). A book loaded from such a directory carries the default rules:
+    // saving it back unchanged is fine and skips the file; an actual change of
+    // behaviour is refused — the person has to fix or remove the file first.
+    const behaviourOnDisk = inspectBehaviourFile(bookDir);
+    const behaviourOnDiskBroken = behaviourOnDisk.state === 'broken';
+    if (behaviourOnDiskBroken && isPlainObject(book.behaviour)
+        && toJson(book.behaviour) !== toJson(emptyBehaviourGlobals())) {
+        throw new HeroStoreError('behaviour_file_broken',
+            `Bundle validation failed (${BEHAVIOUR_FILE}): the file on disk is broken (${behaviourOnDisk.issue.code}) — fix or delete it first`,
+            { issues: [behaviourOnDisk.issue] });
+    }
+
     if (!fs.existsSync(booksDir)) {
         fs.mkdirSync(booksDir, { recursive: true });
     }
@@ -608,7 +621,8 @@ function saveBookBundle(book, ...rest) {
     writeRoot(LOCATIONS_FILE);
     // behaviour.json: an explicit value is written; without one the file on
     // disk stays, and a missing file is created so a book always has it.
-    if (isPlainObject(book.behaviour) || !lstatOrNull(joinInside(bookDir, BEHAVIOUR_FILE))) {
+    // A broken file is never overwritten (checked before the first write).
+    if (!behaviourOnDiskBroken && (isPlainObject(book.behaviour) || !lstatOrNull(joinInside(bookDir, BEHAVIOUR_FILE)))) {
         writeRoot(BEHAVIOUR_FILE);
     }
     if (files[SOURCE_FILE] !== undefined) {
@@ -721,6 +735,31 @@ function readBookHead(bookDir) {
 }
 
 /**
+ * State of behaviour.json without throwing:
+ *   { state: 'absent' } | { state: 'ok', behaviour } | { state: 'broken', issue }
+ * issue: { file: 'behaviour.json', code: 'unreadable' | 'invalid_json' | 'schema',
+ *          message, blocking: true }
+ */
+function inspectBehaviourFile(bookDir) {
+    const file = joinInside(bookDir, BEHAVIOUR_FILE);
+    const st = lstatOrNull(file);
+    if (!st) return { state: 'absent' };
+    const broken = (code, message) => ({ state: 'broken', issue: { file: BEHAVIOUR_FILE, code, message, blocking: true } });
+    if (!st.isFile()) return broken('unreadable', st.isSymbolicLink() ? 'symbolic links are not followed' : 'not a regular file');
+    let doc;
+    try {
+        doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (err) {
+        return broken('invalid_json', err.message);
+    }
+    const check = validateBehaviourGlobals(doc);
+    if (!check.valid) {
+        return broken('schema', check.errors.slice(0, 5).map((e) => (e.path ? `${e.path}: ${e.message}` : e.message)).join('; '));
+    }
+    return { state: 'ok', behaviour: doc };
+}
+
+/**
  * Read the parts of a book that the full loader and the draft loader share:
  * bible, locations, behaviour and the cast (heroes + hero_issues).
  */
@@ -731,17 +770,23 @@ function readBookBody(bookDir, bookMeta) {
     };
     const bible = readObject(BIBLE_FILE, {});
     const locations = readObject(LOCATIONS_FILE, {});
-    const behaviour = readObject(BEHAVIOUR_FILE, null) ?? emptyBehaviourGlobals();
-    const behaviourCheck = validateBehaviourGlobals(behaviour);
-    if (!behaviourCheck.valid) {
-        throw new Error(`behaviour.json: ${behaviourCheck.errors.map((e) => (e.path ? `${e.path}: ${e.message}` : e.message)).join('; ')}`);
-    }
+    // behaviour.json: a missing file means defaults (it is created by the next
+    // save). A BROKEN file does not take the book down (owner's decision В5):
+    // the book opens with the default rules, the problem is listed next to the
+    // hero problems as blocking, the file is left exactly as it is, and
+    // neither a behaviour write nor an export goes through until it is fixed.
+    const behaviourState = inspectBehaviourFile(bookDir);
+    const behaviour = behaviourState.state === 'ok' ? behaviourState.behaviour : emptyBehaviourGlobals();
 
     const cast = characterStore.listCharacters(bookDir, {
         charactersOrder: bookMeta && bookMeta.structure ? bookMeta.structure.characters_order : null,
     });
     const body = { bible, locations, behaviour, heroes: cast.heroes, hero_issues: [] };
-    body.hero_issues = [...cast.issues, ...heroes.collectBookHeroIssues(body)];
+    const fileIssues = behaviourState.state === 'broken' ? [behaviourState.issue, ...cast.issues] : cast.issues;
+    body.hero_issues = [...fileIssues, ...heroes.collectBookHeroIssues(body)];
+    if (behaviourState.state === 'broken') {
+        console.warn(`[VBOOK] broken ${BEHAVIOUR_FILE}: ${behaviourState.issue.code} — ${behaviourState.issue.message}`);
+    }
     for (const problem of cast.issues) {
         if (problem.blocking) console.warn(`[VBOOK] broken hero file ${problem.file}: ${problem.code} — ${problem.message}`);
     }
@@ -796,15 +841,20 @@ function loadBookFromDir(bookId, bookDir) {
  * @param {{ skipBroken?: boolean }} [options]
  * @returns {{ buffer: Buffer, files: string[], skipped: object[] }|null} null when there is no such book
  * @throws {BookModelError} UNSUPPORTED_VBOOK_VERSION
- * @throws {HeroStoreError} hero_file_broken (.details.issues) unless skipBroken
+ * @throws {HeroStoreError} hero_file_broken | behaviour_file_broken (.details.issues)
+ *         unless skipBroken (then the broken heroes are left out and behaviour.json
+ *         is exported with the default rules)
  */
 function exportBookBundle(bookId, options = {}) {
     const book = loadBook(bookId);
     if (!book) return null;
-    const broken = book.hero_issues.filter((i) => i.blocking && i.file && i.code !== 'narrator_missing');
+    // Blocking problems are broken FILES (hero files, behaviour.json). A book
+    // without a narrator exports: narrator_missing is a warning (В8).
+    const broken = book.hero_issues.filter((i) => i.blocking && i.file);
     if (broken.length > 0 && !options.skipBroken) {
-        throw new HeroStoreError('hero_file_broken',
-            `broken hero file${broken.length === 1 ? '' : 's'}: ${heroProblemList(broken)}`,
+        const onlyBehaviour = broken.every((i) => i.file === BEHAVIOUR_FILE);
+        throw new HeroStoreError(onlyBehaviour ? 'behaviour_file_broken' : 'hero_file_broken',
+            `broken file${broken.length === 1 ? '' : 's'}: ${heroProblemList(broken)}`,
             { issues: broken });
     }
     const sourceText = readTextNoFollow(joinInside(getBookDir(bookId), SOURCE_FILE));
@@ -1032,6 +1082,7 @@ module.exports = {
     // Persistence
     loadBook,
     resetBook,
+    inspectBehaviourFile,
     readBookHead,
     readBookBody,
 

@@ -28,7 +28,11 @@ const { joinInside, assertInside } = require('./safe-paths');
 const NARRATOR_ID = 'narrator';
 const TIMBRE_SOURCES = Object.freeze(['cleaned', 'user', 'analysis']);
 const REFERENCE_SOURCES = Object.freeze(['designed', 'uploaded']);
+// Automatic transcript check of a designed reference. An uploaded sample may
+// instead carry 'user' — a person confirmed the text — or no value at all
+// (owner's decision В1, 14.11; the hero-file schema states the same).
 const VERIFICATION_STATES = Object.freeze(['passed', 'failed']);
+const UPLOADED_VERIFICATION_STATES = Object.freeze(['passed', 'failed', 'user']);
 const REFERENCE_FILE_RE = /^voices\/[A-Za-z0-9_-]{1,128}\/[A-Za-z0-9_-]{1,128}\.wav$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
@@ -82,7 +86,11 @@ function referenceProblem(ref) {
     if (typeof ref.ref_text !== 'string' || !ref.ref_text.trim()) return 'reference.ref_text must be a non-empty string';
     if (!REFERENCE_SOURCES.includes(ref.source)) return `reference.source must be ${REFERENCE_SOURCES.join('|')}`;
     if (typeof ref.sha256 !== 'string' || !SHA256_RE.test(ref.sha256)) return 'reference.sha256 must be 64 lowercase hex';
-    if (!VERIFICATION_STATES.includes(ref.verification)) return `reference.verification must be ${VERIFICATION_STATES.join('|')}`;
+    if (ref.source === 'designed') {
+        if (!VERIFICATION_STATES.includes(ref.verification)) return `reference.verification must be ${VERIFICATION_STATES.join('|')}`;
+    } else if (ref.verification !== undefined && ref.verification !== null && !UPLOADED_VERIFICATION_STATES.includes(ref.verification)) {
+        return `reference.verification must be ${UPLOADED_VERIFICATION_STATES.join('|')}`;
+    }
     if (typeof ref.locked !== 'boolean') return 'reference.locked must be boolean';
     if (ref.seed !== undefined && ref.seed !== null && !Number.isSafeInteger(ref.seed)) return 'reference.seed must be an integer';
     if (ref.model !== undefined && ref.model !== null && typeof ref.model !== 'string') return 'reference.model must be a string';
@@ -98,12 +106,23 @@ function normaliseReference(ref) {
         model: typeof ref.model === 'string' ? ref.model : null,
         seed: Number.isSafeInteger(ref.seed) ? ref.seed : null,
         sha256: ref.sha256,
-        verification: ref.verification,
+        verification: ref.verification === undefined ? null : ref.verification,
         locked: ref.locked,
     };
     if (typeof ref.candidate_id === 'string') out.candidate_id = ref.candidate_id;
     if (typeof ref.language === 'string') out.language = ref.language;
     return out;
+}
+
+/**
+ * May this reference be used for synthesis as far as verification goes?
+ * designed → the automatic check passed; uploaded → passed, or confirmed by a
+ * person ('user').
+ */
+function isReferenceVerified(ref) {
+    if (!ref) return false;
+    if (ref.verification === 'passed') return true;
+    return ref.source === 'uploaded' && ref.verification === 'user';
 }
 
 // ── public port ───────────────────────────────────────────────────────────
@@ -160,6 +179,7 @@ function setCharacterVoiceReference(book, characterId, reference) {
     const stored = { ...normalised };
     if (stored.model === null) delete stored.model;
     if (stored.seed === null) delete stored.seed;
+    if (stored.verification === null) delete stored.verification;
     v.reference = stored;
     return normalised;
 }
@@ -207,7 +227,7 @@ function voiceDesignDescription(voice) {
 // ── reference file on disk (content folder, never the .vbook) ───────────
 /**
  * Absolute path of a stored reference link.
- * The link must be voices/<hero id>/<name>.<wav|flac|mp3|ogg>, relative to
+ * The link must be voices/<hero id>/<name>.wav, relative to
  * `buildDir` (= <output>/build_<book_id>). Absolute paths, "..", "." and
  * backslashes are refused, and the resolved path is re-checked to lie inside
  * <buildDir>/voices/<hero id>/.
@@ -223,7 +243,7 @@ function resolveReferenceFile(buildDir, reference, characterId) {
     if (typeof file !== 'string' || !file) throw bad('file is missing');
     if (file.includes('\\') || file.includes('\0') || file.startsWith('/') || /^[A-Za-z]:/.test(file)) throw bad('not a relative link');
     if (file.split('/').some((seg) => seg === '..' || seg === '.' || seg === '') || file.includes('..')) throw bad('path traversal');
-    if (!VOICE_REFERENCE_FILE_RE.test(file)) throw bad('must be voices/<hero id>/<name>.<wav|flac|mp3|ogg>');
+    if (!VOICE_REFERENCE_FILE_RE.test(file)) throw bad('must be voices/<hero id>/<name>.wav');
     const [, heroId, name] = file.split('/');
     if (!isValidHeroId(heroId)) throw bad('invalid hero id');
     if (characterId !== undefined && heroId !== characterId) throw bad(`must be inside voices/${characterId}/`);
@@ -309,6 +329,7 @@ module.exports = {
     cleanVoiceDescription,
     voiceFromDescription,
     referenceProblem,
+    isReferenceVerified,
     resolveReferenceFile,
     referenceState,
 };

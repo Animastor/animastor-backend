@@ -379,7 +379,7 @@ describe('Book input guard (routes)', function () {
     describe('VBook 4 import refusals (disk unchanged)', () => {
         const ROUTES = ['/api/v1/book/import', '/api/v1/book/load-vbook'];
         const hero = (extra) => JSON.stringify({ ...YURA, ...extra });
-        const refFile = (file) => hero({ voice: { timbre: 't', reference: { file, sha256: SHA } } });
+        const refFile = (file) => hero({ voice: { timbre: 't', reference: { file, sha256: SHA, ref_text: 'Фраза.', source: 'uploaded', locked: true } } });
 
         // [label, bundle options, expected status, expected error]
         const CASES = [
@@ -400,6 +400,10 @@ describe('Book input guard (routes)', function () {
             ['reference.file with a backslash', { replace: { 'characters/yura.json': refFile('voices\\yura\\a.wav') } }, 422, 'hero_file_broken'],
             ['reference.file in another hero\'s folder', { replace: { 'characters/yura.json': refFile('voices/narrator/a.wav') } }, 422, 'hero_file_broken'],
             ['reference.file that is not an audio file', { replace: { 'characters/yura.json': refFile('voices/yura/a.sh') } }, 422, 'hero_file_broken'],
+            ['reference.file that is not .wav', { replace: { 'characters/yura.json': refFile('voices/yura/a.mp3') } }, 422, 'hero_file_broken'],
+            ['reference without ref_text', { replace: { 'characters/yura.json': hero({ voice: { reference: { file: 'voices/yura/a.wav', sha256: SHA, source: 'uploaded', locked: true } } }) } }, 422, 'hero_file_broken'],
+            ['hero id "chapters" (reserved)', { extra: [{ name: 'characters/chapters.json', data: hero({ id: 'chapters' }) }] }, 422, 'hero_file_broken'],
+            ['hero id "source" (reserved)', { extra: [{ name: 'characters/source.json', data: hero({ id: 'source' }) }] }, 422, 'hero_file_broken'],
             ['archive without manifest.json in the root (prefix folder)', { prefix: 'import_1700000000/' }, 400, 'manifest_not_in_root'],
             ['archive without manifest.json at all', { drop: ['manifest.json'] }, 400, 'manifest_not_in_root'],
             ['vbook_version 3.1', { version: '3.1' }, 422, 'unsupported_vbook_version'],
@@ -421,6 +425,13 @@ describe('Book input guard (routes)', function () {
                 });
             }
         }
+
+        it('the same hero with a well-formed reference imports — the refusals above are about the path, not the fixture', async () => {
+            const r = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: 'v4_good_ref', buildId: 'build_v4_good_ref', replace: { 'characters/yura.json': refFile('voices/yura/a.wav') } }) });
+            ownedBookIds.push('v4_good_ref');
+            expect(r.status, JSON.stringify(r.body)).to.equal(200);
+            expect(book.loadBook('v4_good_ref').heroes[1].voice.reference.file).to.equal('voices/yura/a.wav');
+        });
 
         it('a refused hero file is named in the answer, without a server path', async () => {
             const r = await req('POST', '/api/v1/book/import', {
@@ -588,9 +599,18 @@ describe('Book input guard (routes)', function () {
             expect(d.status).to.equal(409);
             expect(d.body).to.deep.equal(r.body);
             // importing a v4 archive over that id neither opens nor replaces it
+            // (В9) the answer names the obstacle — the OLD copy — and the way out
             const again = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: 'old_book_31', buildId: 'build_old_book_31' }), lang: 'ru' });
             expect(again.status).to.equal(409);
-            expect(again.body).to.deep.equal(r.body);
+            expect(again.body).to.deep.equal({
+                error: 'unsupported_vbook_version', vbook_version: '3.1', supported: 4,
+                existing_book_id: 'old_book_31', hint: 'delete_existing_book',
+                message: 'На сервере уже есть книга с этим идентификатором (old_book_31) в формате VBook 3.1, который больше не поддерживается. Удалите старую книгу и повторите импорт.',
+            });
+            const againEn = await req('POST', '/api/v1/book/load-vbook', { cookie: userCookie, file: bundle({ bookId: 'old_book_31', buildId: 'build_old_book_31' }) });
+            expect(againEn.status).to.equal(409);
+            expect(againEn.body.hint).to.equal('delete_existing_book');
+            expect(againEn.body.message).to.match(/Delete the old book and import again\.$/);
 
             expect(contents(dir)).to.deep.equal(before);
             expect(stamps()).to.deep.equal(stampsBefore);
@@ -677,6 +697,44 @@ describe('Book input guard (routes)', function () {
                     .to.deep.equal(V4_BOOK_FILES.filter((f) => f.includes('.') && f !== 'characters/yura.json'));
                 expect(skipped.headers.get('x-animastor-skipped-heroes')).to.equal('1');
                 expect(contents(dir)).to.deep.equal(before);
+            });
+
+            it('(В5) a broken behaviour.json: GET /book 200 with default rules and a blocking problem; export 409 behaviour_file_broken; skip_broken exports', async () => {
+                const r0 = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: 'v4_broken_behaviour', buildId: 'build_v4_broken_behaviour' }) });
+                ownedBookIds.push('v4_broken_behaviour');
+                expect(r0.status, JSON.stringify(r0.body)).to.equal(200);
+                const bdir = path.join(booksDir, 'v4_broken_behaviour');
+                fs.writeFileSync(path.join(bdir, 'behaviour.json'), '{"schema":');
+                const before = contents(bdir);
+
+                const got = await req('GET', '/api/v1/book/v4_broken_behaviour', { cookie: userCookie });
+                expect(got.status, JSON.stringify(got.body)).to.equal(200);
+                expect(got.body.behaviour).to.deep.equal({ schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] });
+                expect(got.body.heroes.map((h) => h.id)).to.deep.equal(['narrator', 'yura']);
+                expect(got.body.hero_issues.map((i) => [i.file, i.code, i.blocking])).to.deep.equal([['behaviour.json', 'invalid_json', true]]);
+
+                const refused = await req('GET', '/api/v1/book/v4_broken_behaviour/download', { cookie: userCookie });
+                expect(refused.status).to.equal(409);
+                expect(refused.body.error).to.equal('behaviour_file_broken');
+                expect(refused.body.issues.map((i) => i.file)).to.deep.equal(['behaviour.json']);
+
+                const skipped = await req('GET', '/api/v1/book/v4_broken_behaviour/download?skip_broken=1', { cookie: userCookie, raw: true });
+                expect(skipped.status).to.equal(200);
+                expect(JSON.parse(zipFiles(skipped.buffer)['behaviour.json']).rules).to.deep.equal([]);
+                expect(skipped.headers.get('x-animastor-skipped-heroes')).to.equal('0');
+                expect(skipped.headers.get('x-animastor-skipped-files')).to.equal('1');
+                expect(contents(bdir)).to.deep.equal(before);
+            });
+
+            it('(В8) a book without a narrator exports; narrator_missing is a warning', async () => {
+                const r0 = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: 'v4_no_narrator', buildId: 'build_v4_no_narrator', drop: ['characters/narrator.json'] }) });
+                ownedBookIds.push('v4_no_narrator');
+                expect(r0.status, JSON.stringify(r0.body)).to.equal(200);
+                const got = await req('GET', '/api/v1/book/v4_no_narrator', { cookie: userCookie });
+                expect(got.body.hero_issues.map((i) => [i.code, i.blocking])).to.deep.equal([['narrator_missing', false]]);
+                const d = await req('GET', '/api/v1/book/v4_no_narrator/download', { cookie: userCookie, raw: true });
+                expect(d.status).to.equal(200);
+                expect(Object.keys(zipFiles(d.buffer))).to.not.include('characters/narrator.json');
             });
 
             it('1.6 an archive that carries the broken file is refused on import (422), disk unchanged', async () => {

@@ -37,7 +37,8 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 class HeroStoreError extends Error {
     /**
      * @param {string} code  invalid_hero_id | reserved_id | invalid_character |
-     *                       hero_file_broken | narrator_required | path_is_link
+     *                       hero_file_broken | behaviour_file_broken |
+     *                       narrator_required | path_is_link
      * @param {string} message
      * @param {object} [details]
      */

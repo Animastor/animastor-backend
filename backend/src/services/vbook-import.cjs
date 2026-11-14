@@ -55,9 +55,10 @@ function importRefusal(err, req, unsupportedStatus = 422) {
     if (code === 'MANIFEST_NOT_IN_ROOT') {
         return { status: 400, body: { error: 'manifest_not_in_root', code: 'manifest_not_in_root', message: err.message } };
     }
-    if (code === 'HERO_FILE_BROKEN' || code === 'hero_file_broken') {
+    if (code === 'HERO_FILE_BROKEN' || code === 'hero_file_broken' || code === 'behaviour_file_broken') {
         const issues = err.issues || (err.details && err.details.issues) || [];
-        return { status: 422, body: { error: 'hero_file_broken', code: 'hero_file_broken', message: err.message, issues: publicIssues(issues) } };
+        const error = code === 'behaviour_file_broken' ? 'behaviour_file_broken' : 'hero_file_broken';
+        return { status: 422, body: { error, code: error, message: err.message, issues: publicIssues(issues) } };
     }
     if (err && err.name === 'InvalidInputError') {
         return { status: err.status || 400, body: { error: err.message || 'invalid input', code: String(code || 'invalid_input').toLowerCase() } };
@@ -133,7 +134,17 @@ function createVbookImporter({ book, importBookAllowed, log = () => {} }) {
             return { ok: false, status: check.status, body: { error: check.error } };
         }
         if (existingUnsupported) {
-            return { ok: false, ...importRefusal(existingUnsupported, req, 409) };
+            // The archive is fine; the obstacle is the OLD copy on the server
+            // (owner's decision В9): 409 with the version body of that copy
+            // and an explicit way out — delete the old book, then import.
+            const refusal = importRefusal(existingUnsupported, req, 409);
+            const ru = requestLanguage(req) === 'ru';
+            refusal.body.existing_book_id = bookId;
+            refusal.body.hint = 'delete_existing_book';
+            refusal.body.message = ru
+                ? `На сервере уже есть книга с этим идентификатором (${bookId}) в формате VBook ${existingUnsupported.vbookVersion || 'без номера версии'}, который больше не поддерживается. Удалите старую книгу и повторите импорт.`
+                : `A book with this id (${bookId}) already exists on the server in VBook ${existingUnsupported.vbookVersion || 'format without a version number'}, which is no longer supported. Delete the old book and import again.`;
+            return { ok: false, ...refusal };
         }
 
         if (existingBook) {

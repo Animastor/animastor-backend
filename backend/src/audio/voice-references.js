@@ -253,7 +253,9 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
         const r = v.reference;
         if (!r) return { status: 'missing' };
         if (!r.locked) return { status: 'unlocked', reference: r };
-        if (r.verification !== 'passed') return { status: 'not_verified', reference: r };
+        // designed → the automatic check passed; uploaded → passed or confirmed
+        // by a person ('user'). One rule, owned by the port (В1).
+        if (!voicePort.isReferenceVerified(r)) return { status: 'not_verified', reference: r };
         const file = paths.resolveLink(buildIdOf(loadedBook), r.file);
         if (!fs.existsSync(file)) return { status: 'file_missing', reference: r, path: file };
         const bytes = fs.readFileSync(file);

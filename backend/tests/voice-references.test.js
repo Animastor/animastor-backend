@@ -154,6 +154,36 @@ describe('voice references — WAV, paths, sha256, status', () => {
         expect(ref).to.include({ source: 'uploaded', ref_text: 'Слова из образца, исправленные.', seed: null, model: null });
     });
 
+    it('(В8) synthesis without a narrator is refused: 409 voice_reference_required, reason missing_voice', () => {
+        const svc = vr.createVoiceReferences({ outputDir: out });
+        // a book whose narrator.json is missing or broken has no narrator hero in memory
+        const book = v4Book({ manifest: { build_id: 'build_b' } }, { anna: { timbre: 'a' } });
+        lockReference(book, out, 'anna');
+        expect(svc.referenceStatus(book, 'narrator').status).to.equal('missing_voice');
+        const segs = [{ segment_type: 'narration', text: 'Текст.' }, { segment_type: 'dialogue', text: 'anna: Привет.' }];
+        const ids = generation.requiredVoiceIds(segs, { payload: {} }, { ...book, book: { defaults: {} } });
+        expect(ids.sort()).to.deep.equal(['anna', 'narrator']);
+        expect(() => svc.requireReferences(book, ids)).to.throw().that.satisfies((e) =>
+            e.status === 409 && e.code === 'voice_reference_required'
+            && JSON.stringify(e.details) === JSON.stringify({ character_ids: ['narrator'], reasons: { narrator: 'missing_voice' } }));
+    });
+
+    it('(В1) an uploaded reference confirmed by a person (verification "user") is usable; a designed one must have passed', () => {
+        const svc = vr.createVoiceReferences({ outputDir: out });
+        const book = v4Book({ manifest: { build_id: 'build_b' } }, { narrator: { timbre: 't' } });
+        lockReference(book, out, 'narrator');
+        const ref = voiceOf(book, 'narrator').reference;
+        expect(svc.referenceStatus(book, 'narrator').status).to.equal('ok');
+        Object.assign(ref, { source: 'uploaded', verification: 'user' });
+        expect(svc.referenceStatus(book, 'narrator').status).to.equal('ok');
+        delete ref.verification;
+        expect(svc.referenceStatus(book, 'narrator').status).to.equal('not_verified');
+        Object.assign(ref, { source: 'designed', verification: 'user' });
+        expect(svc.referenceStatus(book, 'narrator').status).to.equal('malformed');
+        Object.assign(ref, { source: 'designed', verification: 'failed' });
+        expect(svc.referenceStatus(book, 'narrator').status).to.equal('not_verified');
+    });
+
     // ── paths of uploads: every value that reaches the disk is re-checked ──
     describe('upload paths cannot leave build_<id>/voices/<voice>/uploads/', () => {
         const provider = () => ({ ...require('@animastor/generation').comfyuiProvider, assembleVoiceTranscribeWorkflow: (spec) => ({ spec }) });

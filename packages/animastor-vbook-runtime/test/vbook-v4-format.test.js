@@ -383,13 +383,124 @@ describe('VBook 4 format — acceptance of step 1 (package level)', () => {
             fs.writeFileSync(file, 'not json');
             let book = vbook.loadBook(bookId);
             expect(book.heroes.map((h) => h.id)).to.deep.equal(['yura', 'anna']);
-            expect(book.hero_issues.map((i) => [i.code, i.blocking])).to.deep.equal([['invalid_json', true], ['narrator_missing', true]]);
+            // the broken FILE blocks (writes to it, export); "no narrator" is a warning (В8)
+            expect(book.hero_issues.map((i) => [i.code, i.blocking])).to.deep.equal([['invalid_json', true], ['narrator_missing', false]]);
             expect(vbook.voice.getCharacterVoice(book, 'narrator')).to.equal(null);
             fs.unlinkSync(file);
             book = vbook.loadBook(bookId);
-            expect(book.hero_issues.map((i) => i.code)).to.deep.equal(['narrator_missing']);
-            // a missing narrator is not a broken file: the export goes through
-            expect(vbook.exportBookBundle(bookId).files).to.not.include('characters/narrator.json');
+            expect(book.hero_issues).to.deep.equal([{
+                file: 'characters/narrator.json', hero_id: 'narrator', code: 'narrator_missing', blocking: false,
+                message: book.hero_issues[0].message,
+            }]);
+            // a missing narrator is not a broken file: the book saves and the export goes through
+            vbook.saveBookBundle(book);
+            const out = vbook.exportBookBundle(bookId);
+            expect(out.files).to.not.include('characters/narrator.json');
+            expect(out.skipped).to.deep.equal([]);
+            // …and the archive imports back, still reporting the missing narrator
+            const again = vbook.buildBookFromBundle(vbook.extractBookBundle(out.buffer, { log: () => {} }));
+            expect(again.hero_issues.map((i) => [i.code, i.blocking])).to.deep.equal([['narrator_missing', false]]);
+        });
+
+        // ── owner's decision В5: a broken behaviour.json ──
+        describe('a broken behaviour.json (В5)', () => {
+            const CASES = [
+                ['not JSON', '{"schema":', 'invalid_json'],
+                ['a 3.1 document', JSON.stringify({ schema_version: 2, rules: [], characters: {} }), 'schema'],
+                ['a rule with scope', JSON.stringify({ schema: 'animastor.behaviour-globals/1', rules: [{ id: 'r', scope: 'global' }] }), 'schema'],
+                ['an array', '[]', 'schema'],
+            ];
+            for (const [label, text, code] of CASES) {
+                it(`${label}: the book opens with the default rules and lists the problem as blocking`, () => {
+                    const bookId = newBook();
+                    const file = path.join(books, bookId, 'behaviour.json');
+                    fs.writeFileSync(file, text);
+                    for (const book of [vbook.loadBook(bookId), lazyBook.loadDraftBook(bookId), bookModel.loadBook(bookId, { mode: 'lazy' })]) {
+                        expect(book.behaviour).to.deep.equal({ schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] });
+                        expect(book.heroes.map((h) => h.id)).to.deep.equal(['narrator', 'yura', 'anna']);
+                        expect(book.chapters.length).to.be.greaterThan(0);
+                        expect(book.hero_issues).to.have.length(1);
+                        expect(book.hero_issues[0]).to.include({ file: 'behaviour.json', code, blocking: true });
+                        expect(book.hero_issues[0]).to.not.have.property('hero_id');
+                    }
+                    expect(fs.readFileSync(file, 'utf8')).to.equal(text);
+                });
+            }
+
+            it('saving the book as loaded leaves the broken file alone; the rest of the book is saved', () => {
+                const bookId = newBook();
+                const dir = path.join(books, bookId);
+                fs.writeFileSync(path.join(dir, 'behaviour.json'), '{oops');
+                const book = vbook.loadBook(bookId);
+                book.heroes[1].notes = 'edited while behaviour.json is broken';
+                book.book.title = 'Новое название';
+                vbook.saveBookBundle(book);
+                expect(fs.readFileSync(path.join(dir, 'behaviour.json'), 'utf8')).to.equal('{oops');
+                const reloaded = vbook.loadBook(bookId);
+                expect(reloaded.heroes[1].notes).to.equal('edited while behaviour.json is broken');
+                expect(reloaded.book.title).to.equal('Новое название');
+                expect(reloaded.hero_issues.map((i) => i.file)).to.deep.equal(['behaviour.json']);
+            });
+
+            it('a write of behaviour is refused (behaviour_file_broken) and nothing on disk changes', () => {
+                const bookId = newBook();
+                const dir = path.join(books, bookId);
+                fs.writeFileSync(path.join(dir, 'behaviour.json'), '{oops');
+                const before = contents(dir);
+                const book = vbook.loadBook(bookId);
+                book.behaviour.rules.push({ id: 'g1', when: { emotion: ['proud'] }, then: { action: 'nods' } });
+                book.book.title = 'Не должно сохраниться';
+                const err = refusal(() => vbook.saveBookBundle(book));
+                expect(err && err.code).to.equal('behaviour_file_broken');
+                expect(err.details.issues.map((i) => [i.file, i.code])).to.deep.equal([['behaviour.json', 'invalid_json']]);
+                expect(contents(dir)).to.deep.equal(before);
+            });
+
+            it('export is refused like a broken hero; skipBroken exports with the default rules', () => {
+                const bookId = newBook();
+                const dir = path.join(books, bookId);
+                fs.writeFileSync(path.join(dir, 'behaviour.json'), '{oops');
+                const before = contents(dir);
+                const err = refusal(() => vbook.exportBookBundle(bookId));
+                expect(err && err.code).to.equal('behaviour_file_broken');
+                expect(err.details.issues.map((i) => i.file)).to.deep.equal(['behaviour.json']);
+                // together with a broken hero the answer is the hero one, and it lists both
+                fs.writeFileSync(path.join(dir, 'characters', 'anna.json'), '{oops');
+                const both = refusal(() => vbook.exportBookBundle(bookId));
+                expect(both.code).to.equal('hero_file_broken');
+                expect(both.details.issues.map((i) => i.file).sort()).to.deep.equal(['behaviour.json', 'characters/anna.json']);
+                fs.writeFileSync(path.join(dir, 'characters', 'anna.json'), before['characters/anna.json']);
+
+                const out = vbook.exportBookBundle(bookId, { skipBroken: true });
+                expect(JSON.parse(zipContents(out.buffer)['behaviour.json'])).to.deep.equal({ schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] });
+                expect(out.skipped.map((i) => i.file)).to.deep.equal(['behaviour.json']);
+                expect(contents(dir)).to.deep.equal(before);
+            });
+
+            it('a missing behaviour.json is not a problem: defaults in memory, the file is created by the next save', () => {
+                const bookId = newBook();
+                const file = path.join(books, bookId, 'behaviour.json');
+                fs.unlinkSync(file);
+                const book = vbook.loadBook(bookId);
+                expect(book.hero_issues).to.deep.equal([]);
+                expect(book.behaviour.schema).to.equal('animastor.behaviour-globals/1');
+                vbook.saveBookBundle(book);
+                expect(JSON.parse(fs.readFileSync(file, 'utf8')).schema).to.equal('animastor.behaviour-globals/1');
+            });
+
+            it('once the file is fixed the rules are back and writable', () => {
+                const bookId = newBook();
+                const file = path.join(books, bookId, 'behaviour.json');
+                fs.writeFileSync(file, '{oops');
+                expect(vbook.loadBook(bookId).hero_issues).to.have.length(1);
+                fs.writeFileSync(file, JSON.stringify({ schema: 'animastor.behaviour-globals/1', rules: [{ id: 'mine' }] }));
+                const book = vbook.loadBook(bookId);
+                expect(book.hero_issues).to.deep.equal([]);
+                expect(book.behaviour.rules).to.deep.equal([{ id: 'mine' }]);
+                book.behaviour.rules.push({ id: 'second' });
+                vbook.saveBookBundle(book);
+                expect(vbook.loadBook(bookId).behaviour.rules.map((r) => r.id)).to.deep.equal(['mine', 'second']);
+            });
         });
 
         it('1.6 book-level warnings are non-blocking: duplicate rule id, ambiguous alias, unknown key', () => {

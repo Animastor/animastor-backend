@@ -91,7 +91,7 @@ describe('character-store', () => {
         }
 
         it('reserved ids cannot be written', () => {
-            for (const id of ['manifest', 'book', 'bible', 'locations', 'voices', 'characters', 'behavior', 'behaviour', 'mentions', 'index']) {
+            for (const id of ['manifest', 'book', 'bible', 'locations', 'voices', 'characters', 'behavior', 'behaviour', 'mentions', 'index', 'chapters', 'source']) {
                 expect(codeOf(() => writeCharacter(bookDir, hero(id))), id).to.equal('reserved_id');
             }
             expect(fs.existsSync(dir())).to.equal(false);
@@ -102,7 +102,7 @@ describe('character-store', () => {
             expect(codeOf(() => writeCharacter(bookDir, hero('yura', { role: 'narrator' })))).to.equal('invalid_character');
             expect(codeOf(() => writeCharacter(bookDir, hero('narrator')))).to.equal('invalid_character'); // narrator needs the role
             expect(codeOf(() => writeCharacter(bookDir, hero('yura', {
-                voice: { reference: { file: 'voices/anna/ref.wav', sha256: 'a'.repeat(64) } },
+                voice: { reference: { file: 'voices/anna/ref.wav', sha256: 'a'.repeat(64), ref_text: 'x', source: 'uploaded', locked: true } },
             })))).to.equal('invalid_character');
             expect(codeOf(() => writeCharacter(bookDir, 'yura'))).to.equal('invalid_character');
             expect(fs.existsSync(dir())).to.equal(false);

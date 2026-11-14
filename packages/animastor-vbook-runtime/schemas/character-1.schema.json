@@ -138,7 +138,9 @@
           "behavior",
           "behaviour",
           "mentions",
-          "index"
+          "index",
+          "chapters",
+          "source"
         ]
       },
       "description": "Канонический snake_case id. Имя файла — ровно <id>.json."
@@ -197,6 +199,14 @@
         },
         "reference": {
           "$ref": "#/$defs/voiceReference"
+        },
+        "timbre_source": {
+          "enum": [
+            "analysis",
+            "cleaned",
+            "user"
+          ],
+          "description": "Откуда timbre: analysis — из анализа; cleaned — очищен правилами; user — правил человек (такой голос анализ не трогает никогда)."
         }
       },
       "additionalProperties": true
@@ -205,20 +215,26 @@
       "type": "object",
       "required": [
         "file",
-        "sha256"
+        "sha256",
+        "ref_text",
+        "source",
+        "locked"
       ],
       "properties": {
         "file": {
           "type": "string",
-          "pattern": "^voices/[a-z0-9_]+/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.(wav|flac|mp3|ogg)$",
-          "description": "Путь относительно build_<book_id>/. Второй сегмент равен id героя (проверяется валидатором, не схемой)."
+          "pattern": "^voices/[a-z0-9_]+/[A-Za-z0-9_-]{1,128}\\.wav$",
+          "description": "Путь относительно build_<book_id>/: voices/<id героя>/<имя>.wav. В имени нет точек, поэтому «..» невозможно. Второй сегмент равен id героя (проверяется валидатором, не схемой)."
         },
         "sha256": {
           "$ref": "#/$defs/sha256"
         },
         "ref_text": {
           "type": "string",
-          "maxLength": 2000
+          "minLength": 1,
+          "maxLength": 2000,
+          "pattern": "\\S",
+          "description": "Что произнесено в референсе; пустая строка и одни пробелы недопустимы."
         },
         "source": {
           "enum": [
@@ -235,15 +251,45 @@
           "minimum": 0
         },
         "verification": {
-          "type": "string",
-          "maxLength": 40,
-          "description": "pending | passed | failed; значения задаёт задача референсных голосов."
+          "enum": [
+            "passed",
+            "failed",
+            "user"
+          ],
+          "description": "passed | failed — автоматическая сверка транскрипта; user — только для source=uploaded: текст подтвердил человек."
         },
         "locked": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         }
       },
+      "description": "Закреплённый референс голоса. Поля и проверки — те же, что у порта @animastor/vbook-runtime/voice (решение владельца 14.11, В1): файл только .wav; обязательны file, sha256, ref_text, source, locked; verification обязательна для source=designed (passed | failed), для uploaded допустима и может быть user — транскрипт подтвердил человек.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "const": "designed"
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "required": [
+              "verification"
+            ],
+            "properties": {
+              "verification": {
+                "enum": [
+                  "passed",
+                  "failed"
+                ]
+              }
+            }
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "behaviour": {
@@ -359,7 +405,10 @@
         "file": {
           "type": "string",
           "pattern": "^refs/images/[a-z0-9_]+/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.(png|jpg|jpeg|webp)$",
-          "description": "Путь относительно build_<book_id>/. Третий сегмент равен id героя (проверяется валидатором)."
+          "description": "Путь относительно build_<book_id>/. Третий сегмент равен id героя (проверяется валидатором). Последовательность «..» в пути недопустима.",
+          "not": {
+            "pattern": "\\.\\."
+          }
         },
         "sha256": {
           "$ref": "#/$defs/sha256"

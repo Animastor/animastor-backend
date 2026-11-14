@@ -354,13 +354,25 @@ describe('vbook-runtime input safety', () => {
             const book = build(validFiles());
             const dir = path.join(books, 'safety_book_1');
             const keep = path.join(sandbox, 'data', 'sibling', 'keep.txt');
-            for (const name of ['manifest.json', 'book.json', 'behaviour.json']) {
+            for (const name of ['manifest.json', 'book.json']) {
                 fs.rmSync(dir, { recursive: true, force: true });
                 fs.mkdirSync(dir);
                 fs.symlinkSync(keep, path.join(dir, name));
                 expect(() => vbook.saveBookBundle(book), name).to.throw();
                 expect(fs.readFileSync(keep, 'utf8')).to.equal('keep');
             }
+            // behaviour.json as a link is a broken behaviour file (В5): it is never
+            // written through and never replaced — unchanged rules save around it,
+            // changed rules are refused.
+            fs.rmSync(dir, { recursive: true, force: true });
+            fs.mkdirSync(dir);
+            fs.symlinkSync(keep, path.join(dir, 'behaviour.json'));
+            vbook.saveBookBundle(book);
+            expect(fs.lstatSync(path.join(dir, 'behaviour.json')).isSymbolicLink()).to.equal(true);
+            expect(fs.readFileSync(keep, 'utf8')).to.equal('keep');
+            const changed = { ...book, behaviour: { ...book.behaviour, rules: [{ id: 'r1' }] } };
+            expect(refusal(() => vbook.saveBookBundle(changed)).code).to.equal('behaviour_file_broken');
+            expect(fs.readFileSync(keep, 'utf8')).to.equal('keep');
             for (const name of ['characters', 'chapters']) {
                 fs.rmSync(dir, { recursive: true, force: true });
                 fs.mkdirSync(dir);
