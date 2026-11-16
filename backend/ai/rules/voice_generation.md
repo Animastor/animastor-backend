@@ -39,37 +39,69 @@ Use the following chain, from highest to lowest priority:
 %TEXT%
 
 ## Instructions
-- For each character identified as a dialogue participant, write a voice description (1-3 sentences).
-- The description becomes the character's PERMANENT voice: a neutral reference sample is synthesised
-  from it once and every line is cloned from that sample (VOICE_REFERENCES). Describe the constant
-  TIMBRE only: pitch, register, texture, age, pace, accent.
-- NO situational or plot directions: no conditions ("when …", "if …"), no quoted words or lines,
-  no emotions tied to a moment, no addressee-dependent changes. Such sentences are removed automatically.
-- Focus on: tone, pitch, pace, accent, constant speech manner.
-- Use the character's appearance (age, build, face, impression) as the PRIMARY basis for voice inference when no explicit voice is described.
-- Use dialogue lines from the source text to identify speech patterns, vocabulary, and emotional range.
-- Voice descriptions must be in ENGLISH (they feed into an English-only TTS model).
-- Make each voice description DISTINCT — no two characters should sound alike.
-- Be vivid and specific. Avoid generic phrases like "A character voice", "natural intonation", or "matching the character".
+For each character identified as a dialogue participant, write TWO separate fields.
 
-## Examples of good voice descriptions
-- "Deep, resonant baritone, slow and deliberate like flowing honey. Slightly dry, sarcastic manner. Native Russian pronunciation."
-- "High-pitched and nervous, words tumbling out in a rush. Often trails off at the end of sentences. Native English pronunciation."
-- "Warm, motherly alto with a gentle, reassuring tone. Speaks softly but with quiet authority. Native Russian pronunciation."
-- "Sharp, clipped, impatient. Every word precise and cutting. Professional demeanor, slightly condescending. Native English pronunciation."
+### `timbre` — WHO is speaking (1–2 sentences)
+The constant physical voice of the character. A neutral reference sample is synthesised from this
+text ONCE and every line of the character is cloned from that sample (VOICE_REFERENCES), so it must
+describe only what never changes:
+- sex and approximate age;
+- pitch and register (bass, baritone, tenor, alto, soprano; low / high);
+- texture (hoarse, clear, nasal, breathy, resonant, dry);
+- accent, and always "Native <Lang> pronunciation".
+
+### `manner` — HOW the character usually speaks (0–2 sentences)
+The habitual delivery, the same in every scene: pace, intonation, loudness, speech habits
+(clipped phrases, long pauses, trailing off, careful articulation). If the text gives no ground for
+it, return an empty string — do NOT invent a manner.
+
+### What belongs to NEITHER field
+- NO situational or plot directions: no conditions ("when …", "if …"), no emotions tied to a moment,
+  no addressee-dependent changes ("with Anna he whispers").
+- NO directions tied to particular words or lines of the text: nothing like "on the word …",
+  "at the phrase …", no quoted words, no quoted lines.
+- NO appearance, clothes or biography.
+Sentences of this kind are removed automatically; a voice whose `timbre` consists only of them is
+rejected as a whole.
+
+### General
+- Use the character's appearance (age, build, face, impression) as the PRIMARY basis for inferring
+  the timbre when no explicit voice is described.
+- Use dialogue lines from the source text to identify the habitual manner (pace, vocabulary,
+  sentence length) — describe the habit, never the line it was seen in.
+- Both fields must be in ENGLISH (they feed into an English-only TTS model).
+- Make each timbre DISTINCT — no two characters should sound alike.
+- Be vivid and specific. Avoid generic phrases like "A character voice", "natural intonation",
+  or "matching the character".
+
+## Examples
+- timbre: "Deep, resonant male baritone, around fifty, slightly dry texture. Native Russian pronunciation."
+  manner: "Slow and deliberate, with a faintly sarcastic intonation."
+- timbre: "High, thin female voice of a young woman, a little breathy. Native English pronunciation."
+  manner: "Fast, words tumbling out in a rush; often trails off at the end of a sentence."
+- timbre: "Warm, low alto of a middle-aged woman, soft and rounded. Native Russian pronunciation."
+  manner: "Speaks quietly and evenly, with calm authority."
+- timbre: "Sharp, bright tenor of a man in his thirties. Native English pronunciation."
+  manner: ""
+
+Bad (rejected or cut): "Cheerful inflection on the word 'поехали'.", "When angry, the voice hardens.",
+"Whispers to Anna in chapter two."
 
 ## Output format
 ```json
 {
   "voices": {
     "character_id_1": {
-      "instruction": "Voice description for character 1"
+      "timbre": "Who sounds: sex, age, pitch, texture, accent. Native <Lang> pronunciation.",
+      "manner": "How the character usually speaks, or an empty string."
     },
     "character_id_2": {
-      "instruction": "Voice description for character 2"
+      "timbre": "…",
+      "manner": ""
     }
   }
 }
 ```
 
-Return ONLY valid JSON. Include ONLY characters who have dialogue. Do NOT include narrator.
+Use the character ids EXACTLY as they are written in the Characters list. Return ONLY valid JSON.
+Include ONLY characters who have dialogue. Do NOT include narrator. There is no `instruction` field.

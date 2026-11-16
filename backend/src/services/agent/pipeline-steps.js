@@ -29,6 +29,7 @@ const {
 // prompt-profiles layer — the VBook→image edge (recon finding) is gone.
 const { normalizeCharacterRefs } = require('@animastor/generation').promptProfiles.characterUtils;
 const { sanitizeVideoTokens, tokensToString } = require('../../book/lazy-book/appearance');
+const heroLooks = require('./hero-looks');
 const { findUnverifiedSnakeTokens, canonicalizeText, desnakeifyText, findCrossPromptGaps, participantFieldIds } = require('../../utils/snake-guard');
 // Shared pure prompt-context builder lives in the ai-agent contour (C21):
 // the location registry context block is consumed by contour tasks (scenes)
@@ -336,14 +337,13 @@ async function stepGenerateVoices(sessionId, text, characters, stepIndex, progre
 }
 
 /**
- * Resolve the effective video tokens for a character in a scene: the scene-level
- * override (scene.passport[charId].video_tokens) wins, then the global passport
- * token, then the top-level agent field. Returns the raw value (array | string).
+ * The effective video tokens of a character in a scene, through the one
+ * resolver of VBook 4 (resolveHeroLook, VBOOK_FORMAT_V4 §4a.5): base passport ←
+ * look ← scene.look_patch. Returns an array, or null when there are none.
  */
-function effectiveSceneTokens(scene, c) {
-    const sceneTok = scene?.passport?.[c.id]?.video_tokens;
-    if (sceneTok) return sceneTok;
-    return c.passport?.video_tokens || c.video_tokens || null;
+function effectiveSceneTokens(scene, c, book) {
+    const tokens = heroLooks.currentSceneTokens(book || heroLooks.workingBook([c]), scene, c.id);
+    return tokens.length > 0 ? tokens : null;
 }
 
 /**
@@ -355,10 +355,11 @@ function effectiveSceneTokens(scene, c) {
  */
 function buildSceneTokensContext(scenes, characters) {
     const charMap = new Map((characters || []).map(c => [c.id, c]));
+    const book = heroLooks.workingBook(characters);
     const parts = [];
     (scenes || []).forEach((scene, si) => {
         const rows = (scene.participants || [])
-            .map(id => ({ id, ch: charMap.get(id), tokens: charMap.has(id) ? effectiveSceneTokens(scene, charMap.get(id)) : null }))
+            .map(id => ({ id, ch: charMap.get(id), tokens: charMap.has(id) ? effectiveSceneTokens(scene, charMap.get(id), book) : null }))
             .filter(r => r.ch && r.tokens && tokensToString(r.tokens));
         if (rows.length < 2) return;
         const lines = rows.map(r => {

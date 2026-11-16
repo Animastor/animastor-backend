@@ -12,6 +12,8 @@
         "./looks.cjs": "./src/looks.cjs",
         "./heroes.cjs": "./src/heroes.cjs",
         "./character-store.cjs": "./src/character-store.cjs",
+        "./hero-id.cjs": "./src/hero-id.cjs",
+        "./hero-analysis.cjs": "./src/hero-analysis.cjs",
         "./voice": "./src/voice.js",
         "./books-root": "./src/books-root.js",
         "./safe-paths": "./src/safe-paths.js",

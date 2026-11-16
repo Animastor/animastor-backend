@@ -315,7 +315,10 @@ describe('behaviour rules — effective set', () => {
         const names = aiService.loadReferenceExamples(dir).map(x => x.relPath);
         expect(names).to.not.include('behaviour-rules.json');
         expect(names).to.not.include('behaviour-rules.example.json');
-        expect(names).to.include('behavior.json'); // the pre-existing structure example stays
+        // the structure examples are a VBook 4 book: behaviour.json + one file per hero
+        expect(names).to.include('behaviour.json');
+        expect(names).to.include('characters/narrator.json');
+        for (const legacy of ['behavior.json', 'characters.json', 'voices.json', 'mentions.json']) expect(names, legacy).to.not.include(legacy);
     });
 
     it('book rules override defaults by id (shallow merge), add new ids, enabled:false disables a default', () => {

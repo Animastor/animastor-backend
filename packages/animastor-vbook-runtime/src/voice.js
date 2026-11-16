@@ -352,6 +352,9 @@ function voiceFromAnalysis(raw) {
     let timbreRaw = '';
     let mannerRaw = '';
     let repaired = false;
+    // A block that already went through this function (the voice step parses,
+    // the write barrier parses again) keeps what it was told about itself.
+    const stated = raw && typeof raw === 'object' && TIMBRE_SOURCES.includes(raw.timbre_source) ? raw.timbre_source : null;
     if (typeof raw === 'string') {
         timbreRaw = raw; repaired = true;
     } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -373,7 +376,7 @@ function voiceFromAnalysis(raw) {
         voice: {
             timbre: timbre.text,
             manner: manner.text,
-            timbre_source: repaired || removed.length > 0 ? 'cleaned' : 'analysis',
+            timbre_source: repaired || removed.length > 0 ? 'cleaned' : (stated || 'analysis'),
         },
         removed,
         reason: null,

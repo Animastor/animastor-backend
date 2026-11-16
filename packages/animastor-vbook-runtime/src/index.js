@@ -1109,6 +1109,10 @@ module.exports = {
     // characters/ store (also at ./character-store.cjs) — VBOOK_FORMAT_V4 §3, §4, §10
     characterStore,
 
+    // analysis → heroes (also at ./hero-id.cjs, ./hero-analysis.cjs) — VBOOK_FORMAT_V4 §12, step 2
+    heroId: require('./hero-id.cjs'),
+    heroAnalysis: require('./hero-analysis.cjs'),
+
     // Path/input safety
     safePaths,
     getBookDir,

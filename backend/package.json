@@ -16,7 +16,7 @@
     },
     "dependencies": {
         "@animastor/ai-agent": "^0.1.0",
-        "@animastor/ai-analysis": "^0.1.1",
+        "@animastor/ai-analysis": "file:../packages/animastor-ai-analysis",
         "@animastor/assistant": "^0.2.0",
         "@animastor/auth": "^0.1.1",
         "@animastor/contracts": "^0.1.1",

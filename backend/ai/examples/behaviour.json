@@ -1,0 +1,7 @@
+{
+  "schema": "animastor.behaviour-globals/1",
+  "defaults": {
+    "max_per_scene": 2
+  },
+  "rules": []
+}

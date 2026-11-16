@@ -1,0 +1,10 @@
+{
+  "schema": "animastor.character/1",
+  "id": "narrator",
+  "role": "narrator",
+  "voice": {
+    "timbre": "A mature Russian male voice, deep and calm, slightly melancholic. Native Russian pronunciation.",
+    "manner": "Slow literary narration, soft authority, philosophical tone.",
+    "timbre_source": "analysis"
+  }
+}

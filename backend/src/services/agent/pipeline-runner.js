@@ -11,6 +11,8 @@ const config = require('../../config/runtime-config');
 const { updateSession, createSession, isSessionCancelled, isBookCancelled } = require('../agent-session');
 const { PROGRESS_STAGES, MAX_WINDOW_CHARS, MAX_SCENES_PER_CHUNK, computeWindowChars } = require('../agent-prompts');
 const { mergeCharacterLists, isPlaceholderCharacter } = require('../../utils/character-identity');
+const heroAnalysis = require('@animastor/vbook-runtime/hero-analysis.cjs');
+const heroLooks = require('./hero-looks');
 const { sanitizeEnvironment } = require('../../utils/snake-guard');
 const layerConfig = require('../layer-config');
 const pipelineSteps = require('./pipeline-steps');
@@ -74,33 +76,19 @@ function _resolveAnalysisParallelism(options) {
 /**
  * Write scene-level video_tokens (chosen by the passport-reconciliation agent
  * for uniqueness within a scene — stage 2 of the video_tokens scheme) into
- * scene.passport. Only writes when the agent's tokens actually differ from the
- * current effective tokens (existing scene override, or the global passport
- * token) — keeps scene data minimal and regeneration deterministic.
+ * scene.look_patch[hero_id].video_tokens (VBOOK_FORMAT_V4 §4a.4). The current
+ * tokens are read through resolveHeroLook — base passport ← look ← an existing
+ * look_patch — and a patch is written only when the agent's tokens actually
+ * differ: scene data stays minimal and regeneration deterministic.
+ * scene.passport is never written (VBook 4 does not have it).
  */
 function applySceneVideoTokens(enrichedScenes, videoTokens, characters) {
     if (!videoTokens || videoTokens.length === 0) return;
-    const globalTokens = new Map((characters || []).map(c => [c.id, c.passport?.video_tokens || c.video_tokens || null]));
+    const book = heroLooks.workingBook(characters);
     for (const row of videoTokens) {
         const scene = enrichedScenes[row.scene_index];
         if (!scene) continue;
-        let scenePassport = scene.passport || {};
-        let changed = false;
-        const participants = scene.participants || [];
-        for (const [charId, tokens] of Object.entries(row.tokens)) {
-            // Guard: only participants of THIS scene get overrides — a
-            // hallucinated token for a non-participant would otherwise win over
-            // the global token at render time.
-            if (!participants.includes(charId)) continue;
-            const current = scenePassport[charId]?.video_tokens ?? globalTokens.get(charId) ?? null;
-            if (JSON.stringify(current) === JSON.stringify(tokens)) continue;
-            scenePassport = {
-                ...scenePassport,
-                [charId]: { ...(scenePassport[charId] || {}), video_tokens: tokens },
-            };
-            changed = true;
-        }
-        if (changed) scene.passport = scenePassport;
+        heroLooks.applyReconciledTokens(book, scene, row.tokens);
     }
 }
 
@@ -485,13 +473,26 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
         // mergeCharacterLists itself drops placeholder characters the AI
         // invented ('unknown', 'unnamed', …) — they are never real characters.
         const existingCount = characters.length;
-        const mergeResult = mergeCharacterLists(characters, charResult.characters || [], { skipGeneric: true });
-        characters = mergeResult.characters;
-        if (charResult.mentions && typeof charResult.mentions === 'object') {
-            for (const [alias, charId] of Object.entries(charResult.mentions)) {
-                if (!mentions[alias]) mentions[alias] = charId;
-            }
+        // Canonical hero ids BEFORE anything refers to them (VBOOK_FORMAT_V4
+        // §12, step 2): the ids the model wrote are transliterated and folded
+        // to snake_case, a hero of the registry keeps its id whatever spelling
+        // the model used this time, collisions get _2, _3. Scenes, units and
+        // prompts of this window then see the final ids only.
+        const normalized = heroAnalysis.normalizeWindowCharacters(charResult.characters || [], characters);
+        for (const s of normalized.skipped) {
+            console.warn(`[AGENT] Character without a usable id or name skipped: ${JSON.stringify(s.id || s.name || '')}`);
         }
+        const renamed = [...normalized.idMap].filter(([from, to]) => from !== to);
+        if (renamed.length > 0) {
+            console.log(`[AGENT] Hero ids normalized: ${renamed.map(([from, to]) => `${JSON.stringify(from)} → ${to}`).join(', ')}`);
+        }
+        const mergeResult = mergeCharacterLists(characters, normalized.characters, { skipGeneric: true });
+        characters = mergeResult.characters;
+        const windowMentions = heroAnalysis.remapMentions(charResult.mentions, normalized.idMap);
+        for (const [alias, charId] of Object.entries(windowMentions)) {
+            if (!mentions[alias]) mentions[alias] = charId;
+        }
+        charResult = { ...charResult, characters: normalized.characters, mentions: windowMentions };
         console.log(`[AGENT] Characters: ${existingCount} existing + ${mergeResult.added} new + ${mergeResult.enriched} enriched + ${mergeResult.skippedGeneric} generic skipped = ${characters.length} total, mentions: ${Object.keys(mentions).length}`);
     }
 
@@ -813,7 +814,7 @@ if (characters.length > 0) {
             }
 
             // Stage 2 of the video_tokens scheme: persist the agent-chosen
-            // scene-level tokens (scene.passport[charId].video_tokens) — only
+            // scene-level tokens (scene.look_patch[hero_id].video_tokens) — only
             // when they differ from the current effective tokens.
             applySceneVideoTokens(enrichedScenes, videoTokens, characters);
         }
@@ -1189,7 +1190,7 @@ async function processCachedScenes(sessionId, scenes, characters, locations, men
             }
 
             // Stage 2 of the video_tokens scheme: persist the agent-chosen
-            // scene-level tokens (scene.passport[charId].video_tokens) — only
+            // scene-level tokens (scene.look_patch[hero_id].video_tokens) — only
             // when they differ from the current effective tokens.
             applySceneVideoTokens(enrichedScenes, videoTokens, characters);
         }

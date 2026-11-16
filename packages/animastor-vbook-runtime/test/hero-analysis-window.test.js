@@ -236,6 +236,15 @@ describe('the analysis writes heroes (step 2)', () => {
             });
         }
 
+        it('parsing twice is stable: a block marked cleaned / user stays so; new plot text still marks it cleaned', () => {
+            const once = voice.voiceFromAnalysis({ timbre: 'Low male bass.', manner: 'Slow. If asked, he shouts.' }).voice;
+            expect(once.timbre_source).to.equal('cleaned');
+            expect(voice.voiceFromAnalysis(once).voice).to.deep.equal(once);
+            expect(voice.voiceFromAnalysis({ timbre: 'Low.', manner: '', timbre_source: 'user' }).voice.timbre_source).to.equal('user');
+            expect(voice.voiceFromAnalysis({ timbre: 'Low. When angry, loud.', timbre_source: 'analysis' }).voice.timbre_source).to.equal('cleaned');
+            expect(voice.voiceFromAnalysis({ timbre: 'Low.', timbre_source: 'llm' }).voice.timbre_source).to.equal('analysis');
+        });
+
         it('a refused voice never blocks the hero: the file is written without a voice block', () => {
             const { bookId } = lazyBook.createDraftBook(SOURCE, lazyBook.SourceType.TXT, 'zima.txt');
             const w = windowOne();
@@ -532,6 +541,38 @@ describe('the analysis writes heroes (step 2)', () => {
             expect(Object.fromEntries(out.idMap)).to.deep.equal({ 'Юрий': 'yura', 'Новый Герой': 'novyy_geroy' });
             expect(out.skipped).to.deep.equal([{ id: '!!!', name: null, reason: 'empty_id' }]);
             expect(heroAnalysis.remapMentions({ 'дядя': 'Юрий', 'x': 'unknown' }, out.idMap)).to.deep.equal({ 'дядя': 'yura', 'x': 'unknown' });
+        });
+    });
+
+    describe('an id with a collision suffix is not evidence of identity', () => {
+        const { mergeCharacterLists, findCanonicalCharacter } = require('../src/character-identity');
+        it('boris_2 "Савелий Кузьмич" is not merged into boris "Борис" when the working lists are merged', () => {
+            const existing = [{ id: 'yura', name: 'Юра', appearance: 'a man' }];
+            const incoming = [
+                { id: 'boris', name: 'Борис', appearance: 'old man, grey beard' },
+                { id: 'boris_2', name: 'Савелий Кузьмич', appearance: 'a boy of ten' },
+            ];
+            const out = mergeCharacterLists(existing, incoming, { skipGeneric: true });
+            expect(out.characters.map((c) => c.id)).to.deep.equal(['yura', 'boris', 'boris_2']);
+            expect(out.added).to.equal(2);
+            expect(findCanonicalCharacter(incoming[1], [incoming[0]])).to.equal(null);
+        });
+        it('…while a fuller name of the same person still is', () => {
+            const out = mergeCharacterLists([{ id: 'boris', name: 'Борис', appearance: 'old man' }], [{ id: 'boris_petrovich', name: 'Борис Петрович', appearance: 'old man' }]);
+            expect(out.characters.map((c) => c.id)).to.deep.equal(['boris']);
+        });
+        it('the same id is always the same character, suffix or not', () => {
+            const list = [{ id: 'boris_2', name: 'Савелий Кузьмич', appearance: 'a boy' }];
+            expect(findCanonicalCharacter({ id: 'boris_2', name: 'Савелий' }, list)).to.equal(list[0]);
+        });
+        it('working lists merge voices and aliases without replacing what is there', () => {
+            const voiceBlock = { timbre: 'Kept.', manner: '' };
+            const out = mergeCharacterLists(
+                [{ id: 'yura', name: 'Юра', appearance: 'a man', aliases: ['Юрий'], voice: voiceBlock }],
+                [{ id: 'yura', name: 'Юра', appearance: 'a man', aliases: ['юрий', 'Юрка', 'Юра'], voice: { timbre: 'A much longer and different description.', manner: 'x' } }],
+            );
+            expect(out.characters[0].voice).to.equal(voiceBlock);
+            expect(out.characters[0].aliases).to.deep.equal(['Юрий', 'Юрка']);
         });
     });
 

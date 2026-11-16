@@ -1,0 +1,44 @@
+{
+  "schema": "animastor.character/1",
+  "id": "dmitry_orekhov",
+  "name": "Dmitry Orekhov",
+  "passport": {
+    "appearance": "tall lean man around forty-five, calm reserved presence, pale face with sharp refined features, thin ironic smile, black hair with traces of grey",
+    "clothes": "dark long coat, black hat, silver walking cane, polished shoes",
+    "video_tokens": [
+      "black hat",
+      "silver cane",
+      "long dark coat"
+    ]
+  },
+  "voice": {
+    "timbre": "A mature Russian male voice, deep and warm. Native Russian pronunciation.",
+    "manner": "Unhurried and slightly ironic, speaks slowly with quiet confidence.",
+    "timbre_source": "analysis"
+  },
+  "behaviour": {
+    "profile": {
+      "baseline": "still and economical; makes minimal movements, speaks slowly and quietly with a dry precise tone, watches more than he participates, unhurried even under pressure",
+      "quirks": [
+        "taps his silver cane once, softly, before delivering a verdict-like remark",
+        "lets a thin ironic smile replace an answer when he does not want to speak",
+        "always removes his hat last, even in a hurry"
+      ],
+      "reactions": [
+        {
+          "trigger": "is provoked or insulted",
+          "reaction": "remains perfectly still, answers with one dry short line and a colder smile, never raises his voice"
+        },
+        {
+          "trigger": "is threatened",
+          "reaction": "stops moving entirely, lowers his voice further, and studies the other person the way one studies a solved puzzle"
+        },
+        {
+          "trigger": "sees something genuinely unexpected",
+          "reaction": "a single raised eyebrow is the only visible reaction; he then changes the subject with practiced ease"
+        }
+      ]
+    },
+    "rules": []
+  }
+}

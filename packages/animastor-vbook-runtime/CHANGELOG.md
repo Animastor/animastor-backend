@@ -67,6 +67,31 @@ migration.**
   `getMentionsPath`, `getVoicesPath`, `getBehaviorPath` are removed
   (`getCharactersDir`, `getBehaviourPath`).
 
+### Step 2 — the analysis writes heroes (same unpublished 0.5.0)
+
+- `src/hero-id.cjs` — `normalizeHeroId` (fixed Cyrillic table, lower case,
+  `_`, ≤ 64), `assignHeroIds` (a hero keeps its id across windows — matched by
+  name / alias, or by its own id incl. after transliteration unless that id is
+  shared; collisions inside a window and reserved ids get `_2`, `_3`),
+  `mergeAliases`.
+- `src/hero-analysis.cjs` — `registryFromBook`, `mentionsFromBook`,
+  `normalizeWindowCharacters`, `aliasAdditions`, `mergeWindowIntoHero`.
+- Voice port: `voiceFromAnalysis` (`{timbre, manner}` → a voice block,
+  plot-bound sentences dropped, refused without a timbre), `isVoiceProtected`,
+  `isReferenceVerified`; cleanup rules v2.
+- `lazy-book/create.js`: ids are normalised (nothing is skipped for its id),
+  aliases come from the mentions of the window, a later window only adds what
+  a hero lacks; `scene.look_patch` is written only where it differs from the
+  resolved look.
+- `character-identity`: an id with a collision suffix is not identity
+  evidence; working voices `{timbre, manner}` and aliases are merged without
+  replacing.
+- Owner's decisions on step 1 (В1–В9): the reference schema equals the port
+  (.wav only; `ref_text`, `source`, `locked` required), reserved ids
+  `chapters` / `source`, a broken `behaviour.json` opens with defaults
+  (`behaviour_file_broken` on write / export), an empty look value is an
+  absent value (`empty_value`), `narrator_missing` is a warning.
+
 ### Removed
 
 - `src/behavior-schema.cjs` (subpath `./behavior-schema.cjs`, `behaviorSchema`
