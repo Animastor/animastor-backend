@@ -17,9 +17,9 @@ const voice = require('../src/voice.js');
 const parse = (timbre, manner, language) => voice.voiceFromAnalysis({ timbre, manner }, { language });
 
 describe('voice cleanup rules v3 (step 2b)', () => {
-    it('the rules version is 3', () => {
-        expect(voice.CLEANUP_RULES_VERSION).to.equal(3);
-        expect(voice.cleanVoiceDescription('A voice.').rules_version).to.equal(3);
+    it('the rules version is 4 (v3 behaviour below still holds; v4 — voice-rules-v4.test.js)', () => {
+        expect(voice.CLEANUP_RULES_VERSION).to.equal(4);
+        expect(voice.cleanVoiceDescription('A voice.').rules_version).to.equal(4);
     });
 
     describe('the phrases of the acceptance run', () => {
@@ -83,7 +83,8 @@ describe('voice cleanup rules v3 (step 2b)', () => {
             ['sobbing', 'Sobbing, broken phrases.', 'Broken phrases.'],
             ['tearful', 'Tearful and quiet.'],
             ['ill', 'Sounds ill and weak.'],
-            ['cold', 'Nasal, as if with a cold.'],
+            // v4: the condition is cut by clause, the texture stays
+            ['cold', 'Nasal, as if with a cold.', 'Nasal.'],
             ['fever', 'Feverish, mumbling.', 'Mumbling.'],
             ['out of breath', 'Out of breath after running.'],
             ['panting', 'Panting heavily.'],

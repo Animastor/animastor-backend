@@ -49,7 +49,8 @@ For each character identified as a dialogue participant, write TWO separate fiel
 The constant physical voice of the character. A neutral reference sample is synthesised from this
 text ONCE and every line of the character is cloned from that sample (VOICE_REFERENCES), so it must
 describe only what never changes:
-- sex and approximate age;
+- sex and approximate age; build may be named when it shapes the voice ("of a tall, thin man",
+  "of a small, plump man", "broad-shouldered");
 - pitch and register (bass, baritone, tenor, alto, soprano; low / high);
 - texture (hoarse, clear, nasal, breathy, resonant, dry);
 - accent if the character has one; otherwise "Native <Lang> pronunciation" (the book language).
@@ -67,7 +68,11 @@ it, return an empty string — do NOT invent a manner.
 - NO episodic physical states — hiccups, drunkenness, crying or tears, illness (a cold, a fever),
   being out of breath. They belong to a moment of the plot, not to the voice ("hiccups after the
   apricot water" is a scene, not a manner).
-- NO appearance, clothes or biography.
+- NO appearance beyond sex, age and build: no hair or baldness, no beard or moustache, no glasses,
+  no clothes, no face or eyes, no biography. Use the appearance to INFER the voice — do not copy it
+  into `timbre` ("of a small, plump bald man in a grey suit" → "of a small, plump man").
+- A condition is not part of the voice: "steady pace; becomes hurried when anxious" — write only
+  "steady pace".
 Sentences of this kind are removed automatically; a voice whose `timbre` consists only of them is
 rejected as a whole.
 
@@ -95,6 +100,7 @@ rejected as a whole.
   manner: "Polite and unhurried, with long pauses."
 
 Bad (rejected or cut): "Cheerful inflection on the word 'поехали'.", "When angry, the voice hardens.",
+"becomes hurried and tremulous when anxious", "of a bald man in a checked cap", "with a grey beard",
 "Whispers to Anna in chapter two.", "frequent hiccups breaking the flow of speech", "slurred, drunken
 speech", "speaks through tears", "spoken with a foreign accent. Native Russian pronunciation."
 

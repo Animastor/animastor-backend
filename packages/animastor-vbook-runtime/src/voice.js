@@ -277,16 +277,28 @@ function referenceState(buildDir, reference, characterId) {
 // ── rule-based cleanup of an analysis description (no LLM) ──────────────
 // A description written by analysis may carry situational / plot directions
 // ("cheerful inflection on 'поехали?'", "When the interlocutor is a close
-// friend, …"). A reference must be neutral, so such sentences are dropped:
+// friend, …"). A reference must be neutral, so such text is dropped:
 //   • sentences containing quoted text («…», “…”, "…", '…' around a word);
-//   • conditional sentences (when / whenever / if / unless / as soon as,
-//     когда / если / как только, wenn / falls / sobald);
 //   • sentences tied to particular words of the text, quoted or not
 //     ("on the word …", "на слове …", "на фразе …", "beim Wort …") — since v2;
+//   • conditions (when / whenever / if / unless / as soon as, когда / если /
+//     как только, wenn / falls / sobald). Since v4 the CONDITIONAL CLAUSE is
+//     cut and the main part stays ("Confident and lecturing, with an
+//     authoritative, steady pace; becomes hurried and tremulous when anxious."
+//     → "Confident and lecturing, with an authoritative, steady pace."). A
+//     sentence that STARTS with the condition ("When angry, he shouts.") is
+//     conditional as a whole and is dropped; so is a clause that only states
+//     the other case ("otherwise …", "иначе …"). Up to v3 the whole sentence
+//     went;
 //   • episodic physical states — hiccups, drunkenness, crying, illness, being
 //     out of breath: a moment of the plot, not the voice. The CLAUSE that
 //     names the state is cut, the rest of the sentence stays ("Impulsive and
-//     irritable, with frequent hiccups …" → "Impulsive and irritable.") — v3.
+//     irritable, with frequent hiccups …" → "Impulsive and irritable.") — v3;
+//   • timbre only, v4: appearance that is not the voice. Sex, age and build
+//     (tall, thin, plump, broad-shouldered) may stay — they tell what the
+//     voice is. Hair and baldness, beard and moustache, glasses, clothes and
+//     other looks are cut ("of a small, plump bald man" → "of a small, plump
+//     man"; "in a grey suit", "в сером костюме" — removed).
 // The result is shown to the user and may be edited (timbre_source 'cleaned' →
 // 'user'). Rule changes bump CLEANUP_RULES_VERSION.
 //
@@ -295,10 +307,12 @@ function referenceState(buildDir, reference, characterId) {
 // another language, and none at all when the timbre names an accent (an accent
 // is a legitimate part of timbre). This is normalisation, not a removal: it does
 // not turn timbre_source into 'cleaned'.
-const CLEANUP_RULES_VERSION = 3;
+const CLEANUP_RULES_VERSION = 4;
 const ON_WORD_RE = /(^|[^\p{L}])(on the (word|words|phrase|line)|at the (word|words|phrase|line)|на (слове|словах|фразе|реплике)|beim wort|bei den worten)(?=$|[^\p{L}])/iu;
 const QUOTED_RE = /[«“„]|"[^"]+"|(^|[\s(])'[^'\s][^']*'/u;
 const CONDITIONAL_RE = /(^|[^\p{L}])(when|whenever|if|unless|as soon as|когда|если|как только|wenn|falls|sobald)(?=$|[^\p{L}])/iu;
+const LEADING_CONDITIONAL_RE = /^\s*(when|whenever|if|unless|as soon as|когда|если|как только|wenn|falls|sobald)(?=$|[^\p{L}])/iu;
+const OTHERWISE_RE = /^\s*(otherwise|else|in other cases|иначе|в остальн\p{L}* (случаях|время)|sonst)(?=$|[^\p{L}])/iu;
 // Episodic physical states (v3). Word starts, so "hiccups", "hiccuping",
 // "drunken", "sobbing", "feverish" match; "breathy" (a texture) and
 // "ill-tempered" (a character) do not.
@@ -310,6 +324,23 @@ const EPISODIC_STATE_RE = new RegExp([
     'out of breath', 'short of breath', 'breathless', 'panting', 'gasping for', 'winded', 'запыхав', 'запыхал', 'задыха', 'одышк',
 ].map((w) => `(?<![\\p{L}])${w}`).join('|'), 'iu');
 
+// Appearance in timbre (v4). Nouns of looks and clothes — whole words (with
+// plural / case endings), so "cap" does not hit "capable", "hat" not "that".
+const LOOKS_NOUN_EN = '(?:hair|haircut|beard|goatee|moustache|mustache|sideburns|stubble|glasses|spectacles|pince-nez|monocle|bald (?:head|patch|spot)|scar|freckles|wig|suit|coat|overcoat|jacket|cap|hat|beret|shirt|trousers|pants|jeans|boots|shoes|sandals|dress|skirt|tie|uniform|robe|cloak|gown|vest|waistcoat|sweater|tunic|clothes|clothing|attire|outfit)(?:s|es)?';
+const LOOKS_NOUN_RU = '(?:костюм|пиджак|пальто|плащ|куртк|кепк|кепочк|шляп|фуражк|берет[еаоуы]|рубаш|рубах|ковбойк|брюк|штан|сапог|ботин|туфл|плать|юбк|галстук|мундир|форм[еуой]|халат|одежд|очк|пенсне|монокл|бород|бородк|усам|усах|усы|усик|бакенбард|щетин|лысин|плеш|волос|причёск|прическ|шрам|веснушк|парик)\\p{L}{0,4}';
+const LOOKS_PHRASE_EN_RE = new RegExp(`\\s*,?\\s*(?<![\\p{L}])(?:with|in|wearing|dressed in|clad in)\\s+(?:[\\p{L}'-]+\\s+){0,4}?${LOOKS_NOUN_EN}(?![\\p{L}-])(?:\\s+and\\s+(?:[\\p{L}'-]+\\s+){0,3}?${LOOKS_NOUN_EN}(?![\\p{L}-]))?`, 'giu');
+const LOOKS_PHRASE_RU_RE = new RegExp(`\\s*,?\\s*(?<![\\p{L}])(?:с|со|в|во|одет\\p{L}*\\s+в)\\s+(?:[\\p{L}-]+\\s+){0,3}?${LOOKS_NOUN_RU}(?![\\p{L}])(?:\\s+и\\s+(?:[\\p{L}-]+\\s+){0,2}?${LOOKS_NOUN_RU}(?![\\p{L}]))?`, 'giu');
+// Adjectives of looks: bald, red-haired, bearded, bespectacled, лысый, рыжий …
+const LOOKS_ADJ = [
+    'bald(?:ing)?', 'balding', '[\\p{L}]+-haired', '(?:red|grey|gray|white|bald)-headed', 'bearded', 'beardless',
+    'moustached', 'mustached', 'mustachioed', 'bespectacled', 'freckled', 'freckle-faced', '(?:clean-)?shaven', 'curly', 'wavy-haired', '[\\p{L}]+-eyed',
+    'лыс\\p{L}*', 'лысеющ\\p{L}*', 'плешив\\p{L}*', 'рыж\\p{L}*', 'седовлас\\p{L}*', 'сед(?:ой|ая|ое|ые|ого|ую|ым|ыми|ых|ому|ою|ой)', '\\p{L}*волос\\p{L}*',
+    'бородат\\p{L}*', 'безбород\\p{L}*', 'усат\\p{L}*', 'очкаст\\p{L}*', 'кудряв\\p{L}*', 'веснушчат\\p{L}*', 'бритоголов\\p{L}*', '\\p{L}+глаз\\p{L}*',
+].join('|');
+const LOOKS_ADJ_RE = new RegExp(`(\\s*,\\s*|\\s+(?:and|и)\\s+|\\s+|^)(?<![\\p{L}-])(?:${LOOKS_ADJ})(?![\\p{L}-])(\\s*,)?`, 'giu');
+// "He has red hair", "wears a grey suit", "носит очки" — a clause that only states looks.
+const LOOKS_CLAUSE_RE = new RegExp(`^\\s*(?:(?:he|she|they)\\s+)?(?:has|have|wears|wearing|is wearing|dressed|clad|носит|одет\\p{L}*|у (?:него|неё|нее))(?![\\p{L}])[^]*(?<![\\p{L}])(?:${LOOKS_NOUN_EN}|${LOOKS_NOUN_RU})(?![\\p{L}])`, 'iu');
+
 function splitSentences(text) {
     return String(text || '')
         .replace(/\s+/g, ' ')
@@ -319,33 +350,114 @@ function splitSentences(text) {
         .filter(Boolean);
 }
 
-// Cut the clauses of one sentence that name an episodic state. Returns the
-// sentence that is left ('' when nothing is) and the clauses cut.
-function cutEpisodicStates(sentence) {
-    if (!EPISODIC_STATE_RE.test(sentence)) return { kept: sentence, cut: [] };
+// A sentence → its clauses with the separators that were between them, so a
+// sentence with a clause cut out keeps its own punctuation.
+const CLAUSE_SEP_RE = /(\s*[,;]\s*|\s+[—–]\s+)/;
+const DANGLING_RE = /^(with|and|but|or|while|и|а|но|с|или)$/i;
+
+/**
+ * Cut the clauses `drop(clause, { sep, previousCut })` says yes to. Returns the sentence that is
+ * left ('' when nothing meaningful is) and the clauses cut.
+ */
+function cutClauses(sentence, drop) {
     const end = /[.!?…]$/.test(sentence) ? sentence.slice(-1) : '.';
     const body = sentence.replace(/[.!?…]+$/, '');
-    const clauses = body.split(/\s*[,;]\s*|\s+[—–]\s+/);
-    const cut = clauses.filter((c) => EPISODIC_STATE_RE.test(c));
-    const left = clauses.filter((c) => !EPISODIC_STATE_RE.test(c) && /\p{L}/u.test(c));
+    const parts = body.split(CLAUSE_SEP_RE);
+    const clauses = [];
+    for (let i = 0; i < parts.length; i += 2) clauses.push({ sep: i === 0 ? '' : parts[i - 1], text: parts[i] });
+    const cut = [];
+    const kept = [];
+    let previousCut = false;
+    for (const c of clauses) {
+        if (drop(c.text, { sep: c.sep, previousCut })) { cut.push(c.text.trim()); previousCut = true; continue; }
+        previousCut = false;
+        if (!/\p{L}/u.test(c.text)) continue;
+        kept.push(c);
+    }
+    if (cut.length === 0) return { kept: sentence, cut };
     // what is left must still say something: a dangling "with" / "and" is not a clause
-    const meaningful = left.filter((c) => !/^(with|and|but|or|и|а|но|с)$/i.test(c.trim()));
+    const meaningful = kept.filter((c) => !DANGLING_RE.test(c.text.trim()));
     if (meaningful.length === 0) return { kept: '', cut };
-    const joined = meaningful.join(', ');
+    let joined = meaningful.map((c, i) => (i === 0 ? c.text.trim() : `${c.sep}${c.text}`)).join('');
+    joined = joined.replace(/\s*[,;—–]\s*$/, '');
     return { kept: `${joined.charAt(0).toUpperCase()}${joined.slice(1)}${end}`, cut };
 }
 
+// Cut the clauses of one sentence that name an episodic state (v3).
+function cutEpisodicStates(sentence) {
+    if (!EPISODIC_STATE_RE.test(sentence)) return { kept: sentence, cut: [] };
+    return cutClauses(sentence, (c) => EPISODIC_STATE_RE.test(c));
+}
+
+// Cut the conditional clause (v4); a sentence that starts with the condition
+// goes as a whole.
+function cutConditions(sentence) {
+    if (!CONDITIONAL_RE.test(sentence)) return { kept: sentence, cut: [] };
+    if (LEADING_CONDITIONAL_RE.test(sentence)) return { kept: '', cut: [sentence] };
+    // "…, когда волнуется — сбивается": the part after a dash that follows a
+    // condition is its consequence and goes with it
+    return cutClauses(sentence, (c, { sep, previousCut }) => CONDITIONAL_RE.test(c) || OTHERWISE_RE.test(c)
+        || (previousCut && /[—–]/.test(sep)));
+}
+
+// Appearance that is not the voice (v4, timbre only).
+function cutAppearance(sentence) {
+    const cut = [];
+    let out = sentence;
+    const take = (re, keep) => {
+        out = out.replace(re, (m, ...g) => {
+            const piece = m.trim().replace(/^[,;]\s*|\s*,$/g, '').replace(/^(and|и)\s+/i, '');
+            if (piece) cut.push(piece);
+            return keep(m, ...g);
+        });
+    };
+    take(LOOKS_PHRASE_EN_RE, () => '');
+    take(LOOKS_PHRASE_RU_RE, () => '');
+    // an adjective: keep the separator before it when one stays meaningful
+    // ("a small, plump bald man" → "a small, plump man"; "a bald, plump man" → "a plump man")
+    take(LOOKS_ADJ_RE, (m, before, after) => {
+        if (/^\s*,/.test(before || '') && after) return ',';
+        if (/^\s*,/.test(before || '') || /^\s+(and|и)\s+/i.test(before || '')) return '';
+        return (before || '') === '' ? '' : ' ';
+    });
+    if (cut.length > 0) {
+        out = out
+            .replace(/\s{2,}/g, ' ')
+            .replace(/\s+([,.;!?…])/g, '$1')
+            .replace(/,\s*,/g, ',')
+            .replace(/(^|[^\p{L}])(a|an|the)\s*,\s*/giu, '$1$2 ')
+            .replace(/(^|[^\p{L}])(a|an|the)\s+(and|,)\s+/giu, '$1$2 ')
+            .replace(/(^|[^\p{L}])a(\s+)(?=[aeio]\p{L})/gu, '$1an$2')
+            .replace(/(^|[^\p{L}])an(\s+)(?=[^aeiouh\s]\p{L})/gu, '$1a$2')
+            .replace(/^[\s,;]+/, '')
+            .trim();
+    }
+    const clauses = cutClauses(out, (c) => LOOKS_CLAUSE_RE.test(c));
+    cut.push(...clauses.cut);
+    out = clauses.kept;
+    if (out && !/\p{L}/u.test(out.replace(/[.!?…]/g, ''))) out = '';
+    if (cut.length === 0) return { kept: sentence, cut };
+    return { kept: out ? `${out.charAt(0).toUpperCase()}${out.slice(1)}` : '', cut };
+}
+
 /**
+ * @param {string} text
+ * @param {{ appearance?: boolean }} [options]  appearance: cut looks too (timbre)
  * @returns {{timbre:string, removed:string[], rules_version:number}}
  */
-function cleanVoiceDescription(text) {
+function cleanVoiceDescription(text, options = {}) {
     const kept = [];
     const removed = [];
     for (const s of splitSentences(text)) {
-        if (QUOTED_RE.test(s) || CONDITIONAL_RE.test(s) || ON_WORD_RE.test(s)) { removed.push(s); continue; }
-        const states = cutEpisodicStates(s);
-        removed.push(...states.cut);
-        if (states.kept) kept.push(states.kept);
+        if (QUOTED_RE.test(s) || ON_WORD_RE.test(s)) { removed.push(s); continue; }
+        let sentence = s;
+        for (const rule of options.appearance ? [cutConditions, cutEpisodicStates, cutAppearance] : [cutConditions, cutEpisodicStates]) {
+            if (!sentence) break;
+            const r = rule(sentence);
+            removed.push(...r.cut);
+            sentence = r.kept;
+        }
+        if (sentence) kept.push(sentence);
     }
     return { timbre: kept.join(' '), removed, rules_version: CLEANUP_RULES_VERSION };
 }
@@ -385,16 +497,16 @@ function normalisePronunciation(timbre, language) {
 
 /** A voice entry created from an analysis description (cleaned, not yet reviewed). */
 function voiceFromDescription(text) {
-    const { timbre } = cleanVoiceDescription(text);
+    const { timbre } = cleanVoiceDescription(text, { appearance: true });
     return { timbre, manner: '', timbre_source: 'cleaned' };
 }
 
 // ── a voice as the analysis returned it → the voice block of a hero ──────
 const VOICE_TEXT_MAX = 2000;
 
-function cleanField(value) {
+function cleanField(value, options) {
     if (typeof value !== 'string' || !value.trim()) return { text: '', removed: [] };
-    const cleaned = cleanVoiceDescription(value);
+    const cleaned = cleanVoiceDescription(value, options);
     return { text: cleaned.timbre.slice(0, VOICE_TEXT_MAX).trim(), removed: cleaned.removed };
 }
 
@@ -442,7 +554,7 @@ function voiceFromAnalysis(raw, options = {}) {
     }
     if (!timbreRaw.trim() && !mannerRaw.trim()) return { voice: null, removed: [], reason: 'empty' };
 
-    const timbre = cleanField(timbreRaw);
+    const timbre = cleanField(timbreRaw, { appearance: true });
     const manner = cleanField(mannerRaw);
     const removed = [...timbre.removed, ...manner.removed];
     if (!timbre.text) return { voice: null, removed, reason: 'timbre_empty' };
