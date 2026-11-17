@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1 (2026-11-17, unpublished)
+
+Только зависимость: `@animastor/generation` ^0.3.0 (VBook 4, шаг 3 — реестр инвалидации на героях).
+Кода оркестрации изменение не касается.
+
 ## 1.4.0 (2026-11-12, unpublished) — kind `voice_reference`
 
 Основание: animastor-docs `architecture/VOICE_REFERENCES.md`. Minor: прежние порты не меняются.

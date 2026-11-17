@@ -57,7 +57,9 @@ const FIXTURES = [
         newScene: { participants: ['char-1', 'char-2'] },
     },
     {
-        name: 'scene.passport override change → image + video (no audio)',
+        // VBook 4: scene.passport is not a key any more — without the book
+        // context the derived scene.resolved_looks is absent on both sides
+        name: 'scene.passport (3.1) change → nothing (looks: scene.resolved_looks, needs the book)',
         oldScene: { passport: { 'char-1': { clothing_base: 'grey coat' } } },
         newScene: { passport: { 'char-1': { clothing_base: 'black suit' } } },
     },

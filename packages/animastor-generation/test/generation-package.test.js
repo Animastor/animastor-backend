@@ -79,7 +79,7 @@ describe('@animastor/generation package', () => {
             expect(dg[fn], `dirtyGrammar.${fn}`).to.be.a('function');
         }
         for (const k of ['SCENE_FIELDS', 'CROSS_FIELDS', 'isEqual',
-            'extractPassport', 'SPEECH_SEC_PER_WORD', 'SPEECH_MIN_SEC', 'CYR_LATIN_MAP']) {
+            'sceneHasSpeaker', 'resolvedLooks', 'voiceKey', 'SPEECH_SEC_PER_WORD', 'SPEECH_MIN_SEC', 'CYR_LATIN_MAP']) {
             expect(k in dg, `dirtyGrammar.${k}`).to.equal(true);
         }
         // frozen layer→layer dependency graph: the real object, not undefined

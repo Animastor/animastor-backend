@@ -124,7 +124,7 @@ const SCENE_FIELDS = [
         layers: ['image', 'video'],
         extract: (scene) => scene?.participants,
         label: 'Scene-level character participants',
-        usedBy: 'buildCharacters → book.characters[id].passport',
+        usedBy: 'buildCharacters → resolveHeroLook(book, chapter, scene, id)',
     },
 
     // ── Scene style ───────────────────────────────
@@ -147,16 +147,25 @@ const SCENE_FIELDS = [
         usedBy: 'buildCharacters → resolveState()',
     },
 
-    // ── Scene character passport overrides ────────
-    // scene.passport[charId].<field> fully replaces the corresponding
-    // global passport field for that character in this scene. Consumed by
-    // resolvePassport() (image) and video-workflows (video_tokens).
+    // ── Resolved looks of the participants (VBook 4, VBOOK_FORMAT_V4 §4a.5) ──
+    // A DERIVED key: for every participant with a passport, the look the
+    // generation will actually use — resolveHeroLook(book, chapter, scene, id)
+    // → { appearance, clothes, video_tokens }. It replaces scene.passport and
+    // the book-wide characters.passport: the RESULT is compared, not the
+    // sources, so exactly the scenes whose resolved look changed get dirty —
+    // a look field edit marks the scenes where that look acts, a chapter
+    // assignment the chapter's scenes without their own reference, a base
+    // field edit only the scenes where no look overrides it; label, notes,
+    // image_ref and an unassigned look change nothing. Audio is never marked.
+    // Needs the context of the scene: extract(scene, { book, chapter,
+    // resolveHeroLook }) — the resolver is injected by the host (this module
+    // stays pure); without a book in the context the key is absent.
     {
-        key: 'scene.passport',
+        key: 'scene.resolved_looks',
         layers: ['image', 'video'],
-        extract: (scene) => scene?.passport,
-        label: 'Per-scene character passport overrides',
-        usedBy: 'buildCharacters → resolvePassport(), video-workflows → video tokens',
+        extract: (scene, ctx) => resolvedLooks(scene, ctx),
+        label: 'Resolved looks of the participants (passport ← look ← look_patch)',
+        usedBy: 'buildCharacters → resolveHeroLook, video-workflows buildCharLines → resolveHeroLook',
     },
 ];
 
@@ -182,53 +191,42 @@ const UNIT_FIELD_LAYERS = Object.freeze({
 // ======================================================
 // REGISTRY: Cross-cutting fields
 // ======================================================
-// These fields live outside individual scenes (characters.json,
+// These fields live outside individual scenes (characters/<id>.json,
 // bible.json) and affect ALL scenes that reference the entity.
 // computeBookDiff() uses this list for entity-level comparison.
 // ======================================================
 
 const CROSS_FIELDS = [
-    // ── Character passport ─────────────────────────
-    // passport.appearance + passport.clothes → merged into
-    // "id: appearance, clothes" in the final image prompt
+    // ── Hero passport / looks ──────────────────────
+    // VBook 4: covered by the derived scene key scene.resolved_looks (every
+    // scene is compared with its book and chapter), so there is no
+    // entity-level passport entry — it marked every scene of the hero, even
+    // the ones where a look overrides the edited field.
+    //
+    // ── Hero voice (VBook 4: the voice lives in characters/<id>.json) ──
+    // VOICE_REFERENCES.md (0.2.0, kept): every chunk is cloned from the LOCKED
+    // reference (file sha256 + ref_text) — so only a change of that locked
+    // reference makes audio dirty; timbre / manner only drive the creation of
+    // reference candidates and change no chunk. (VBOOK_FORMAT_V4 §8.2 also
+    // lists timbre / manner → audio — an open question to the owner, see the
+    // step 3 report.) Video is mute; nothing else of a hero (name, role,
+    // aliases, notes, image_refs, behaviour, looks) touches audio. The
+    // narrator's voice is used by every scene; another hero's — by the scenes
+    // where it takes part or speaks (unit.audio.speaker = its id).
     {
-        key: 'characters.passport',
-        layers: ['image', 'video'],
-        entitySource: (book) => book.characters || [],
-        entityId: (char) => char.id,
-        isChanged: (oldEntity, newEntity) => {
-            // Compare passport fields only (not voice, not metadata)
-            return !isEqual(
-                extractPassport(oldEntity),
-                extractPassport(newEntity)
-            );
-        },
-        findAffectedScenes: (allScenes, entityId) => {
-            return allScenes.filter(s => sceneReferencesCharacter(s, entityId));
-        },
-        label: 'Character passport (appearance, clothes, video_tokens)',
-        usedBy: 'buildCharacters → resolvePassport(), video-workflows → video tokens',
-    },
-    // ── Character voice ───────────────────────────
-    // voice settings affect TTS only — no visual impact
-    {
-        key: 'characters.voice',
+        key: 'heroes.voice',
         layers: ['audio'],
-        entitySource: (book) => book.characters || [],
-        entityId: (char) => char.id,
-        isChanged: (oldEntity, newEntity) => {
-            return !isEqual(oldEntity?.voice, newEntity?.voice);
-        },
-        findAffectedScenes: (allScenes, entityId) => {
-            return allScenes.filter(s => sceneReferencesCharacter(s, entityId));
-        },
-        label: 'Character voice settings (TTS)',
-        usedBy: 'audio-service → character voice mapping',
+        entitySource: (book) => (Array.isArray(book?.heroes) ? book.heroes : []).filter((h) => h && typeof h.id === 'string'),
+        entityId: (hero) => hero.id,
+        isChanged: (oldEntity, newEntity) => voiceKey(oldEntity) !== voiceKey(newEntity),
+        findAffectedScenes: (allScenes, entityId) => (entityId === NARRATOR_ID
+            ? allScenes
+            : allScenes.filter((s) => sceneReferencesCharacter(s, entityId) || sceneHasSpeaker(s, entityId))),
+        label: 'Locked voice reference of a hero (voice.reference sha256 / ref_text)',
+        usedBy: 'audio/generation → reference of the voice (LoadAudio + VoiceClonePrompt); voiceInstruct',
     },
-    // Note: No 'characters.any' catch-all — passport and voice
-    // entries above cover all generation-relevant character fields.
-    // Passport changes → image+video; voice changes → audio.
-    // Other fields (name, role, metadata) don't affect generation.
+    // Note: no catch-all for heroes — looks are the derived scene key,
+    // the voice is the entry above; other hero fields don't affect generation.
     // ── Location from bible.json ──────────────────
     // bible.locations[locId].description + environment template
     // are injected into the final prompt
@@ -247,50 +245,49 @@ const CROSS_FIELDS = [
         label: 'Location description + environment template (bible.json)',
         usedBy: 'buildImagePrompt → bible.locations[locationId]',
     },
-    // ── Book-level TTS voice config ──────────────────
-    // VOICE_REFERENCES.md: chunk audio is cloned from the LOCKED voice
-    // reference (file sha256 + ref_text). timbre / manner only drive the
-    // creation of reference candidates — editing them changes no chunk.
-    // A reference change is book-global (any scene may use the voice).
-    {
-        key: 'book.voices',
-        layers: ['audio'],
-        entitySource: (book) => {
-            const v = book?.voices || {};
-            return Object.entries(v).map(([id, data]) => ({ id, ...(data || {}) }));
-        },
-        entityId: (v) => v.id,
-        isChanged: (oldEntity, newEntity) => {
-            const key = (e) => {
-                const r = e && e.reference && e.reference.locked === true ? e.reference : null;
-                return r ? `${r.sha256 || ''}\u0000${r.ref_text || ''}` : '';
-            };
-            return key(oldEntity) !== key(newEntity);
-        },
-        findAffectedScenes: (allScenes) => allScenes,
-        label: 'Locked voice reference (book.voices[id].reference)',
-        usedBy: 'audio/generation → LoadAudio + VoiceClonePrompt',
-    },
 ];
 
 // ======================================================
 // HELPERS
 // ======================================================
 
-/**
- * Extract passport fields from a character entity.
- */
-function extractPassport(char) {
-    if (!char) return null;
-    const p = char.passport || {};
-    return {
-        appearance: p.appearance,
-        clothes: p.clothes,
-        // video_tokens feed the video prompt (video-workflows). Global token
-        // changes must also invalidate video dependencies.
-        video_tokens: p.video_tokens,
-    };
+const NARRATOR_ID = 'narrator';
+
+const strOf = (v) => (typeof v === 'string' ? v : '');
+
+/** What of a hero's voice reaches the audio layer: the LOCKED reference only. */
+function voiceKey(hero) {
+    const v = hero && hero.voice && typeof hero.voice === 'object' && !Array.isArray(hero.voice) ? hero.voice : null;
+    const r = v && v.reference && typeof v.reference === 'object' && v.reference.locked === true ? v.reference : null;
+    return r ? `${strOf(r.sha256)}\u0000${strOf(r.ref_text)}` : '';
 }
+
+/** Does any unit of the scene have this speaker? */
+function sceneHasSpeaker(sceneEntry, heroId) {
+    const scene = sceneEntry && (sceneEntry.scene || sceneEntry.payload);
+    if (!scene) return false;
+    const units = (Array.isArray(scene.units) ? scene.units : [])
+        .concat((Array.isArray(scene.dialogue_blocks) ? scene.dialogue_blocks : []).flatMap((b) => (b && Array.isArray(b.units) ? b.units : [])));
+    return units.some((u) => u && u.audio && u.audio.speaker === heroId);
+}
+
+/**
+ * The derived key scene.resolved_looks: participant id → resolved look.
+ * undefined without a book / resolver in the context (key absent).
+ */
+function resolvedLooks(scene, ctx) {
+    if (!ctx || !ctx.book || typeof ctx.resolveHeroLook !== 'function') return undefined;
+    const out = {};
+    const ids = Array.isArray(scene?.participants) ? scene.participants : [];
+    for (const id of ids) {
+        if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(out, id)) continue;
+        const look = ctx.resolveHeroLook(ctx.book, ctx.chapter || null, scene || null, id);
+        if (!look) continue;
+        out[id] = { appearance: look.appearance, clothes: look.clothes, video_tokens: look.video_tokens };
+    }
+    return out;
+}
+
 
 /**
  * Check if a scene entry references a character at scene or unit level.
@@ -316,9 +313,14 @@ function sceneReferencesCharacter(sceneEntry, characterId) {
  *
  * @param {Object} oldScene - Old scene payload
  * @param {Object} newScene - New scene payload
+ * @param {{ old?: {book, chapter}, new?: {book, chapter}, resolveHeroLook?: Function }} [context]
+ *   the book and chapter of each side and the look resolver — needed by the
+ *   derived key scene.resolved_looks (VBook 4); without it that key is absent
  * @returns {{ dirtyLayers: string[], changes: Object }}
  */
-function computeSceneDirtyLayers(oldScene, newScene) {
+function computeSceneDirtyLayers(oldScene, newScene, context = {}) {
+    const oldCtx = context && context.old ? { ...context.old, resolveHeroLook: context.resolveHeroLook } : null;
+    const newCtx = context && context.new ? { ...context.new, resolveHeroLook: context.resolveHeroLook } : null;
     const dirtyLayers = [];
     const changes = {};
 
@@ -452,8 +454,8 @@ function computeSceneDirtyLayers(oldScene, newScene) {
 
     // ── Scene fields comparison ──
     for (const field of SCENE_FIELDS) {
-        const oldVal = field.extract(oldScene);
-        const newVal = field.extract(newScene);
+        const oldVal = field.extract(oldScene, oldCtx);
+        const newVal = field.extract(newScene, newCtx);
         if (!isEqual(oldVal, newVal)) {
             // Push primary layers
             for (const layer of field.layers) {
@@ -550,8 +552,10 @@ module.exports = {
     getCrossFields,
     getLayerDependencies,
     sceneReferencesCharacter,
+    sceneHasSpeaker,
+    resolvedLooks,
+    voiceKey,
 
     // Exposed for testing
     isEqual,
-    extractPassport,
 };
