@@ -2,10 +2,16 @@
 // Behaviour rules — effective rule set of a book (host, with I/O)
 // ======================================================
 // Effective rules = repository defaults (backend/ai/examples/behaviour-rules.json)
-// overridden by the book's behavior.json v2 `rules` with the same id
-// (shallow merge: a book entry {id, enabled:false} disables a default);
-// book-only ids are added. Disabled and invalid rules are dropped here, so
-// the matcher only ever sees well-formed rules.
+// overridden by the book's rules with the same id (shallow merge: a book entry
+// {id, enabled:false} disables a default); book-only ids are added. Disabled
+// and invalid rules are dropped here, so the matcher only ever sees
+// well-formed rules.
+//
+// VBook 4 (VBOOK_FORMAT_V4 §6.3): the book's rules are behaviour.json `rules`
+// (scope "global") ⊕ the rules of every hero file (scope "character",
+// character_id = the hero's id) — heroRules() of @animastor/vbook-runtime.
+// A rule id is unique across the book; a duplicate keeps the first source
+// (globals, then heroes in book order) and is logged (duplicate_rule_id).
 //
 // Rule (schema v2):
 //   {id, scope:"global"|"character", character_id?, when:{emotion:[], unit_type?:[]},
@@ -13,8 +19,10 @@
 // Missing numbers fall back to RULE_DEFAULTS.
 //
 // Scene limit: defaults.max_per_scene of the defaults file (2), overridden by
-// the book's behavior.json defaults.max_per_scene (integer ≥ 0; 0 = behaviours
+// the book's behaviour.json defaults.max_per_scene (integer ≥ 0; 0 = behaviours
 // off in every scene). Invalid values are ignored; neither set = unlimited.
+// A broken behaviour.json is treated as absent (owner's decision В5); a broken
+// hero file contributes no rules.
 //
 // Docs: animastor-docs architecture/VBOOK_BEHAVIOUR.md.
 // ======================================================
@@ -24,6 +32,9 @@
 const fs = require('fs');
 const path = require('path');
 const { isBehaviourEmotion } = require('./behaviour-emotions');
+const { inspectBehaviourFile } = require('@animastor/vbook-runtime');
+const { listCharacters } = require('@animastor/vbook-runtime/character-store.cjs');
+const { heroRules } = require('@animastor/vbook-runtime/heroes.cjs');
 
 const DEFAULT_RULES_PATH = path.join(__dirname, '..', '..', '..', 'ai', 'examples', 'behaviour-rules.json');
 const ACTION_MAX_CHARS = 200;
@@ -72,7 +83,7 @@ function sanitizeRule(raw) {
 
 /**
  * @param {object[]} defaults  — repository default rules
- * @param {object[]} bookRules — behavior.json v2 rules of the book
+ * @param {object[]} bookRules — rules of the book (behaviour.json + heroes, with scope)
  * @returns {object[]} sanitized effective rules, sorted by id
  */
 function computeEffectiveRules(defaults, bookRules) {
@@ -112,20 +123,30 @@ function loadDefaultRules(filePath = DEFAULT_RULES_PATH) {
     return Array.isArray(doc?.rules) ? doc.rules : [];
 }
 
-/** A book's behavior.json when it is a v2 document, else null (v2.1 has no rules/defaults). */
+/**
+ * The book's behaviour document for the matcher (VBook 4):
+ *   { defaults, rules, duplicates } — defaults of behaviour.json; rules =
+ *   behaviour.json rules (global) ⊕ hero rules (character); null when the
+ *   book has neither. Throws when behaviour.json is broken (the caller logs it
+ *   and goes on without the book's globals).
+ */
 function readBookDoc(bookDir) {
     if (!bookDir) return null;
-    const p = path.join(bookDir, 'behavior.json');
-    if (!fs.existsSync(p)) return null;
-    const doc = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.schema_version == null) return null;
-    return doc;
+    const state = inspectBehaviourFile(bookDir);
+    if (state.state === 'broken') {
+        throw new Error(`behaviour.json ${state.issue.code}: ${state.issue.message}`);
+    }
+    const globals = state.state === 'ok' ? state.behaviour : null;
+    const heroes = listCharacters(bookDir).heroes;
+    const { rules, duplicates } = heroRules({ behaviour: globals, heroes });
+    if (!globals && rules.length === 0) return null;
+    return { defaults: globals && globals.defaults ? globals.defaults : undefined, rules, duplicates };
 }
 
-/** Rules stored in a book's behavior.json (v2 only — v2.1 files have none). */
+/** Rules of a book (behaviour.json + hero files), with scope / character_id. */
 function readBookRules(bookDir) {
     const doc = readBookDoc(bookDir);
-    return doc && Array.isArray(doc.rules) ? doc.rules : [];
+    return doc ? doc.rules : [];
 }
 
 /**
@@ -142,7 +163,7 @@ function computeEffectiveSettings(defaultsDoc, bookDoc) {
 
 /**
  * Effective rules + scene limit for a book directory. Never throws: a broken
- * defaults file or behavior.json is logged and treated as absent.
+ * defaults file or behaviour.json is logged and treated as absent.
  */
 function loadEffectiveSettings(bookDir, { log = console } = {}) {
     let defaultsDoc = null;
@@ -151,7 +172,12 @@ function loadEffectiveSettings(bookDir, { log = console } = {}) {
         log.warn(`[BEHAVIOUR] default rules unreadable: ${e.message}`);
     }
     try { bookDoc = readBookDoc(bookDir); } catch (e) {
-        log.warn(`[BEHAVIOUR] behavior.json unreadable (${bookDir}): ${e.message}`);
+        log.warn(`[BEHAVIOUR] book rules unreadable (${bookDir}): ${e.message}`);
+        // a broken behaviour.json: the hero rules still apply (В5)
+        try { bookDoc = { rules: heroRules({ behaviour: null, heroes: listCharacters(bookDir).heroes }).rules }; } catch (_) { bookDoc = null; }
+    }
+    if (bookDoc && Array.isArray(bookDoc.duplicates) && bookDoc.duplicates.length > 0) {
+        log.warn(`[BEHAVIOUR] duplicate_rule_id (${bookDir}): ${bookDoc.duplicates.join(', ')} — the later source is not applied`);
     }
     return computeEffectiveSettings(defaultsDoc, bookDoc);
 }

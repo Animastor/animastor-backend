@@ -135,7 +135,7 @@ function bookV4() {
         book: { title: 'Мастер и Маргарита (фикстура шага 3)' },
         bible: clone(SPEC.bible),
         locations: clone(SPEC.locations),
-        behaviour: { schema: 'animastor.behaviour/1', defaults: {}, rules: [] },
+        behaviour: { schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] },
         heroes,
         hero_issues: [],
         chapters: SPEC.chapters.map((c) => ({
