@@ -118,11 +118,13 @@ function mentionsFromBook(book, working) {
  *   the registry (matched by id, name or alias).
  *   merges — one entry per candidate that turned out to be a hero of the
  *   registry: { from, name, to, reason, evidence } (the journal of the window).
+ *   possible_duplicates — new heroes that ONE mention clue ties to a hero of
+ *   the registry (not merged): { from, name, id, of, evidence }.
  * @param {{ mentions?: object }} [options]  the window's mentions — evidence
  *   for a renamed hero (assignHeroIds, 'matched_by_mentions').
  */
 function normalizeWindowCharacters(candidates, registry, options = {}) {
-    const { assignments, skipped, idMap } = assignHeroIds(candidates, registry, { mentions: options.mentions });
+    const { assignments, skipped, idMap, possibleDuplicates } = assignHeroIds(candidates, registry, { mentions: options.mentions });
     const characters = assignments.map((a) => {
         const copy = { ...a.candidate, id: a.id };
         if (a.name) copy.name = a.name;
@@ -138,6 +140,9 @@ function normalizeWindowCharacters(candidates, registry, options = {}) {
             from: a.rawId || null, name: a.name || null, to: a.id, reason: a.reason, evidence: a.evidence || [],
         })),
         skipped: skipped.map((s) => ({ id: s.rawId || null, name: text(s.candidate.name) || null, reason: s.reason })),
+        possible_duplicates: (possibleDuplicates || []).map((p) => ({
+            from: p.rawId || null, name: p.name || null, id: p.id, of: p.of, evidence: p.evidence || [],
+        })),
     };
 }
 

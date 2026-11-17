@@ -20,8 +20,10 @@
 //         "Иностранец в сером костюме"): the window's mentions { alias →
 //         the candidate's raw id } are evidence too. When every such alias
 //         that names somebody of the book names the SAME one hero, no alias
-//         is ambiguous, and no other candidate of the window claims that
-//         hero, the candidate is that hero (reason 'matched_by_mentions');
+//         is ambiguous, there are at least TWO different such aliases, and no
+//         other candidate of the window claims that hero, the candidate is
+//         that hero (reason 'matched_by_mentions'). One clue merges nothing:
+//         the candidate is a new hero, reported as a possible duplicate;
 //       - an ambiguous match (the name points at one hero, an alias at
 //         another; an alias two heroes claim; an id that yura and yura_2
 //         share) merges nothing — the candidate is a new hero;
@@ -91,6 +93,11 @@ function firstFreeId(base, taken) {
 }
 
 const matchKey = (v) => normalizeForMatch(v) || text(v).toLowerCase();
+
+// The safety net by mentions merges a candidate into a known hero only on this
+// many DIFFERENT unambiguous clues; fewer → no merge, a "possible duplicate"
+// line in the journal (owner's decision 17.11, VBOOK_FORMAT_V4 §12в).
+const MIN_MENTION_EVIDENCE = 2;
 
 /** Is `base` used by more than one hero (base, base_2, …)? */
 function isSharedBase(base, ids) {
@@ -197,7 +204,10 @@ function mergeAliases(name, ...lists) {
  *                  name: string, aliases: string[], rawId: string, reason: string,
  *                  evidence: string[] }[],
  *   skipped: { index: number, candidate: object, rawId: string, reason: string }[],
- *   idMap: Map<string, string>   // raw id (as the model wrote it) → final id
+ *   idMap: Map<string, string>,  // raw id (as the model wrote it) → final id
+ *   possibleDuplicates: { index, rawId, name, id, of, evidence: string[] }[]
+ *     // a NEW hero (id) that one mention clue ties to a known hero (of):
+ *     // not merged, reported
  * }}
  * reason of an assignment: 'same_id' | 'matched_by_name' | 'matched_by_mentions' | 'new' | 'new_suffix' | 'new_reserved'
  * evidence: what decided a merge — the matching spellings (by name / by
@@ -227,10 +237,16 @@ function assignHeroIds(candidates, existingHeroes, options = {}) {
     list.forEach((c) => { if (isPlainObject(c)) { const id = strongOf(c); if (id) strongClaim.add(id); } });
     const mentionMatch = new Map(); // candidate index → { id, evidence }
     const mentionClaims = new Map(); // hero id → count
+    const possibleByIndex = new Map(); // candidate index → { id, evidence } — one clue only
     list.forEach((c, index) => {
         if (!isPlainObject(c) || strongOf(c)) return;
         const match = matchByValues(mentionAliasesFor(c, options.mentions), identityIndex);
         if (!match.id || strongClaim.has(match.id)) return;
+        // One epithet is not enough (acceptance 2.6: «клетчатый» — Koroviev's
+        // epithet — was written as an alias of voland in window 1). A merge by
+        // mentions needs at least MIN_MENTION_EVIDENCE DIFFERENT clues.
+        const distinct = new Set(match.evidence.map(matchKey));
+        if (distinct.size < MIN_MENTION_EVIDENCE) { possibleByIndex.set(index, match); return; }
         mentionMatch.set(index, match);
         mentionClaims.set(match.id, (mentionClaims.get(match.id) || 0) + 1);
     });
@@ -240,6 +256,7 @@ function assignHeroIds(candidates, existingHeroes, options = {}) {
 
     const assignments = [];
     const skipped = [];
+    const possibleDuplicates = [];
     const idMap = new Map();
     const rawIdConflicts = new Set();
     // heroes created earlier in THIS window take part in name matching too
@@ -332,6 +349,10 @@ function assignHeroIds(candidates, existingHeroes, options = {}) {
             ? [rawId] : [];
         const aliases = mergeAliases(name, rawIdAsAlias, candidateAliases(candidate).filter((a) => !namesAnother(a)));
         assignments.push({ index, candidate, id, existing: isExisting, name, aliases, rawId, reason, evidence });
+        if (!isExisting && possibleByIndex.has(index)) {
+            const p = possibleByIndex.get(index);
+            possibleDuplicates.push({ index, rawId, name, id, of: p.id, evidence: p.evidence });
+        }
         if (!isExisting) {
             claimInWindow(name, id);
             for (const alias of aliases) claimInWindow(alias, id);
@@ -339,11 +360,12 @@ function assignHeroIds(candidates, existingHeroes, options = {}) {
     });
 
     for (const rawId of rawIdConflicts) idMap.delete(rawId);
-    return { assignments, skipped, idMap };
+    return { assignments, skipped, idMap, possibleDuplicates };
 }
 
 module.exports = {
     CYR_TO_LATIN,
+    MIN_MENTION_EVIDENCE,
     normalizeHeroId,
     firstFreeId,
     mergeAliases,

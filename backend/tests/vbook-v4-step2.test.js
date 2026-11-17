@@ -629,7 +629,7 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         configureBooksRoot(() => config.BOOKS_DIR);
         quiet = { log: console.log, warn: console.warn };
         logged = [];
-        console.log = (...a) => logged.push(a.join(' ')); console.warn = () => {};
+        console.log = (...a) => logged.push(a.join(' ')); console.warn = (...a) => logged.push(a.join(' '));
     });
     afterEach(() => {
         console.log = quiet.log; console.warn = quiet.warn;
@@ -647,7 +647,7 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         return { result, seen };
     }
 
-    async function twoWindows() {
+    async function twoWindows(second = MIM_TWO) {
         const { bookId } = lazyBook.createDraftBook(SOURCE, lazyBook.SourceType.TXT, 'mim.txt');
         let draft = lazyBook.loadDraftBook(bookId);
         const one = await run(MIM_ONE, heroAnalysis.registryFromBook(draft, []), heroAnalysis.mentionsFromBook(draft, {}));
@@ -656,7 +656,7 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         const registry = heroAnalysis.registryFromBook(draft, one.result.characters);
         const mentions = heroAnalysis.mentionsFromBook(draft, one.result.mentions);
         logged.length = 0;
-        const two = await run(MIM_TWO, registry, { ...mentions });
+        const two = await run(second, registry, { ...mentions });
         const written = lazyBook.appendToBook(bookId, { characters: two.result.characters, locations: two.result.locations, mentions: two.result.mentions, scenes: two.result.scenes, structure, maxScenes: 5, chapterIndex: 1 });
         return { bookId, dir: path.join(config.BOOKS_DIR, bookId), one, two, written, registry };
     }
@@ -672,16 +672,22 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         expect(voland.aliases).to.include.members(['немец', 'англичанин']);
     });
 
-    it('the renamed Bezdomny and Woland are the known heroes: no duplicates, no new files', async () => {
+    // The model of the acceptance run IGNORED the registry and renamed both
+    // heroes. Safety net by mentions (owner's decision 17.11): a merge needs
+    // ≥ 2 different clues. Woland has six, Bezdomny ONE («Иван Николаевич»;
+    // «поэт» and «Бездомный» are not aliases of ivan_ponyrev) → Woland is
+    // merged, Bezdomny stays a new hero with a "possible duplicate" line.
+    it('model ignored the registry: Woland (≥ 2 clues) is merged, Bezdomny (1 clue) is a new hero, not merged', async () => {
         const { dir, written } = await twoWindows();
-        expect(written.newHeroes).to.deep.equal([]);
-        expect(heroFiles(dir)).to.deep.equal(['ivan_ponyrev.json', 'mikhail_berlioz.json', 'narrator.json', 'voland.json']);
+        expect(written.newHeroes).to.deep.equal(['ivan_nikolayevich_bezdomny']);
+        expect(heroFiles(dir)).to.deep.equal(['ivan_nikolayevich_bezdomny.json', 'ivan_ponyrev.json', 'mikhail_berlioz.json', 'narrator.json', 'voland.json']);
     });
 
-    it('scenes of window 2 refer to the known ids', async () => {
+    it('scenes of window 2 refer to the known ids where the evidence is enough', async () => {
         const { two } = await twoWindows();
-        expect(two.seen.sceneStepCharacters).to.deep.equal(['mikhail_berlioz', 'ivan_ponyrev', 'voland']);
-        expect(two.result.mentions).to.include({ 'француз': 'voland', 'Бездомный': 'ivan_ponyrev' });
+        // the cast the scene step sees: the registry plus the one new hero
+        expect(two.seen.sceneStepCharacters).to.deep.equal(['mikhail_berlioz', 'ivan_ponyrev', 'voland', 'ivan_nikolayevich_bezdomny']);
+        expect(two.result.mentions).to.include({ 'француз': 'voland' });
     });
 
     it('the new spellings become aliases of the known hero; the name is never replaced', async () => {
@@ -691,17 +697,36 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         expect(voland.aliases).to.include.members(['немец', 'англичанин', 'француз', 'интурист']);
         // the name the model used this time is kept as an alias
         expect(voland.aliases).to.include('Иностранец в сером костюме');
-        expect(hero(bookId, 'ivan_ponyrev').aliases).to.include('Иван Николаевич Бездомный');
-        expect(hero(bookId, 'ivan_ponyrev').aliases).to.include('Бездомный');
     });
 
-    it('the journal: one line per merge with the reason and the evidence', async () => {
+    it('the journal: one line per merge with the reason and the evidence; one line per possible duplicate', async () => {
         await twoWindows();
         const merges = logged.filter((l) => l.startsWith('[AGENT] Hero merge:'));
-        expect(merges).to.have.length(3);
+        expect(merges).to.have.length(2);
         expect(merges[0]).to.equal('[AGENT] Hero merge: "mikhail_aleksandrovich_berlioz" → mikhail_berlioz (matched_by_name: "Михаил Александрович Берлиоз")');
-        expect(merges[1]).to.equal('[AGENT] Hero merge: "ivan_nikolayevich_bezdomny" → ivan_ponyrev (matched_by_mentions: "Иван Николаевич")');
-        expect(merges[2]).to.match(/^\[AGENT\] Hero merge: "foreign_man_gray_suit" → voland \(matched_by_mentions: .*"иностранец".*\)$/);
+        expect(merges[1]).to.match(/^\[AGENT\] Hero merge: "foreign_man_gray_suit" → voland \(matched_by_mentions: .*"иностранец".*\)$/);
+        const possible = logged.filter((l) => l.startsWith('[AGENT] Possible duplicate:'));
+        expect(possible).to.deep.equal(['[AGENT] Possible duplicate: "ivan_nikolayevich_bezdomny" → new ivan_nikolayevich_bezdomny, may be ivan_ponyrev ("Иван Николаевич")']);
+    });
+
+    // The main path (step 2b, rerun of the acceptance): the model saw the
+    // registry and returned the known heroes with their ids.
+    it('model returned the known ids (rerun): no duplicates, no new files, the names become aliases', async () => {
+        const rerun = {
+            ...MIM_TWO,
+            characters: [
+                { id: 'mikhail_berlioz', name: 'Михаил Александрович Берлиоз', appearance: 'small plump man', clothes: 'grey suit' },
+                { id: 'ivan_ponyrev', name: 'Иван Николаевич Бездомный', appearance: 'young man', clothes: 'cowboy shirt' },
+                { id: 'voland', name: 'Иностранец в сером костюме', appearance: 'tall man', clothes: 'grey suit' },
+            ],
+            mentions: { 'Бездомный': 'ivan_ponyrev', 'поэт': 'ivan_ponyrev', 'француз': 'voland', 'интурист': 'voland' },
+        };
+        const { bookId, dir, written } = await twoWindows(rerun);
+        expect(written.newHeroes).to.deep.equal([]);
+        expect(heroFiles(dir)).to.deep.equal(['ivan_ponyrev.json', 'mikhail_berlioz.json', 'narrator.json', 'voland.json']);
+        expect(hero(bookId, 'ivan_ponyrev').aliases).to.include.members(['Иван Николаевич Бездомный', 'Бездомный']);
+        expect(hero(bookId, 'voland').aliases).to.include('Иностранец в сером костюме');
+        expect(logged.filter((l) => l.startsWith('[AGENT] Possible duplicate:'))).to.deep.equal([]);
     });
 });
 

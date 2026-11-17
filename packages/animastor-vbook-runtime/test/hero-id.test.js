@@ -274,23 +274,54 @@ describe('hero id normalisation (step 2)', () => {
         };
         const byIndex = (plan, i) => plan.assignments.find((a) => a.index === i);
 
-        it('the window 2 of the acceptance: Bezdomny and Woland are the known heroes, nobody is duplicated', () => {
+        // Owner's decision 17.11: a merge by mentions needs ≥ 2 DIFFERENT clues.
+        // In the real window 2 Bezdomny had ONE clue («Иван Николаевич» — «поэт»
+        // and «Бездомный» are not aliases of ivan_ponyrev), Woland three.
+        it('the window 2 of the acceptance: Woland (3 clues) is merged; Bezdomny (1 clue) is a possible duplicate, not merged', () => {
             const plan = assignHeroIds(WINDOW_TWO, REGISTRY, { mentions: MENTIONS });
+            expect(ids(plan)).to.deep.equal(['mikhail_berlioz', 'ivan_nikolayevich_bezdomny', 'voland']);
+            expect(plan.idMap.get('foreign_man_gray_suit')).to.equal('voland');
+            expect(byIndex(plan, 1)).to.include({ existing: false, reason: 'new' });
+            expect(plan.possibleDuplicates).to.deep.equal([{
+                index: 1, rawId: 'ivan_nikolayevich_bezdomny', name: 'Иван Николаевич Бездомный',
+                id: 'ivan_nikolayevich_bezdomny', of: 'ivan_ponyrev', evidence: ['Иван Николаевич'],
+            }]);
+        });
+
+        it('Bezdomny with a second clue in the registry («Бездомный») is merged', () => {
+            const registry = REGISTRY.map((h) => (h.id === 'ivan_ponyrev' ? { ...h, aliases: [...h.aliases, 'Бездомный'] } : h));
+            const plan = assignHeroIds(WINDOW_TWO, registry, { mentions: MENTIONS });
             expect(ids(plan)).to.deep.equal(['mikhail_berlioz', 'ivan_ponyrev', 'voland']);
             expect(plan.assignments.every((a) => a.existing)).to.equal(true);
-            expect(plan.idMap.get('ivan_nikolayevich_bezdomny')).to.equal('ivan_ponyrev');
-            expect(plan.idMap.get('foreign_man_gray_suit')).to.equal('voland');
+            expect(byIndex(plan, 1)).to.include({ reason: 'matched_by_mentions' });
+            expect(byIndex(plan, 1).evidence).to.have.members(['Иван Николаевич', 'Бездомный']);
+            expect(plan.possibleDuplicates).to.deep.equal([]);
         });
 
         it('every merge carries its reason and evidence', () => {
             const plan = assignHeroIds(WINDOW_TWO, REGISTRY, { mentions: MENTIONS });
             expect(byIndex(plan, 0)).to.include({ reason: 'matched_by_name' });
             expect(byIndex(plan, 0).evidence).to.deep.equal(['Михаил Александрович Берлиоз']);
-            expect(byIndex(plan, 1)).to.include({ reason: 'matched_by_mentions' });
-            expect(byIndex(plan, 1).evidence).to.deep.equal(['Иван Николаевич']);
             expect(byIndex(plan, 2)).to.include({ reason: 'matched_by_mentions' });
             // case-insensitive: «иностранец» = the name «Иностранец»
             expect(byIndex(plan, 2).evidence).to.have.members(['иностранец', 'немец', 'англичанин']);
+        });
+
+        it('Koroviev: «клетчатый» (an alias voland got in window 1) is ONE clue → not merged, a possible duplicate', () => {
+            const registry = [{ id: 'voland', name: 'Иностранец', aliases: ['прозрачный гражданин престранного вида', 'клетчатый', 'немец'] }];
+            const plan = assignHeroIds([{ id: 'koroviev', name: 'Коровьев' }], registry, { mentions: { 'клетчатый': 'koroviev', 'регент': 'koroviev' } });
+            expect(ids(plan)).to.deep.equal(['koroviev']);
+            expect(plan.assignments[0]).to.include({ existing: false, reason: 'new' });
+            expect(plan.possibleDuplicates).to.deep.equal([
+                { index: 0, rawId: 'koroviev', name: 'Коровьев', id: 'koroviev', of: 'voland', evidence: ['клетчатый'] },
+            ]);
+        });
+
+        it('the same clue twice (case, ё) is still one clue', () => {
+            const registry = [{ id: 'voland', name: 'Иностранец', aliases: ['клетчатый'] }];
+            const plan = assignHeroIds([{ id: 'koroviev', name: 'Коровьев' }], registry, { mentions: { 'клетчатый': 'koroviev', 'Клетчатый': 'koroviev' } });
+            expect(ids(plan)).to.deep.equal(['koroviev']);
+            expect(plan.possibleDuplicates).to.have.length(1);
         });
 
         it('the new spelling of a renamed hero is kept as an alias', () => {
@@ -349,11 +380,11 @@ describe('hero id normalisation (step 2)', () => {
         });
 
         it('a mention to a name (not to the id) counts; mentions to other targets are ignored', () => {
-            const registry = [{ id: 'voland', name: 'Иностранец', aliases: ['немец'] }];
+            const registry = [{ id: 'voland', name: 'Иностранец', aliases: ['немец', 'интурист'] }];
             const plan = assignHeroIds([{ id: 'foreign_man', name: 'Иностранец в сером' }], registry,
-                { mentions: { 'немец': 'Иностранец в сером', 'англичанин': 'someone_else' } });
+                { mentions: { 'немец': 'Иностранец в сером', 'интурист': 'foreign_man', 'англичанин': 'someone_else' } });
             expect(ids(plan)).to.deep.equal(['voland']);
-            expect(plan.assignments[0].evidence).to.deep.equal(['немец']);
+            expect(plan.assignments[0].evidence).to.have.members(['немец', 'интурист']);
         });
 
         it('new heroes and garbage mentions: no evidence, no merge', () => {

@@ -484,6 +484,10 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
         for (const m of normalized.merges || []) {
             console.log(`[AGENT] Hero merge: ${JSON.stringify(m.from || m.name || '')} → ${m.to} (${m.reason}: ${m.evidence.map((e) => JSON.stringify(e)).join(', ')})`);
         }
+        // One mention clue is not a merge (§12в): reported, the hero stays new.
+        for (const d of normalized.possible_duplicates || []) {
+            console.warn(`[AGENT] Possible duplicate: ${JSON.stringify(d.from || d.name || '')} → new ${d.id}, may be ${d.of} (${d.evidence.map((e) => JSON.stringify(e)).join(', ')})`);
+        }
         for (const s of normalized.skipped) {
             console.warn(`[AGENT] Character without a usable id or name skipped: ${JSON.stringify(s.id || s.name || '')}`);
         }
