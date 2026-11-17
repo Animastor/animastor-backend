@@ -416,6 +416,13 @@ const UNIT_OUTPUT_MIN_TOKENS = 4096;
 const UNIT_OUTPUT_MAX_TOKENS = 16384;
 const VISUALS_TOKENS_PER_UNIT = 200;
 const REVIEW_TOKENS_PER_UNIT = 100;
+//   video_action_polish    returns EVERY unit (only video.action); rerun of
+//                          acceptance 2.6: 14 units → 763, 26 → 1340, 23 → 1064,
+//                          84 → 3759 output tokens, i.e. 45–55 per unit. 60 per
+//                          unit + the 1024 base: 84 units → 6064 (+61% over
+//                          the measured 3759); 4096 stays the floor up to 51
+//                          units, the 16384 ceiling is reached at 256 units.
+const VIDEO_ACTION_TOKENS_PER_UNIT = 60;
 function unitOutputBudget(unitCount, tokensPerUnit, base = 1024) {
     const want = base + Math.max(0, Number(unitCount) || 0) * tokensPerUnit;
     return Math.min(UNIT_OUTPUT_MAX_TOKENS, Math.max(UNIT_OUTPUT_MIN_TOKENS, want));
@@ -816,7 +823,7 @@ async function stepPolishVideoActions(sessionId, allVisualUnits, characters, loc
     ];
 
     try {
-        const result = await aiCaller.callAI(messages, { maxTokens: 4096 });
+        const result = await aiCaller.callAI(messages, { maxTokens: unitOutputBudget(polishable.length, VIDEO_ACTION_TOKENS_PER_UNIT) });
         const polishedUnits = result.units || [];
 
         // Merge AI results back, preserving original fields and only updating video.action
@@ -1370,5 +1377,6 @@ module.exports = {
     // Cross-prompt consistency helpers (pure — exported for tests)
     buildCrossPromptHints,
     unitOutputBudget,
+    VIDEO_ACTION_TOKENS_PER_UNIT,
     stillMissingIds,
 };

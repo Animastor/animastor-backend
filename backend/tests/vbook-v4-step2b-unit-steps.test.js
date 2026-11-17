@@ -89,6 +89,18 @@ describe('VBook 4 step 2b — per-unit steps: one copy of the units, changed uni
         });
     });
 
+    describe('video_action_polish (the rest of step 2b)', () => {
+        it('max_tokens = 1024 + 60 per unit, floor 4096: 84 units (acceptance window 2) → 6064, 24 → 4096', async () => {
+            const seen = [];
+            const mod = loadSteps(async (m, o) => { seen.push(o.maxTokens); return { units: [] }; });
+            const polishUnits = (n) => Array.from({ length: n }, (_, i) => ({ ...unit(i, `frame ${i}`), video: { action: `mikhail_berlioz nods, take ${i}` }, estimated_duration_sec: 4 }));
+            await mod.stepPolishVideoActions('s', polishUnits(84), CHARS, [], 0, () => {}, {});
+            await mod.stepPolishVideoActions('s', polishUnits(24), CHARS, [], 0, () => {}, {});
+            expect(mod.VIDEO_ACTION_TOKENS_PER_UNIT).to.equal(60);
+            expect(seen).to.deep.equal([6064, 4096]);
+        });
+    });
+
     it('the rules ask for the changed units only', () => {
         const fs = require('fs');
         const path = require('path');
