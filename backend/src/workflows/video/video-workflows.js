@@ -8,8 +8,9 @@
 
 // S-6: Book-model reads go through the Generation-owned BookDataPort —
 // the former direct ../../book / ../../book/lazy-book/appearance requires
-// (the frozen R4 violation) are gone; the host binds the two operations
-// (collectSceneUnits / tokensToString) at the composition root.
+// (the frozen R4 violation) are gone; the host binds the operations
+// (collectSceneUnits / tokensToString; resolveHeroLook / passportHeroes since
+// VBook 4 step 3) at the composition root.
 const bookData = require('@animastor/generation').ports.bookData;
 // S-3: workflow/connector access rides the generation provider seam —
 // no direct workflow-connector package imports in generation modules.
@@ -89,10 +90,12 @@ async function readIUMetadata(buildId, bookId, chapterId, sceneId, unitId) {
 
 // ── Video token resolution ──────────────────────────────────────────
 // video_tokens are 1-4 SHORT visual features per character, chosen by the AI
-// agent (characters.md → global passport) and refined per scene by passport
-// reconciliation (scene.passport[charId].video_tokens — a FULL override).
-// This module only renders them (array | legacy string) and guards against
-// exact duplicates within a scene.
+// agent (characters.md → base passport) and refined per scene by passport
+// reconciliation (scene.look_patch[heroId].video_tokens — a FULL override).
+// VBook 4 (VBOOK_FORMAT_V4 §4a.5): the tokens of a hero in a scene come ONLY
+// from resolveHeroLook (scene look → chapter look → base passport, then
+// look_patch). This module only renders them and guards against exact
+// duplicates within a scene; the fallback is the base tokens of the result.
 
 /**
  * Comparison key for the duplicate guard: feature ORDER must not matter, so an
@@ -106,34 +109,33 @@ function tokenKey(tokens) {
 }
 
 /**
- * Build "character_id: tokens." lines for the video prompt. A scene override
- * fully replaces the global token. Duplicate guard: if two participants in the
- * SAME scene resolve to the same feature SET (an agent collision —
- * order-insensitive), the second one falls back to its global passport token;
- * if that also collides, the line is dropped rather than emitting an
- * ambiguous reference.
+ * Build "character_id: tokens." lines for the video prompt. Duplicate guard:
+ * if two participants in the SAME scene resolve to the same feature SET (an
+ * agent collision — order-insensitive), the second one falls back to its base
+ * passport tokens; if that also collides, the line is dropped rather than
+ * emitting an ambiguous reference. A participant that is not a hero with a
+ * passport (exact id) gets no line.
  */
-function buildCharLines(participants, loadedBook, scene) {
+function buildCharLines(participants, loadedBook, scene, chapter) {
     const used = new Set();
     const lines = [];
     for (const id of participants) {
-        const c = loadedBook.characters?.find(ch => ch.id === id);
-        if (!c) continue;
-        const sceneTokens = scene?.passport?.[c.id]?.video_tokens;
-        const globalTokens = c.passport?.video_tokens;
+        const look = bookData.resolveHeroLook(loadedBook, chapter || null, scene || null, id);
+        if (!look) continue;
+        const sceneTokens = look.video_tokens;
+        const globalTokens = look.base.video_tokens;
         const sceneStr = bookData.tokensToString(sceneTokens);
         const globalStr = bookData.tokensToString(globalTokens);
         let chosen = sceneStr ? sceneTokens : globalTokens;
         let final = sceneStr || globalStr;
         if (final && used.has(tokenKey(chosen))) {
-            // Scene token collides — try the global one instead.
+            // Scene tokens collide — try the base ones instead.
             chosen = globalTokens;
             final = globalStr;
         }
         if (!final || used.has(tokenKey(chosen))) continue;
         used.add(tokenKey(chosen));
-        // Trailing period guard: legacy string tokens may already end with '.'
-        lines.push(`${c.id}: ${final.replace(/[.\s]+$/, '')}.`);
+        lines.push(`${id}: ${final.replace(/[.\s]+$/, '')}.`);
     }
     return lines;
 }
@@ -232,7 +234,7 @@ function buildVideoPrompt(sceneData, loadedBook, units, iuDurations, profileName
     //    "character_id: tokens." block on its own line for readability; newline
     //    is just a separator for the video model, like the storyboard lines).
     const participants = scene.participants || [];
-    const charLines = buildCharLines(participants, loadedBook, scene);
+    const charLines = buildCharLines(participants, loadedBook, scene, sceneData.chapter);
     const charactersSection = charLines.length > 0 ? charLines.join('\n') : '';
 
     // 2. Location / environment context
@@ -245,7 +247,8 @@ function buildVideoPrompt(sceneData, loadedBook, units, iuDurations, profileName
         ...(scene.location?.environment || {}),
     };
 
-    // 3. Storyboard per IU
+    // 3. Storyboard per IU (names → ids over the heroes with a passport)
+    const heroes = bookData.passportHeroes(loadedBook);
     const storyboardParts = [];
     let cumulativeSec = 0;
 
@@ -267,8 +270,8 @@ function buildVideoPrompt(sceneData, loadedBook, units, iuDurations, profileName
         // motion to the identity anchors in the characters section. Then generic
         // group nouns ("the two men", "both characters") are deterministically
         // anchored to the in-frame ids named by the unit's own image.prompt.
-        const actionText = normalizeCharacterRefs(unit.video?.action || prompt, loadedBook.characters);
-        const promptNorm = normalizeCharacterRefs(prompt || '', loadedBook.characters);
+        const actionText = normalizeCharacterRefs(unit.video?.action || prompt, heroes);
+        const promptNorm = normalizeCharacterRefs(prompt || '', heroes);
         const inFrameIds = participants.filter(id =>
             new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(id)}(?![\\p{L}\\p{N}_])`, 'i').test(promptNorm)
         );
@@ -290,7 +293,7 @@ function buildVideoPrompt(sceneData, loadedBook, units, iuDurations, profileName
             descParts.push(action);
             // Derived active speaker: if dialogue unit has audio.speaker, add speaking behaviour
             if (unit.type === 'dialogue' && unit.audio?.speaker) {
-                descParts.push(`${normalizeCharacterRefs(unit.audio.speaker, loadedBook.characters)} speaking with lip movement`);
+                descParts.push(`${normalizeCharacterRefs(unit.audio.speaker, heroes)} speaking with lip movement`);
             }
         } else if (prompt) {
             descParts.push(prompt);

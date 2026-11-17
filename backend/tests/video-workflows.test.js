@@ -246,9 +246,9 @@ describe('buildVideoPrompt', () => {
 
     const loadedBook = {
         manifest: { title: 'Adventure Story', render: { mode: 'cinematic_realism' } },
-        characters: [
-            { id: 'char_hero', name: 'Hero', passport: { video_tokens: 'hero token description' } },
-            { id: 'char_sidekick', name: 'Sidekick', passport: { video_tokens: 'sidekick token' } },
+        heroes: [
+            { id: 'char_hero', name: 'Hero', passport: { video_tokens: ['hero token description'] } },
+            { id: 'char_sidekick', name: 'Sidekick', passport: { video_tokens: ['sidekick token'] } },
         ],
         locations: {
             'loc_castle': { description: 'an ancient castle' }
@@ -274,13 +274,13 @@ describe('buildVideoPrompt', () => {
         expect(prompt).to.include('char_sidekick: sidekick token.');
     });
 
-    it('prefers scene.passport video_tokens override over global passport', () => {
+    it('prefers the scene look_patch video_tokens over the base passport (v4: scene.passport → look_patch)', () => {
         const sceneWithOverride = {
             ...sceneData,
             scene: {
                 ...sceneData.scene,
-                passport: {
-                    char_hero: { video_tokens: 'hero scene override token' },
+                look_patch: {
+                    char_hero: { video_tokens: ['hero scene override token'] },
                 },
             },
         };
@@ -294,7 +294,7 @@ describe('buildVideoPrompt', () => {
     it('joins array video_tokens (new agent format) into a comma list', () => {
         const bookWithArrays = {
             ...loadedBook,
-            characters: [
+            heroes: [
                 { id: 'char_hero', name: 'Hero', passport: { video_tokens: ['tie', 'round glasses'] } },
                 { id: 'char_sidekick', name: 'Sidekick', passport: { video_tokens: ['red jacket'] } },
             ],
@@ -309,7 +309,7 @@ describe('buildVideoPrompt', () => {
             ...sceneData,
             scene: {
                 ...sceneData.scene,
-                passport: {
+                look_patch: {
                     char_hero: { video_tokens: ['tie'] },
                     char_sidekick: { video_tokens: ['tie'] }, // collision with hero
                 },
@@ -321,12 +321,12 @@ describe('buildVideoPrompt', () => {
         expect(prompt).to.include('char_sidekick: sidekick token.');
     });
 
-    it('falls back to global passport when scene.passport has no override', () => {
+    it('falls back to the base passport when look_patch has no override', () => {
         const sceneNoOverride = {
             ...sceneData,
             scene: {
                 ...sceneData.scene,
-                passport: {},
+                look_patch: {},
             },
         };
         const prompt = wf.buildVideoPrompt(sceneNoOverride, loadedBook, units, [3, 4]);
@@ -358,7 +358,7 @@ describe('buildVideoPrompt', () => {
     it('handles participants without video_tokens gracefully', () => {
         const bookNoTokens = {
             ...loadedBook,
-            characters: [
+            heroes: [
                 { id: 'char_hero', name: 'Hero', passport: {} },
             ]
         };
@@ -501,8 +501,8 @@ describe('buildVideoPrompt — assembly profile driven', () => {
     };
     const loadedBook = {
         manifest: { title: 'Adventure Story', render: { mode: 'cinematic_realism' } },
-        characters: [
-            { id: 'char_hero', name: 'Hero', passport: { video_tokens: 'hero token description' } },
+        heroes: [
+            { id: 'char_hero', name: 'Hero', passport: { video_tokens: ['hero token description'] } },
         ],
         locations: { 'loc_castle': { description: 'an ancient castle' } },
     };
@@ -536,7 +536,7 @@ describe('buildVideoWorkflows', () => {
     it('returns failure for empty scene data', async () => {
         const result = await wf.buildVideoWorkflows(
             { book_id: 'b1', chapter_id: 'ch1', scene_id: 'sc1', scene: {} },
-            { characters: [] },
+            { heroes: [] },
             'build1',
             {}
         );
@@ -546,22 +546,31 @@ describe('buildVideoWorkflows', () => {
 });
 
 describe('buildCharLines (video token resolution)', () => {
-    it('renders array tokens and legacy string tokens', () => {
+    it('renders array tokens; a legacy string token is not read (v4 — tokens are an array only, Н13)', () => {
         const book = {
-            characters: [
+            heroes: [
                 { id: 'a', name: 'A', passport: { video_tokens: ['tie', 'glasses'] } },
-                { id: 'b', name: 'B', passport: { video_tokens: 'red jacket' } },
+                { id: 'b', name: 'B', passport: { video_tokens: ['red jacket'] } },
+                { id: 'c', name: 'C', passport: { video_tokens: 'legacy string' } },
             ],
         };
-        const lines = wf.buildCharLines(['a', 'b'], book, {});
+        const lines = wf.buildCharLines(['a', 'b', 'c'], book, {});
         expect(lines).to.deep.equal(['a: tie, glasses.', 'b: red jacket.']);
+    });
+
+    it('a chapter look reaches the tokens; the scene look_patch wins over it', () => {
+        const book = { heroes: [{ id: 'a', name: 'A', passport: { video_tokens: ['tie'] }, looks: [{ id: 'coat', label: 'Coat', fields: { video_tokens: ['grey coat'] } }] }] };
+        const chapter = { looks: { a: 'coat' } };
+        expect(wf.buildCharLines(['a'], book, {}, chapter)).to.deep.equal(['a: grey coat.']);
+        expect(wf.buildCharLines(['a'], book, { look_patch: { a: { video_tokens: ['scarf'] } } }, chapter)).to.deep.equal(['a: scarf.']);
+        expect(wf.buildCharLines(['a'], book, { looks: { a: 'base' } }, chapter)).to.deep.equal(['a: tie.']);
     });
 
     it('drops the second line when both scene and global tokens collide', () => {
         const book = {
-            characters: [
-                { id: 'a', name: 'A', passport: { video_tokens: 'same token' } },
-                { id: 'b', name: 'B', passport: { video_tokens: 'same token' } },
+            heroes: [
+                { id: 'a', name: 'A', passport: { video_tokens: ['same token'] } },
+                { id: 'b', name: 'B', passport: { video_tokens: ['same token'] } },
             ],
         };
         const lines = wf.buildCharLines(['a', 'b'], book, {});
@@ -571,7 +580,7 @@ describe('buildCharLines (video token resolution)', () => {
 
     it('skips participants without tokens', () => {
         const book = {
-            characters: [
+            heroes: [
                 { id: 'a', name: 'A', passport: {} },
             ],
         };
@@ -580,11 +589,11 @@ describe('buildCharLines (video token resolution)', () => {
 
     it('prefers scene override over global token', () => {
         const book = {
-            characters: [
-                { id: 'a', name: 'A', passport: { video_tokens: 'global token' } },
+            heroes: [
+                { id: 'a', name: 'A', passport: { video_tokens: ['global token'] } },
             ],
         };
-        const scene = { passport: { a: { video_tokens: ['scene token'] } } };
+        const scene = { look_patch: { a: { video_tokens: ['scene token'] } } };
         expect(wf.buildCharLines(['a'], book, scene)).to.deep.equal(['a: scene token.']);
     });
 });

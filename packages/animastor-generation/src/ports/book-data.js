@@ -14,8 +14,10 @@
 //       ↑ wired by the host
 //   Book Model (book facade → @animastor/vbook-runtime)
 //
-// CONTRACT (frozen — exactly the two operations Generation actually uses;
-// NOT a universal BookRepository, NOT the Book domain):
+// CONTRACT (exactly the operations Generation actually uses; NOT a universal
+// BookRepository, NOT the Book domain). 0.3.0 (VBook 4 step 3) adds the two
+// hero reads of the video builder — appearance only through the runtime's one
+// resolver, the hero list only through its helper:
 //   collectSceneUnits(scene) → unit[]
 //     - scene: a loaded book scene object (domain data passed by the
 //       caller — payload, not a host handle); returns the scene's IU units
@@ -24,20 +26,26 @@
 //   tokensToString(tokens) → string
 //     - renders video passport tokens (array | legacy string) to the
 //       "token one, token two." prompt line; pure renderer
+//   resolveHeroLook(book, chapter, scene, heroId) → look | null
+//     - VBOOK_FORMAT_V4 §4a.5: the hero's appearance / clothes /
+//       video_tokens in this scene (+ base); null for a hero without passport
+//   passportHeroes(book) → hero[]
+//     - heroes with a passport (the former book.characters), book order
 //
 // Book ownership is unchanged: the Book Model stays Book/VBook-owned;
 // Generation receives scene DATA, not the module.
 //
 // Docs: docs/architecture/generation-module-extraction-reconnaissance.md §28
 
-const OPERATIONS = ['collectSceneUnits', 'tokensToString'];
+const OPERATIONS = ['collectSceneUnits', 'tokensToString', 'resolveHeroLook', 'passportHeroes'];
 
 let impl = null;
 
 /**
  * Wire the host book-data adapter. Called once by the composition root
  * (backend.cjs) before any video workflow build can run.
- * @param {{ collectSceneUnits: Function, tokensToString: Function }} adapter
+ * @param {{ collectSceneUnits: Function, tokensToString: Function,
+ *           resolveHeroLook: Function, passportHeroes: Function }} adapter
  */
 function setBookData(adapter) {
     if (!adapter) {
@@ -56,7 +64,7 @@ function bookData() {
     if (!impl) {
         throw new Error(
             'book-data: not wired — the composition root must call ' +
-            'setBookData({ collectSceneUnits, tokensToString }) before ' +
+            'setBookData({ collectSceneUnits, tokensToString, resolveHeroLook, passportHeroes }) before ' +
             'video workflow builds run (S-6)'
         );
     }
@@ -79,6 +87,16 @@ function tokensToString(tokens) {
     return bookData().tokensToString(tokens);
 }
 
+/** How a hero looks in a scene (delegating, fail-fast). VBOOK_FORMAT_V4 §4a.5 */
+function resolveHeroLook(book, chapter, scene, heroId) {
+    return bookData().resolveHeroLook(book, chapter, scene, heroId);
+}
+
+/** Heroes with a passport (delegating, fail-fast). VBOOK_FORMAT_V4 §8.1 */
+function passportHeroes(book) {
+    return bookData().passportHeroes(book);
+}
+
 function isBookDataWired() {
     return impl !== null;
 }
@@ -93,6 +111,8 @@ module.exports = {
     setBookData,
     collectSceneUnits,
     tokensToString,
+    resolveHeroLook,
+    passportHeroes,
     isBookDataWired,
     _resetBookData,
 };

@@ -115,7 +115,7 @@ describe('Image profile name from connector', () => {
 describe('buildImagePrompt — assembly profile driven', () => {
 
     const bookPayload = {
-        characters: [
+        heroes: [
             { id: 'berlioz', name: 'Берлиоз', passport: { appearance: 'short and stout', clothes: 'gray summer suit' } },
             { id: 'bezdomny', name: 'Бездомный', passport: { appearance: 'broad-shouldered, ginger hair' } },
         ],

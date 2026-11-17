@@ -30,6 +30,8 @@ require('@animastor/generation').ports.profileStore.setProfileStore({
 require('@animastor/generation').ports.bookData.setBookData({
     collectSceneUnits: require('./book').collectSceneUnits,
     tokensToString: require('./book/lazy-book/appearance').tokensToString,
+    resolveHeroLook: require('@animastor/vbook-runtime/looks.cjs').resolveHeroLook,
+    passportHeroes: require('@animastor/vbook-runtime/heroes.cjs').passportHeroes,
 });
 // O-2: PERSISTENCE PORT — runtime/orchestration persistence composition.
 // The two tiers consume PG/Redis-registry/filesystem persistence ONLY

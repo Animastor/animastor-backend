@@ -229,13 +229,13 @@ describe('applySceneVideoTokens (stage 2 persistence → scene.look_patch)', () 
 describe('buildCharLines duplicate guard (order-insensitive)', () => {
     it('treats the same feature set in different order as a collision', () => {
         const book = {
-            characters: [
+            heroes: [
                 { id: 'a', name: 'A', passport: { video_tokens: ['tie', 'red jacket'] } },
                 { id: 'b', name: 'B', passport: { video_tokens: ['blue shirt'] } },
             ],
         };
         const scene = {
-            passport: {
+            look_patch: {
                 a: { video_tokens: ['tie', 'red jacket'] },
                 b: { video_tokens: ['red jacket', 'tie'] }, // same set, different order
             },

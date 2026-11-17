@@ -203,10 +203,10 @@ describe('S6: Generation host boundary (ports)', () => {
             expect(profilePort[fn], `profile-store.${fn}`).to.be.a('function');
         }
         const bookPort = require('@animastor/generation').ports.bookData;
-        for (const fn of ['setBookData', 'collectSceneUnits', 'tokensToString', 'isBookDataWired', '_resetBookData']) {
+        for (const fn of ['setBookData', 'collectSceneUnits', 'tokensToString', 'resolveHeroLook', 'passportHeroes', 'isBookDataWired', '_resetBookData']) {
             expect(bookPort[fn], `book-data.${fn}`).to.be.a('function');
         }
-        expect(bookPort.OPERATIONS).to.deep.equal(['collectSceneUnits', 'tokensToString']);
+        expect(bookPort.OPERATIONS).to.deep.equal(['collectSceneUnits', 'tokensToString', 'resolveHeroLook', 'passportHeroes']);
 
         // fail-fast: an unwired port throws with a wiring instruction —
         // never a silent no-op (S-5 seam convention)
@@ -235,6 +235,8 @@ describe('S6: Generation host boundary (ports)', () => {
             if (wired.book) bookPort.setBookData({
                 collectSceneUnits: require('../../src/book').collectSceneUnits,
                 tokensToString: require('../../src/book/lazy-book/appearance').tokensToString,
+                resolveHeroLook: require('@animastor/vbook-runtime/looks.cjs').resolveHeroLook,
+                passportHeroes: require('@animastor/vbook-runtime/heroes.cjs').passportHeroes,
             });
         }
         // wiring restored — consumers resolve again

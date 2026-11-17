@@ -41,6 +41,8 @@ require('@animastor/generation').ports.profileStore.setProfileStore({
 require('@animastor/generation').ports.bookData.setBookData({
     collectSceneUnits: require('../src/book').collectSceneUnits,
     tokensToString: require('../src/book/lazy-book/appearance').tokensToString,
+    resolveHeroLook: require('@animastor/vbook-runtime/looks.cjs').resolveHeroLook,
+    passportHeroes: require('@animastor/vbook-runtime/heroes.cjs').passportHeroes,
 });
 // O-2: PersistencePort — mirrors the production composition root: binds the
 // host persistence adapter so tier consumers (runtime/orchestration) resolve
