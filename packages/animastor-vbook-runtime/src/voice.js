@@ -282,13 +282,33 @@ function referenceState(buildDir, reference, characterId) {
 //   • conditional sentences (when / whenever / if / unless / as soon as,
 //     когда / если / как только, wenn / falls / sobald);
 //   • sentences tied to particular words of the text, quoted or not
-//     ("on the word …", "на слове …", "на фразе …", "beim Wort …") — since v2.
+//     ("on the word …", "на слове …", "на фразе …", "beim Wort …") — since v2;
+//   • episodic physical states — hiccups, drunkenness, crying, illness, being
+//     out of breath: a moment of the plot, not the voice. The CLAUSE that
+//     names the state is cut, the rest of the sentence stays ("Impulsive and
+//     irritable, with frequent hiccups …" → "Impulsive and irritable.") — v3.
 // The result is shown to the user and may be edited (timbre_source 'cleaned' →
 // 'user'). Rule changes bump CLEANUP_RULES_VERSION.
-const CLEANUP_RULES_VERSION = 2;
+//
+// v3 also owns the pronunciation suffix of timbre (voiceFromAnalysis with the
+// book language): "Native <language of the book> pronunciation." — never
+// another language, and none at all when the timbre names an accent (an accent
+// is a legitimate part of timbre). This is normalisation, not a removal: it does
+// not turn timbre_source into 'cleaned'.
+const CLEANUP_RULES_VERSION = 3;
 const ON_WORD_RE = /(^|[^\p{L}])(on the (word|words|phrase|line)|at the (word|words|phrase|line)|на (слове|словах|фразе|реплике)|beim wort|bei den worten)(?=$|[^\p{L}])/iu;
 const QUOTED_RE = /[«“„]|"[^"]+"|(^|[\s(])'[^'\s][^']*'/u;
 const CONDITIONAL_RE = /(^|[^\p{L}])(when|whenever|if|unless|as soon as|когда|если|как только|wenn|falls|sobald)(?=$|[^\p{L}])/iu;
+// Episodic physical states (v3). Word starts, so "hiccups", "hiccuping",
+// "drunken", "sobbing", "feverish" match; "breathy" (a texture) and
+// "ill-tempered" (a character) do not.
+const EPISODIC_STATE_RE = new RegExp([
+    'hiccup', 'hiccough', 'икот', 'ика(ет|я|ющ)',
+    'drunk', 'intoxicat', 'tipsy', 'inebriat', 'пьян', 'нетрезв', 'хмельн',
+    'crying', 'cries', 'sobb?ing', 'sobs', 'in tears', 'through tears', 'tearful', 'weeping', 'плач', 'рыда', 'сквозь сл[её]зы', 'всхлип',
+    'ill(?![\\p{L}-])', 'sick(?![\\p{L}-])', 'feverish', 'fever', '(with|from) a cold', 'flu(?!\\p{L})', 'болен', 'больн', 'простуж', 'температур',
+    'out of breath', 'short of breath', 'breathless', 'panting', 'gasping for', 'winded', 'запыхав', 'запыхал', 'задыха', 'одышк',
+].map((w) => `(?<![\\p{L}])${w}`).join('|'), 'iu');
 
 function splitSentences(text) {
     return String(text || '')
@@ -299,6 +319,22 @@ function splitSentences(text) {
         .filter(Boolean);
 }
 
+// Cut the clauses of one sentence that name an episodic state. Returns the
+// sentence that is left ('' when nothing is) and the clauses cut.
+function cutEpisodicStates(sentence) {
+    if (!EPISODIC_STATE_RE.test(sentence)) return { kept: sentence, cut: [] };
+    const end = /[.!?…]$/.test(sentence) ? sentence.slice(-1) : '.';
+    const body = sentence.replace(/[.!?…]+$/, '');
+    const clauses = body.split(/\s*[,;]\s*|\s+[—–]\s+/);
+    const cut = clauses.filter((c) => EPISODIC_STATE_RE.test(c));
+    const left = clauses.filter((c) => !EPISODIC_STATE_RE.test(c) && /\p{L}/u.test(c));
+    // what is left must still say something: a dangling "with" / "and" is not a clause
+    const meaningful = left.filter((c) => !/^(with|and|but|or|и|а|но|с)$/i.test(c.trim()));
+    if (meaningful.length === 0) return { kept: '', cut };
+    const joined = meaningful.join(', ');
+    return { kept: `${joined.charAt(0).toUpperCase()}${joined.slice(1)}${end}`, cut };
+}
+
 /**
  * @returns {{timbre:string, removed:string[], rules_version:number}}
  */
@@ -306,10 +342,45 @@ function cleanVoiceDescription(text) {
     const kept = [];
     const removed = [];
     for (const s of splitSentences(text)) {
-        if (QUOTED_RE.test(s) || CONDITIONAL_RE.test(s) || ON_WORD_RE.test(s)) removed.push(s);
-        else kept.push(s);
+        if (QUOTED_RE.test(s) || CONDITIONAL_RE.test(s) || ON_WORD_RE.test(s)) { removed.push(s); continue; }
+        const states = cutEpisodicStates(s);
+        removed.push(...states.cut);
+        if (states.kept) kept.push(states.kept);
     }
     return { timbre: kept.join(' '), removed, rules_version: CLEANUP_RULES_VERSION };
+}
+
+// ── pronunciation suffix of timbre (v3) ─────────────────────────────────
+const LANGUAGE_NAMES = Object.freeze({
+    ru: 'Russian', en: 'English', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian',
+    uk: 'Ukrainian', be: 'Belarusian', pl: 'Polish', cs: 'Czech', pt: 'Portuguese', nl: 'Dutch',
+    sv: 'Swedish', fi: 'Finnish', tr: 'Turkish', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
+    ar: 'Arabic', he: 'Hebrew', kk: 'Kazakh',
+});
+const PRONUNCIATION_RE = /\s*(?:[,;]\s*)?\b(?:with\s+)?(?:a\s+)?native\s+(?:[\p{L}-]+\s+){1,2}pronunciation\b[.!]?/giu;
+const ACCENT_RE = /(^|[^\p{L}])(accent|accented|акцент)/iu;
+
+/** Name of a book language for the suffix ('' when unknown). */
+function languageName(language) {
+    const code = String(language || '').trim().toLowerCase().split(/[-_]/)[0];
+    return LANGUAGE_NAMES[code] || '';
+}
+
+/**
+ * timbre → the same timbre with the pronunciation suffix of the book:
+ * every "Native X pronunciation" is removed; "Native <book language>
+ * pronunciation." is appended unless the timbre names an accent. Without a
+ * known language the text is returned as it is (a re-parse at write time).
+ */
+function normalisePronunciation(timbre, language) {
+    const name = languageName(language);
+    const accent = ACCENT_RE.test(timbre);
+    if (!name && !accent) return timbre;
+    let out = timbre.replace(PRONUNCIATION_RE, '').replace(/\s{2,}/g, ' ').replace(/\s+([.,;])/g, '$1').trim();
+    out = out.replace(/[,;]$/, '').trim();
+    if (out && !/[.!?…]$/.test(out)) out += '.';
+    if (!out) return timbre;
+    return accent ? out : `${out} Native ${name} pronunciation.`;
 }
 
 /** A voice entry created from an analysis description (cleaned, not yet reviewed). */
@@ -347,8 +418,11 @@ function cleanField(value) {
  *             removed: string[], reason: string|null }}
  *   voice === null → nothing is written; reason: 'empty' | 'bad_shape' |
  *   'timbre_empty' (only situational text, or a manner without a timbre)
+ * @param {{ language?: string }} [options]  the book language — the
+ *   pronunciation suffix of timbre follows it (v3); without it the suffix is
+ *   left as it is unless the timbre names an accent.
  */
-function voiceFromAnalysis(raw) {
+function voiceFromAnalysis(raw, options = {}) {
     let timbreRaw = '';
     let mannerRaw = '';
     let repaired = false;
@@ -374,7 +448,7 @@ function voiceFromAnalysis(raw) {
     if (!timbre.text) return { voice: null, removed, reason: 'timbre_empty' };
     return {
         voice: {
-            timbre: timbre.text,
+            timbre: normalisePronunciation(timbre.text, options && options.language).slice(0, VOICE_TEXT_MAX).trim(),
             manner: manner.text,
             timbre_source: repaired || removed.length > 0 ? 'cleaned' : (stated || 'analysis'),
         },
@@ -407,6 +481,7 @@ module.exports = {
     cleanVoiceDescription,
     voiceFromDescription,
     voiceFromAnalysis,
+    normalisePronunciation,
     isVoiceProtected,
     referenceProblem,
     isReferenceVerified,

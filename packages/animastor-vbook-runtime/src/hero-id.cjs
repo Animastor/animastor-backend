@@ -10,12 +10,18 @@
 //                          everything outside [a-z0-9] becomes "_" → repeats
 //                          collapse → trimmed → cut to 64.
 //
-//   assignHeroIds(candidates, existingHeroes)
+//   assignHeroIds(candidates, existingHeroes, { mentions })
 //       gives every candidate of one analysis window its final id:
 //       - the SAME hero keeps its id across windows: a candidate whose name or
 //         alias names exactly one existing hero gets that hero's id; so does a
 //         candidate whose own id is an id of the book (also after
 //         transliteration) — unless that id is shared by several heroes;
+//       - a safety net for a model that renamed a known hero ("Иностранец" →
+//         "Иностранец в сером костюме"): the window's mentions { alias →
+//         the candidate's raw id } are evidence too. When every such alias
+//         that names somebody of the book names the SAME one hero, no alias
+//         is ambiguous, and no other candidate of the window claims that
+//         hero, the candidate is that hero (reason 'matched_by_mentions');
 //       - an ambiguous match (the name points at one hero, an alias at
 //         another; an alias two heroes claim; an id that yura and yura_2
 //         share) merges nothing — the candidate is a new hero;
@@ -124,19 +130,42 @@ function candidateAliases(candidate) {
 
 /**
  * Which existing hero is this candidate, judged by name and aliases?
- * @returns {{ id: string|null, ambiguous: boolean }}
+ * @returns {{ id: string|null, ambiguous: boolean, evidence: string[] }}
+ *   evidence — the spellings that named the hero
  */
 function matchExistingHero(candidate, identityIndex) {
+    return matchByValues([candidate.name, ...candidateAliases(candidate)], identityIndex);
+}
+
+function matchByValues(values, identityIndex) {
     const hits = new Set();
+    const evidence = [];
     let ambiguous = false;
-    for (const value of [candidate.name, ...candidateAliases(candidate)]) {
+    for (const value of values) {
         const owners = identityIndex.get(matchKey(value));
         if (!owners) continue;
         if (owners.size > 1) { ambiguous = true; continue; }
         hits.add([...owners][0]);
+        evidence.push(text(value));
     }
-    if (hits.size === 1 && !ambiguous) return { id: [...hits][0], ambiguous: false };
-    return { id: null, ambiguous: ambiguous || hits.size > 1 };
+    if (hits.size === 1 && !ambiguous) return { id: [...hits][0], ambiguous: false, evidence };
+    return { id: null, ambiguous: ambiguous || hits.size > 1, evidence: [] };
+}
+
+/**
+ * The window's mentions that point at this candidate: { alias: target } where
+ * the target is the candidate's raw id or its name (compared by matchKey —
+ * "Foreign_Man" = "foreign man"). Returns the aliases.
+ */
+function mentionAliasesFor(candidate, mentions) {
+    if (!isPlainObject(mentions)) return [];
+    const keys = new Set([matchKey(candidate.id), matchKey(candidate.name)].filter(Boolean));
+    const out = [];
+    for (const [alias, target] of Object.entries(mentions)) {
+        if (typeof target !== 'string' || !text(alias)) continue;
+        if (keys.has(matchKey(target))) out.push(text(alias));
+    }
+    return out;
 }
 
 /** Aliases a hero keeps: unique after normalizeForMatch, never equal to the name. */
@@ -162,21 +191,52 @@ function mergeAliases(name, ...lists) {
  *
  * @param {object[]} candidates      [{ id?, name?, alias?, aliases? … }] in the order the analysis returned them
  * @param {object[]} existingHeroes  heroes already in the book ({ id, name?, aliases? })
+ * @param {{ mentions?: object }} [options]  mentions of the window { alias: raw id the model wrote }
  * @returns {{
  *   assignments: { index: number, candidate: object, id: string, existing: boolean,
- *                  name: string, aliases: string[], rawId: string, reason: string }[],
+ *                  name: string, aliases: string[], rawId: string, reason: string,
+ *                  evidence: string[] }[],
  *   skipped: { index: number, candidate: object, rawId: string, reason: string }[],
  *   idMap: Map<string, string>   // raw id (as the model wrote it) → final id
  * }}
- * reason of an assignment: 'same_id' | 'matched_by_name' | 'new' | 'new_suffix' | 'new_reserved'
+ * reason of an assignment: 'same_id' | 'matched_by_name' | 'matched_by_mentions' | 'new' | 'new_suffix' | 'new_reserved'
+ * evidence: what decided a merge — the matching spellings (by name / by
+ *   mentions), the id (same_id); empty for a new hero
  * reason of a skip: 'empty_id'
  */
-function assignHeroIds(candidates, existingHeroes) {
+function assignHeroIds(candidates, existingHeroes, options = {}) {
     const existing = (Array.isArray(existingHeroes) ? existingHeroes : [])
         .filter((h) => isPlainObject(h) && typeof h.id === 'string');
     const existingIds = new Set(existing.map((h) => h.id));
     const identityIndex = buildIdentityIndex(existing);
     const taken = new Set(existingIds);
+    const list = Array.isArray(candidates) ? candidates : [];
+
+    // Strong evidence first, for the whole window: which heroes of the book
+    // are claimed by a candidate's own id / name / aliases. Then the mention
+    // evidence: a hero is taken by mentions only when exactly one candidate
+    // points at it this way and no candidate claims it strongly.
+    const strongClaim = new Set();
+    const strongOf = (candidate) => {
+        const byName = matchExistingHero(candidate, identityIndex);
+        if (byName.id) return byName.id;
+        const base = normalizeHeroId(text(candidate.id)) || normalizeHeroId(text(candidate.name));
+        if (base && existingIds.has(base) && !isSharedBase(base, existingIds)) return base;
+        return null;
+    };
+    list.forEach((c) => { if (isPlainObject(c)) { const id = strongOf(c); if (id) strongClaim.add(id); } });
+    const mentionMatch = new Map(); // candidate index → { id, evidence }
+    const mentionClaims = new Map(); // hero id → count
+    list.forEach((c, index) => {
+        if (!isPlainObject(c) || strongOf(c)) return;
+        const match = matchByValues(mentionAliasesFor(c, options.mentions), identityIndex);
+        if (!match.id || strongClaim.has(match.id)) return;
+        mentionMatch.set(index, match);
+        mentionClaims.set(match.id, (mentionClaims.get(match.id) || 0) + 1);
+    });
+    for (const [index, match] of mentionMatch) {
+        if (mentionClaims.get(match.id) > 1) mentionMatch.delete(index);
+    }
 
     const assignments = [];
     const skipped = [];
@@ -191,7 +251,7 @@ function assignHeroIds(candidates, existingHeroes) {
         windowIndex.get(key).add(id);
     };
 
-    (Array.isArray(candidates) ? candidates : []).forEach((candidate, index) => {
+    list.forEach((candidate, index) => {
         if (!isPlainObject(candidate)) return;
         const rawId = text(candidate.id);
         const name = text(candidate.name);
@@ -205,6 +265,7 @@ function assignHeroIds(candidates, existingHeroes) {
         let id = null;
         let reason = null;
         let isExisting = false;
+        let evidence = [];
 
         // 1. Name / aliases name exactly one hero of the book → the same hero,
         //    whatever id the model wrote this time. The name is the stronger
@@ -212,7 +273,7 @@ function assignHeroIds(candidates, existingHeroes) {
         //    and a repeated window must find each of them again.
         {
             const match = matchExistingHero(candidate, identityIndex);
-            if (match.id) { id = match.id; reason = 'matched_by_name'; isExisting = true; }
+            if (match.id) { id = match.id; reason = 'matched_by_name'; isExisting = true; evidence = match.evidence; }
         }
         // 2. The id the model wrote IS an id of the book — as it stands or after
         //    transliteration ("Юра" → yura) → the same hero; the name it used
@@ -221,7 +282,13 @@ function assignHeroIds(candidates, existingHeroes) {
         //    ambiguous, only the name can tell them apart (rule 1), and a
         //    candidate nobody recognises is a new hero.
         if (!id && existingIds.has(base) && !isSharedBase(base, existingIds)) {
-            id = base; reason = 'same_id'; isExisting = true;
+            id = base; reason = 'same_id'; isExisting = true; evidence = [rawId || name];
+        }
+        // 2b. Safety net: the window's mentions name exactly one hero of the
+        //     book for this candidate (see mentionMatch above).
+        if (!id && mentionMatch.has(index)) {
+            const match = mentionMatch.get(index);
+            id = match.id; reason = 'matched_by_mentions'; isExisting = true; evidence = match.evidence;
         }
         // 3. The same character twice in one window (same raw id, or same name).
         if (!id && rawId && idMap.has(rawId) && !rawIdConflicts.has(rawId)) {
@@ -264,7 +331,7 @@ function assignHeroIds(candidates, existingHeroes) {
         const rawIdAsAlias = rawId && !suffixed && !isCanonicalHeroId(rawId) && /[^a-z0-9_\s-]/i.test(rawId) && !namesAnother(rawId)
             ? [rawId] : [];
         const aliases = mergeAliases(name, rawIdAsAlias, candidateAliases(candidate).filter((a) => !namesAnother(a)));
-        assignments.push({ index, candidate, id, existing: isExisting, name, aliases, rawId, reason });
+        assignments.push({ index, candidate, id, existing: isExisting, name, aliases, rawId, reason, evidence });
         if (!isExisting) {
             claimInWindow(name, id);
             for (const alias of aliases) claimInWindow(alias, id);
