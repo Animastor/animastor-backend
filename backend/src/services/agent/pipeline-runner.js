@@ -460,7 +460,7 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
             throw err;
         }
     } else {
-        const charResultSeq = await pipelineSteps.stepExtractCharacters(sessionId, text, stepIndex, _progress, language);
+        const charResultSeq = await pipelineSteps.stepExtractCharacters(sessionId, text, stepIndex, _progress, language, characters);
         charResult = charResultSeq;
     }
     if (!charResult || !charResult.characters || charResult.characters.length === 0) {
@@ -478,7 +478,12 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
         // to snake_case, a hero of the registry keeps its id whatever spelling
         // the model used this time, collisions get _2, _3. Scenes, units and
         // prompts of this window then see the final ids only.
-        const normalized = heroAnalysis.normalizeWindowCharacters(charResult.characters || [], characters);
+        const normalized = heroAnalysis.normalizeWindowCharacters(charResult.characters || [], characters, { mentions: charResult.mentions });
+        // Journal of hero merges (VBOOK_FORMAT_V4 §12б): every candidate that
+        // is a hero of the book, with the reason and the evidence.
+        for (const m of normalized.merges || []) {
+            console.log(`[AGENT] Hero merge: ${JSON.stringify(m.from || m.name || '')} → ${m.to} (${m.reason}: ${m.evidence.map((e) => JSON.stringify(e)).join(', ')})`);
+        }
         for (const s of normalized.skipped) {
             console.warn(`[AGENT] Character without a usable id or name skipped: ${JSON.stringify(s.id || s.name || '')}`);
         }
@@ -489,6 +494,14 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
         const mergeResult = mergeCharacterLists(characters, normalized.characters, { skipGeneric: true });
         characters = mergeResult.characters;
         const windowMentions = heroAnalysis.remapMentions(charResult.mentions, normalized.idMap);
+        // The name under which the model returned a KNOWN hero this time
+        // ("Иностранец в сером костюме" for voland) is a way the text names
+        // him: it goes the alias path (§7 — aliasAdditions drops it when it is
+        // the hero's own name or names somebody else). mergeCharacterLists
+        // keeps the registry name, so without this the spelling is lost.
+        for (const m of normalized.merges || []) {
+            if (m.name && !Object.prototype.hasOwnProperty.call(windowMentions, m.name)) windowMentions[m.name] = m.to;
+        }
         for (const [alias, charId] of Object.entries(windowMentions)) {
             if (!mentions[alias]) mentions[alias] = charId;
         }

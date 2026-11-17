@@ -88,7 +88,10 @@ const WINDOW_TWO = {
 function makePipeline(script, seen = {}) {
     const callAI = async () => ({ voices: script.voices });
     const pipelineSteps = {
-        stepExtractCharacters: async () => ({ characters: JSON.parse(JSON.stringify(script.characters)), mentions: { ...script.mentions } }),
+        stepExtractCharacters: async (...args) => {
+            seen.knownHeroes = args[5];
+            return { characters: JSON.parse(JSON.stringify(script.characters)), mentions: { ...script.mentions } };
+        },
         // the REAL voice step of @animastor/ai-analysis; only the LLM call is scripted
         stepGenerateVoices: async (sessionId, text, characters) => generateVoices(
             { windowText: text, characters, promptProfiles: {}, language: 'ru', sessionId, stepIndex: 0 },
@@ -106,6 +109,10 @@ function makePipeline(script, seen = {}) {
             seen.ids = {
                 yura: id('Юра'), anna: id('Анна Сергеевна'), kiosk: id('Женщина в будочке'), book: id('Книжник'),
                 boris: id('Борис'), boris2: id('Савелий Кузьмич'),
+                // step 2b scenario (Мастер и Маргарита): by id
+                berlioz: characters.some((c) => c.id === 'mikhail_berlioz') ? 'mikhail_berlioz' : undefined,
+                ivan: characters.some((c) => c.id === 'ivan_ponyrev') ? 'ivan_ponyrev' : undefined,
+                voland: characters.some((c) => c.id === 'voland') ? 'voland' : undefined,
             };
             return script.scenes(seen.ids);
         },
@@ -289,7 +296,8 @@ describe('VBook 4 step 2 — the analysis writes heroes (backend)', function () 
         it('the LLM returned a plot-bound phrase → it is in neither field; a string → repaired; no timbre → no voice', async () => {
             const { bookId } = await firstWindow();
             expect(hero(bookId, 'anna_sergeevna').voice).to.deep.equal({ timbre: 'A clear female alto. Native Russian pronunciation.', manner: 'Speaks quickly.', timbre_source: 'cleaned' });
-            expect(hero(bookId, 'zhenshchina_v_budochke').voice).to.deep.equal({ timbre: 'A sharp middle-aged female voice.', manner: '', timbre_source: 'cleaned' });
+            // rules v3 (step 2b): the pronunciation suffix of the book language is added to timbre
+            expect(hero(bookId, 'zhenshchina_v_budochke').voice).to.deep.equal({ timbre: 'A sharp middle-aged female voice. Native Russian pronunciation.', manner: '', timbre_source: 'cleaned' });
             // { manner } without a timbre is refused: the hero exists, without a voice block
             expect(hero(bookId, 'book_2')).to.not.have.property('voice');
             expect(voicePort.getCharacterVoice(book.loadBook(bookId), 'book_2')).to.equal(null);
@@ -475,16 +483,30 @@ describe('VBook 4 step 2 — the analysis writes heroes (backend)', function () 
             expect(checkBook(c, baseline).checks.find((x) => !x.ok).details).to.deep.equal(['алиас «поэт» объявлен двумя героями']);
         });
 
-        it('an empty timbre or manner of a speaking hero or of the narrator fails; --allow-empty-manner relaxes the manner only', () => {
+        it('В4: an empty manner of a speaking hero or of the narrator is a warning, the book passes; an empty timbre fails', () => {
+            const VOICE_CHECK = 'у диктора и говорящих героев заполнен timbre (пустая manner — предупреждение)';
             const b = goodBook(); b.heroes[2].voice = voice('A voice.', ''); b.heroes[0].voice.manner = '';
-            const strict = checkBook(b, baseline);
-            expect(failed(strict)).to.deep.equal(['у диктора и говорящих героев заполнены timbre и manner']);
-            expect(strict.checks.find((c) => !c.ok).details).to.have.length(2);
-            expect(checkBook(b, baseline, { allowEmptyManner: true }).ok).to.equal(true);
+            const report = checkBook(b, baseline);
+            expect(report.ok).to.equal(true);
+            expect(report.warnings).to.have.length(2);
+            expect(report.warnings.every((w) => w.endsWith('manner пустая'))).to.equal(true);
             const c = goodBook(); delete c.heroes[3].voice;
-            expect(checkBook(c, baseline, { allowEmptyManner: true }).ok).to.equal(false);
+            expect(failed(checkBook(c, baseline))).to.deep.equal([VOICE_CHECK]);
+            const e = goodBook(); e.heroes[0].voice.timbre = ' ';
+            expect(checkBook(e, baseline).checks.find((x) => !x.ok).details).to.deep.equal(['диктор (narrator): timbre не заполнен']);
             const d = goodBook(); d.heroes[4].voice = { instruction: 'legacy' };
             expect(checkBook(d, baseline).checks.find((x) => !x.ok).details).to.deep.equal(['annushka: в голосе осталось поле instruction']);
+        });
+
+        it('the command line: WARN lines and exit 0 for an empty manner; the --allow-empty-manner flag is gone (exit 2)', () => {
+            const { main } = require('../scripts/check-vbook-v4-step2.cjs');
+            const lines = [];
+            const saved = { log: console.log, error: console.error };
+            console.log = (...a) => lines.push(a.join(' ')); console.error = (...a) => lines.push(a.join(' '));
+            try {
+                expect(main(['/nonexistent-dir', '--allow-empty-manner'])).to.equal(2);
+                expect(lines.join('\n')).to.include('Неизвестный флаг: --allow-empty-manner');
+            } finally { console.log = saved.log; console.error = saved.error; }
         });
 
         it('a 3.1 book, a broken hero file, a non-canonical id fail their own checks', () => {
@@ -517,6 +539,17 @@ describe('VBook 4 step 2 — the analysis writes heroes (backend)', function () 
             expect(strict).to.equal(1);
             expect(missingBook).to.equal(2);
             expect(out.join('\n')).to.include('ИТОГ: приёмка 2.6 пройдена').and.include('ИТОГ: приёмка 2.6 НЕ пройдена');
+
+            // В4: an empty manner of a speaking hero → a WARN line, exit 0
+            book.characterStore.updateCharacter(first.dir, 'yura', (h) => ({ ...h, voice: { ...h.voice, manner: '' } }));
+            const warnOut = [];
+            console.log = (m) => warnOut.push(String(m));
+            let warned;
+            try { warned = main([first.dir, ownBaseline]); } finally { console.log = () => {}; }
+            configureBooksRoot(() => config.BOOKS_DIR);
+            expect(warned, warnOut.join('\n')).to.equal(0);
+            expect(warnOut).to.include('WARN  Юра (yura): manner пустая');
+            expect(warnOut).to.include('ИТОГ: приёмка 2.6 пройдена (предупреждений: 1)');
         });
     });
 
@@ -546,3 +579,129 @@ describe('VBook 4 step 2 — the analysis writes heroes (backend)', function () 
         });
     });
 });
+
+// ── Step 2b: the acceptance 2.6 scenario (reports/2026-11-17/vbook-v4-acceptance-2.6.md) ──
+const MIM_ONE = {
+    characters: [
+        { id: 'mikhail_berlioz', name: 'Михаил Александрович Берлиоз', appearance: 'small plump bald man', clothes: 'grey summer suit', video_tokens: ['bald head'] },
+        { id: 'ivan_ponyrev', name: 'Иван Николаевич Понырев (Бездомный)', appearance: 'broad-shouldered red-haired young man', clothes: 'checked cap', video_tokens: ['checked cap'] },
+        { id: 'voland', name: 'Иностранец', appearance: 'tall man over forty, different eyes', clothes: 'expensive grey suit', video_tokens: ['grey suit'] },
+    ],
+    mentions: { 'поэт Бездомный': 'ivan_ponyrev', 'Иван Николаевич': 'ivan_ponyrev', 'немец': 'voland', 'англичанин': 'voland', 'редактор': 'mikhail_berlioz' },
+    voices: {
+        mikhail_berlioz: { timbre: 'A high bright male tenor. Native Russian pronunciation.', manner: 'Lecturing.' },
+        ivan_ponyrev: { timbre: 'A hoarse young male voice. Native Russian pronunciation.', manner: '' },
+        voland: { timbre: 'A low male voice. Native Russian pronunciation.', manner: '' },
+    },
+    scenes: (ids) => [{ title: 'У окна', text: 'Юра вошёл в комнату и остановился у окна.', characters_present: [ids.berlioz, ids.ivan], location: { id: 'room' } }],
+    videoTokens: () => [],
+};
+// window 2 exactly as the model answered in the acceptance run
+const MIM_TWO = {
+    characters: [
+        { id: 'mikhail_aleksandrovich_berlioz', name: 'Михаил Александрович Берлиоз', appearance: 'small plump man', clothes: 'grey suit' },
+        { id: 'ivan_nikolayevich_bezdomny', name: 'Иван Николаевич Бездомный', appearance: 'young man', clothes: 'cowboy shirt' },
+        { id: 'foreign_man_gray_suit', name: 'Иностранец в сером костюме', appearance: 'tall man', clothes: 'grey suit' },
+    ],
+    mentions: {
+        'редактор': 'mikhail_aleksandrovich_berlioz', 'Михаил Александрович': 'mikhail_aleksandrovich_berlioz', 'Берлиоз': 'mikhail_aleksandrovich_berlioz',
+        'поэт': 'ivan_nikolayevich_bezdomny', 'Иван Николаевич': 'ivan_nikolayevich_bezdomny', 'Бездомный': 'ivan_nikolayevich_bezdomny',
+        'незнакомец': 'foreign_man_gray_suit', 'иностранец': 'foreign_man_gray_suit', 'немец': 'foreign_man_gray_suit',
+        'англичанин': 'foreign_man_gray_suit', 'француз': 'foreign_man_gray_suit', 'интурист': 'foreign_man_gray_suit',
+    },
+    voices: {
+        ivan_ponyrev: { timbre: 'A clear male tenor of a young man. Native Russian pronunciation.', manner: 'Impulsive and irritable, with abrupt interruptions.' },
+        voland: { timbre: 'A low male voice with a foreign accent.', manner: 'Polite and inquisitive.' },
+    },
+    scenes: (ids) => [{ title: 'В дороге', text: 'Они ехали молча.', characters_present: [ids.berlioz, ids.ivan, ids.voland], location: { id: 'road' } }],
+    videoTokens: () => [],
+};
+
+describe('VBook 4 step 2b — heroes of the book are recognised in the next window (acceptance 2.6)', function () {
+    this.timeout(20000);
+    let sandbox, savedBooks, quiet, logged;
+
+    beforeEach(() => {
+        sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'v4-step2b-'));
+        savedBooks = config.BOOKS_DIR;
+        config.BOOKS_DIR = path.join(sandbox, 'books');
+        fs.mkdirSync(config.BOOKS_DIR);
+        configureBooksRoot(() => config.BOOKS_DIR);
+        quiet = { log: console.log, warn: console.warn };
+        logged = [];
+        console.log = (...a) => logged.push(a.join(' ')); console.warn = () => {};
+    });
+    afterEach(() => {
+        console.log = quiet.log; console.warn = quiet.warn;
+        config.BOOKS_DIR = savedBooks;
+        fs.rmSync(sandbox, { recursive: true, force: true });
+    });
+
+    const structure = { title: 'Мастер и Маргарита', author: 'М. Булгаков', chapters: [{ type: 'chapter', number: 1, title: 'Глава 1' }, { type: 'chapter', number: 2, title: 'Глава 2' }] };
+    async function run(script, registry, mentions) {
+        const seen = {};
+        const { mod } = makePipeline(script, seen);
+        const result = await mod.runPipeline('sess', 'Window text.', registry, [], 0, () => {}, 0, {
+            rawWindowText: 'Window text.', chunkSize: 5, existingMentions: mentions,
+        });
+        return { result, seen };
+    }
+
+    async function twoWindows() {
+        const { bookId } = lazyBook.createDraftBook(SOURCE, lazyBook.SourceType.TXT, 'mim.txt');
+        let draft = lazyBook.loadDraftBook(bookId);
+        const one = await run(MIM_ONE, heroAnalysis.registryFromBook(draft, []), heroAnalysis.mentionsFromBook(draft, {}));
+        lazyBook.createFromAnalysis(bookId, { characters: one.result.characters, locations: one.result.locations, mentions: one.result.mentions, scenes: one.result.scenes, structure, maxScenes: 5 });
+        draft = lazyBook.loadDraftBook(bookId);
+        const registry = heroAnalysis.registryFromBook(draft, one.result.characters);
+        const mentions = heroAnalysis.mentionsFromBook(draft, one.result.mentions);
+        logged.length = 0;
+        const two = await run(MIM_TWO, registry, { ...mentions });
+        const written = lazyBook.appendToBook(bookId, { characters: two.result.characters, locations: two.result.locations, mentions: two.result.mentions, scenes: two.result.scenes, structure, maxScenes: 5, chapterIndex: 1 });
+        return { bookId, dir: path.join(config.BOOKS_DIR, bookId), one, two, written, registry };
+    }
+    const heroFiles = (dir) => fs.readdirSync(path.join(dir, 'characters')).sort();
+    const hero = (bookId, id) => book.heroes.findHero(book.loadBook(bookId), id);
+
+    it('the character step of window 2 receives the registry of the book (id, name, aliases); window 1 an empty one', async () => {
+        const { one, two } = await twoWindows();
+        expect(one.seen.knownHeroes).to.deep.equal([]);
+        expect(two.seen.knownHeroes.map((h) => h.id)).to.deep.equal(['mikhail_berlioz', 'ivan_ponyrev', 'voland']);
+        const voland = two.seen.knownHeroes.find((h) => h.id === 'voland');
+        expect(voland.name).to.equal('Иностранец');
+        expect(voland.aliases).to.include.members(['немец', 'англичанин']);
+    });
+
+    it('the renamed Bezdomny and Woland are the known heroes: no duplicates, no new files', async () => {
+        const { dir, written } = await twoWindows();
+        expect(written.newHeroes).to.deep.equal([]);
+        expect(heroFiles(dir)).to.deep.equal(['ivan_ponyrev.json', 'mikhail_berlioz.json', 'narrator.json', 'voland.json']);
+    });
+
+    it('scenes of window 2 refer to the known ids', async () => {
+        const { two } = await twoWindows();
+        expect(two.seen.sceneStepCharacters).to.deep.equal(['mikhail_berlioz', 'ivan_ponyrev', 'voland']);
+        expect(two.result.mentions).to.include({ 'француз': 'voland', 'Бездомный': 'ivan_ponyrev' });
+    });
+
+    it('the new spellings become aliases of the known hero; the name is never replaced', async () => {
+        const { bookId } = await twoWindows();
+        const voland = hero(bookId, 'voland');
+        expect(voland.name).to.equal('Иностранец');
+        expect(voland.aliases).to.include.members(['немец', 'англичанин', 'француз', 'интурист']);
+        // the name the model used this time is kept as an alias
+        expect(voland.aliases).to.include('Иностранец в сером костюме');
+        expect(hero(bookId, 'ivan_ponyrev').aliases).to.include('Иван Николаевич Бездомный');
+        expect(hero(bookId, 'ivan_ponyrev').aliases).to.include('Бездомный');
+    });
+
+    it('the journal: one line per merge with the reason and the evidence', async () => {
+        await twoWindows();
+        const merges = logged.filter((l) => l.startsWith('[AGENT] Hero merge:'));
+        expect(merges).to.have.length(3);
+        expect(merges[0]).to.equal('[AGENT] Hero merge: "mikhail_aleksandrovich_berlioz" → mikhail_berlioz (matched_by_name: "Михаил Александрович Берлиоз")');
+        expect(merges[1]).to.equal('[AGENT] Hero merge: "ivan_nikolayevich_bezdomny" → ivan_ponyrev (matched_by_mentions: "Иван Николаевич")');
+        expect(merges[2]).to.match(/^\[AGENT\] Hero merge: "foreign_man_gray_suit" → voland \(matched_by_mentions: .*"иностранец".*\)$/);
+    });
+});
+

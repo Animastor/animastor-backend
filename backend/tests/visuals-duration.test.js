@@ -46,10 +46,11 @@ function scene() {
 
 describe('stepCreateVisuals (duration-aware input)', () => {
     it('sends estimated_duration_sec in every unit line', async () => {
+        // step 2b: the units are sent once — in the system prompt (%UNITS%)
         let sentUser = '';
         const { mod } = loadModule({
             callAI: async (messages) => {
-                sentUser = messages[1].content;
+                sentUser = messages[0].content;
                 return { units: [] };
             },
         });

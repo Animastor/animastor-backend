@@ -10,13 +10,14 @@
 //   3. каждый герой эталона найден (по name / aliases / id);
 //   4. ложных слияний нет: два героя эталона не оказались одним героем книги,
 //      и ни один алиас не объявлен двумя героями;
-//   5. у говорящих героев эталона и у диктора заполнены timbre и manner
-//      (manner может быть пустым только с флагом --allow-empty-manner),
-//      поля instruction нет ни у кого.
+//   5. у говорящих героев эталона и у диктора заполнен timbre, поля instruction
+//      нет ни у кого. Пустая manner — предупреждение (WARN), не провал:
+//      правило для модели разрешает пустую манеру (решение владельца В4).
 //
 // Запуск:
-//   node backend/scripts/check-vbook-v4-step2.cjs <каталог книги> [эталон.json] [--allow-empty-manner] [--json]
-// Код выхода: 0 — приёмка пройдена, 1 — нет, 2 — книгу не удалось прочитать.
+//   node backend/scripts/check-vbook-v4-step2.cjs <каталог книги> [эталон.json] [--json]
+// Код выхода: 0 — приёмка пройдена (предупреждения допустимы), 1 — нет,
+// 2 — книгу не удалось прочитать или неизвестный флаг.
 
 'use strict';
 
@@ -50,12 +51,13 @@ function matchesBaseline(hero, entry) {
 /**
  * @param {object} loaded   книга v4 в памяти (book.loadBook)
  * @param {object} baseline { characters: [{ id, name, keys: [], speaks }] }
- * @param {{ allowEmptyManner?: boolean, legacyFiles?: string[] }} [options]
- * @returns {{ ok: boolean, checks: {name: string, ok: boolean, details: string[]}[], mapping: object }}
+ * @param {{ legacyFiles?: string[] }} [options]
+ * @returns {{ ok: boolean, checks: {name: string, ok: boolean, details: string[], warnings: string[]}[],
+ *            warnings: string[], mapping: object }}
  */
 function checkBook(loaded, baseline, options = {}) {
     const checks = [];
-    const add = (name, details) => checks.push({ name, ok: details.length === 0, details });
+    const add = (name, details, warnings = []) => checks.push({ name, ok: details.length === 0, details, warnings });
     const heroes = Array.isArray(loaded.heroes) ? loaded.heroes : [];
 
     add('книга в формате VBook 4, файлов 3.1 нет', [
@@ -91,6 +93,7 @@ function checkBook(loaded, baseline, options = {}) {
     add('ложных слияний и дубликатов нет', merges);
 
     const voices = [];
+    const voiceWarnings = [];
     const needVoice = [{ label: 'диктор', ids: ['narrator'] },
         ...(baseline.characters || []).filter((e) => e.speaks).map((e) => ({ label: e.name, ids: mapping[e.id] || [] }))];
     for (const { label, ids } of needVoice) {
@@ -99,22 +102,24 @@ function checkBook(loaded, baseline, options = {}) {
             if (!hero) { voices.push(`${label}: героя ${id} нет в книге`); continue; }
             const v = hero.voice && typeof hero.voice === 'object' ? hero.voice : null;
             if (!v || !text(v.timbre)) voices.push(`${label} (${id}): timbre не заполнен`);
-            else if (!text(v.manner) && !options.allowEmptyManner) voices.push(`${label} (${id}): manner не заполнен`);
+            else if (!text(v.manner)) voiceWarnings.push(`${label} (${id}): manner пустая`);
         }
     }
     for (const hero of heroes) {
         if (hero.voice && Object.prototype.hasOwnProperty.call(hero.voice, 'instruction')) voices.push(`${hero.id}: в голосе осталось поле instruction`);
     }
-    add('у диктора и говорящих героев заполнены timbre и manner', voices);
+    add('у диктора и говорящих героев заполнен timbre (пустая manner — предупреждение)', voices, voiceWarnings);
 
-    return { ok: checks.every((c) => c.ok), checks, mapping };
+    return { ok: checks.every((c) => c.ok), checks, warnings: checks.flatMap((c) => c.warnings), mapping };
 }
 
 function main(argv) {
     const args = argv.filter((a) => !a.startsWith('--'));
     const flags = new Set(argv.filter((a) => a.startsWith('--')));
-    if (args.length < 1) {
-        console.error('Использование: check-vbook-v4-step2.cjs <каталог книги> [эталон.json] [--allow-empty-manner] [--json]');
+    const unknown = [...flags].filter((f) => f !== '--json');
+    if (args.length < 1 || unknown.length > 0) {
+        if (unknown.length > 0) console.error(`Неизвестный флаг: ${unknown.join(' ')}`);
+        console.error('Использование: check-vbook-v4-step2.cjs <каталог книги> [эталон.json] [--json]');
         return 2;
     }
     const bookDir = path.resolve(args[0]);
@@ -130,7 +135,7 @@ function main(argv) {
         return 2;
     }
     const legacyFiles = LEGACY_FILES.filter((f) => fs.existsSync(path.join(bookDir, f)));
-    const report = checkBook(loaded, baseline, { allowEmptyManner: flags.has('--allow-empty-manner'), legacyFiles });
+    const report = checkBook(loaded, baseline, { legacyFiles });
     if (flags.has('--json')) {
         console.log(JSON.stringify(report, null, 2));
     } else {
@@ -140,8 +145,10 @@ function main(argv) {
         for (const c of report.checks) {
             console.log(`${c.ok ? 'OK  ' : 'FAIL'}  ${c.name}`);
             for (const d of c.details) console.log(`        - ${d}`);
+            for (const w of c.warnings) console.log(`WARN  ${w}`);
         }
-        console.log(report.ok ? 'ИТОГ: приёмка 2.6 пройдена' : 'ИТОГ: приёмка 2.6 НЕ пройдена');
+        const warned = report.warnings.length > 0 ? ` (предупреждений: ${report.warnings.length})` : '';
+        console.log(report.ok ? `ИТОГ: приёмка 2.6 пройдена${warned}` : `ИТОГ: приёмка 2.6 НЕ пройдена${warned}`);
     }
     return report.ok ? 0 : 1;
 }

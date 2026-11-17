@@ -381,7 +381,8 @@ describe('C21 AI Agent contour: generation boundary', () => {
         // VBook 4: the write-back is a voice BLOCK { timbre, manner, timbre_source }
         // parsed and cleaned by the runtime's voiceFromAnalysis — text only.
         expect(voices, 'voices.js writes a parsed voice description').to.match(/ch\.voice = parsed\.voice;/);
-        expect(voices).to.match(/voiceFromAnalysis\(raw\[ch\.id\]\)/);
+        // step 2b: the book language drives the pronunciation suffix (rules v3)
+        expect(voices).to.match(/voiceFromAnalysis\(raw\[ch\.id\], \{ language: input\.language \}\)/);
         expect(voices, 'no legacy single-string contract').to.not.match(/\.instruction\b/);
         // code-only scan (comments legitimately mention the downstream TTS
         // consumer — the forbidden thing is RENDERING, i.e. audio I/O calls)

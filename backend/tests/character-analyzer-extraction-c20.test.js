@@ -140,7 +140,8 @@ describe('C20 character-analyzer: generateVoices contract (F7)', () => {
             const ch = realChar();
             const { ports } = makePorts({ voices: { anna_smirnova: raw } });
             await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
-            expect(ch.voice).to.deep.equal({ timbre: 'Deep male bass. Slow.', manner: '', timbre_source: 'cleaned' });
+            // rules v3 (step 2b): the pronunciation suffix of the book language (ru) is added
+            expect(ch.voice).to.deep.equal({ timbre: 'Deep male bass. Slow. Native Russian pronunciation.', manner: '', timbre_source: 'cleaned' });
         }
     });
 

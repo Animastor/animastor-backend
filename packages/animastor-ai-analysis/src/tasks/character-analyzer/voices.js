@@ -141,7 +141,8 @@ async function generateVoices(input, ports) {
         const rejected = {};
         for (const ch of charsWithoutVoice) {
             if (!Object.prototype.hasOwnProperty.call(raw, ch.id)) continue;
-            const parsed = voiceFromAnalysis(raw[ch.id]);
+            // the book language drives the pronunciation suffix of timbre (rules v3)
+            const parsed = voiceFromAnalysis(raw[ch.id], { language: input.language });
             if (!parsed.voice) { rejected[ch.id] = parsed.reason; continue; }
             ch.voice = parsed.voice;
             voices[ch.id] = parsed.voice;
