@@ -9,8 +9,12 @@
 //   build_<book_id>/voices/<character_id>/uploads/<candidate_id>.<ext>  user upload (source)
 //
 // The .vbook keeps only the text link + metadata (characters/<id>.json →
-// voice.reference, through the @animastor/vbook-runtime voice port). sha256 is computed HERE,
-// over the stored file — exactly the bytes LoadAudio receives on the worker.
+// voice.reference, through the @animastor/vbook-runtime voice port). sha256 of a
+// NEW candidate is computed HERE, over the stored file — exactly the bytes
+// LoadAudio receives on the worker. The state of a LOCKED reference (file
+// there, sha256 matches) is the port's referenceState — one layer of statuses
+// (VBook 4, owner's decision В9): referenceStatus below maps it, it reads no
+// reference file and compares no sha256 itself.
 //
 // Pure helpers (no I/O) are exported for tests: normaliseTranscript,
 // compareTranscript, parseWavMeta, canonicalWav, …
@@ -177,6 +181,8 @@ function createPaths(outputDir) {
     const voicesDir = (buildId) => joinInside(buildDir(buildId), 'voices');
     const voiceDir = (buildId, voiceId) => joinInside(voicesDir(buildId), assertSafeId(voiceId, 'character_id'));
     return {
+        /** build_<book_id>/ — the base of every reference link */
+        buildDir,
         voicesDir,
         voiceDir,
         candidateWav: (buildId, voiceId, candId) => joinInside(voiceDir(buildId, voiceId), `${assertSafeId(candId, 'candidate_id')}.wav`),
@@ -243,8 +249,15 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
     }
 
     /**
-     * Status of the locked reference of a voice (pure check + disk):
+     * Status of the locked reference of a voice:
      * ok | missing_voice | missing | malformed | unlocked | not_verified | file_missing | sha_mismatch
+     *
+     * One layer (VBook 4, В9): the port decides whether the reference is
+     * verified (isReferenceVerified) and what state its file is in
+     * (referenceState: ok | missing | mismatch — the link is checked to stay
+     * inside build_<id>/voices/<id>/, symbolic links are not followed). This
+     * function only maps them; missing_voice / malformed / unlocked /
+     * not_verified stay as the reasons synthesis is refused.
      */
     function referenceStatus(loadedBook, voiceId) {
         const v = voicePort.getCharacterVoice(loadedBook, voiceId);
@@ -256,11 +269,12 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
         // designed → the automatic check passed; uploaded → passed or confirmed
         // by a person ('user'). One rule, owned by the port (В1).
         if (!voicePort.isReferenceVerified(r)) return { status: 'not_verified', reference: r };
-        const file = paths.resolveLink(buildIdOf(loadedBook), r.file);
-        if (!fs.existsSync(file)) return { status: 'file_missing', reference: r, path: file };
-        const bytes = fs.readFileSync(file);
-        if (sha256(bytes) !== r.sha256) return { status: 'sha_mismatch', reference: r, path: file };
-        return { status: 'ok', reference: r, path: file, bytes: bytes.length };
+        const dir = paths.buildDir(buildIdOf(loadedBook));
+        const state = voicePort.referenceState(dir, r, voiceId);
+        if (state === 'missing') return { status: 'file_missing', reference: r };
+        if (state === 'mismatch') return { status: 'sha_mismatch', reference: r };
+        const file = voicePort.resolveReferenceFile(dir, r, voiceId);
+        return { status: 'ok', reference: r, path: file, bytes: fs.statSync(file).size };
     }
 
     /**
