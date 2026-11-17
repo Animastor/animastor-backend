@@ -230,6 +230,8 @@ function buildConnectorProvider(row) {
     };
 }
 
+const aiReasoning = require('./ai-reasoning');
+
 function buildWorkspaceProvider(row) {
     if ((row.provider_type || row.provider) === LOCAL_AI_TYPE) {
         return buildConnectorProvider(row);
@@ -249,6 +251,8 @@ function buildWorkspaceProvider(row) {
         apiKey,
         model: row.model || FALLBACK_MODEL,
         workspaceId: row.workspace_id,
+        // reasoning settings (step 2b) — applied by ai-service.callAI
+        ...aiReasoning.reasoningFromRow(row),
     };
 }
 
@@ -276,11 +280,18 @@ async function getRow(workspaceId) {
     const { query } = require('../storage/postgres/database');
     const result = await query(
         `SELECT workspace_id, provider, provider_type, endpoint, api_key_enc, model, enabled,
-                connector_id, status, last_tested_at, created_at, updated_at
+                connector_id, status, last_tested_at, created_at, updated_at,
+                disable_thinking, reasoning_effort
          FROM workspace_ai_providers WHERE workspace_id = $1 LIMIT 1`,
         [workspaceId]
     );
     return result.rows[0] || null;
+}
+
+/** [disable_thinking, reasoning_effort] for INSERT / UPDATE (undefined input → keep the row's). */
+function reasoningParams(input, existing) {
+    const next = aiReasoning.nextReasoningColumns(input, existing);
+    return [next.disable_thinking, next.reasoning_effort];
 }
 
 async function insertRow(workspaceId, input) {
@@ -289,8 +300,9 @@ async function insertRow(workspaceId, input) {
     const isLocalAi = providerType === LOCAL_AI_TYPE;
     const result = await query(
         `INSERT INTO workspace_ai_providers
-             (workspace_id, provider, provider_type, endpoint, api_key_enc, model, enabled, connector_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+             (workspace_id, provider, provider_type, endpoint, api_key_enc, model, enabled, connector_id, status,
+              disable_thinking, reasoning_effort)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
         [workspaceId, providerType, providerType,
          // local-ai rows carry no endpoint/credential — marker values only
          // (AD-11; NOT NULL satisfied, no usable material stored).
@@ -298,7 +310,8 @@ async function insertRow(workspaceId, input) {
          isLocalAi ? LOCAL_AI_KEY_MARKER : encryptSecret(input.apiKey),
          input.model || null, input.enabled !== false,
          isLocalAi ? (input.connectorId || null) : null,
-         DEFAULT_STATUS]
+         DEFAULT_STATUS,
+         ...reasoningParams(input, null)]
     );
     return result.rows[0];
 }
@@ -337,10 +350,12 @@ async function updateRow(workspaceId, input, existing) {
         `UPDATE workspace_ai_providers
          SET provider = $2, provider_type = $3, endpoint = $4, api_key_enc = COALESCE($5, api_key_enc),
              model = $6, enabled = $7, connector_id = $8,
+             disable_thinking = $9, reasoning_effort = $10,
              updated_at = (EXTRACT(EPOCH FROM NOW())::bigint)
          WHERE workspace_id = $1 RETURNING *`,
         [workspaceId, next.provider_type, next.provider_type, next.endpoint, next.api_key_enc || null,
-         next.model, next.enabled, next.connector_id]
+         next.model, next.enabled, next.connector_id,
+         ...reasoningParams(input, existing)]
     );
     return result.rows[0];
 }
@@ -368,6 +383,7 @@ function publicMeta(row) {
             connector_id: row.connector_id || null,
             status: row.status || DEFAULT_STATUS,
             last_tested_at: row.last_tested_at != null ? Number(row.last_tested_at) : null,
+            ...aiReasoning.reasoningMeta(row),
             created_at: row.created_at,
             updated_at: row.updated_at,
         };
@@ -387,6 +403,7 @@ function publicMeta(row) {
         api_key_masked: maskKey(decryptSecret(row.api_key_enc)),
         status: row.status || DEFAULT_STATUS,
         last_tested_at: row.last_tested_at != null ? Number(row.last_tested_at) : null,
+        ...aiReasoning.reasoningMeta(row),
         created_at: row.created_at,
         updated_at: row.updated_at,
     };
@@ -419,7 +436,8 @@ async function setLastTest(workspaceId, ok) {
 /**
  * Upsert the active provider. One row per workspace enforced by PK.
  * @param {string} workspaceId
- * @param {{providerType?:string, provider?:string, endpoint?:string, apiKey?:string, model?:string|null, connectorId?:string|null, enabled?:boolean}} input
+ * @param {{providerType?:string, provider?:string, endpoint?:string, apiKey?:string, model?:string|null, connectorId?:string|null, enabled?:boolean,
+ *          disableThinking?:boolean, reasoningEffort?:string|null}} input   (reasoning: undefined → keep)
  * @throws When `provider`/`providerType` is supplied but not one of PROVIDER_TYPES.
  */
 async function upsertProvider(workspaceId, input) {

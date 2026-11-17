@@ -44,11 +44,21 @@ async function callAI(messages, options) {
                 timeout: options?.timeout || 180000,
                 maxTokens: options?.maxTokens || 2048,
             }, provider);
-            const parsed = aiService.parseJsonResponse(response.content);
+            let parsed;
+            try {
+                parsed = aiService.parseJsonResponse(response.content);
+            } catch (parseErr) {
+                // say WHY the JSON is broken when the model was cut off
+                if (response.finishReason === 'length') {
+                    parseErr.message = `${parseErr.message} (output cut at max_tokens=${options?.maxTokens || 2048}, finish_reason=length)`;
+                }
+                throw parseErr;
+            }
             return parsed;
         } catch (err) {
             lastError = err;
             console.warn(`[AGENT] AI call attempt ${attempt} failed: ${err.message}`);
+            if (err.nonRetryable) throw err;
             if (attempt < attemptCount) {
                 const delay = 2000 * attempt;
                 await new Promise(r => setTimeout(r, delay));

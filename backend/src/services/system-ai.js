@@ -86,7 +86,7 @@ async function resolveSystemProvider() {
     try {
         const { query } = require('../storage/postgres/database');
         const { rows } = await query(
-            `SELECT provider_type, endpoint, api_key_enc, model, status
+            `SELECT provider_type, endpoint, api_key_enc, model, status, disable_thinking, reasoning_effort
              FROM system_ai_providers WHERE id = 'default' LIMIT 1`
         );
         if (rows.length > 0) {
@@ -100,6 +100,8 @@ async function resolveSystemProvider() {
                     apiKey,
                     model: row.model || null,
                     workspaceId: null,
+                    // reasoning settings (step 2b) — applied by ai-service.callAI
+                    ...require('./ai-reasoning').reasoningFromRow(row),
                 };
             }
         }
@@ -131,7 +133,8 @@ async function getSystemProviderMeta() {
     try {
         const { query } = require('../storage/postgres/database');
         const { rows } = await query(
-            `SELECT provider_type, endpoint, api_key_enc, model, status, last_tested_at, created_at, updated_at
+            `SELECT provider_type, endpoint, api_key_enc, model, status, last_tested_at, created_at, updated_at,
+                    disable_thinking, reasoning_effort
              FROM system_ai_providers WHERE id = 'default' LIMIT 1`
         );
         if (rows.length === 0) return null;
@@ -144,6 +147,7 @@ async function getSystemProviderMeta() {
             api_key_masked: maskKey(decryptSecret(row.api_key_enc)),
             status: row.status || 'untested',
             last_tested_at: row.last_tested_at != null ? Number(row.last_tested_at) : null,
+            ...require('./ai-reasoning').reasoningMeta(row),
             created_at: row.created_at,
             updated_at: row.updated_at,
         };
@@ -155,7 +159,8 @@ async function getSystemProviderMeta() {
 
 /**
  * Upsert the system provider (admin action).
- * @param {{providerType?:string, endpoint:string, apiKey?:string, model?:string|null}} input
+ * @param {{providerType?:string, endpoint:string, apiKey?:string, model?:string|null,
+ *          disableThinking?:boolean, reasoningEffort?:string|null}} input   (reasoning: undefined → keep)
  */
 async function upsertSystemProvider(input) {
     const { encryptSecret, normalizeProviderType } = require('./workspace-ai-provider');
@@ -165,7 +170,7 @@ async function upsertSystemProvider(input) {
     const endpoint = (input.endpoint || '').trim().replace(/\/+$/, '');
 
     const { rows: existing } = await query(
-        `SELECT api_key_enc FROM system_ai_providers WHERE id = 'default' LIMIT 1`
+        `SELECT api_key_enc, disable_thinking, reasoning_effort FROM system_ai_providers WHERE id = 'default' LIMIT 1`
     );
 
     let apiKeyEnc;
@@ -177,15 +182,17 @@ async function upsertSystemProvider(input) {
         throw new Error('apiKey is required when creating the system provider');
     }
 
+    const reasoning = require('./ai-reasoning').nextReasoningColumns(input, existing[0] || null);
     const result = await query(
-        `INSERT INTO system_ai_providers (id, provider_type, endpoint, api_key_enc, model, status)
-         VALUES ('default', $1, $2, $3, $4, 'untested')
+        `INSERT INTO system_ai_providers (id, provider_type, endpoint, api_key_enc, model, status, disable_thinking, reasoning_effort)
+         VALUES ('default', $1, $2, $3, $4, 'untested', $5, $6)
          ON CONFLICT (id)
          DO UPDATE SET provider_type = $1, endpoint = $2,
                        api_key_enc = $3, model = $4,
+                       disable_thinking = $5, reasoning_effort = $6,
                        updated_at = (EXTRACT(EPOCH FROM NOW())::bigint)
          RETURNING *`,
-        [providerType, endpoint, apiKeyEnc, input.model || null]
+        [providerType, endpoint, apiKeyEnc, input.model || null, reasoning.disable_thinking, reasoning.reasoning_effort]
     );
     invalidateAll();
     return getSystemProviderMeta();

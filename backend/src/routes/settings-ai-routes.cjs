@@ -150,6 +150,11 @@ module.exports = function(app) {
             }
         }
 
+        const reasoning = require('../services/ai-reasoning').parseReasoningInput(body);
+        if (!reasoning.ok) {
+            return res.status(400).json({ error: reasoning.error });
+        }
+
         const endpoint = normalizeEndpoint(body.endpoint);
         if (!endpoint) {
             return res.status(400).json({ error: 'endpoint must be a valid http(s) URL' });
@@ -189,6 +194,7 @@ module.exports = function(app) {
                 apiKey: body.api_key ? String(body.api_key).trim() : undefined,
                 model: body.model ?? null,
                 enabled: body.enabled !== false,
+                ...reasoning.value,
             });
             res.json({ provider: meta });
         } catch (err) {

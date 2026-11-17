@@ -121,6 +121,11 @@ module.exports = function(app, redis) {
                     return res.status(400).json({ error: 'provider.api_key must be a non-empty string' });
                 }
 
+                const reasoning = require('../services/ai-reasoning').parseReasoningInput(p);
+                if (!reasoning.ok) {
+                    return res.status(400).json({ error: `provider.${reasoning.error}` });
+                }
+
                 const existing = await systemAi.getSystemProviderMeta();
                 if (!p.api_key && !existing) {
                     return res.status(400).json({ error: 'provider.api_key is required' });
@@ -131,6 +136,7 @@ module.exports = function(app, redis) {
                     endpoint: endpoint || (existing ? existing.endpoint : ''),
                     apiKey: p.api_key ? String(p.api_key).trim() : undefined,
                     model: p.model !== undefined ? (p.model || null) : undefined,
+                    ...reasoning.value,
                 });
             }
 
