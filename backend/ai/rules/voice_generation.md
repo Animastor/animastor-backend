@@ -86,6 +86,11 @@ rejected as a whole.
 - Be vivid and specific. Avoid generic phrases like "A character voice", "natural intonation",
   or "matching the character".
 
+### A character that already has a timbre
+The list may contain characters whose `current_voice` has a timbre but no manner. The timbre is
+fixed — never rewrite it. For such a character return ONLY `{"manner": "…"}` (or `""` when the
+text gives no ground for a habitual manner); the same rules for `manner` apply.
+
 ## Examples
 - timbre: "Deep, resonant male baritone, around fifty, slightly dry texture. Native Russian pronunciation."
   manner: "Slow and deliberate, with a faintly sarcastic intonation."

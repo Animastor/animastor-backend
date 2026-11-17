@@ -13,7 +13,7 @@
 // Fail: → throw (after failStep). The RUNNER owns the degradation rule.
 
 const { execute } = require('@animastor/ai-agent');
-const { generateVoices } = require('./voices');
+const { generateVoices, needsManner } = require('./voices');
 
 // ── Known heroes of the book (VBOOK_FORMAT_V4 §12б) ──────────────────────
 // The registry the model sees so that it returns a known hero under its id
@@ -109,6 +109,7 @@ async function extractCharacters(input, ports) {
 module.exports = {
     extractCharacters,
     generateVoices,
+    needsManner,
     charactersTask,
     formatKnownHeroes,
     KNOWN_HEROES_MAX_CHARS,

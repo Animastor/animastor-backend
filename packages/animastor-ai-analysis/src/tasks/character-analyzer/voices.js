@@ -16,12 +16,17 @@
 // (@animastor/vbook-runtime/voice) drops such sentences by rule as a safety
 // net — or refuses the voice when no timbre is left.
 //
-// Skip rules (unchanged):
+// Skip rules:
 //   - only characters with a real described appearance (hasRealAppearance —
 //     the shared @animastor/vbook-runtime/character-identity predicate);
-//   - only characters without a voice; an existing voice is NEVER overwritten
-//     (the hero file keeps a person's edits and a locked reference — the
-//     write barrier in lazy-book/create.js enforces the same).
+//   - a voice is asked for characters without one; an existing voice is NEVER
+//     overwritten (the hero file keeps a person's edits and a locked reference
+//     — the write barrier in lazy-book/create.js enforces the same);
+//   - a character WITH a timbre and an EMPTY manner is asked for the manner
+//     only, unless the voice is protected (timbre_source 'user' or a locked
+//     reference — workingCharacterFromHero marks it `protected`). Its timbre is
+//     never changed; the write barrier fills only the empty manner
+//     (mergeWindowIntoHero). Owner's decision 17.11, VBOOK_FORMAT_V4 §12в.
 //
 // Fail contract (unchanged): any AI failure → failStep + warn, returns
 // { voices: {} }; existing character voices are kept.
@@ -30,13 +35,28 @@
 // host's prompt-profile loader). No PG/Redis/fs access inside.
 
 const { hasRealAppearance } = require('@animastor/vbook-runtime/character-identity');
-const { voiceFromAnalysis } = require('@animastor/vbook-runtime/voice');
+const { voiceFromAnalysis, cleanVoiceDescription, isVoiceProtected } = require('@animastor/vbook-runtime/voice');
 
 /** Does this working character already have a voice (timbre)? */
 function hasVoice(character) {
     const v = character && character.voice;
     if (v && typeof v === 'object') return typeof v.timbre === 'string' && v.timbre.trim().length > 0;
     return typeof v === 'string' && v.trim().length >= 20 && !/character voice|natural intonation|matching/i.test(v);
+}
+
+/** A timbre without a manner, and the analysis may still add to this voice. */
+function needsManner(character) {
+    const v = character && character.voice;
+    if (!v || typeof v !== 'object' || !hasVoice(character)) return false;
+    if (typeof v.manner === 'string' && v.manner.trim()) return false;
+    return v.protected !== true && !isVoiceProtected(v);
+}
+
+/** The manner the model returned for a manner-only character ('' when none). */
+function mannerFrom(entry) {
+    const raw = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry.manner : null;
+    if (typeof raw !== 'string' || !raw.trim()) return '';
+    return cleanVoiceDescription(raw).timbre.slice(0, 2000).trim();
 }
 
 function describeVoice(character) {
@@ -87,7 +107,8 @@ async function generateVoices(input, ports) {
     // earlier window, from the hero file, edited by a person — is never asked
     // for again and never replaced: no voice drift across windows.
     const charsWithoutVoice = viableChars.filter((c) => !hasVoice(c));
-    if (charsWithoutVoice.length === 0) {
+    const charsWithoutManner = viableChars.filter(needsManner);
+    if (charsWithoutVoice.length === 0 && charsWithoutManner.length === 0) {
         console.log('[AGENT] Step voice_generation: skipped — every character already has a voice');
         return { voices: {} };
     }
@@ -124,9 +145,12 @@ async function generateVoices(input, ports) {
         input.language
     );
 
+    const mannerOnly = charsWithoutManner.length > 0
+        ? `\n\nThese characters already have a timbre — do NOT change it. For them return ONLY "manner" ({"manner": "…"}), an empty string when the text gives no ground: ${charsWithoutManner.map((c) => c.id).join(', ')}.`
+        : '';
     const messages = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Analyze the source text and generate voice descriptions for characters who have DIALOGUE LINES (speech). Skip characters who only appear in narration and never speak. Do NOT generate narrator voice.\n\nCharacters:\n${charsContext}\n\nSource text for analysis:\n${truncatedText}` },
+        { role: 'user', content: `Analyze the source text and generate voice descriptions for characters who have DIALOGUE LINES (speech). Skip characters who only appear in narration and never speak. Do NOT generate narrator voice.${mannerOnly}\n\nCharacters:\n${charsContext}\n\nSource text for analysis:\n${truncatedText}` },
     ];
 
     try {
@@ -147,13 +171,23 @@ async function generateVoices(input, ports) {
             ch.voice = parsed.voice;
             voices[ch.id] = parsed.voice;
         }
+        // Manner-only: the timbre stays as it is, only the empty manner is filled.
+        let mannersFilled = 0;
+        for (const ch of charsWithoutManner) {
+            if (!Object.prototype.hasOwnProperty.call(raw, ch.id)) continue;
+            const manner = mannerFrom(raw[ch.id]);
+            if (!manner) continue;
+            ch.voice = { ...ch.voice, manner };
+            voices[ch.id] = ch.voice;
+            mannersFilled++;
+        }
         if (Object.keys(rejected).length > 0) {
             console.warn(`[AGENT] Step voice_generation: voices not accepted — ${Object.entries(rejected).map(([id, why]) => `${id}: ${why}`).join(', ')}`);
         }
 
         await logConversation(input.sessionId, step.step_id, messages, JSON.stringify(result));
-        await completeStep(step.step_id, { voices: Object.keys(voices).length, rejected: Object.keys(rejected).length });
-        console.log(`[AGENT] Step voice_generation: ${Object.keys(voices).length}/${viableChars.length} characters got voice descriptions`);
+        await completeStep(step.step_id, { voices: Object.keys(voices).length - mannersFilled, manners: mannersFilled, rejected: Object.keys(rejected).length });
+        console.log(`[AGENT] Step voice_generation: ${Object.keys(voices).length - mannersFilled}/${viableChars.length} characters got voice descriptions, ${mannersFilled}/${charsWithoutManner.length} got a missing manner`);
         // { voices } — the frozen F7 result; `rejected` appears only when the
         // model returned something that could not become a voice.
         return Object.keys(rejected).length > 0 ? { voices, rejected } : { voices };
@@ -164,4 +198,4 @@ async function generateVoices(input, ports) {
     }
 }
 
-module.exports = { generateVoices, hasVoice };
+module.exports = { generateVoices, hasVoice, needsManner };

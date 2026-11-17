@@ -60,6 +60,9 @@ function workingCharacterFromHero(hero, working) {
     };
     if (isPlainObject(hero.voice)) {
         out.voice = { timbre: text(hero.voice.timbre), manner: text(hero.voice.manner) };
+        // a person's voice / a locked reference: the voice step must not ask
+        // for anything of it (not even a missing manner)
+        if (isVoiceProtected(hero.voice)) out.voice.protected = true;
     }
     for (const key of Object.keys(out)) if (out[key] === undefined) delete out[key];
     return out;

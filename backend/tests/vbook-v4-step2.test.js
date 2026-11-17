@@ -352,8 +352,9 @@ describe('VBook 4 step 2 — the analysis writes heroes (backend)', function () 
             expect(yura.looks).to.deep.equal(edited.looks);
             expect(yura.notes).to.equal('заметка автора');
             expect(yura.name).to.equal('Юрий Андреевич Живаго');
-            // the voice step was not even shown yura as a character without a voice
-            expect(second.result.characters.find((c) => c.id === 'yura').voice).to.deep.equal({ timbre: 'Edited by hand.', manner: '' });
+            // the voice step was not even shown yura as a character without a voice;
+            // the working copy is marked protected, so its empty manner is not asked for (step 2b rest)
+            expect(second.result.characters.find((c) => c.id === 'yura').voice).to.deep.equal({ timbre: 'Edited by hand.', manner: '', protected: true });
         });
 
         it('the registry of the second window is the BOOK: a person\'s change is seen, a deleted hero is not brought back from memory', async () => {
@@ -647,11 +648,12 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         return { result, seen };
     }
 
-    async function twoWindows(second = MIM_TWO) {
+    async function twoWindows(second = MIM_TWO, between = null) {
         const { bookId } = lazyBook.createDraftBook(SOURCE, lazyBook.SourceType.TXT, 'mim.txt');
         let draft = lazyBook.loadDraftBook(bookId);
         const one = await run(MIM_ONE, heroAnalysis.registryFromBook(draft, []), heroAnalysis.mentionsFromBook(draft, {}));
         lazyBook.createFromAnalysis(bookId, { characters: one.result.characters, locations: one.result.locations, mentions: one.result.mentions, scenes: one.result.scenes, structure, maxScenes: 5 });
+        if (between) { between(bookId); }
         draft = lazyBook.loadDraftBook(bookId);
         const registry = heroAnalysis.registryFromBook(draft, one.result.characters);
         const mentions = heroAnalysis.mentionsFromBook(draft, one.result.mentions);
@@ -728,5 +730,33 @@ describe('VBook 4 step 2b — heroes of the book are recognised in the next wind
         expect(hero(bookId, 'voland').aliases).to.include('Иностранец в сером костюме');
         expect(logged.filter((l) => l.startsWith('[AGENT] Possible duplicate:'))).to.deep.equal([]);
     });
-});
 
+    // The rest of step 2b (owner's decision 17.11): a known hero with a timbre
+    // and an EMPTY manner is asked for the manner in the next window, unless a
+    // person edited the voice or locked a reference. The timbre never changes.
+    describe('an empty manner of a known hero is asked for again', () => {
+        it('voland and ivan_ponyrev (empty manner after window 1) get the manner of window 2; the timbre stays', async () => {
+            const { bookId, dir } = await twoWindows();
+            const voland = hero(bookId, 'voland').voice;
+            expect(voland.manner).to.equal('Polite and inquisitive.');
+            expect(voland.timbre).to.equal('A low male voice. Native Russian pronunciation.');
+            const ivan = hero(bookId, 'ivan_ponyrev').voice;
+            expect(ivan.manner).to.equal('Impulsive and irritable, with abrupt interruptions.');
+            expect(ivan.timbre).to.equal('A hoarse young male voice. Native Russian pronunciation.');
+            // Berlioz had a manner — not asked, not changed
+            expect(hero(bookId, 'mikhail_berlioz').voice.manner).to.equal('Lecturing.');
+            expect(heroFiles(dir)).to.include('voland.json');
+        });
+
+        it('a voice edited by a person (timbre_source user) is not asked for and keeps its empty manner', async () => {
+            const { bookId } = await twoWindows(MIM_TWO, (id) => {
+                const b = book.loadBook(id);
+                const v = book.heroes.findHero(b, 'voland');
+                voicePort.setCharacterVoiceDescription(b, 'voland', { timbre: v.voice.timbre, manner: '', timbre_source: 'user' });
+                book.saveBookBundle(b);
+            });
+            expect(hero(bookId, 'voland').voice).to.include({ manner: '', timbre_source: 'user' });
+            expect(hero(bookId, 'ivan_ponyrev').voice.manner).to.equal('Impulsive and irritable, with abrupt interruptions.');
+        });
+    });
+});
