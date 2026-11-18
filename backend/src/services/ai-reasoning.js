@@ -122,16 +122,41 @@ function reasoningForTest(body = {}, stored = null) {
 }
 
 /**
+ * Who can change the settings of the provider that answered (owner, step 6):
+ *   'system'   — the system provider (admin panel) or the operator env
+ *                fallback ('global'): the user asks the administrator;
+ *   'personal' — the provider of the user's own workspace (settings/ai,
+ *                a shared endpoint or a Local AI connector in it).
+ * @returns {'system'|'personal'|null}
+ */
+function reasoningProviderSource(provider) {
+    const source = provider && provider.source;
+    if (source === 'system' || source === 'global') return 'system';
+    if (source === 'workspace') return 'personal';
+    return null;
+}
+
+/**
  * The model spent the whole budget on reasoning and wrote nothing. Repeating
  * the same request gives the same result — the error is not retried.
+ * The text names the provider in a fixed form («Provider: system.» /
+ * «Provider: personal.») — the progress text is the one channel every front
+ * reads; err.providerSource carries the same value for structured channels.
  */
-function reasoningExhaustedError({ maxTokens, reasoningTokens }) {
+function reasoningExhaustedError({ maxTokens, reasoningTokens, provider = null }) {
+    const providerSource = reasoningProviderSource(provider);
+    const advice = providerSource === 'system'
+        ? 'Provider: system. Ask the administrator to disable thinking (disable_thinking) or lower reasoning_effort of the system AI provider.'
+        : providerSource === 'personal'
+            ? 'Provider: personal. Disable thinking in your AI provider settings (disable_thinking) or lower reasoning_effort.'
+            : 'Disable thinking in the AI provider settings (disable_thinking) or lower reasoning_effort.';
     const err = new Error(
         `The model exhausted its token limit on reasoning (finish_reason=length, empty content, `
         + `max_tokens=${maxTokens}${reasoningTokens != null ? `, reasoning_tokens=${reasoningTokens}` : ''}). `
-        + 'Disable thinking in the AI provider settings (disable_thinking) or lower reasoning_effort.',
+        + advice,
     );
     err.code = 'reasoning_budget_exhausted';
+    err.providerSource = providerSource;
     err.nonRetryable = true;
     return err;
 }
@@ -145,5 +170,6 @@ module.exports = {
     reasoningBodyFields,
     withReasoning,
     reasoningForTest,
+    reasoningProviderSource,
     reasoningExhaustedError,
 };

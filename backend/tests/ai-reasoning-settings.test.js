@@ -143,6 +143,29 @@ describe('VBook 4 step 2b — reasoning settings of an AI provider', function ()
             expect(stub.calls).to.have.length(1);
         });
 
+        it('the error names who can change the provider: system → the administrator, workspace → personal (owner, step 6)', async () => {
+            const run = async (provider) => {
+                const stub = stubFetch([answer('', 'length', 4096)]);
+                try { await aiService.callAI([{ role: 'user', content: 'x' }], { maxTokens: 4096 }, provider); } catch (e) { return e; } finally { stub.restore(); }
+                return null;
+            };
+            const sys = await run(SYSTEM);
+            expect(sys.providerSource).to.equal('system');
+            expect(sys.message).to.include('Provider: system.').and.include('Ask the administrator');
+            // a workspace endpoint goes through the public-address check (DNS) — the factory directly
+            const aiReasoning = require('../src/services/ai-reasoning');
+            const own = aiReasoning.reasoningExhaustedError({ maxTokens: 1, provider: { source: 'workspace' } });
+            expect(own.providerSource).to.equal('personal');
+            expect(own.message).to.include('Provider: personal.').and.include('your AI provider settings');
+            expect(aiReasoning.reasoningExhaustedError({ maxTokens: 1, provider: { source: 'global' } }).providerSource).to.equal('system');
+            const unknown = aiReasoning.reasoningExhaustedError({ maxTokens: 1 });
+            expect(unknown.providerSource).to.equal(null);
+            expect(unknown.message).to.not.include('Provider:');
+            const { analysisErrorBody } = require('../src/routes/book/import-routes.cjs');
+            expect(analysisErrorBody(sys)).to.deep.equal({ error: sys.message, code: 'reasoning_budget_exhausted', provider_source: 'system' });
+            expect(analysisErrorBody(new Error('boom'))).to.deep.equal({ error: 'boom' });
+        });
+
         it('the agent caller does not retry it either (acceptance 2.6: 1 request instead of 3×3)', async () => {
             const stub = stubFetch([answer('', 'length', 4096)]);
             let err;

@@ -115,6 +115,7 @@ async function callAI(messages, options = {}, provider = null) {
                 throw aiReasoning.reasoningExhaustedError({
                     maxTokens,
                     reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens,
+                    provider,
                 });
             }
             return {

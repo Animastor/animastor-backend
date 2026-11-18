@@ -19,6 +19,15 @@ const heroAnalysis = require('@animastor/vbook-runtime/hero-analysis.cjs');
 const textUtils = require('./text-utils');
 const profileOverride = require('../profile-override');
 
+// Structured fields of an error progress event (owner, step 6): the code and
+// who can change the provider (reasoning_budget_exhausted → system/personal).
+function errorProgressFields(err) {
+    const out = {};
+    if (err && typeof err.code === 'string') out.error_code = err.code;
+    if (err && err.providerSource) out.provider_source = err.providerSource;
+    return out;
+}
+
 /**
  * Read chunk_size from Redis layer-config for the given book (default 3).
  * Shared with /agent-status (layerConfig.getChunkSize) so the actual window
@@ -275,7 +284,7 @@ async function bootstrapWithAgentInner(bookId, draft, progress, publishProgress,
                 status: 'failed',
                 progress_msg: `Ошибка: ${err.message}`,
             }).catch(() => {});
-            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}` });
+            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}`, ...errorProgressFields(err) });
         } else {
             // Отправляем статус «Отменено» через publishProgress (progress-колбэк — no-op)
             try {
@@ -794,7 +803,7 @@ async function _bootstrapNextWindowInner(bookId, progress, publishProgress, redi
                 status: 'failed',
                 progress_msg: `Ошибка: ${err.message}`,
             }).catch(() => {});
-            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}` });
+            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}`, ...errorProgressFields(err) });
         } else {
             // Отправляем статус «Отменено» через publishProgress (progress-колбэк — no-op)
             try {

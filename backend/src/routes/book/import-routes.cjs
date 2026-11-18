@@ -7,6 +7,19 @@ const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
 const { publishProgress } = require('../../services/progress-pubsub.cjs');
+
+// The 400 body of an analysis that failed (owner, step 6): a reasoning model
+// that spent its whole budget gets its code and who can change the provider
+// (system → the administrator, personal → settings/ai); everything else keeps
+// the historical { error } body.
+function analysisErrorBody(err) {
+    const body = { error: (err && err.message) || 'unknown error' };
+    if (err && err.code === 'reasoning_budget_exhausted') {
+        body.code = err.code;
+        if (err.providerSource) body.provider_source = err.providerSource;
+    }
+    return body;
+}
 // S-4: filename grammar composed from the canonical owner (bytes unchanged)
 const artifactNaming = require('@animastor/generation').artifactNaming;
 // VBook agent-session store (host-side domain module): import/bootstrap flows
@@ -306,7 +319,7 @@ app.post('/api/v1/book/import', requireUser, singleUpload('file'), async (req, r
         }
     } catch (err) {
         if (err && err.status === 400) console.warn(`[UNIFIED-IMPORT] refused: ${err.code || 'invalid input'}`); else console.error('UNIFIED-IMPORT ERROR:', err);
-        return res.status(400).json({ error: err.message || 'unknown error' });
+        return res.status(400).json(analysisErrorBody(err));
     }
 });
 
@@ -617,7 +630,7 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
             });
         } catch (err) {
             console.error('BOOTSTRAP ERROR:', err);
-            return res.status(400).json({ error: err.message || 'unknown error' });
+            return res.status(400).json(analysisErrorBody(err));
         }
     });
 
@@ -633,7 +646,7 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
             return res.json(result);
         } catch (err) {
             console.error('BOOTSTRAP-NEXT ERROR:', err);
-            return res.status(400).json({ error: err.message || 'unknown error' });
+            return res.status(400).json(analysisErrorBody(err));
         }
     });
 
@@ -888,3 +901,4 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
         }
     });
 };
+module.exports.analysisErrorBody = analysisErrorBody;
