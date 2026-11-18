@@ -45,7 +45,8 @@ const crypto = require('crypto');
 
 const { query } = require('../src/storage/postgres/database');
 const { runMigrations } = require('../src/storage/postgres/schema');
-const { authContext } = require('../src/middleware/auth-context');
+const { authContext, requireIdentityForWrites } = require('../src/middleware/auth-context');
+const authService = require('../src/auth/auth-service');
 const { requireWorkerAuth } = require('../src/middleware/worker-auth-middleware');
 const workerAuth = require('../src/services/worker-auth');
 const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
@@ -68,6 +69,7 @@ function buildApp(redis) {
     const app = express();
     app.use(express.json());
     app.use(authContext);
+    app.use(requireIdentityForWrites); // as backend.cjs
     registerAuthRoutes(app, null, { utils: { log: () => {} } });
     registerWorkerRoutes(app, redis);
 
@@ -245,15 +247,10 @@ describe('Private worker identity & authentication (Phase 1)', () => {
         });
 
         it('guests cannot create workers (401)', async () => {
-            // Anonymous content write elsewhere provisions a guest cookie.
-            const gres = await fetch(`${base}/api/v1/ai/settings`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ provider: 'none' }),
-            });
-            const gSet = typeof gres.headers.getSetCookie === 'function' ? gres.headers.getSetCookie() : [];
-            const gCookie = gSet.find((c) => c.startsWith('animastor_gid='));
-            expect(gCookie).to.be.a('string');
+            // No route mints a guest any more (owner, 18.11): a guest made
+            // before that, through the service.
+            const created = await authService.createGuest();
+            const gCookie = `animastor_gid=${created.token}`;
             const res = await fetch(`${base}/api/v1/workers`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Cookie: gCookie },

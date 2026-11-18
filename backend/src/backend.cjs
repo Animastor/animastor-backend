@@ -348,10 +348,12 @@ const { noStoreForPolling } = require('./middleware/no-store');
 app.use('/api/v1', noStoreForPolling);
 
 // Auth context middleware (session cookie → req.user / req.workspace).
-// Requests without a valid session stay anonymous (pre-auth compatibility —
-// no global requireAuth); authenticated requests get real identity.
-const { authContext, requireBookAccess } = require('./middleware/auth-context');
+// Requests without a valid session stay anonymous; an anonymous write and
+// any anonymous /api/v1/book/* request answer 401 (no guest is minted —
+// owner's decision 18.11).
+const { authContext, requireBookAccess, requireIdentityForWrites } = require('./middleware/auth-context');
 app.use(authContext);
+app.use(requireIdentityForWrites);
 
 // Input guard: book/build ids from the URL, query string and JSON body must
 // match the storage grammar before any route runs (400 otherwise).

@@ -404,11 +404,17 @@ describe('Workspace AI Provider', () => {
             let res = await fetch(`http://localhost:${port}/api/v1/settings/ai/provider`);
             expect(res.status).to.equal(401);
 
-            // Anonymous WRITE is auto-provisioned as guest (authContext), so
-            // PUT creates a provider in the guest workspace and returns meta.
+            // Anonymous WRITE → 401: no guest is minted (owner, 18.11).
+            res = await fetch(`http://localhost:${port}/api/v1/settings/ai/provider`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: 'https://s.example/v1', api_key: 'k' }),
+            });
+            expect(res.status).to.equal(401);
+            // A guest made before that (the service) writes its own workspace.
+            const guest = await require('../src/auth/auth-service').createGuest();
+            const guestCookie = `animastor_gid=${guest.token}`;
             res = await fetch(`http://localhost:${port}/api/v1/settings/ai/provider`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', Cookie: guestCookie },
                 // No workspace id accepted from the body — server takes req.workspace.
                 body: JSON.stringify({ endpoint: 'https://s.example/v1', api_key: 'sk-settings-secret', model: 'sm' }),
             });
@@ -421,12 +427,12 @@ describe('Workspace AI Provider', () => {
             // Invalid endpoint → 400
             const badRes = await fetch(`http://localhost:${port}/api/v1/settings/ai/provider`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', Cookie: guestCookie },
                 body: JSON.stringify({ endpoint: 'not-a-url', api_key: 'sk-x' }),
             });
             expect(badRes.status).to.equal(400);
 
-            // Clean up the auto-provisioned guest workspace (cascades provider + guest rows).
+            // Clean up the guest workspace (cascades provider + guest rows).
             await query(`DELETE FROM workspaces WHERE id = $1`, [putBody.provider.workspace_id]);
         });
     });

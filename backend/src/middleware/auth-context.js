@@ -50,20 +50,16 @@ function identityOf(req) {
 
 /**
  * Authentication context middleware.
- * Resolution order: authenticated session → guest identity → (on /api/v1)
- * auto-provisioned guest. Any lookup failure degrades downward instead of
+ * Resolution order: authenticated session → guest identity (an EXISTING
+ * guest cookie only). Any lookup failure degrades downward instead of
  * 500-ing every request during a transient PG outage.
+ *
+ * Owner's decision 18.11 (VBook v4 step 5): a guest identity is never minted
+ * on any route. An anonymous write — and any anonymous request to
+ * /api/v1/book/* — answers 401 login_required (requireIdentityForWrites);
+ * the fronts open the sign-in window on 401. Guests created before keep
+ * resolving until their workspace expires (register still converts them).
  */
-// Sign-in-only write paths: an anonymous request here must not mint a guest
-// identity (the handlers answer 401 instead).
-const NO_GUEST_PROVISION_PATHS = new Set([
-    '/api/v1/book/import',
-    '/api/v1/book/import-txt',
-    '/api/v1/book/import-text',
-    '/api/v1/book/load-vbook',
-    '/api/v1/generate',
-]);
-
 /** Every value of a cookie name, in header order (compat: single-value parser). */
 function readAllCookies(req, name) {
     if (authService.parseCookieHeaders) {
@@ -120,39 +116,35 @@ async function authContext(req, res, next) {
             }
         }
 
-        // First visit (no cookies): a WRITE under /api/v1 becomes a guest so
-        // the content just created persists inside an owned temporary
-        // workspace. GET/HEAD stay pre-auth (legacy "list all" behaviour, no
-        // throwaway workspace on mere browsing); DELETE needs no fresh
-        // identity. Outside /api/v1 (/health, /metrics, /gpu/*) stays
-        // unauthenticated.
-        //
-        // EXEMPT: /api/v1/worker* — machine/worker-facing surface. Anonymous
-        // writes there must never auto-provision guest + workspace rows (the
-        // removed legacy heartbeat endpoint was exactly that DB-churn
-        // vector). Worker identity uses its own credential namespace (wrk.*),
-        // never guest auto-provision.
-        // EXEMPT: /api/v1/ai-connector* — same doctrine for the Local AI
-        // Connector (LAC): registration/lifecycle routes are users-only (a
-        // guest workspace must never own long-lived llmc.* credentials), and
-        // an anonymous probe must not mint a guest workspace per hit.
-        const isContentWrite = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
-        if (isContentWrite && req.path && req.path.startsWith('/api/v1')
-            && !req.path.startsWith('/api/v1/auth')
-            && !req.path.startsWith('/api/v1/worker')
-            && !req.path.startsWith('/api/v1/ai-connector')
-            && !req.path.startsWith('/api/v1/admin')
-            && !NO_GUEST_PROVISION_PATHS.has(req.path)) {
-            const created = await authService.createGuest();
-            req.guest = { guestId: created.guestId };
-            req.workspace = { ...created.workspace, status: 'active', expiresAt: created.workspaceExpiresAt };
-            req.auth = { kind: 'guest' };
-            res.setHeader('Set-Cookie', authService.guestCookieHeader(created.token, { secure: isHttpsRequest(req) }));
-        }
     } catch (err) {
         console.error('[AUTH-CONTEXT] identity resolution failed (anonymous for this request):', err.message);
     }
     next();
+}
+
+// Machine surfaces with their own credentials (wrk.* worker tokens, llmc.*
+// connector tokens) and the sign-in routes themselves: they decide on their
+// own, the cookie identity does not apply.
+const ANONYMOUS_WRITE_PREFIXES = ['/api/v1/auth/', '/api/v1/worker/', '/api/v1/ai-connector/'];
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** Is this /api/v1 request one an anonymous caller may make (no 401 here)? */
+function anonymousAllowed(req) {
+    const p = req.path || '';
+    if (!p.startsWith('/api/v1/')) return true; // /health, /metrics, /gpu/*, /internal/* — own auth
+    if (p === '/api/v1/book' || p.startsWith('/api/v1/book/')) return false; // every method
+    if (!WRITE_METHODS.has(req.method)) return true;
+    return ANONYMOUS_WRITE_PREFIXES.some((prefix) => p.startsWith(prefix));
+}
+
+/**
+ * Anonymous write → 401 (owner's decision 18.11). Mounted right after
+ * authContext: no route handler runs, no row of users / workspaces / guests
+ * is created. A guest or a user passes; their rights are checked further on.
+ */
+function requireIdentityForWrites(req, res, next) {
+    if (hasIdentity(req) || anonymousAllowed(req)) return next();
+    return res.status(401).json({ error: 'Authentication required', code: 'login_required' });
 }
 
 /** Production/HTTPS detection (transport concern — stays host-side). */
@@ -369,6 +361,8 @@ function getCurrentWorkspace(req) {
 
 module.exports = {
     authContext,
+    requireIdentityForWrites,
+    anonymousAllowed,
     requireAuth,
     requireAdmin,
     requireWorkspaceMembership,

@@ -30,7 +30,7 @@ const registerAuthRoutes = require('../src/routes/auth-routes.cjs');
 const registerImportRoutes = require('../src/routes/book/import-routes.cjs');
 const registerExportRoutes = require('../src/routes/book/export-routes.cjs');
 const registerRecentBooksRoutes = require('../src/routes/book/recent-books-routes.cjs');
-const { authContext, requireBookAccess, requireAdmin } = require('../src/middleware/auth-context');
+const { authContext, requireIdentityForWrites, requireBookAccess, requireAdmin } = require('../src/middleware/auth-context');
 const inputGuard = require('../src/middleware/input-guard');
 
 // ── raw zip writer (entry names verbatim) ──────────────────────────────
@@ -194,6 +194,7 @@ describe('Book input guard (routes)', function () {
         const app = express();
         app.use(express.json());
         app.use(authContext);
+        app.use(requireIdentityForWrites); // as backend.cjs
         inputGuard.registerParamGuards(app);
         app.use('/api/v1', inputGuard.requestIdsGuard);
         registerAuthRoutes(app, null, { utils: { log: () => {} } });
@@ -823,19 +824,23 @@ describe('Book input guard (routes)', function () {
             expect(r.body.hero_issues.map((i) => i.file)).to.include('characters/Юра.json');
         });
 
-        // Without a session a read is 401; a write mints a fresh guest identity
-        // (auth-context: guest auto-provisioning on /api/v1), and that guest does
-        // not own the book → 403. Either way: refused, nothing changes.
-        it('anonymous → 401 / 403 (fresh guest) on every hero route; nothing changes', async () => {
+        // Owner's decision 18.11 (step 5): no guest is minted on any route —
+        // an anonymous request to /api/v1/book/* is 401, reads and writes alike.
+        it('anonymous → 401 login_required on every hero route; no guest cookie, no users/workspaces/guests rows; nothing changes', async () => {
             const before = contents(dir);
+            const rows = async () => (await query(`SELECT (SELECT COUNT(*)::int FROM users) AS u,
+                (SELECT COUNT(*)::int FROM workspaces) AS w, (SELECT COUNT(*)::int FROM guests) AS g`)).rows[0];
+            const rowsBefore = await rows();
             for (const [m, u, body] of [...heroRoutes(S4, 'yura'), ['POST', `/api/v1/book/${S4}/heroes`, { name: 'Анна' }],
                 ['DELETE', `/api/v1/book/${S4}/hero-files?file=${encodeURIComponent('Юра.json')}`], ['POST', `/api/v1/book/${S4}/looks/assign`, { hero_id: 'yura', look_id: null, chapters: [CH] }],
                 ['PATCH', `/api/v1/book/${S4}/behaviour`, { fields: { 'defaults.max_per_scene': 1 } }]]) {
                 const r = await req(m, u, { body });
-                if (m === 'GET') expect(r.status, `${m} ${u}`).to.equal(401);
-                else expect(r.status, `${m} ${u}`).to.be.oneOf([401, 403]);
+                expect(r.status, `${m} ${u}`).to.equal(401);
+                expect(r.body.code, `${m} ${u}`).to.equal('login_required');
+                expect(r.setCookie || '', `${m} ${u}`).to.not.match(/animastor_gid=/);
             }
             expect(contents(dir)).to.deep.equal(before);
+            expect(await rows()).to.deep.equal(rowsBefore);
         });
 
         it('a stranger (another user\'s book) → 403 on every hero route; nothing changes', async () => {
