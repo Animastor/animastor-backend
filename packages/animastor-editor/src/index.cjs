@@ -9,7 +9,7 @@
 //
 // The package owns: the core book GET/PUT/PATCH/DELETE endpoints (with the
 // read-time enrichment + post-commit derived-state fan-out), entity CRUD
-// (characters/locations/voices/behaviors), structure CRUD
+// (locations), the VBook 4 hero API (heroes, rules, looks, behaviour), structure CRUD
 // (chapters/scenes/units), blank-book scaffolding (POST /book/blank), the
 // read-time chunk repair (read-recovery), the pure scene-patch helpers and
 // the entity-id grammar (transliteration → snake_case, over the pure
@@ -29,6 +29,7 @@
 //   const editorPorts = createEditorPorts({ deps: { ...7 frozen ports... } });
 //   createEditorRoutes(app, redis, { ...routeDeps, editorModel, editorPorts });
 //   createEntityCrudRoutes(app, redis, { ...routeDeps, editorModel, editorPorts });
+//   createHeroRoutes(app, redis, { ...routeDeps, editorModel, editorPorts });
 //
 // This entrypoint is the ONLY public surface (Phase 4.1): the package.json
 // export map exposes exactly this root ("." → "./src/index.cjs") and every
@@ -47,10 +48,12 @@
 const { createEditorModel } = require('./editor-model.cjs');
 const createEditorRoutes = require('./editor-routes.cjs');
 const createEntityCrudRoutes = require('./entity-crud-routes.cjs');
+// VBook 4 hero API (VBOOK_FORMAT_V4 §8.2): heroes, rules, looks, behaviour.
+const createHeroRoutes = require('./hero-routes.cjs');
 // The ports seam (composition-root shape): host legs are wired INTO the
 // frozen 7-port object by the host and injected into the registrars. The
 // module itself holds zero host requires — exporting it through the root
 // keeps the seam documented and typed without opening any internal path.
 const createEditorPorts = require('./editor-ports.cjs');
 
-module.exports = { createEditorModel, createEditorRoutes, createEntityCrudRoutes, createEditorPorts };
+module.exports = { createEditorModel, createEditorRoutes, createEntityCrudRoutes, createHeroRoutes, createEditorPorts };

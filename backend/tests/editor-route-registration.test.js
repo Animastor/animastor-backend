@@ -12,8 +12,9 @@
 //   - both host shims are identity re-exports of the package public API
 //     (same object, 4 factories) and are NOT callable — the call-site
 //     must destructure the factories (no shim-as-function masking);
-//   - createEditorRoutes + createEntityCrudRoutes register the frozen
-//     26-endpoint editor surface (11 core + 15 entity/structure CRUD);
+//   - createEditorRoutes + createEntityCrudRoutes + createHeroRoutes register
+//     the frozen 32-endpoint editor surface (8 core + 9 entity/structure CRUD
+//     + 15 hero routes — VBook 4 step 4);
 //   - the composition-root seams fail closed (missing editorPorts /
 //     editorModel / persistBook throw at registration time);
 //   - book-routes.cjs — the real boot-path call-site — registers the
@@ -34,10 +35,12 @@ const PACKAGE_FACTORIES = [
     'createEditorPorts',
     'createEditorRoutes',
     'createEntityCrudRoutes',
+    'createHeroRoutes',
 ];
 
-// Frozen HTTP surface (editor-route-split.test.js E1 parity — same 26
-// endpoints the pre-extraction host registered).
+// Frozen HTTP surface (editor-route-split.test.js E1 parity): the 26
+// endpoints the pre-extraction host registered, minus the nine 3.1 entity
+// routes and plus the fifteen hero routes of VBook 4 step 4 — 32.
 const EDITOR_ENDPOINTS = [
     ['get', '/api/v1/book/:bookId'],
     ['get', '/api/v1/book/:bookId/source-coverage'],
@@ -46,25 +49,33 @@ const EDITOR_ENDPOINTS = [
     ['patch', '/api/v1/book/:bookId/scene/:chapterId/:sceneId'],
     ['patch', '/api/v1/book/:bookId/metadata'],
     ['patch', '/api/v1/book/:bookId/locations/:locationId'],
-    ['patch', '/api/v1/book/:bookId/characters/:characterId'],
-    ['patch', '/api/v1/book/:bookId/voices/:voiceId'],
-    ['patch', '/api/v1/book/:bookId/behaviors/:characterId'],
     ['delete', '/api/v1/book/:bookId'],
     ['post', '/api/v1/book/blank'],
-    ['post', '/api/v1/book/:bookId/characters'],
-    ['delete', '/api/v1/book/:bookId/characters/:characterId'],
     ['post', '/api/v1/book/:bookId/locations'],
     ['delete', '/api/v1/book/:bookId/locations/:locationId'],
-    ['post', '/api/v1/book/:bookId/voices'],
-    ['delete', '/api/v1/book/:bookId/voices/:voiceId'],
-    ['post', '/api/v1/book/:bookId/behaviors'],
-    ['delete', '/api/v1/book/:bookId/behaviors/:characterId'],
     ['post', '/api/v1/book/:bookId/chapters'],
     ['delete', '/api/v1/book/:bookId/chapters/:chapterId'],
     ['post', '/api/v1/book/:bookId/chapters/:chapterId/scenes'],
     ['delete', '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId'],
     ['post', '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units'],
     ['delete', '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units/:unitId'],
+    // hero-routes.cjs (15) — VBook 4 step 4 (VBOOK_FORMAT_V4 §8.2); the nine
+    // /characters, /voices, /behaviors routes of 3.1 are gone
+    ['get', '/api/v1/book/:bookId/heroes'],
+    ['get', '/api/v1/book/:bookId/heroes/:heroId'],
+    ['post', '/api/v1/book/:bookId/heroes'],
+    ['patch', '/api/v1/book/:bookId/heroes/:heroId'],
+    ['delete', '/api/v1/book/:bookId/heroes/:heroId'],
+    ['delete', '/api/v1/book/:bookId/hero-files'],
+    ['post', '/api/v1/book/:bookId/heroes/:heroId/rules'],
+    ['patch', '/api/v1/book/:bookId/heroes/:heroId/rules/:ruleId'],
+    ['delete', '/api/v1/book/:bookId/heroes/:heroId/rules/:ruleId'],
+    ['post', '/api/v1/book/:bookId/heroes/:heroId/looks'],
+    ['patch', '/api/v1/book/:bookId/heroes/:heroId/looks/:lookId'],
+    ['delete', '/api/v1/book/:bookId/heroes/:heroId/looks/:lookId'],
+    ['post', '/api/v1/book/:bookId/looks/assign'],
+    ['get', '/api/v1/book/:bookId/behaviour'],
+    ['patch', '/api/v1/book/:bookId/behaviour'],
 ];
 
 function fakeApp() {
@@ -111,10 +122,11 @@ describe('editor registration contract (Phase 4.1 regression)', () => {
         expect(Object.keys(shim).sort()).to.deep.equal(PACKAGE_FACTORIES.slice().sort());
     });
 
-    it('the two registrars freeze the 26-endpoint editor surface', () => {
+    it('the three registrars freeze the 32-endpoint editor surface', () => {
         const { app, routes } = fakeApp();
         pkg.createEditorRoutes(app, {}, fakeDeps());
         pkg.createEntityCrudRoutes(app, {}, fakeDeps());
+        pkg.createHeroRoutes(app, {}, fakeDeps());
         expect(sortedRoutes(routes)).to.deep.equal(EXPECTED_SORTED);
     });
 

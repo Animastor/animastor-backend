@@ -1,224 +1,80 @@
 // ======================================================
-// PATCH CHARACTER — global passport persistence
+// PATCH HERO — global passport persistence (VBook 4)
 // ======================================================
-// Verifies the save path the editors use for the Characters tab:
-//   1. PATCH /characters/{id} with flat "passport.<field>" keys → setDeep on
-//      the character → characters.json updated (the generator reads this file)
-//   2. Empty string → null clears a passport field (so clearing persists)
-//   3. video_tokens comma-text → array (normalizeFieldValue)
-//   4. Regression guard: the OLD Android behavior (char.* keys sent to the
-//      scene PATCH with unit_id) must NOT touch characters.json — it only
-//      wrote junk keys into the unit object.
-//
-// Mirrors the project's route-testing pattern (book-metadata-patch.test.js /
-// scene-passport-patch.test.js): it simulates exactly what the PATCH handler
-// does (setDeep over fields + save) rather than spinning up the express app.
+// The save path of the hero card's «Внешность» block (VBOOK_FORMAT_V4 §8.2,
+// HERO_CARD.md §4) — the VBook 4 successor of PATCH /characters/{id}:
+//   1. PATCH /heroes/{id} with "passport.<field>" keys → characters/<id>.json
+//      (the file the generator reads through resolveHeroLook)
+//   2. null / empty string removes a passport field
+//   3. video_tokens comma-text → array
+//   4. the image prompt builder sees the new passport
+//   5. regression guard: the OLD Android behaviour (char.* keys sent to the
+//      scene PATCH with unit_id) never touches the hero file.
+
+'use strict';
 
 const { expect } = require('chai');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
-require('./vbook-test-bindings.cjs');
-const bookModule = require('../../../backend/src/book/index');
-const config = require('../../../backend/src/config/runtime-config');
-const { setDeep, normalizeFieldValue, findUnitInScene } = require('../src/scene-patch-utils.cjs');
+const h = require('./hero-harness.cjs');
 const promptBuilder = require('../../../backend/src/image/prompt-builder');
+const { findUnitInScene } = require('../src/scene-patch-utils.cjs');
 
-const ORIG_BOOKS_DIR = config.BOOKS_DIR;
+const B = 'passport_book_1';
 
-// [v4-pending step 4] PATCH /characters/<id> edits book.characters[i].passport of
-// 3.1. VBook 4: PATCH /heroes/<id> with passport.* paths (VBOOK_FORMAT_V4 §8.2),
-// @animastor/editor 0.5.0, step 4.
-describe.skip('[v4-pending step 4] PATCH CHARACTER — global passport persistence', () => {
+describe('PATCH HERO — global passport persistence (VBook 4)', function () {
+    this.timeout(20000);
+    let t;
 
-    let tmpDir;
-    let bookId;
-    let bookDir;
-
-    const CHAPTER_ID = 'ch-test';
-    const SCENE_ID = 'sc-0001';
-
-    beforeEach(() => {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'character-patch-'));
-        bookId = 'test-char-' + Date.now();
-        bookDir = path.join(tmpDir, bookId);
-        fs.mkdirSync(bookDir, { recursive: true });
-        fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
-
-        config.BOOKS_DIR = tmpDir;
-
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
-            book_id: bookId,
-            vbook_version: '3.1',
-            build_id: 'build-test',
-            state: 'BOOTSTRAPPED',
-            created_at: new Date().toISOString(),
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
-            book_id: bookId,
-            version: '3.0',
-            title: 'Test Book',
-            author: 'Test Author',
-            language: 'ru',
-            structure: { chapters_order: ['chapters/ch-test.json'] },
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'chapters', 'ch-test.json'), JSON.stringify({
-            chapter_id: CHAPTER_ID,
-            chapter_title: 'Chapter 1',
-            scenes: [{
-                scene_id: SCENE_ID,
-                scene_title: 'Opening',
-                type: 'narration',
-                participants: ['hero'],
-                location: { id: 'main_street' },
-                units: [{ id: 'u1', text: 'The hero arrives.' }],
-            }],
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            {
-                id: 'hero',
-                name: 'Hero',
-                passport: {
-                    appearance: 'Tall, dark hair',
-                    clothes: 'dark suit',
-                    video_tokens: ['global video tokens'],
-                },
-            },
-        ], null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'locations.json'), JSON.stringify({
-            main_street: { description: 'Main street', environment: { time: 'day' } },
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({}));
+    beforeEach(async () => {
+        t = await h.startHeroServer();
+        h.writeBook(t.booksDir, B);
     });
+    afterEach(async () => { await t.close(); });
 
-    afterEach(() => {
-        config.BOOKS_DIR = ORIG_BOOKS_DIR;
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
-    });
+    const patch = (fields) => t.api('PATCH', `/api/v1/book/${B}/heroes/sveta`, { fields });
 
-    function readCharacters() {
-        return JSON.parse(fs.readFileSync(path.join(bookDir, 'characters.json'), 'utf8'));
-    }
-
-    function readScene() {
-        return JSON.parse(fs.readFileSync(path.join(bookDir, 'chapters', 'ch-test.json'), 'utf8')).scenes[0];
-    }
-
-    // ── Helper: simulate the PATCH CHARACTER handler ──
-    // (fields = flat dotted keys like "passport.appearance" → setDeep on the char)
-    function applyCharacterFieldsPatch(characterId, fields) {
-        const oldBook = bookModule.loadBook(bookId);
-        const char = (oldBook.characters || []).find(c => c && c.id === characterId);
-        if (!char) throw new Error(`Character ${characterId} not found`);
-
-        for (const [key, value] of Object.entries(fields)) {
-            setDeep(char, key, normalizeFieldValue(key, value));
-        }
-        bookModule.saveBookBundle(oldBook, null);
-        return bookModule.loadBook(bookId) || oldBook;
-    }
-
-    // ── Helper: simulate the OLD Android leak ──
-    // (char.* keys sent to the scene PATCH WITH unit_id → setDeep on the unit)
-    function applyLeakyScenePatch(fields) {
-        const oldBook = bookModule.loadBook(bookId);
-        const targetScene = oldBook.chapters[0].scenes[0];
-        const unit = findUnitInScene(targetScene, 'u1');
-        if (!unit) throw new Error('Unit not found');
-
-        for (const [key, value] of Object.entries(fields)) {
-            setDeep(unit, key, normalizeFieldValue(key, value));
-        }
-        bookModule.saveBookBundle(oldBook, null);
-    }
-
-    // ======================================================
-    // Test 1: passport.appearance lands in characters.json
-    // ======================================================
-    it('persists passport.<field> keys to characters.json', () => {
-        applyCharacterFieldsPatch('hero', {
-            'passport.appearance': 'short blond hair',
-            'passport.clothes': 'leather jacket',
-        });
-
-        const chars = readCharacters();
-        const hero = chars.find(c => c.id === 'hero');
+    it('persists passport.<field> keys to characters/<id>.json', async () => {
+        const r = await patch({ 'passport.appearance': 'short blond hair', 'passport.clothes': 'leather jacket' });
+        expect(r.status).to.equal(200);
+        const hero = t.readHero(B, 'sveta');
         expect(hero.passport.appearance).to.equal('short blond hair');
         expect(hero.passport.clothes).to.equal('leather jacket');
-        // Unrelated field untouched
-        expect(hero.passport.video_tokens).to.deep.equal(['global video tokens']);
+        // unrelated field untouched
+        expect(hero.passport.video_tokens).to.deep.equal(['woman', 'red hair']);
     });
 
-    // ======================================================
-    // Test 2: empty string clears a passport field (null)
-    // ======================================================
-    it('clears a passport field when the editor sends an empty string', () => {
-        applyCharacterFieldsPatch('hero', { 'passport.appearance': '' });
-
-        const chars = readCharacters();
-        const hero = chars.find(c => c.id === 'hero');
-        expect(hero.passport.appearance).to.be.null;
-        expect(hero.passport.clothes).to.equal('dark suit');
+    it('removes a passport field when the editor sends an empty string or null', async () => {
+        await patch({ 'passport.appearance': '' });
+        expect(t.readHero(B, 'sveta').passport).to.not.have.property('appearance');
+        expect(t.readHero(B, 'sveta').passport.clothes).to.equal('green dress');
+        await patch({ 'passport.clothes': null });
+        expect(t.readHero(B, 'sveta').passport).to.not.have.property('clothes');
     });
 
-    // ======================================================
-    // Test 3: video_tokens comma-text → array
-    // ======================================================
-    it('normalizes comma-joined video_tokens text back into an array', () => {
-        applyCharacterFieldsPatch('hero', {
-            'passport.video_tokens': 'short blond hair, leather jacket',
-        });
-
-        const chars = readCharacters();
-        const hero = chars.find(c => c.id === 'hero');
-        expect(hero.passport.video_tokens).to.deep.equal(['short blond hair', 'leather jacket']);
+    it('normalizes comma-joined video_tokens text back into an array', async () => {
+        await patch({ 'passport.video_tokens': 'short blond hair, leather jacket' });
+        expect(t.readHero(B, 'sveta').passport.video_tokens).to.deep.equal(['short blond hair', 'leather jacket']);
     });
 
-    // ======================================================
-    // Test 4: the generator reads the updated passport
-    // ======================================================
-    it('image prompt builder sees the updated global passport', () => {
-        applyCharacterFieldsPatch('hero', {
-            'passport.appearance': 'tall and thin, grey eyes',
-            'passport.clothes': 'long grey coat',
-        });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        const out = promptBuilder.buildCharacters(scene, null, book.chapters[0], book);
+    it('the image prompt builder sees the updated global passport', async () => {
+        await patch({ 'passport.appearance': 'tall and thin, grey eyes', 'passport.clothes': 'long grey coat' });
+        const book = h.bookModule.loadBook(B);
+        const chapter = book.chapters[1];
+        const out = promptBuilder.buildCharacters(chapter.scenes[0], null, chapter, book);
         expect(out).to.have.length(1);
         expect(out[0]).to.include('tall and thin, grey eyes');
         expect(out[0]).to.include('long grey coat');
     });
 
-    // ======================================================
-    // Test 5: regression — old Android leak never touches characters.json
-    // ======================================================
-    it('char.* keys sent to the scene PATCH must NOT reach characters.json', () => {
-        // Before: canonical appearance
-        expect(readCharacters()[0].passport.appearance).to.equal('Tall, dark hair');
-
-        // The OLD Android save pushed the whole fieldValues (char.<id>.passport.*)
-        // into the scene PATCH with unit_id — the server setDeep'd them into the
-        // unit. Characters.json must stay untouched.
-        applyLeakyScenePatch({
-            'char.hero.passport.appearance': 'short hair',
-            'char.hero.passport.clothes': 'leather jacket',
+    it('char.* keys sent to the scene PATCH must NOT reach the hero file', async () => {
+        const before = JSON.stringify(t.readHero(B, 'sveta'));
+        const r = await t.api('PATCH', `/api/v1/book/${B}/scene/${h.CH2}/sc-00000003`, {
+            unit_id: 'iu-00000003',
+            fields: { 'char.sveta.passport.appearance': 'short hair', 'char.sveta.passport.clothes': 'leather jacket' },
         });
-
-        const chars = readCharacters();
-        expect(chars[0].passport.appearance).to.equal('Tall, dark hair');
-        expect(chars[0].passport.clothes).to.equal('dark suit');
-
-        // The junk DID land in the unit — that is exactly why the leak is wrong
-        // (it saves "successfully" while persisting nothing the generator reads).
-        const scene = readScene();
-        expect(findUnitInScene(scene, 'u1')).to.have.property('char');
+        expect(r.status).to.equal(200);
+        expect(JSON.stringify(t.readHero(B, 'sveta'))).to.equal(before);
+        // the junk DID land in the unit — that is exactly why the leak is wrong
+        const scene = t.readChapter(B, h.CH2).scenes[0];
+        expect(findUnitInScene(scene, 'iu-00000003')).to.have.property('char');
     });
 });

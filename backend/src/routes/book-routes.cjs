@@ -14,8 +14,10 @@
 // docs/architecture/editor-module-extraction-audit.md §13): core book
 // CRUD + entity/structure CRUD moved there, registered below.
 //   editor-routes.cjs       - GET/PUT/PATCH book, DELETE, source-coverage, cover
-//   entity-crud-routes.cjs  - add/delete characters, locations, voices,
-//                             behaviors, chapters, scenes, units; POST /blank
+//   entity-crud-routes.cjs  - add/delete locations, chapters, scenes,
+//                             units; POST /blank
+//   hero-routes.cjs         - VBook 4 heroes, rules, looks, looks/assign,
+//                             hero-files, behaviour (VBOOK_FORMAT_V4 §8.2)
 //
 // Previously extracted sub-registrars:
 //   status-routes.cjs    - status endpoints
@@ -42,9 +44,10 @@ module.exports = function(app, redis, deps) {
     // TypeError) and silently dropped the entity/structure CRUD leg.
     // editorModel/editorPorts are wired at the composition root
     // (backend.cjs routeDeps) and ride in via deps.
-    const { createEditorRoutes, createEntityCrudRoutes } = require('./editor/index.cjs');
+    const { createEditorRoutes, createEntityCrudRoutes, createHeroRoutes } = require('./editor/index.cjs');
     createEditorRoutes(app, redis, deps);
     createEntityCrudRoutes(app, redis, deps);
+    createHeroRoutes(app, redis, deps);
 
     // Import and bootstrap routes
     require('./book/import-routes.cjs')(app, redis, deps);

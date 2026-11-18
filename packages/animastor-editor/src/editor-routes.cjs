@@ -10,16 +10,18 @@
 // the editorPorts seam wired at the composition root
 // (src/editor-ports.cjs), the playerPorts analog.
 //
-// 11 endpoints: GET book, GET source-coverage, GET cover, PUT book,
-// PATCH scene/metadata/locations/characters/voices/behaviors, DELETE book.
+// 8 endpoints: GET book, GET source-coverage, GET cover, PUT book,
+// PATCH scene/metadata/locations, DELETE book (VBook 4 step 4 removed
+// PATCH characters/voices/behaviors — heroes: ./hero-routes.cjs).
 
 const { setDeep, findUnitInScene, normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cjs');
 const { recoverMissingRedisChunks } = require('./read-recovery.cjs');
-const voiceModel = require('@animastor/vbook-runtime/voice');
 // VBook 4 (VBOOK_FORMAT_V4): the model is { manifest, book, bible, locations,
-// behaviour, heroes, hero_issues, chapters }. The 3.1 entity routes below are
-// gated until the hero API of step 4 replaces them (see ./vbook4-pending.cjs).
-const { behaviorCharacters, legacyEntityGate, legacyBodyKeys } = require('./vbook4-pending.cjs');
+// behaviour, heroes, hero_issues, chapters }. Heroes are edited through the
+// hero routes (./hero-routes.cjs); the 3.1 routes /characters, /voices,
+// /behaviors are gone (step 4).
+const { legacyBodyKeys, enrichHero, stripComputed } = require('./hero-api.cjs');
+const { joinInside, isValidBuildId } = require('@animastor/vbook-runtime/safe-paths');
 const {
     isUnsupportedVersionError, unsupportedVersionBody,
 } = require('@animastor/vbook-runtime/vbook-version.cjs');
@@ -53,6 +55,14 @@ module.exports = function(app, redis, deps) {
     const IMAGE_PROMPT_MAX_CHARS = editorPorts.promptLimit;
     const PROMPT_PATH_KEYS = new Set(['image.prompt', 'visual.prompt', 'video.action']);
 
+    // <outputRoot>/<build_id> — where a hero's reference files live (read only).
+    function buildDirOf(bookData) {
+        const root = editorPorts.outputRoot;
+        const buildId = bookData && bookData.manifest && bookData.manifest.build_id;
+        if (!root || !isValidBuildId(buildId)) return null;
+        try { return joinInside(root, buildId); } catch (_) { return null; }
+    }
+
     function promptLengthError(field, value) {
         return `Field "${field}" is ${value.length} chars — exceeds the ${IMAGE_PROMPT_MAX_CHARS}-char limit for a frame prompt. It looks like a large text block was pasted in; please shorten it.`;
     }
@@ -63,6 +73,55 @@ module.exports = function(app, redis, deps) {
             err.statusCode = 400;
             throw err;
         }
+    }
+
+    // ── scene look fields (VBOOK_FORMAT_V4 §4a.3, §4a.4) ──────────────
+    const LOOK_PATCH_FIELDS = ['appearance', 'clothes', 'video_tokens'];
+    const SNAKE_ID = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
+    function sceneLookKeyProblem(key, value) {
+        const parts = key.split('.');
+        if (parts[0] === 'looks') {
+            if (parts.length !== 2 || !SNAKE_ID.test(parts[1])) return 'looks.<hero_id>';
+            if (value !== null && value !== '' && (typeof value !== 'string' || (value !== 'base' && !SNAKE_ID.test(value)))) {
+                return 'looks.<hero_id>: a look id, "base" or null';
+            }
+            return null;
+        }
+        if (parts[0] === 'look_patch') {
+            if (parts.length !== 3 || !SNAKE_ID.test(parts[1]) || !LOOK_PATCH_FIELDS.includes(parts[2])) {
+                return `look_patch.<hero_id>.<${LOOK_PATCH_FIELDS.join('|')}>`;
+            }
+            return null;
+        }
+        return null;
+    }
+    /** Set or (null / '') remove one look field of a scene; empty maps are dropped. */
+    function setSceneLookField(sceneObj, key, value) {
+        const parts = key.split('.');
+        const v = normalizeFieldValue(key, value);
+        const map = parts[0];
+        if (parts.length === 2) {
+            if (v === null || v === undefined) {
+                if (sceneObj[map]) delete sceneObj[map][parts[1]];
+            } else {
+                if (!sceneObj[map] || typeof sceneObj[map] !== 'object') sceneObj[map] = {};
+                sceneObj[map][parts[1]] = v;
+            }
+        } else {
+            const heroId = parts[1];
+            const field = parts[2];
+            if (v === null || v === undefined) {
+                if (sceneObj[map] && sceneObj[map][heroId]) {
+                    delete sceneObj[map][heroId][field];
+                    if (Object.keys(sceneObj[map][heroId]).length === 0) delete sceneObj[map][heroId];
+                }
+            } else {
+                if (!sceneObj[map] || typeof sceneObj[map] !== 'object') sceneObj[map] = {};
+                if (!sceneObj[map][heroId] || typeof sceneObj[map][heroId] !== 'object') sceneObj[map][heroId] = {};
+                sceneObj[map][heroId][field] = v;
+            }
+        }
+        if (sceneObj[map] && typeof sceneObj[map] === 'object' && Object.keys(sceneObj[map]).length === 0) delete sceneObj[map];
     }
 
     function findOversizedPromptInScene(sceneObj) {
@@ -171,9 +230,13 @@ module.exports = function(app, redis, deps) {
                 console.warn(`[BOOK-RECOVER] ${bookId}: chunk recovery failed: ${chunkErr.message}`);
             }
 
-            // VBook 4: the model as it is — { manifest, book, bible, locations,
+            // VBook 4: the model — { manifest, book, bible, locations,
             // behaviour, heroes, hero_issues, chapters, scene_list }. There is
             // no compatible projection of characters / voices / behaviors (§1.5).
+            // Heroes carry the computed fields of §8.2 (rev, voice.reference_state,
+            // voice.reference_outdated, image_refs[].state) — never stored.
+            const buildDir = buildDirOf(bookData);
+            bookData.heroes = (bookData.heroes || []).map((h) => enrichHero(h, buildDir));
             return res.json(bookData);
         } catch (err) {
             console.error('[GET BOOK] Error:', err.message);
@@ -217,8 +280,13 @@ module.exports = function(app, redis, deps) {
                     message: 'characters, voices and behaviors are not part of VBook 4 — heroes live in `heroes`',
                 });
             }
-            // hero_issues is computed on load and never stored.
+            // hero_issues and the computed hero fields (rev, reference_state, …)
+            // are computed on load and never stored.
             delete updatedBookData.hero_issues;
+            delete updatedBookData.scene_list;
+            if (Array.isArray(updatedBookData.heroes)) {
+                updatedBookData.heroes = updatedBookData.heroes.map(stripComputed);
+            }
 
             let oldBook;
             try {
@@ -381,12 +449,28 @@ module.exports = function(app, redis, deps) {
                     if (textChanged) rebuildFullText(targetScene);
                     log(`[PATCH BOOK] ${bookId}/${chapterId}/${sceneId}/${unit_id}: fields=${Object.keys(fields).join(', ')}`);
                 } else {
+                    // VBook 4 (§4a): a scene overrides a hero's look by
+                    // `looks.<hero_id>` (a look id, "base" or null) and edits single
+                    // fields by `look_patch.<hero_id>.<field>`. scene.passport is gone.
+                    const legacy = Object.keys(fields).filter((k) => k === 'passport' || k.startsWith('passport.'));
+                    if (legacy.length > 0) {
+                        return res.status(400).json({
+                            error: 'legacy_field', fields: legacy,
+                            message: 'scene.passport is not part of VBook 4 — use looks.<hero_id> and look_patch.<hero_id>.<field>',
+                        });
+                    }
+                    for (const key of Object.keys(fields)) {
+                        const lookProblem = sceneLookKeyProblem(key, fields[key]);
+                        if (lookProblem) return res.status(400).json({ error: 'invalid_look_field', field: key, message: lookProblem });
+                    }
                     for (const [key, value] of Object.entries(fields)) {
+                        if (key.startsWith('looks.') || key.startsWith('look_patch.')) {
+                            setSceneLookField(targetScene, key, value);
+                            continue;
+                        }
                         // scene_title → scene_title, location.id → location.id, env.time → location.environment.time
                         const resolvedKey = key.startsWith('env.') ? 'location.environment.' + key.slice(4) : key;
                         if (PROMPT_PATH_KEYS.has(resolvedKey)) assertPromptLength(resolvedKey, value);
-                        // video_tokens (passport.*.video_tokens) is edited as comma-joined text —
-                        // normalizeFieldValue splits it back into an array (agent scheme format).
                         setDeep(targetScene, resolvedKey, normalizeFieldValue(resolvedKey, value));
                         // Special handling for participants (comma-separated string → array)
                         if (key === 'participants' && typeof value === 'string') {
@@ -599,169 +683,6 @@ module.exports = function(app, redis, deps) {
             });
         } catch (err) {
             console.error('[PATCH LOCATION] Error:', err.message);
-            return res.status(500).json({ error: err.message });
-        }
-    });
-
-    // ======================================================
-    // PATCH BOOK CHARACTER (name + passport) — targeted edit.
-    // The Android EditFragment renders these editable but its save path
-    // routes char.*/voice.* keys into the scene object (setDeep junk) —
-    // this endpoint makes character/voice edits actually persist (06 §15).
-    // ======================================================
-    app.patch('/api/v1/book/:bookId/characters/:characterId', legacyEntityGate, async (req, res) => {
-        try {
-            const { bookId, characterId } = req.params;
-            const { fields } = req.body;
-
-            if (!fields || typeof fields !== 'object' || Object.keys(fields).length === 0) {
-                return res.status(400).json({ error: 'Provide "fields" object' });
-            }
-
-            const oldBook = editorModel.read(bookId);
-            if (!oldBook) return res.status(404).json({ error: 'Book not found' });
-
-            const char = (oldBook.characters || []).find(c => c && c.id === characterId);
-            if (!char) {
-                return res.status(404).json({ error: `Character ${characterId} not found` });
-            }
-
-            const bookBeforePatch = JSON.parse(JSON.stringify(oldBook));
-
-            for (const [key, value] of Object.entries(fields)) {
-                // "passport.appearance" → char.passport.appearance
-                // "passport.video_tokens" — comma-joined text from the editor → array
-                setDeep(char, key, normalizeFieldValue(key, value));
-            }
-            log(`[PATCH CHARACTER] ${bookId}/${characterId}: fields=${Object.keys(fields).join(', ')}`);
-
-            editorModel.commit(oldBook, null);
-
-            const newBook = editorModel.read(bookId) || oldBook;
-            const diff = bookDiff.computeBookDiff(bookBeforePatch, newBook);
-
-            if (diff.dirty_scenes.length > 0) {
-                try {
-                    await storage.bookSync.reconcileFromDiff(bookId, diff.dirty_scenes, newBook);
-                    await sceneAssetsRepo.bumpSceneVersions(bookId, diff.dirty_scenes);
-                    for (const ds of diff.dirty_scenes) {
-                        const ids = ds.changes?.units?.unit_ids;
-                        if (ids && Array.isArray(ids) && ids.length > 0) {
-                            await sceneAssetsRepo.setDirtyUnitIds(bookId, ds.chapter_id, ds.scene_id, ids);
-                        }
-                    }
-                } catch (syncErr) {
-                    console.warn(`[PATCH CHARACTER] PG reconcile/bump failed: ${syncErr.message}`);
-                }
-            }
-
-            return res.json({
-                saved: true, book_id: bookId, character_id: characterId,
-                dirty_scenes: diff.dirty_scenes.length,
-            });
-        } catch (err) {
-            console.error('[PATCH CHARACTER] Error:', err.message);
-            return res.status(500).json({ error: err.message });
-        }
-    });
-
-    // ======================================================
-    // PATCH BOOK VOICE (timbre / manner) — targeted edit.
-    // ======================================================
-    app.patch('/api/v1/book/:bookId/voices/:voiceId', legacyEntityGate, async (req, res) => {
-        try {
-            const { bookId, voiceId } = req.params;
-            const { fields } = req.body;
-
-            if (!fields || typeof fields !== 'object' || Object.keys(fields).length === 0) {
-                return res.status(400).json({ error: 'Provide "fields" object' });
-            }
-
-            const oldBook = editorModel.read(bookId);
-            if (!oldBook) return res.status(404).json({ error: 'Book not found' });
-
-            const voices = oldBook.voices || {};
-            const voice = voices[voiceId];
-            if (!voice) {
-                return res.status(404).json({ error: `Voice ${voiceId} not found` });
-            }
-
-            // VOICE_REFERENCES.md: only the description is edited here; the reference
-            // (audio link + sha256) changes only through the voice-reference API
-            const allowed = new Set(['timbre', 'manner']);
-            const bad = Object.keys(fields).filter((k) => !allowed.has(k));
-            if (bad.length) {
-                return res.status(400).json({ error: `voice fields not editable here: ${bad.join(', ')} (allowed: timbre, manner)` });
-            }
-
-            const bookBeforePatch = JSON.parse(JSON.stringify(oldBook));
-
-            voiceModel.setCharacterVoiceDescription(oldBook, voiceId, {
-                ...(fields.timbre !== undefined ? { timbre: fields.timbre == null ? '' : String(fields.timbre), timbre_source: 'user' } : {}),
-                ...(fields.manner !== undefined ? { manner: fields.manner == null ? '' : String(fields.manner) } : {}),
-            });
-            log(`[PATCH VOICE] ${bookId}/${voiceId}: fields=${Object.keys(fields).join(', ')}`);
-
-            editorModel.commit(oldBook, null);
-
-            const newBook = editorModel.read(bookId) || oldBook;
-            const diff = bookDiff.computeBookDiff(bookBeforePatch, newBook);
-
-            if (diff.dirty_scenes.length > 0) {
-                try {
-                    await storage.bookSync.reconcileFromDiff(bookId, diff.dirty_scenes, newBook);
-                    await sceneAssetsRepo.bumpSceneVersions(bookId, diff.dirty_scenes);
-                } catch (syncErr) {
-                    console.warn(`[PATCH VOICE] PG reconcile/bump failed: ${syncErr.message}`);
-                }
-            }
-
-            return res.json({
-                saved: true, book_id: bookId, voice_id: voiceId,
-                dirty_scenes: diff.dirty_scenes.length,
-            });
-        } catch (err) {
-            console.error('[PATCH VOICE] Error:', err.message);
-            return res.status(500).json({ error: err.message });
-        }
-    });
-
-    // ======================================================
-    // PATCH BOOK BEHAVIOR (per-character, behaviors.characters.<id>).
-    // No dirty-scene propagation: character entries are not read by
-    // generation, and rule matches are snapshotted into unit.behaviour at
-    // pipeline time (architecture/VBOOK_BEHAVIOUR.md) — editing a behaviour
-    // never invalidates ready assets. Fields are merged via setDeep
-    // (unknown keys pass through so a future extension survives round-trips).
-    // ======================================================
-    app.patch('/api/v1/book/:bookId/behaviors/:characterId', legacyEntityGate, async (req, res) => {
-        try {
-            const { bookId, characterId } = req.params;
-            const { fields } = req.body;
-
-            if (!fields || typeof fields !== 'object' || Object.keys(fields).length === 0) {
-                return res.status(400).json({ error: 'Provide "fields" object' });
-            }
-
-            const oldBook = editorModel.read(bookId);
-            if (!oldBook) return res.status(404).json({ error: 'Book not found' });
-
-            const behaviors = behaviorCharacters(oldBook);
-            const behavior = behaviors[characterId];
-            if (!behavior) {
-                return res.status(404).json({ error: `Behavior for character ${characterId} not found` });
-            }
-
-            for (const [key, value] of Object.entries(fields)) {
-                setDeep(behavior, key, value === '' ? null : value);
-            }
-            log(`[PATCH BEHAVIOR] ${bookId}/${characterId}: fields=${Object.keys(fields).join(', ')}`);
-
-            editorModel.commit(oldBook, null);
-
-            return res.json({ saved: true, book_id: bookId, character_id: characterId });
-        } catch (err) {
-            console.error('[PATCH BEHAVIOR] Error:', err.message);
             return res.status(500).json({ error: err.message });
         }
     });

@@ -30,6 +30,8 @@
 //                       the blank-book commit fails (POST /book/blank)
 //   recoverChunks     — read-time Redis chunk repair (read-recovery ctx)
 //   placeholderAudio — recoverMissingPlaceholders (read-repair leg)
+//   outputRoot        — artifact root (string), read-only: state of the
+//                       reference files of a hero in GET /book (VBook 4)
 //
 // IMPORTANT (behavior-neutral split): the port functions are the SAME host
 // function references the contour previously required directly — no
@@ -57,6 +59,7 @@ module.exports = function createEditorPorts({ deps }) {
         sceneAssetsRepo, placeholderAudio,
         auditCoverage, promptLimit,
         purge, resolveOwnership, rollbackOwnership, recoveryCtx,
+        outputRoot,
     } = deps;
 
     // ── PG scene-assets port ────────────────────────────
@@ -83,5 +86,10 @@ module.exports = function createEditorPorts({ deps }) {
         resolveOwnership,
         rollbackOwnership,
         recoveryCtx,
+        // VBook 4 (§8.2): the artifact root, to compute the state of a hero's
+        // reference files (voice.reference_state, image_refs[].state) for the
+        // API — <outputRoot>/<build_id>/voices|refs/… Read only.
+        // Passed through as given (identity, like every other leg).
+        outputRoot,
     };
 };

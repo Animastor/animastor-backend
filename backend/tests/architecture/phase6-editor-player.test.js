@@ -277,14 +277,13 @@ describe('T6: contour routes do not gain new implementation-detail deps', () => 
             // with the split (audit F3).
             './scene-patch-utils.cjs',
             './read-recovery.cjs',
-            // VBook 4 step 1: gate of the 3.1 entity routes; deleted with them in step 4.
-            './vbook4-pending.cjs',
+            // VBook 4 step 4: pure hero helpers of the package (computed hero
+            // fields of GET /book, legacy body keys of PUT /book).
+            './hero-api.cjs',
         ],
         'packages/animastor-editor/src/entity-crud-routes.cjs': [
             './entity-id.js',
             './scene-patch-utils.cjs',
-            // VBook 4 step 1: gate of the 3.1 entity routes; deleted with them in step 4.
-            './vbook4-pending.cjs',
             // The id grammar is the VBook runtime package export (bare
             // specifier — not a relative edge, not scanned here).
         ],

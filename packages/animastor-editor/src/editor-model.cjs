@@ -26,6 +26,11 @@
 // tests/architecture/phase6-editor-player.test.js.
 
 const bookModel = require('@animastor/vbook-runtime/book-model.cjs');
+// Hero files (VBOOK_FORMAT_V4 §10.1): point writes of ONE hero go through the
+// character store of the runtime — the only writer of characters/<id>.json —
+// never through a rewrite of the whole book.
+const characterStore = require('@animastor/vbook-runtime/character-store.cjs');
+const { getBookDir } = require('@animastor/vbook-runtime/lazy-book/paths');
 
 /**
  * Create the Editor model facade.
@@ -38,6 +43,8 @@ function createEditorModel(deps = {}) {
     if (typeof persist !== 'function') {
         throw new Error('createEditorModel requires persistBook (the canonical bundle writer)');
     }
+    const store = deps.characterStore || characterStore;
+    const bookDirOf = deps.getBookDir || getBookDir;
 
     return {
         read(bookId, options) {
@@ -46,6 +53,23 @@ function createEditorModel(deps = {}) {
         // VBook 4 saves the book object only (the raw-files mode is gone).
         commit(book) {
             return persist(book);
+        },
+        /**
+         * COMMIT of one hero file (MODIFY happens in the caller's mutator):
+         * every function is synchronous — read, change, validate and the
+         * atomic write run without an await in between, so two requests for
+         * two different heroes never overwrite each other (§10.1).
+         */
+        heroes(bookId) {
+            const dir = bookDirOf(bookId);
+            return {
+                inspect: (heroId) => store.inspectCharacter(dir, heroId),
+                read: (heroId) => store.readCharacter(dir, heroId),
+                create: (hero) => store.writeCharacter(dir, hero),
+                update: (heroId, mutate) => store.updateCharacter(dir, heroId, mutate),
+                remove: (heroId, options) => store.removeCharacter(dir, heroId, options),
+                removeEntry: (name) => store.removeCharacterEntry(dir, name),
+            };
         },
     };
 }

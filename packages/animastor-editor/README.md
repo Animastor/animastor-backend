@@ -3,8 +3,8 @@
 Animastor **Editor** — the book-editing HTTP contour of the Animastor
 backend: core book GET/PUT/PATCH/DELETE (with read-time enrichment and the
 post-commit derived-state fan-out), targeted PATCH endpoints for
-scenes/metadata/locations/characters/voices/behaviors, entity CRUD
-(characters/locations/voices/behaviors), structure CRUD
+scenes/metadata/locations, location CRUD, the VBook 4 hero API (heroes, rules,
+looks, look assignment, broken hero files, book behaviour — 0.5.0), structure CRUD
 (chapters/scenes/units) and blank-book scaffolding (`POST /book/blank`).
 Includes the `createEditorModel` facade over the Canonical Book Model, the
 pure scene-patch helpers and the entity-id grammar (transliteration →
@@ -33,7 +33,7 @@ npm install @animastor/editor
 
 The package exposes a single entrypoint — `require('@animastor/editor')`
 returns `{ createEditorModel, createEditorRoutes, createEntityCrudRoutes,
-createEditorPorts }`. Since Phase 4.1 the export map is root-only:
+createHeroRoutes, createEditorPorts }`. Since Phase 4.1 the export map is root-only:
 deep imports (`@animastor/editor/...`, `@animastor/editor/src/...`) are
 blocked by the package `exports` map and rejected by the deep-import guard
 (`backend/tests/architecture/editor-package-boundary.test.js`, PB1–PB4).
@@ -65,7 +65,7 @@ npm test           # behavioral tests, no host needed
 
 ```js
 const { createEditorModel, createEditorRoutes, createEntityCrudRoutes,
-        createEditorPorts } = require('@animastor/editor');
+        createHeroRoutes, createEditorPorts } = require('@animastor/editor');
 
 const editorModel = createEditorModel({ bookModel, persistBook: book.saveBookBundle });
 const editorPorts = createEditorPorts({
@@ -78,30 +78,42 @@ const editorPorts = createEditorPorts({
         resolveOwnership,         // workspace-ownership attach (POST /book/blank)
         rollbackOwnership,        // registry-row rollback on failed blank commit
         recoveryCtx,              // read-recovery ctx (redis chunk repair)
+        outputRoot,               // artifact root (read only): state of hero reference files
     },
 });
 createEditorRoutes(app, redis, { ...routeDeps, editorModel, editorPorts });
 createEntityCrudRoutes(app, redis, { ...routeDeps, editorModel, editorPorts });
+createHeroRoutes(app, redis, { ...routeDeps, editorModel, editorPorts });
 ```
 
-## Frozen HTTP surface (26 endpoints)
+## Frozen HTTP surface (32 endpoints)
 
 ```
 GET    /api/v1/book/:bookId                                  PUT    /api/v1/book/:bookId
 PATCH  /api/v1/book/:bookId/scene/:chapterId/:sceneId        PATCH  /api/v1/book/:bookId/metadata
-PATCH  /api/v1/book/:bookId/locations/:locationId            PATCH  /api/v1/book/:bookId/characters/:characterId
-PATCH  /api/v1/book/:bookId/voices/:voiceId                  PATCH  /api/v1/book/:bookId/behaviors/:characterId
+PATCH  /api/v1/book/:bookId/locations/:locationId
 GET    /api/v1/book/:bookId/source-coverage                  GET    /api/v1/book/:bookId/cover
 DELETE /api/v1/book/:bookId                                  POST   /api/v1/book/blank
-POST   /api/v1/book/:bookId/characters                       DELETE /api/v1/book/:bookId/characters/:characterId
 POST   /api/v1/book/:bookId/locations                        DELETE /api/v1/book/:bookId/locations/:locationId
-POST   /api/v1/book/:bookId/voices                           DELETE /api/v1/book/:bookId/voices/:voiceId
-POST   /api/v1/book/:bookId/behaviors                        DELETE /api/v1/book/:bookId/behaviors/:characterId
 POST   /api/v1/book/:bookId/chapters                         DELETE /api/v1/book/:bookId/chapters/:chapterId
 POST   /api/v1/book/:bookId/chapters/:chapterId/scenes       DELETE /api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId
 POST   /api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units
 DELETE /api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units/:unitId
+
+hero API (VBook 4, 0.5.0 — animastor-docs architecture/VBOOK_FORMAT_V4.md §8.2):
+GET    /api/v1/book/:bookId/heroes                           GET    /api/v1/book/:bookId/heroes/:heroId
+POST   /api/v1/book/:bookId/heroes                           PATCH  /api/v1/book/:bookId/heroes/:heroId
+DELETE /api/v1/book/:bookId/heroes/:heroId[?broken=1]        DELETE /api/v1/book/:bookId/hero-files?file=<name>
+POST   /api/v1/book/:bookId/heroes/:heroId/rules             PATCH  /api/v1/book/:bookId/heroes/:heroId/rules/:ruleId
+DELETE /api/v1/book/:bookId/heroes/:heroId/rules/:ruleId
+POST   /api/v1/book/:bookId/heroes/:heroId/looks             PATCH  /api/v1/book/:bookId/heroes/:heroId/looks/:lookId
+DELETE /api/v1/book/:bookId/heroes/:heroId/looks/:lookId     POST   /api/v1/book/:bookId/looks/assign
+GET    /api/v1/book/:bookId/behaviour                        PATCH  /api/v1/book/:bookId/behaviour
 ```
+
+The 3.1 routes `/characters`, `/voices`, `/behaviors` are gone (0.5.0). The voice
+reference of a hero (`/heroes/:heroId/voice/…`) is a host route of the backend
+(it needs the orchestration), not part of this package.
 
 Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github.com/Animastor/animastor-backend/blob/main/backend/tests/architecture/editor-route-split.test.js)
 (E1–E3), [`backend/tests/architecture/editor-extraction-readiness.test.js`](https://github.com/Animastor/animastor-backend/blob/main/backend/tests/architecture/editor-extraction-readiness.test.js)
@@ -115,7 +127,7 @@ Guards: [`backend/tests/architecture/editor-route-split.test.js`](https://github
   (`@animastor/editor/...`) throw `ERR_PACKAGE_PATH_NOT_EXPORTED` at runtime and are
   rejected by the PB1 architecture guard.
 - `createEditorPorts` is public through the root: it is the composition-root seam
-  the host fills before route registration (the frozen 8-port contract above).
+  the host fills before route registration (the frozen 9-port contract above).
 - The pure `cyr-latin-map` transliteration module is **internal**. Hosts that need
   Cyrillic→Latin normalization outside the Editor should keep their own copy (the
   Animastor backend carries a byte-parity twin guarded by the PB5 test) — the
