@@ -19,6 +19,7 @@
 module.exports = function(app, _redis, deps) {
     const authService = (deps && deps.authService) || require('../auth/auth-service');
     const guestRepo = (deps && deps.guestRepo) || require('../storage/postgres/repositories/guest-repo');
+    const { isAdminUser } = require('../middleware/auth-context');
     const log = (deps && deps.utils && deps.utils.log) || (() => {});
 
     /** Detect production/HTTPS context for the Secure cookie flag. */
@@ -135,7 +136,7 @@ module.exports = function(app, _redis, deps) {
                 return res.json({
                     authenticated: true,
                     identity: 'user',
-                    user: { id: req.user.userId, username: req.user.username, display_name: req.user.displayName || null, role: req.user.role || 'user' },
+                    user: { id: req.user.userId, username: req.user.username, display_name: req.user.displayName || null, role: req.user.role || 'user', is_admin: isAdminUser(req.user) },
                     workspace: req.workspace,
                 });
             }

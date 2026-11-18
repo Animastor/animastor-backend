@@ -5,6 +5,14 @@
 //
 // Connector Registry API for Workflow Manager UI.
 
+const { requireAdmin } = require('../middleware/auth-context');
+
+/** GET/HEAD pass; every other method of /api/v1/connectors/* → requireAdmin (401 / 403). */
+function connectorWriteGuard(req, res, next) {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+    return requireAdmin(req, res, next);
+}
+
 module.exports = function(app, redis, deps) {
     const { wfManager } = deps;
     const { log } = deps.utils || { log: console.log };
@@ -14,6 +22,15 @@ module.exports = function(app, redis, deps) {
     // primed from Redis best-effort (assembly-time reads stay synchronous).
     const profileOverride = require('../services/profile-override');
     profileOverride.setRedis(redis);
+
+    // Writes are platform-admin only (owner, VBook v4 step 6). Connectors are
+    // SYSTEM data — the files of ai/connectors/ (add, parameters, status,
+    // bindings, reload) and the one global prompt-profile override in Redis
+    // (PUT /profiles): no workspace owns them, every book of every user is
+    // assembled with them. Reads stay open to any signed-in identity (the
+    // settings screen shows the active profile). /validate writes nothing but
+    // belongs to the same admin editor, so it is admin too.
+    app.use('/api/v1/connectors', connectorWriteGuard);
 
     // ⚠️ IMPORTANT: Static routes MUST be defined BEFORE parameterized routes (:name).
     // Express matches routes top-to-bottom — /grouped would match as :name otherwise.
@@ -349,3 +366,5 @@ module.exports = function(app, redis, deps) {
 
     log('[ROUTES] Connector routes loaded');
 };
+
+module.exports.connectorWriteGuard = connectorWriteGuard;

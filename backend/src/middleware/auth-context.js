@@ -175,18 +175,23 @@ function requireAuth(req, res, next) {
  * login exists for the seeded account (the seeded 'developer' user has no
  * password and cannot log in yet).
  */
-function requireAdmin(req, res, next) {
-    if (!req.user) {
-        return res.status(401).json({ error: 'Authentication required' });
-    }
+/** Platform admin: role='admin' OR the ADMIN_USERNAMES allowlist (the one predicate). */
+function isAdminUser(user) {
+    if (!user) return false;
+    if (user.role === 'admin') return true;
     const allowlist = (process.env.ADMIN_USERNAMES || '')
         .split(',')
         .map(s => s.trim().toLowerCase())
         .filter(Boolean);
-    const isAdminRole = req.user.role === 'admin';
-    const inAllowlist = allowlist.includes(String(req.user.username || '').toLowerCase());
-    if (!isAdminRole && !inAllowlist) {
-        return res.status(403).json({ error: 'Admin access required' });
+    return allowlist.includes(String(user.username || '').toLowerCase());
+}
+
+function requireAdmin(req, res, next) {
+    if (!req.user) {
+        return res.status(401).json({ error: 'Authentication required' });
+    }
+    if (!isAdminUser(req.user)) {
+        return res.status(403).json({ error: 'Admin access required', code: 'admin_required' });
     }
     next();
 }
@@ -365,6 +370,7 @@ module.exports = {
     anonymousAllowed,
     requireAuth,
     requireAdmin,
+    isAdminUser,
     requireWorkspaceMembership,
     checkBookAccess,
     requireBookAccess,
