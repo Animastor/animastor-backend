@@ -94,6 +94,10 @@ function referenceProblem(ref) {
     if (typeof ref.locked !== 'boolean') return 'reference.locked must be boolean';
     if (ref.seed !== undefined && ref.seed !== null && !Number.isSafeInteger(ref.seed)) return 'reference.seed must be an integer';
     if (ref.model !== undefined && ref.model !== null && typeof ref.model !== 'string') return 'reference.model must be a string';
+    if (ref.source_timbre_sha256 !== undefined && ref.source_timbre_sha256 !== null
+        && (typeof ref.source_timbre_sha256 !== 'string' || !SHA256_RE.test(ref.source_timbre_sha256))) {
+        return 'reference.source_timbre_sha256 must be 64 lowercase hex';
+    }
     return null;
 }
 
@@ -111,7 +115,28 @@ function normaliseReference(ref) {
     };
     if (typeof ref.candidate_id === 'string') out.candidate_id = ref.candidate_id;
     if (typeof ref.language === 'string') out.language = ref.language;
+    if (typeof ref.source_timbre_sha256 === 'string') out.source_timbre_sha256 = ref.source_timbre_sha256;
     return out;
+}
+
+/**
+ * sha256 of a timbre text as it is compared (owner's decision 18.11): UTF-8 of
+ * the trimmed string; an empty or absent timbre hashes the empty string.
+ */
+function timbreSha256(timbre) {
+    return crypto.createHash('sha256').update(str(timbre), 'utf8').digest('hex');
+}
+
+/**
+ * Was the reference made from another timbre than the one the hero has now?
+ * Only a reference that remembers its timbre (source_timbre_sha256, written on
+ * pinning since 18.11) can be outdated; without it the answer is false.
+ * Nothing is regenerated automatically — the API only reports it.
+ */
+function isReferenceOutdated(voice) {
+    const ref = voice && isPlainObject(voice.reference) ? voice.reference : null;
+    if (!ref || typeof ref.source_timbre_sha256 !== 'string') return false;
+    return ref.source_timbre_sha256 !== timbreSha256(voice.timbre);
 }
 
 /**
@@ -599,4 +624,6 @@ module.exports = {
     isReferenceVerified,
     resolveReferenceFile,
     referenceState,
+    timbreSha256,
+    isReferenceOutdated,
 };

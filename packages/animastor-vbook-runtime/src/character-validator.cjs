@@ -42,7 +42,7 @@ const KNOWN_KEYS = Object.freeze({
     root: ['schema', 'id', 'name', 'role', 'aliases', 'passport', 'looks', 'voice', 'behaviour', 'image_refs', 'notes'],
     passport: ['appearance', 'clothes', 'video_tokens'],
     voice: ['timbre', 'manner', 'timbre_source', 'reference'],
-    reference: ['file', 'sha256', 'ref_text', 'source', 'model', 'seed', 'verification', 'locked', 'candidate_id', 'language'],
+    reference: ['file', 'sha256', 'ref_text', 'source', 'model', 'seed', 'verification', 'locked', 'candidate_id', 'language', 'source_timbre_sha256'],
     profile: ['baseline', 'quirks', 'reactions'],
     look: ['id', 'label', 'fields', 'image_ref', 'notes', 'evidence'],
     imageRef: ['file', 'sha256', 'kind', 'source', 'model', 'seed', 'locked', 'note'],
@@ -226,6 +226,10 @@ function checkVoiceReference(report, ref, heroId) {
         report.schema(`${path}.verification`, 'is required for a designed reference');
     }
     if (hasOwn(ref, 'locked')) checkBoolean(report, ref.locked, `${path}.locked`);
+    // sha256 of the timbre the reference was made from (owner's decision 18.11)
+    if (hasOwn(ref, 'source_timbre_sha256') && (typeof ref.source_timbre_sha256 !== 'string' || !SHA256_RE.test(ref.source_timbre_sha256))) {
+        report.schema(`${path}.source_timbre_sha256`, 'must be 64 lowercase hex characters');
+    }
     warnUnknownKeys(report, ref, KNOWN_KEYS.reference, path);
 }
 

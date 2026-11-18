@@ -2,6 +2,22 @@
 
 ## 0.5.0 (2026-11-14, unpublished)
 
+### Step 4 additions (2026-11-18)
+
+- `character-store.removeCharacterEntry(bookDir, name)` / `isPlainEntryName` —
+  delete one entry of `characters/` by its file name (a broken file whose name
+  is not a hero id, owner's decision В14); a link is removed as a link.
+- `voice.reference.source_timbre_sha256` — sha256 of the timbre a reference was
+  made from (schema, validator, port); `voice.timbreSha256`,
+  `voice.isReferenceOutdated` (owner's decision 18.11).
+- `heroes.addPossibleDuplicates(bookMeta, entries)` — `book.json`
+  `analysis.possible_duplicates`; the loaders show live entries as
+  non-blocking `hero_issues` `possible_duplicate` (`lazy-book/create.js` writes
+  `analysis.possibleDuplicates` of a window).
+- `heroes.collectSceneHeroIssues(book)` — non-blocking `unknown_participant`
+  for a scene participant that names no hero; the full and draft loaders and
+  `buildBookFromBundle` add it.
+
 VBook 4 — "one file per hero" (animastor-docs `architecture/VBOOK_FORMAT_V4.md`,
 step 1 of §12). **Breaking: VBook 3.1 is not readable and there is no
 migration.**

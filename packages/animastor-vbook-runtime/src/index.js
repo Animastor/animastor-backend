@@ -456,6 +456,7 @@ function buildBookFromBundle(files) {
         chapters,
     };
     book.hero_issues = [...heroWarnings, ...heroes.collectBookHeroIssues(book)];
+    book.hero_issues.push(...heroes.collectSceneHeroIssues(book));
     if (typeof files[SOURCE_FILE] === 'string') book.sourceText = files[SOURCE_FILE];
     return book;
 }
@@ -783,7 +784,7 @@ function readBookBody(bookDir, bookMeta) {
     });
     const body = { bible, locations, behaviour, heroes: cast.heroes, hero_issues: [] };
     const fileIssues = behaviourState.state === 'broken' ? [behaviourState.issue, ...cast.issues] : cast.issues;
-    body.hero_issues = [...fileIssues, ...heroes.collectBookHeroIssues(body)];
+    body.hero_issues = [...fileIssues, ...heroes.collectBookHeroIssues({ ...body, book: bookMeta })];
     if (behaviourState.state === 'broken') {
         console.warn(`[VBOOK] broken ${BEHAVIOUR_FILE}: ${behaviourState.issue.code} — ${behaviourState.issue.message}`);
     }
@@ -817,7 +818,7 @@ function loadBookFromDir(bookId, bookDir) {
             if (text !== null) chapters.push(JSON.parse(text));
         }
 
-        return {
+        const loaded = {
             manifest,
             book: bookMeta,
             bible: body.bible,
@@ -827,6 +828,8 @@ function loadBookFromDir(bookId, bookDir) {
             hero_issues: body.hero_issues,
             chapters,
         };
+        loaded.hero_issues = [...loaded.hero_issues, ...heroes.collectSceneHeroIssues(loaded)];
+        return loaded;
     } catch (err) {
         if (err instanceof BookModelError) throw err;
         console.error(`Failed to load book from dir ${bookId}:`, err.message);

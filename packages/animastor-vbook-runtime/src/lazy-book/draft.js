@@ -16,7 +16,8 @@ const languageDetector = require('@animastor/parser/language-detector');
 const bookCore = require('../index');
 const characterStore = require('../character-store.cjs');
 const { emptyBehaviourGlobals, CHARACTER_SCHEMA } = require('../character-validator.cjs');
-const { NARRATOR_ID } = require('../heroes.cjs');
+const heroes = require('../heroes.cjs');
+const { NARRATOR_ID } = heroes;
 const {
     BookModelError, assertSupportedVbookVersion, SUPPORTED_VBOOK_VERSION,
 } = require('../vbook-version.cjs');
@@ -164,7 +165,7 @@ function loadDraftBook(bookId) {
             }
         }
 
-        return {
+        const loaded = {
             manifest,
             book: bookMeta,
             sourceText,
@@ -175,6 +176,8 @@ function loadDraftBook(bookId) {
             hero_issues: body.hero_issues,
             chapters,
         };
+        loaded.hero_issues = [...loaded.hero_issues, ...heroes.collectSceneHeroIssues(loaded)];
+        return loaded;
     } catch (err) {
         if (err instanceof BookModelError) throw err;
         console.error(`[LAZY-BOOK] Failed to load ${bookId}:`, err.message);

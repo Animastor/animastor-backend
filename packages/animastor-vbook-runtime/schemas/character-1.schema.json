@@ -260,6 +260,10 @@
         },
         "locked": {
           "type": "boolean"
+        },
+        "source_timbre_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "sha256 текста voice.timbre (UTF-8, без пробелов по краям) в момент закрепления. API отдаёт voice.reference_outdated = true, когда текущий timbre даёт другой хэш (решение владельца 18.11)."
         }
       },
       "description": "Закреплённый референс голоса. Поля и проверки — те же, что у порта @animastor/vbook-runtime/voice (решение владельца 14.11, В1): файл только .wav; обязательны file, sha256, ref_text, source, locked; verification обязательна для source=designed (passed | failed), для uploaded допустима и может быть user — транскрипт подтвердил человек.",

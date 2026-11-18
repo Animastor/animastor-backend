@@ -18,7 +18,7 @@ const { assignHeroIds, mergeAliases } = require('../hero-id.cjs');
 const { aliasAdditions, mergeWindowIntoHero } = require('../hero-analysis.cjs');
 const characterStore = require('../character-store.cjs');
 const { CHARACTER_SCHEMA } = require('../character-validator.cjs');
-const { passportHeroes, NARRATOR_ID } = require('../heroes.cjs');
+const { passportHeroes, NARRATOR_ID, addPossibleDuplicates } = require('../heroes.cjs');
 const { LOOK_FIELDS, resolveHeroLook } = require('../looks.cjs');
 
 // scene.look_patch[hero_id] (VBOOK_FORMAT_V4 §4a.4): only the three look
@@ -826,6 +826,16 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         charactersOrder: [NARRATOR_ID, ...mergedCharacters.map(c => c.id)],
     });
     bookMeta.structure.characters_order = castOnDisk.heroes.map(h => h.id);
+    // Possible duplicates of this window (one mention clue, §12г): kept in
+    // book.json and shown as non-blocking hero_issues — owner's decision 18.11.
+    // Ids go through the same map as participants (final ids of this window).
+    const possibleDuplicates = (Array.isArray(analysis.possibleDuplicates) ? analysis.possibleDuplicates : [])
+        .map((d) => d && ({
+            hero_id: heroIdMap.get(d.id) || d.id,
+            of: heroIdMap.get(d.of) || d.of,
+            evidence: d.evidence,
+        }));
+    const duplicatesAdded = addPossibleDuplicates(bookMeta, possibleDuplicates);
     fs.writeFileSync(getBookMetaPath(bookDir), JSON.stringify(bookMeta, null, 2));
 
     const bookState = isFirstWindow ? BookState.BOOTSTRAPPED : BookState.BOOTSTRAPPED;
@@ -846,6 +856,7 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
         aliasesAdded,
         heroIdMap: Object.fromEntries(heroIdMap),
         skippedHeroes,
+        possibleDuplicates: duplicatesAdded,
         locations: Object.keys(locations).length,
         chapter: chapterObj,
         scenes: chapterObj.scenes.length,

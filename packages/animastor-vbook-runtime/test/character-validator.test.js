@@ -21,9 +21,9 @@ const EXAMPLES_DIR = path.join(__dirname, 'fixtures', 'character-examples');
 const DOCS_ROOT = process.env.ANIMASTOR_DOCS_ROOT || path.resolve(__dirname, '../../../../animastor-docs');
 const DOCS_SCHEMAS = path.join(DOCS_ROOT, 'architecture', 'schemas');
 // sha256 of architecture/schemas in animastor-docs, branch design/vbook-v4
-// (schema: after the owner's decisions В1/В3/В4 of 14.11; examples: ba19f69)
+// (schema: after the owner's decisions В1/В3/В4 of 14.11 and source_timbre_sha256 of 18.11; examples: ba19f69)
 const PINNED = {
-    'animastor.character-1.schema.json': 'f758994d88d1433cd82a22a24b75a3a7f09df081154b0876ebc3ebb9bf99c7e1',
+    'animastor.character-1.schema.json': '847414856aaaa8e257e8e0530cfcbd773c5b8d687c9194f4131da6760f39fb7c',
     'examples/narrator.json': '23e83d39207fe5a07fecfbfa85dfb03eaf7a93fcf9e4fcd0a2d85fa658529215',
     'examples/shop_women.json': '639b44d4b817745305de157b3998393ddd2605a3bc751a6a5b8743e20afcc5de',
     'examples/yura.json': 'fd21db3499040caf17b83374e7878938f812dfdd8312fb9d74709e92995f697f',
@@ -150,6 +150,7 @@ const INVALID = [
     ['reserved id source', base({ id: 'source' })],
     ['reference sha256 upper case', base({ voice: { reference: reference({ sha256: 'A'.repeat(64) }) } })],
     ['reference sha256 short', base({ voice: { reference: reference({ sha256: 'abc' }) } })],
+    ['reference source_timbre_sha256 not hex (18.11)', base({ voice: { reference: reference({ source_timbre_sha256: 'nope' }) } })],
     ['reference file absolute', base({ voice: { reference: reference({ file: '/voices/yura/a.wav' }) } })],
     ['reference file traversal', base({ voice: { reference: reference({ file: 'voices/yura/../../a.wav' }) } })],
     ['reference file leading traversal', base({ voice: { reference: reference({ file: '../voices/yura/a.wav' }) } })],

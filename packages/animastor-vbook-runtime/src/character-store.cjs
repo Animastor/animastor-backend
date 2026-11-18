@@ -350,6 +350,44 @@ function removeCharacter(bookDir, heroId, options = {}) {
     return true;
 }
 
+/**
+ * Is `name` one plain entry name of characters/? No separators, no NUL or
+ * control characters, not "." / "..", not a service (dot) file. Any other
+ * Unicode is fine: a broken file may be called "Юра.json" or "notes.txt".
+ */
+function isPlainEntryName(name) {
+    return typeof name === 'string' && name.length > 0 && name.length <= 255
+        && !/[\/\\\x00-\x1f\x7f]/.test(name) && name !== '.' && name !== '..' && !name.startsWith('.');
+}
+
+/**
+ * Delete one entry of characters/ by its file name — the way out of §10.3 for a
+ * broken file whose name is not a hero id ("Юра.json", "notes.txt"; owner's
+ * decision В14). The caller decides WHICH names may go (only those listed in
+ * the current hero_issues); this function only guarantees the path: one plain
+ * name inside characters/, a regular file or a symbolic link (the link itself
+ * is removed, never its target), never a directory.
+ * @returns {boolean} false when there is no such entry
+ * @throws {HeroStoreError} invalid_file_name | path_is_link
+ */
+function removeCharacterEntry(bookDir, name) {
+    if (!isPlainEntryName(name)) {
+        throw new HeroStoreError('invalid_file_name', `vbook: invalid hero file name ${JSON.stringify(name)}`);
+    }
+    const dir = charactersDir(bookDir);
+    if (!lstatOrNull(dir)) return false;
+    assertDirNotLink(dir);
+    const file = joinInside(dir, name);
+    if (path.dirname(file) !== dir) {
+        throw new HeroStoreError('invalid_file_name', `vbook: invalid hero file name ${JSON.stringify(name)}`);
+    }
+    const st = lstatOrNull(file);
+    if (!st) return false;
+    if (st.isDirectory()) throw new HeroStoreError('path_is_link', `vbook: ${CHARACTER_DIR}/${name} is a directory`);
+    fs.unlinkSync(file);
+    return true;
+}
+
 /** Parse and validate hero-file text that did not come from characters/ (an archive entry). */
 function parseCharacterText(name, raw) {
     let doc;
@@ -392,4 +430,6 @@ module.exports = {
     writeCharacter,
     updateCharacter,
     removeCharacter,
+    removeCharacterEntry,
+    isPlainEntryName,
 };

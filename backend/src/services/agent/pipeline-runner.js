@@ -410,6 +410,9 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
     // so deterministic merge is guaranteed regardless of execution order.
     let mentions = options.existingMentions || {};
     let charResult = null;
+    // One mention clue is not a merge (§12г): such new heroes go to book.json
+    // and GET /book as non-blocking `possible_duplicate` (owner, 18.11).
+    let possibleDuplicates = [];
     let newLocations = null;
     let analysisOrchestratorResult = null;
     const tAnalysisStart = Date.now();
@@ -485,6 +488,7 @@ async function runPipeline(sessionId, text, existingChars, existingLocs, stepInd
             console.log(`[AGENT] Hero merge: ${JSON.stringify(m.from || m.name || '')} → ${m.to} (${m.reason}: ${m.evidence.map((e) => JSON.stringify(e)).join(', ')})`);
         }
         // One mention clue is not a merge (§12в): reported, the hero stays new.
+        possibleDuplicates = (normalized.possible_duplicates || []).map((d) => ({ id: d.id, of: d.of, evidence: d.evidence || [] }));
         for (const d of normalized.possible_duplicates || []) {
             console.warn(`[AGENT] Possible duplicate: ${JSON.stringify(d.from || d.name || '')} → new ${d.id}, may be ${d.of} (${d.evidence.map((e) => JSON.stringify(e)).join(', ')})`);
         }
@@ -1038,6 +1042,7 @@ if (characters.length > 0) {
         sceneConsumedLength: (progressInfo.nextOffset ?? coverage.next_offset) - sourceOffsetBase,
         nextOffset: progressInfo.nextOffset ?? coverage.next_offset,
         coverage,
+        possibleDuplicates,
     };
 }
 

@@ -182,7 +182,101 @@ function collectBookHeroIssues(book) {
     for (const alias of buildAliasIndex(heroList(book)).ambiguous) {
         issues.push({ code: 'ambiguous_alias', message: `alias "${alias}" is claimed by more than one hero`, blocking: false });
     }
+    issues.push(...possibleDuplicateIssues(book));
     return issues;
+}
+
+// ── possible duplicates (owner's decision 18.11, step 4) ─────────────────
+// The analysis does not merge a new hero with a hero of the book on ONE mention
+// clue (§12г); it keeps the new hero and remembers the doubt in book.json:
+//   book.analysis.possible_duplicates: [{ hero_id, of, evidence: [string] }]
+// The loaders turn every entry whose two heroes both still exist into a
+// NON-blocking hero_issues warning `possible_duplicate` of the new hero. It is a
+// hint for a person: nothing is merged, nothing is refused.
+const MAX_POSSIBLE_DUPLICATES = 200;
+
+function possibleDuplicateList(bookMeta) {
+    const analysis = isPlainObject(bookMeta) && isPlainObject(bookMeta.analysis) ? bookMeta.analysis : null;
+    return analysis && Array.isArray(analysis.possible_duplicates) ? analysis.possible_duplicates : [];
+}
+
+/**
+ * Merge new possible duplicates into book.json metadata (mutates `bookMeta`).
+ * An entry is { hero_id, of, evidence[] }; the pair (hero_id, of) is kept once,
+ * evidence is united. Entries without valid ids are dropped.
+ * @returns {number} entries added
+ */
+function addPossibleDuplicates(bookMeta, entries) {
+    if (!isPlainObject(bookMeta) || !Array.isArray(entries) || entries.length === 0) return 0;
+    const current = possibleDuplicateList(bookMeta).filter((e) => isPlainObject(e));
+    let added = 0;
+    for (const raw of entries) {
+        if (!isPlainObject(raw)) continue;
+        const heroId = raw.hero_id;
+        const of = raw.of;
+        if (!isValidHeroId(heroId) || !isValidHeroId(of) || heroId === of) continue;
+        const evidence = (Array.isArray(raw.evidence) ? raw.evidence : [])
+            .filter((e) => typeof e === 'string' && e.trim()).map((e) => e.trim().slice(0, 200));
+        const existing = current.find((e) => e.hero_id === heroId && e.of === of);
+        if (existing) {
+            const known = new Set(Array.isArray(existing.evidence) ? existing.evidence : []);
+            existing.evidence = [...known, ...evidence.filter((e) => !known.has(e))];
+            continue;
+        }
+        if (current.length >= MAX_POSSIBLE_DUPLICATES) break;
+        current.push({ hero_id: heroId, of, evidence });
+        added++;
+    }
+    if (!isPlainObject(bookMeta.analysis)) bookMeta.analysis = {};
+    bookMeta.analysis.possible_duplicates = current;
+    return added;
+}
+
+function possibleDuplicateIssues(book) {
+    const out = [];
+    for (const e of possibleDuplicateList(book && book.book)) {
+        if (!isPlainObject(e) || !findHero(book, e.hero_id) || !findHero(book, e.of)) continue;
+        const evidence = Array.isArray(e.evidence) ? e.evidence.filter((x) => typeof x === 'string') : [];
+        out.push({
+            hero_id: e.hero_id,
+            code: 'possible_duplicate',
+            of: e.of,
+            evidence,
+            message: `"${e.hero_id}" may be the same person as "${e.of}"${evidence.length ? ` (${evidence.map((x) => JSON.stringify(x)).join(', ')})` : ''}; nothing was merged`,
+            blocking: false,
+        });
+    }
+    return out;
+}
+
+// ── scene participants (owner's decision 18.11, step 4) ──────────────────
+// image and video take a participant ONLY by its exact hero id. An id that
+// names no hero (and no broken hero file either — that one is already a
+// blocking problem of its own) is a non-blocking warning of the book.
+function collectSceneHeroIssues(book) {
+    const known = new Set(heroList(book).filter(isPlainObject).map((h) => h.id));
+    for (const i of Array.isArray(book && book.hero_issues) ? book.hero_issues : []) {
+        if (i && typeof i.hero_id === 'string') known.add(i.hero_id);
+    }
+    const unknown = new Map(); // id → [{chapter_id, scene_id}]
+    for (const ch of Array.isArray(book && book.chapters) ? book.chapters : []) {
+        if (!isPlainObject(ch) || !Array.isArray(ch.scenes)) continue;
+        for (const sc of ch.scenes) {
+            if (!isPlainObject(sc) || !Array.isArray(sc.participants)) continue;
+            for (const p of sc.participants) {
+                if (typeof p !== 'string' || !p || known.has(p)) continue;
+                if (!unknown.has(p)) unknown.set(p, []);
+                unknown.get(p).push({ chapter_id: ch.chapter_id || null, scene_id: sc.scene_id || null });
+            }
+        }
+    }
+    return [...unknown].map(([id, scenes]) => ({
+        code: 'unknown_participant',
+        participant: id,
+        scenes: scenes.slice(0, 50),
+        message: `participant "${id}" is not a hero of this book (${scenes.length} scene${scenes.length === 1 ? '' : 's'}); image and video leave it out`,
+        blocking: false,
+    }));
 }
 
 module.exports = {
@@ -201,4 +295,6 @@ module.exports = {
     heroRules,
     sortHeroes,
     collectBookHeroIssues,
+    collectSceneHeroIssues,
+    addPossibleDuplicates,
 };
