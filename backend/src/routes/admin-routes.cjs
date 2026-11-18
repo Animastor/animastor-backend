@@ -165,10 +165,15 @@ module.exports = function(app, redis) {
                 ? body.model.trim()
                 : (fromStored ? stored.model : null);
 
+            // reasoning settings: body values win, else the stored provider —
+            // the test body is the chat body (ai-reasoning.withReasoning)
+            const reasoning = require('../services/ai-reasoning').reasoningForTest(body, fromStored ? stored : null);
+            if (!reasoning.ok) return res.status(400).json({ ok: false, error: reasoning.error });
             const result = await workspaceAi.testConnection({
                 endpoint: endpoint || undefined,
                 apiKey: apiKey || undefined,
                 model: model || undefined,
+                reasoning: reasoning.value,
             });
 
             // Stamp status when the stored provider was the source and the

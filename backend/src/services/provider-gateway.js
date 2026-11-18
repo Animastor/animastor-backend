@@ -113,6 +113,10 @@ const chat = {
             source: provider.source,
             shared: null,
             workspaceId: null,
+            // provider reasoning settings — the chat body applies them through
+            // ai-reasoning.withReasoning (injected into the assistant engine)
+            disableThinking: provider.disableThinking === true,
+            reasoningEffort: provider.reasoningEffort || null,
             // Only the user-controlled workspace endpoint is an SSRF surface;
             // operator-controlled env config (system fallback) is trusted.
             validatePublic: provider.source === 'workspace' && !!provider.endpoint,

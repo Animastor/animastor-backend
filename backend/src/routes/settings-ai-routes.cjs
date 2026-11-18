@@ -281,10 +281,15 @@ module.exports = function(app) {
                 });
             }
 
+            // reasoning settings: body values win, else the stored provider —
+            // the test body is the chat body (ai-reasoning.withReasoning)
+            const reasoning = require('../services/ai-reasoning').reasoningForTest(body, fromStored ? stored : null);
+            if (!reasoning.ok) return res.status(400).json({ ok: false, error: reasoning.error });
             const result = await workspaceAi.testConnection({
                 endpoint: endpoint || undefined,
                 apiKey: apiKey || undefined,
                 model: model || undefined,
+                reasoning: reasoning.value,
             });
 
             // Persist last_tested_at + status so the UI can show a state.

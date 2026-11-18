@@ -674,7 +674,7 @@ function setChatRequestExtras(fn) { buildChatRequestExtras = typeof fn === 'func
 // (the superset the chat may send). The tool itself is not sent.
 const TEST_TOOL = { type: 'function', function: { name: 'noop', parameters: { type: 'object' } } };
 
-async function testConnection({ endpoint, apiKey, model }) {
+async function testConnection({ endpoint, apiKey, model, reasoning = null }) {
     const base = normalizeEndpoint(endpoint) || process.env.AI_API_BASE_URL || 'https://api.aicredits.in/v1';
     const key = apiKey || process.env.OPENROUTER_API_KEY;
     if (!key) return { ok: false, error: 'No API key configured for this provider' };
@@ -697,7 +697,9 @@ async function testConnection({ endpoint, apiKey, model }) {
             body: JSON.stringify({
                 model: usedModel,
                 messages: [{ role: 'user', content: 'ok' }],
-                ...buildChatRequestExtras({ model: usedModel, baseUrl: base, tools: [TEST_TOOL] }),
+                // + the provider's reasoning settings, exactly as the chat and
+                // the analysis send them (ai-reasoning.withReasoning)
+                ...aiReasoning.withReasoning(buildChatRequestExtras({ model: usedModel, baseUrl: base, tools: [TEST_TOOL] }), reasoning),
                 max_tokens: 1,
                 temperature: 0,
             }),

@@ -17,8 +17,11 @@
 // Both are stored in the provider row (system_ai_providers /
 // workspace_ai_providers) like the other provider fields, exposed in the
 // provider meta, accepted by the admin / settings PUT routes. UI: later (GAP).
-// Only the analysis transport (ai-service.callAI) applies them; the chat
-// assistant (@animastor/assistant) builds its own body.
+// Every /chat/completions body of a provider applies them through THIS module
+// (VBOOK_FORMAT_V4 §12, step 4): the analysis transport (ai-service.callAI —
+// reasoningBodyFields), the chat assistant (@animastor/assistant — withReasoning,
+// injected at the composition root) and the provider connection test
+// (workspace-ai-provider.testConnection — withReasoning).
 
 'use strict';
 
@@ -85,6 +88,40 @@ function reasoningBodyFields(provider) {
 }
 
 /**
+ * Chat body extras (token budget, the Qwen `enable_thinking` switch …) with the
+ * provider's reasoning settings on top. A provider that disables thinking wins
+ * over the model-specific switch: `enable_thinking` is dropped, so the body
+ * never says "think" and "do not think" at once.
+ * @param {object} extras    fields built for the model (may be empty)
+ * @param {object} provider  provider snapshot ({disableThinking, reasoningEffort})
+ * @returns {object} a new object
+ */
+function withReasoning(extras, provider) {
+    const out = { ...(extras || {}) };
+    const fields = reasoningBodyFields(provider);
+    if (fields.chat_template_kwargs && fields.chat_template_kwargs.enable_thinking === false) delete out.enable_thinking;
+    return { ...out, ...fields };
+}
+
+/**
+ * Reasoning settings of a provider under test: the body of the test request
+ * wins (validated like the PUT routes), else the stored provider.
+ * @returns {{ ok: true, value: {disableThinking: boolean, reasoningEffort: string|null} } | { ok: false, error: string }}
+ */
+function reasoningForTest(body = {}, stored = null) {
+    const parsed = parseReasoningInput(body || {});
+    if (!parsed.ok) return parsed;
+    const base = stored ? { disableThinking: stored.disableThinking === true, reasoningEffort: stored.reasoningEffort || null } : { disableThinking: false, reasoningEffort: null };
+    return {
+        ok: true,
+        value: {
+            disableThinking: parsed.value.disableThinking !== undefined ? parsed.value.disableThinking : base.disableThinking,
+            reasoningEffort: parsed.value.reasoningEffort !== undefined ? parsed.value.reasoningEffort : base.reasoningEffort,
+        },
+    };
+}
+
+/**
  * The model spent the whole budget on reasoning and wrote nothing. Repeating
  * the same request gives the same result — the error is not retried.
  */
@@ -106,5 +143,7 @@ module.exports = {
     reasoningMeta,
     nextReasoningColumns,
     reasoningBodyFields,
+    withReasoning,
+    reasoningForTest,
     reasoningExhaustedError,
 };
