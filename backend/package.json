@@ -17,7 +17,7 @@
     "dependencies": {
         "@animastor/ai-agent": "^0.1.0",
         "@animastor/ai-analysis": "file:../packages/animastor-ai-analysis",
-        "@animastor/assistant": "^0.2.0",
+        "@animastor/assistant": "file:../packages/animastor-assistant",
         "@animastor/auth": "^0.1.1",
         "@animastor/contracts": "^0.1.1",
         "@animastor/editor": "file:../packages/animastor-editor",
@@ -25,7 +25,7 @@
         "@animastor/installer": "file:../packages/animastor-installer",
         "@animastor/orchestration": "file:../packages/animastor-orchestration",
         "@animastor/parser": "^0.1.1",
-        "@animastor/player": "^0.1.4",
+        "@animastor/player": "file:../packages/animastor-player",
         "@animastor/url-safety": "^0.1.0",
         "@animastor/vbook-runtime": "file:../packages/animastor-vbook-runtime",
         "adm-zip": "^0.5.10",
