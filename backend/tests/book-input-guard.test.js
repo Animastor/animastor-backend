@@ -200,6 +200,11 @@ describe('Book input guard (routes)', function () {
         const guard = requireBookAccess('bookId');
         app.use('/api/v1/book/:bookId', inputGuard.bookIdPathGuard, (r, s, n) => (
             inputGuard.CREATE_BOOK_SUBPATHS.has(r.params.bookId) ? n() : guard(r, s, n)));
+        // VBOOK_FORMAT_V4 §9 (step 4): the version gate of backend.cjs, after the access guard
+        app.use('/api/v1/book/:bookId', require('../src/middleware/vbook-version-gate').createBookVersionGate({
+            getBookManifest: (id) => require('@animastor/vbook-runtime/book-model.cjs').getBookManifest(id),
+            skip: inputGuard.CREATE_BOOK_SUBPATHS,
+        }));
         app.use('/api/v1/scene/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
         app.use('/api/v1/debug', requireAdmin);
         app.get('/api/v1/debug/ping', (r, s) => s.json({ ok: true }));
@@ -209,6 +214,13 @@ describe('Book input guard (routes)', function () {
         // The editor's GET /book — the route that must answer 409 for a 3.1 book.
         const editor = require('@animastor/editor');
         const bookModel = require('@animastor/vbook-runtime/book-model.cjs');
+        // VBook 4 step 4: the hero API — the refusals of its host guards are below
+        editor.createHeroRoutes(app, null, {
+            book, bookDiff: null, storage: null,
+            editorModel: editor.createEditorModel({ bookModel, persistBook: book.saveBookBundle }),
+            editorPorts: { sceneAssetsRepo: {}, outputRoot: outputDir },
+            utils: { log: () => {} },
+        });
         editor.createEditorRoutes(app, null, {
             book, bookDiff: null, storage: null, bookDeletion: null,
             editorModel: editor.createEditorModel({ bookModel, persistBook: book.saveBookBundle }),
@@ -748,6 +760,154 @@ describe('Book input guard (routes)', function () {
                 expect(r.body.issues.map((i) => [i.file, i.code])).to.deep.equal([['characters/yura.json', 'invalid_json']]);
                 expect(contents(sandbox)).to.deep.equal(before);
             });
+        });
+    });
+    // ══════════════════════════════════════════════════════════════════
+    // VBook 4 step 4 — hero API refusals: anonymous, a stranger's book, a bad
+    // :heroId (one canonical grammar, one segment), "..", a file name that is
+    // not in hero_issues; a 3.1 book → the GET /book 409 for every route
+    // ══════════════════════════════════════════════════════════════════
+    describe('VBook 4 step 4 — hero routes refusals (disk unchanged)', () => {
+        const S4 = 'guard_heroes_s4';
+        const OLD = 'old_book_31_s4';
+        const strangerName = `guard_stranger_${stamp}`;
+        let strangerCookie;
+        let dir;
+        async function ownerWorkspaceId() {
+            const row = (await query('SELECT w.id FROM workspaces w JOIN users u ON u.user_id = w.owner_user_id WHERE u.username = $1 LIMIT 1', [uname])).rows[0];
+            return row.id;
+        }
+        async function own(bookId) {
+            await require('../src/middleware/workspace-ownership').resolveWorkspaceForBook(bookId, { bookTitle: bookId, preferredWorkspaceId: await ownerWorkspaceId() });
+            ownedBookIds.push(bookId);
+        }
+        const heroRoutes = (bookId, heroId) => [
+            ['GET', `/api/v1/book/${bookId}/heroes/${heroId}`],
+            ['PATCH', `/api/v1/book/${bookId}/heroes/${heroId}`, { fields: { name: 'X' } }],
+            ['DELETE', `/api/v1/book/${bookId}/heroes/${heroId}`],
+            ['POST', `/api/v1/book/${bookId}/heroes/${heroId}/rules`, { then: { action: 'x' } }],
+            ['POST', `/api/v1/book/${bookId}/heroes/${heroId}/looks`, { label: 'x', fields: { clothes: 'x' } }],
+        ];
+
+        before(async () => {
+            const r = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: S4, buildId: `build_${S4}` }) });
+            ownedBookIds.push(S4);
+            expect(r.status, JSON.stringify(r.body)).to.equal(200);
+            dir = path.join(booksDir, S4);
+            fs.writeFileSync(path.join(dir, 'characters', 'Юра.json'), '{"schema":"animastor.character/1","id":"yura"}');
+            const reg = await req('POST', '/api/v1/auth/register', { body: { username: strangerName, password: 'guard-pass-42', email: `${strangerName}@example.test` } });
+            expect(reg.status, JSON.stringify(reg.body)).to.be.oneOf([200, 201]);
+            strangerCookie = reg.setCookie.split(',').map((c) => c.trim().split(';')[0]).find((c) => c.startsWith('animastor_session=')) || reg.setCookie.split(';')[0];
+            createdGuestCookies.length = 0;
+            const old = path.join(booksDir, OLD);
+            fs.mkdirSync(path.join(old, 'chapters'), { recursive: true });
+            fs.writeFileSync(path.join(old, 'manifest.json'), JSON.stringify({ vbook_version: '3.1', book_id: OLD, build_id: `build_${OLD}` }));
+            fs.writeFileSync(path.join(old, 'book.json'), JSON.stringify({ title: 'Старая', structure: { chapters_order: [] } }));
+            fs.writeFileSync(path.join(old, 'characters.json'), '[]');
+            await own(OLD);
+        });
+        after(async () => {
+            const u = (await query('SELECT user_id FROM users WHERE username = $1', [strangerName])).rows[0];
+            if (u) {
+                await query('DELETE FROM sessions WHERE user_id = $1', [u.user_id]).catch(() => {});
+                await query('DELETE FROM workspace_members WHERE user_id = $1', [u.user_id]).catch(() => {});
+                await query('DELETE FROM workspaces WHERE owner_user_id = $1', [u.user_id]).catch(() => {});
+                await query('DELETE FROM users WHERE user_id = $1', [u.user_id]).catch(() => {});
+            }
+        });
+
+        it('the owner reads the heroes (the mount works) and sees the broken file in hero_issues', async () => {
+            const r = await req('GET', `/api/v1/book/${S4}/heroes`, { cookie: userCookie });
+            expect(r.status, JSON.stringify(r.body)).to.equal(200);
+            expect(r.body.heroes.map((h) => h.id)).to.deep.equal(['narrator', 'yura']);
+            expect(r.body.hero_issues.map((i) => i.file)).to.include('characters/Юра.json');
+        });
+
+        // Without a session a read is 401; a write mints a fresh guest identity
+        // (auth-context: guest auto-provisioning on /api/v1), and that guest does
+        // not own the book → 403. Either way: refused, nothing changes.
+        it('anonymous → 401 / 403 (fresh guest) on every hero route; nothing changes', async () => {
+            const before = contents(dir);
+            for (const [m, u, body] of [...heroRoutes(S4, 'yura'), ['POST', `/api/v1/book/${S4}/heroes`, { name: 'Анна' }],
+                ['DELETE', `/api/v1/book/${S4}/hero-files?file=${encodeURIComponent('Юра.json')}`], ['POST', `/api/v1/book/${S4}/looks/assign`, { hero_id: 'yura', look_id: null, chapters: [CH] }],
+                ['PATCH', `/api/v1/book/${S4}/behaviour`, { fields: { 'defaults.max_per_scene': 1 } }]]) {
+                const r = await req(m, u, { body });
+                if (m === 'GET') expect(r.status, `${m} ${u}`).to.equal(401);
+                else expect(r.status, `${m} ${u}`).to.be.oneOf([401, 403]);
+            }
+            expect(contents(dir)).to.deep.equal(before);
+        });
+
+        it('a stranger (another user\'s book) → 403 on every hero route; nothing changes', async () => {
+            const before = contents(dir);
+            for (const [m, u, body] of [...heroRoutes(S4, 'yura'), ['GET', `/api/v1/book/${S4}/heroes`], ['POST', `/api/v1/book/${S4}/heroes`, { name: 'Анна' }],
+                ['DELETE', `/api/v1/book/${S4}/hero-files?file=${encodeURIComponent('Юра.json')}`]]) {
+                const r = await req(m, u, { cookie: strangerCookie, body });
+                expect(r.status, `${m} ${u}`).to.equal(403);
+            }
+            expect(contents(dir)).to.deep.equal(before);
+        });
+
+        it('a :heroId outside the one canonical grammar → 400 invalid_hero_id before any handler', async () => {
+            const before = contents(dir);
+            for (const bad of ['Yura', 'yu.ra', 'yura_', '_yura', 'yu__ra', 'a'.repeat(65), encodeURIComponent('юра'), 'yura%20x', '..%2F..%2Fmanifest']) {
+                for (const [m, u, body] of heroRoutes(S4, bad)) {
+                    const r = await req(m, u, { cookie: userCookie, body });
+                    expect(r.status, `${m} ${u}`).to.equal(400);
+                    expect(r.body.code, `${m} ${u}`).to.equal('invalid_hero_id');
+                }
+            }
+            expect(contents(dir)).to.deep.equal(before);
+        });
+
+        it('".." as :heroId sent verbatim (encoded) → 400; a bad :lookId → 400 invalid_look_id', async () => {
+            const http = require('http');
+            for (const [method, raw] of [['GET', `/api/v1/book/${S4}/heroes/%2E%2E`], ['POST', `/api/v1/book/${S4}/heroes/%2e%2e/looks`], ['DELETE', `/api/v1/book/${S4}/heroes/%2E%2E%2Fnarrator`]]) {
+                const status = await new Promise((resolve, reject) => {
+                    const r = http.request({ host: '127.0.0.1', port, method, path: raw, headers: { Cookie: userCookie } }, (res) => { res.resume(); resolve(res.statusCode); });
+                    r.on('error', reject); r.end();
+                });
+                expect(status, raw).to.equal(400);
+            }
+            const look = await req('PATCH', `/api/v1/book/${S4}/heroes/yura/looks/Coat.x`, { cookie: userCookie, body: { fields: { label: 'x' } } });
+            expect(look.status).to.equal(400);
+            expect(look.body.code).to.equal('invalid_look_id');
+        });
+
+        it('hero-files: a name not in hero_issues → 404; a path or ".." → 422; the listed name → deleted', async () => {
+            const before = contents(dir);
+            for (const [name, status] of [['yura.json', 404], ['narrator.json', 404], ['../manifest.json', 422], ['..', 422], ['chapters', 404], [`..%2F..%2F${S4}%2Fbook.json`, 422]]) {
+                const r = await req('DELETE', `/api/v1/book/${S4}/hero-files?file=${name.includes('%') ? name : encodeURIComponent(name)}`, { cookie: userCookie });
+                expect(r.status, name).to.equal(status);
+            }
+            expect(contents(dir)).to.deep.equal(before);
+            const ok = await req('DELETE', `/api/v1/book/${S4}/hero-files?file=${encodeURIComponent('Юра.json')}`, { cookie: userCookie });
+            expect(ok.status, JSON.stringify(ok.body)).to.equal(200);
+            expect(fs.existsSync(path.join(dir, 'characters', 'Юра.json'))).to.equal(false);
+            expect(fs.existsSync(path.join(dir, 'characters', 'yura.json'))).to.equal(true);
+        });
+
+        it('a 3.1 book: generation, analysis, editor and hero routes → 409 with the GET /book body; deleting the book is let through', async () => {
+            const old = path.join(booksDir, OLD);
+            const before = contents(old);
+            const ref = await req('GET', `/api/v1/book/${OLD}`, { cookie: userCookie, lang: 'ru' });
+            expect(ref.status).to.equal(409);
+            for (const [m, u, body] of [
+                ['POST', `/api/v1/book/${OLD}/regenerate`, { scope: 'whole_book' }],
+                ['POST', `/api/v1/book/${OLD}/generate-window`, {}],
+                ['POST', `/api/v1/book/${OLD}/agent/continue`, {}],
+                ['PUT', `/api/v1/book/${OLD}`, { manifest: { book_id: OLD } }],
+                ['GET', `/api/v1/book/${OLD}/heroes`],
+                ['POST', `/api/v1/book/${OLD}/heroes`, { name: 'Анна' }],
+                ['PATCH', `/api/v1/book/${OLD}/heroes/yura`, { fields: { name: 'x' } }],
+            ]) {
+                const r = await req(m, u, { cookie: userCookie, body, lang: 'ru' });
+                expect(r.status, `${m} ${u}`).to.equal(409);
+                expect(r.body, `${m} ${u}`).to.deep.equal(ref.body);
+            }
+            const del = await req('DELETE', `/api/v1/book/${OLD}`, { cookie: userCookie });
+            expect(del.status, 'DELETE /book passes the gate (the route itself is not mounted here)').to.not.equal(409);
+            expect(contents(old)).to.deep.equal(before);
         });
     });
 });

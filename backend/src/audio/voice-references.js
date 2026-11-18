@@ -366,9 +366,13 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
                 mode: 'upload',
                 input_files: [{ name: inputName, rel: up.file, sha256: up.sha256, bytes: up.bytes }],
             }));
+            const userText = typeof voiceScope.ref_text === 'string' && voiceScope.ref_text.trim()
+                ? voiceScope.ref_text.trim().slice(0, 2000) : null;
             writeCandidate(buildId, id, {
                 candidate_id: candId, character_id: id, book_id: bookId, source: 'uploaded', status: 'pending',
                 created_at: new Date().toISOString(), upload: { file: up.file, sha256: up.sha256, bytes: up.bytes },
+                // the text said in the sample, typed by the person at upload (HERO_CARD §6)
+                ...(userText ? { ref_text_user: userText } : {}),
             });
             return units;
         }
@@ -468,9 +472,15 @@ function createVoiceReferences({ outputDir, log = () => {} } = {}) {
             out.transcript_match = cmp.passed;
             if (!cmp.passed) problems.push('transcript_mismatch');
         } else {
-            // uploaded: Whisper proposes ref_text; the user confirms / edits it when locking
-            out.ref_text = out.asr_transcript || '';
-            out.ref_text_source = 'asr';
+            // uploaded: the text the person typed at upload wins; otherwise Whisper
+            // proposes ref_text and the person confirms / edits it when pinning
+            if (typeof prev.ref_text_user === 'string' && prev.ref_text_user.trim()) {
+                out.ref_text = prev.ref_text_user.trim();
+                out.ref_text_source = 'user';
+            } else {
+                out.ref_text = out.asr_transcript || '';
+                out.ref_text_source = 'asr';
+            }
         }
         out.verification = problems.length ? 'failed' : 'passed';
         out.verification_problems = problems;

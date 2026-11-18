@@ -390,6 +390,15 @@ app.use('/api/v1/book/:bookId', inputGuard.bookIdPathGuard, (req, res, next) => 
     if (CREATE_BOOK_SUBPATHS.has(req.params.bookId)) return next();
     return bookAccessGuard(req, res, next);
 });
+// VBOOK_FORMAT_V4 §9: a book of an unsupported format (3.1, no version,
+// newer) answers every book route — generation, analysis, editor — with the
+// 409 body of GET /book; deleting the book stays allowed. Runs AFTER the
+// access guard: a stranger learns nothing about the format of a book.
+const vbookVersionGate = require('./middleware/vbook-version-gate');
+app.use('/api/v1/book/:bookId', vbookVersionGate.createBookVersionGate({
+    getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
+    skip: CREATE_BOOK_SUBPATHS,
+}));
 app.use('/api/v1/scene/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
 app.use('/api/v1/iu-image/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
 app.use('/api/v1/preview/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
@@ -411,6 +420,10 @@ app.use('/api/v1/ai', (req, res, next) => {
     if (/^\/sessions\/[^/]+/.test(req.path)) return next(); // handled above
     return aiBookGuard(req, res, next);
 });
+// The assistant on a book of an unsupported format: the same 409 (§9).
+app.use('/api/v1/ai', vbookVersionGate.createScopedBookVersionGate({
+    getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
+}));
 
 // Request ID + HTTP logging
 app.use((req, res, next) => {
@@ -479,6 +492,9 @@ const chatEngine = createChatEngine(config, {
     aiProfile: require('./services/assistant-profile-loader.cjs').loadAssistantProfile(),
     // Chat fallback base URL — operator env knob passed as injected config.
     aiApiBaseUrl: process.env.AI_API_BASE_URL,
+    // Provider reasoning settings (disable_thinking / reasoning_effort) — the
+    // ONE helper the analysis and the provider test use (VBOOK_FORMAT_V4 §12, step 4).
+    withReasoning: require('./services/ai-reasoning').withReasoning,
 });
 const windowGenerator = require('./services/window-generator.cjs')({
     redis, txtImporter, genSessionRepo, state, activeScenes,
@@ -726,6 +742,9 @@ const routeDeps = {
             // Blank book never got a snapshot — deleteBookSnapshots drops
             // just the fresh books row.
             rollbackOwnership: (bookId) => bookRepo.deleteBookSnapshots(bookId),
+            // VBook 4 (§8.2): artifact root — state of a hero's reference files
+            // in the API (voice.reference_state, image_refs[].state), read only.
+            outputRoot: config.OUTPUT_DIR,
             recoveryCtx: {
                 redis, book, state, activeScenes, config, getAllChunks, saveChunk,
                 isBookRegistered,
