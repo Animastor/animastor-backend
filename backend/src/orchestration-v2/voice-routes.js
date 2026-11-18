@@ -279,7 +279,13 @@ function mountVoiceRoutes(app, { host, editorModel, bookRepo, getPool, log = con
             const written = editorModel.heroes(bookId).update(heroId, (hero) => {
                 const one = { manifest: book.manifest, book: book.book, heroes: [hero] };
                 refs().selectCandidate(one, heroId, candId, { refText: body.ref_text });
-                hero.voice.reference.source_timbre_sha256 = voicePort.timbreSha256(hero.voice.timbre);
+                // only a designed reference comes from the timbre text, so only
+                // it remembers the timbre (owner's decision 18.11, step 5)
+                if (hero.voice.reference.source === 'designed') {
+                    hero.voice.reference.source_timbre_sha256 = voicePort.timbreSha256(hero.voice.timbre);
+                } else {
+                    delete hero.voice.reference.source_timbre_sha256;
+                }
                 reference = hero.voice.reference;
                 return hero;
             });

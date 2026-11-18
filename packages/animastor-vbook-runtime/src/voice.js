@@ -129,13 +129,15 @@ function timbreSha256(timbre) {
 
 /**
  * Was the reference made from another timbre than the one the hero has now?
- * Only a reference that remembers its timbre (source_timbre_sha256, written on
- * pinning since 18.11) can be outdated; without it the answer is false.
+ * Only a DESIGNED reference (synthesised from the timbre text) that remembers
+ * its timbre (source_timbre_sha256, written on pinning since 18.11) can be
+ * outdated; an uploaded recording does not come from the timbre text, so it
+ * never is (owner's decision 18.11, step 5). Without the hash → false.
  * Nothing is regenerated automatically — the API only reports it.
  */
 function isReferenceOutdated(voice) {
     const ref = voice && isPlainObject(voice.reference) ? voice.reference : null;
-    if (!ref || typeof ref.source_timbre_sha256 !== 'string') return false;
+    if (!ref || ref.source !== 'designed' || typeof ref.source_timbre_sha256 !== 'string') return false;
     return ref.source_timbre_sha256 !== timbreSha256(voice.timbre);
 }
 

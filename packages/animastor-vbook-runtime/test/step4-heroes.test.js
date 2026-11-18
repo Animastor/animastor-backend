@@ -145,6 +145,12 @@ describe('VBook 4 step 4 — runtime', () => {
             expect(voice.isReferenceOutdated({ timbre: 'Cold.', reference: ref() })).to.equal(false);
             expect(voice.isReferenceOutdated({ timbre: 'Cold.' })).to.equal(false);
         });
+        it('only a designed reference can be outdated; an uploaded one never is (owner, step 5)', () => {
+            const stale = { source_timbre_sha256: sha('Warm.') };
+            expect(voice.isReferenceOutdated({ timbre: 'Cold.', reference: ref({ ...stale, source: 'designed' }) })).to.equal(true);
+            expect(voice.isReferenceOutdated({ timbre: 'Cold.', reference: ref({ ...stale, source: 'uploaded', verification: 'user' }) })).to.equal(false);
+            expect(voice.isReferenceOutdated({ timbre: 'Cold.', reference: ref({ ...stale, source: undefined }) })).to.equal(false);
+        });
         it('the voice port keeps the key through setCharacterVoiceReference; a malformed value is refused', () => {
             const book = { heroes: [{ schema: 'animastor.character/1', id: 'yura', voice: { timbre: 'Warm.' } }] };
             voice.setCharacterVoiceReference(book, 'yura', ref({ source_timbre_sha256: sha('Warm.') }));

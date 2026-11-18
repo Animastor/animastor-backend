@@ -644,6 +644,14 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect((await worker.put(t, candidateWav({ asr_transcript: 'я пришел домой поздно', verification_model: 'faster-whisper-small' }))).status).to.equal(200);
         const after = (await api('GET', `/api/v1/book/${bookId}/heroes/boris/voice/candidates`)).body.candidates[0];
         expect(after).to.include({ status: 'ready', ref_text: 'Я пришёл домой поздно.', ref_text_source: 'user' });
+        // owner's decision (step 5): an uploaded reference keeps no timbre hash
+        // and is never reference_outdated, whatever the timbre becomes
+        const pin = await api('POST', `/api/v1/book/${bookId}/heroes/boris/voice/reference`, { name: after.name, locked: true });
+        expect(pin.status, JSON.stringify(pin.body)).to.equal(200);
+        expect(pin.body.reference.source).to.equal('uploaded');
+        expect(pin.body.reference).to.not.have.property('source_timbre_sha256');
+        voiceOf(b, 'boris').timbre = 'Another timbre entirely.';
+        expect((await api('GET', `/api/v1/book/${bookId}/heroes/boris/voice/candidates`)).body.reference_outdated).to.equal(false);
         // too large → 413 from the upload limit, nothing stored
         const big = new FormData();
         big.append('file', new Blob([Buffer.alloc(21 * 1024 * 1024)], { type: 'audio/wav' }), 'big.wav');
