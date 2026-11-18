@@ -120,11 +120,13 @@ jobs:
           rev=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMG")
           [ "$rev" = "${{ steps.src.outputs.commit }}" ] || { echo "PROVENANCE FAIL: label $rev" >&2; exit 1; }
 
-          # 3) boot in an isolated network (backend hardcodes redis host 'redis')
+          # 3) boot in an isolated network (the redis container is named
+          #    'redis'; REDIS_HOST/REDIS_PORT/PG_HOST are required by the backend)
           docker network create be-smoke >/dev/null
           docker run -d --name redis --network be-smoke redis:7 >/dev/null
           sleep 5
           docker run -d --name backend --network be-smoke \
+            -e REDIS_HOST=redis -e REDIS_PORT=6379 \
             -e PG_HOST=127.0.0.1 -e PG_PORT=5432 \
             -e OUTPUT_DIR=/tmp/out -e BOOKS_DIR=/tmp/books \
             "$IMG" >/dev/null

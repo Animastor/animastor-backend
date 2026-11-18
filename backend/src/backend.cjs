@@ -309,9 +309,20 @@ const fs = require('fs');
 const { PORT = 3000, HUB_URL = 'https://animastor.org/gpu', BUILD_TTL_HOURS = 48 } = process.env;
 const crypto = require('crypto');
 
-// REDIS_PASSWORD (optional): set together with `requirepass` on the Redis
-// service; unset keeps the historical password-less connection.
-const redis = new Redis({ host: 'redis', port: 6379, ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}) });
+// Infrastructure hosts only from the environment (owner, VBook v4 step 6):
+// REDIS_HOST / REDIS_PORT / PG_HOST missing → the process stops here, before
+// any connection. No short-name default: on the VPS a bare `redis` resolves
+// through the hoster's wildcard search domain to a foreign machine
+// (config/infra-env.js). REDIS_PASSWORD (optional): set together with
+// `requirepass` on the Redis service.
+const infraEnv = require('./config/infra-env');
+try {
+    infraEnv.assertInfraEnv();
+} catch (err) {
+    console.error(`[FATAL] ${err.message}`);
+    process.exit(1);
+}
+const redis = new Redis(infraEnv.redisOptions());
 // Stage 114 — the GPU dispatcher needs the Redis client for the queue
 // idempotency claim and the executor-availability gate (both must run BEFORE
 // a job reaches the hub queue). Registering it here keeps a single

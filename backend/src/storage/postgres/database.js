@@ -1,7 +1,10 @@
 const { Pool } = require('pg');
+const infraEnv = require('../../config/infra-env');
 
+// host: no default (owner, VBook v4 step 6) — PG_HOST is read when the pool
+// is created (getPool) and a missing value throws there; see infra-env.js.
 const POOL_CONFIG = {
-    host: process.env.PG_HOST || 'localhost',
+    host: undefined,
     port: parseInt(process.env.PG_PORT || '5432', 10),
     database: process.env.PG_DB || 'animastor',
     user: process.env.PG_USER || 'animastor',
@@ -45,7 +48,7 @@ function getPool() {
     if (pool) return pool;
     assertNotProductionDbUnderTest();
     assertPasswordConfigured();
-    pool = new Pool(POOL_CONFIG);
+    pool = new Pool({ ...POOL_CONFIG, host: infraEnv.pgHost() });
     pool.on('error', (err) => {
         console.error('[PG] Unexpected pool error:', err.message);
     });
