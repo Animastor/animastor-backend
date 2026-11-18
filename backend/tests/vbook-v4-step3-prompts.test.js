@@ -17,6 +17,18 @@ const promptBuilder = require('../src/image/prompt-builder');
 const videoWorkflows = require('../src/workflows/video/video-workflows');
 
 const build = { buildImagePrompt: promptBuilder.buildImagePrompt, buildVideoPrompt: videoWorkflows.buildVideoPrompt };
+const { collectSceneHeroIssues } = require('@animastor/vbook-runtime/heroes.cjs');
+
+// Deliberate differences from the 3.1 golden (owner's decision 18.11, step 4):
+// image takes a participant ONLY by its exact hero id, like video. Scene s2
+// lists "berlioz" — 3.1 found mikhail_berlioz by the first four letters of a
+// name token, v4 leaves the participant out and reports it as a non-blocking
+// `unknown_participant` of the book. Nothing else differs.
+const BERLIOZ_LINE = 'mikhail_berlioz: Short, plump man, pale and sweating, grey summer suit, straw hat, ';
+const DELIBERATE = {
+    'ch1/s2/u3': (golden) => golden.replace(BERLIOZ_LINE, ''),
+    'ch1/s2/u4': (golden) => golden.replace(BERLIOZ_LINE, ''),
+};
 
 describe('VBook 4 step 3 — image and video prompts of a v4 book equal the 3.1 golden', () => {
     const v4 = fx.allPrompts(fx.bookV4(), build);
@@ -27,8 +39,26 @@ describe('VBook 4 step 3 — image and video prompts of a v4 book equal the 3.1 
     });
 
     for (const key of Object.keys(golden.image)) {
-        it(`image ${key}`, () => expect(v4.image[key]).to.equal(golden.image[key]));
+        if (DELIBERATE[key]) {
+            it(`image ${key} — the golden without the fuzzy participant (deliberate, step 4)`, () => {
+                expect(golden.image[key]).to.include(BERLIOZ_LINE, 'the 3.1 golden had it');
+                expect(v4.image[key]).to.equal(DELIBERATE[key](golden.image[key]));
+            });
+        } else {
+            it(`image ${key}`, () => expect(v4.image[key]).to.equal(golden.image[key]));
+        }
     }
+
+    it('the deliberate differences are exactly the two units of scene s2 (the "berlioz" participant)', () => {
+        const differing = Object.keys(golden.image).filter((k) => v4.image[k] !== golden.image[k]);
+        expect(differing).to.deep.equal(Object.keys(DELIBERATE));
+        expect(Object.keys(golden.video).filter((k) => v4.video[k] !== golden.video[k])).to.deep.equal([]);
+    });
+
+    it('the participant that is not a hero id is a non-blocking warning of the book', () => {
+        const issues = collectSceneHeroIssues(fx.bookV4());
+        expect(issues.map((i) => [i.code, i.participant, i.blocking])).to.deep.equal([['unknown_participant', 'berlioz', false]]);
+    });
     for (const key of Object.keys(golden.video)) {
         it(`video ${key}`, () => expect(v4.video[key]).to.equal(golden.video[key]));
     }

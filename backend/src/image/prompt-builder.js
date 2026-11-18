@@ -62,30 +62,15 @@ function buildCharacters(scenePayload, unit, chapter, book) {
     }
 
     // Heroes with a passport (the former book.characters). A participant is
-    // matched by id, else — as before v4 — by the first four letters of a
-    // name token (an analysis id like "berlioz" → mikhail_berlioz).
+    // taken ONLY by its exact hero id (owner's decision 18.11, VBook 4 step 4):
+    // the fuzzy match by the first four letters of a name token is gone, the
+    // same rule as video. An unknown id is a non-blocking warning of the book
+    // (hero_issues `unknown_participant`), not a guess.
     const heroes = passportHeroes(book);
     const seen = new Set();
     const chars = participantIds
         .filter(id => (seen.has(id) ? false : (seen.add(id), true)))
-        .map(id => {
-            const exact = heroes.find(c => c.id === id);
-            if (exact) return exact;
-            const idNorm = helpers.normalizeForMatch(id);
-            for (const c of heroes) {
-                const cNameNorm = helpers.normalizeForMatch(c.name || '');
-                if (idNorm && cNameNorm) {
-                    const idTokens = new Set(idNorm.split(/\s+/).filter(Boolean));
-                    const nameTokens = cNameNorm.split(/\s+/).filter(Boolean);
-                    if ([...idTokens].some(t => t.length >= 4 && nameTokens.some(nt =>
-                        nt.startsWith(t.slice(0, 4)) || t.startsWith(nt.slice(0, 4))
-                    ))) {
-                        return c;
-                    }
-                }
-            }
-            return null;
-        })
+        .map(id => heroes.find(c => c.id === id) || null)
         .filter(Boolean);
 
     if (!chars.length) return [];
