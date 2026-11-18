@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 (2026-11-18, unpublished)
+
+VBook 4 step 4 (animastor-docs `architecture/VBOOK_FORMAT_V4.md` §8.2). **Breaking.**
+
+- `edit_book` addresses heroes by id: `/heroes/<hero_id>/…` — the segment after
+  `/heroes/` is an id, never an array index; the guard (`normalizeHeroPatches`,
+  inside `applyPatches`) turns it into the index. `add /heroes/<new_id>` appends a
+  hero. Refused with a hint: `/characters`, `/voices`, `/behaviors`,
+  `/behavior_rules`, `/mentions`, `/behavior`; computed `/hero_issues`,
+  `/scene_list`; replacing / removing the whole `/heroes`; index addressing;
+  the id / schema / rev of a hero; `voice.reference` (only the hero card pins a
+  reference); removing the narrator.
+- `add` creates missing intermediate objects (`/heroes/<id>/behaviour/profile`).
+- Edit-mode prompt and the `edit_book` tool describe heroes; participants are
+  mapped from `heroes` (exact name or id, case-insensitive — nothing fuzzy).
+- Removed: `normalizeBehaviorPatches` and the character-delete cascade of
+  `behavior.json` v2 (rules live in the hero file and go with it).
+- `chatRequestExtras(input, ai)` — the model extras plus the provider's
+  `disable_thinking` / `reasoning_effort` through the injected
+  `deps.withReasoning` (the host's `ai-reasoning.js`); both chat routes use it.
+  Without the injection the body is the one of 0.2.0.
+
 ## 0.2.0 (2026-11-10, unpublished)
 
 - Edit-mode prompt and `edit_book` tool describe behavior.json schema v2:

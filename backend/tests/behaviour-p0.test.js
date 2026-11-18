@@ -25,6 +25,7 @@ const { matchSceneBehaviours, behaviourSeed, SEED_SPACE } = require('../src/serv
 const behaviourRules = require('../src/services/agent/behaviour-rules');
 const { BEHAVIOUR_EMOTIONS, sanitizeUnitState } = require('../src/services/agent/behaviour-emotions');
 const { applyBehavioursToWindow } = require('../src/services/agent/behaviour-apply');
+const { heroRules } = require('@animastor/vbook-runtime/heroes.cjs');
 
 const BOOK = 'book_behaviour_test';
 
@@ -695,186 +696,140 @@ describe('VBook 4 — behaviour on disk / in memory / at import', () => {
     });
 });
 
-// [v4-pending step 4] GET/PUT /book with the flat `behaviors` map and
-// PATCH /behaviors/<id> are the 3.1 editor API. VBook 4 answers with heroes and
-// behaviour; the hero API (§8.2) is @animastor/editor 0.5.0, step 4.
-describe.skip('[v4-pending step 4] editor routes — flat API map in, v2 on disk (rules survive)', () => {
-    const config = require('../src/config/runtime-config');
-    const bookModule = require('../src/book/index');
-    const ORIG = config.BOOKS_DIR;
-    let tmp; let bookId; let bookDir; let handlers;
-    const RULE = { id: 'own', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' }, strength: 1, probability: 1, cooldown_iu: 0, priority: 0 };
+// VBook 4 step 4: the editor API of behaviour — GET/PUT /book carry `behaviour`
+// (behaviour.json: defaults + global rules) and the heroes with their own
+// behaviour {profile, rules}; a hero's behaviour is edited through the hero API
+// (VBOOK_FORMAT_V4 §6, §8.2). The flat `behaviors` map and /behaviors are gone.
+describe('editor routes — behaviour.json and hero behaviour in VBook 4 (rules survive)', function () {
+    this.timeout(20000);
+    const harness = require('../../packages/animastor-editor/test/hero-harness.cjs');
+    const B = 'beh_ed_book';
+    let t;
+    const disk = () => JSON.parse(fs.readFileSync(path.join(t.bookDir(B), 'behaviour.json'), 'utf8'));
+    const GLOBAL = { id: 'global.sigh', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
 
-    function res() {
-        return { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; }, set() { return this; }, setHeader() {} };
-    }
-    async function call(key, params, body) {
-        const r = res();
-        await handlers.get(key)({ params, body: body || {}, query: {}, headers: {} }, r);
-        return r;
-    }
-    const disk = () => JSON.parse(fs.readFileSync(path.join(bookDir, 'behavior.json'), 'utf8'));
-
-    beforeEach(() => {
-        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'beh-editor-'));
-        bookId = 'beh-ed-' + Date.now();
-        bookDir = path.join(tmp, bookId);
-        fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
-        config.BOOKS_DIR = tmp;
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({ book_id: bookId, vbook_version: '3.1', build_id: 'b', state: 'BOOTSTRAPPED' }));
-        fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({ book_id: bookId, title: 'T', language: 'ru', structure: { chapters_order: ['chapters/ch-00000001.json'] } }));
-        fs.writeFileSync(path.join(bookDir, 'chapters', 'ch-00000001.json'), JSON.stringify({ chapter_id: 'ch-00000001', scenes: [{ scene_id: 'sc-1', units: [{ id: 'iu-1', text: 'x' }] }] }));
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([{ id: 'hero', name: 'Hero' }, { id: 'side', name: 'Side' }]));
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({ schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'calm' } } }));
-
-        handlers = new Map();
-        const app = {};
-        for (const m of ['get', 'post', 'put', 'patch', 'delete']) {
-            app[m] = (p, ...hs) => handlers.set(`${m.toUpperCase()} ${p}`, hs[hs.length - 1]);
-        }
-        const editorModel = { read: (id) => bookModule.loadBook(id), commit: (b, f) => bookModule.saveBookBundle(b, f) };
-        const editorPorts = {
-            sceneAssetsRepo: { bumpSceneVersions: async () => 0, setDirtyUnitIds: async () => 0 },
-            placeholderAudio: { recoverMissingPlaceholders: async () => ({ created: 0, errors: [] }) },
-            auditCoverage: { auditBookCoverage: () => ({}) },
-            promptLimit: 2000,
-            purge: { purgeScene: async () => ({ complete: true, steps: [] }), purgeUnit: async () => ({ complete: true, steps: [] }) },
-            resolveOwnership: async () => ({}),
-            recoveryCtx: { isBookRegistered: async () => false },
-            bookDiff: { computeBookDiff: () => ({ dirty_scenes: [] }) },
-            storage: { bookSync: { reconcileFromDiff: async () => ({ reconciled: 0 }) } },
-        };
-        const deps = { book: bookModule, editorModel, editorPorts, utils: { log: () => {} } };
-        require('../../packages/animastor-editor/src/entity-crud-routes.cjs')(app, {}, deps);
-        require('../../packages/animastor-editor/src/editor-routes.cjs')(app, {}, deps);
+    beforeEach(async () => {
+        t = await harness.startHeroServer();
+        harness.writeBook(t.booksDir, B);
     });
-    afterEach(() => {
-        config.BOOKS_DIR = ORIG;
-        fs.rmSync(tmp, { recursive: true, force: true });
+    afterEach(async () => { await t.close(); });
+
+    it('GET /book returns behaviour (globals) and heroes with their own behaviour; no behaviors / behavior_rules', async () => {
+        const r = await t.api('GET', `/api/v1/book/${B}`);
+        expect(r.status).to.equal(200);
+        expect(r.body.behaviour).to.deep.equal({ schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [GLOBAL] });
+        expect(r.body.heroes.find((h) => h.id === 'yura').behaviour.profile.baseline).to.equal('calm');
+        expect(r.body).to.not.have.property('behaviors');
+        expect(r.body).to.not.have.property('behavior_rules');
     });
 
-    it('GET /book returns the flat map + behavior_rules', async () => {
-        const r = await call('GET /api/v1/book/:bookId', { bookId });
-        expect(r.statusCode).to.equal(200);
-        expect(r.body.behaviors).to.deep.equal({ hero: { baseline: 'calm' } });
-        expect(r.body.behavior_rules).to.deep.equal([RULE]);
+    it('GET → PUT (a hero profile edited) → the hero file changes, behaviour.json rules stay', async () => {
+        const body = (await t.api('GET', `/api/v1/book/${B}`)).body;
+        body.heroes.find((h) => h.id === 'yura').behaviour.profile.baseline = 'edited';
+        const r = await t.api('PUT', `/api/v1/book/${B}`, body);
+        expect(r.status, JSON.stringify(r.body)).to.equal(200);
+        expect(t.readHero(B, 'yura').behaviour.profile.baseline).to.equal('edited');
+        expect(t.readHero(B, 'yura').behaviour.rules.map((x) => x.id)).to.deep.equal(['yura.praised']);
+        expect(disk().rules).to.deep.equal([GLOBAL]);
     });
 
-    it('GET → PUT (flat map, edited) → rules and schema_version still on disk', async () => {
-        const got = (await call('GET /api/v1/book/:bookId', { bookId })).body;
-        const body = JSON.parse(JSON.stringify(got));
-        body.behaviors.hero.baseline = 'edited';
-        body.behaviors.side = { baseline: 'new' };
-        const r = await call('PUT /api/v1/book/:bookId', { bookId }, body);
-        expect(r.statusCode, JSON.stringify(r.body)).to.equal(200);
-        expect(disk()).to.deep.equal({ schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'edited' }, side: { baseline: 'new' } } });
+    it('PUT without behaviour keeps behaviour.json as it is', async () => {
+        const body = (await t.api('GET', `/api/v1/book/${B}`)).body;
+        delete body.behaviour;
+        const before = fs.readFileSync(path.join(t.bookDir(B), 'behaviour.json'), 'utf8');
+        expect((await t.api('PUT', `/api/v1/book/${B}`, body)).status).to.equal(200);
+        expect(fs.readFileSync(path.join(t.bookDir(B), 'behaviour.json'), 'utf8')).to.equal(before);
     });
 
-    it('PUT without behaviors keeps the stored document', async () => {
-        const got = (await call('GET /api/v1/book/:bookId', { bookId })).body;
-        delete got.behaviors;
-        delete got.behavior_rules;
-        await call('PUT /api/v1/book/:bookId', { bookId }, got);
-        expect(disk()).to.deep.equal({ schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'calm' } } });
+    it('profile and rules of a hero through the hero API; behaviour.json untouched', async () => {
+        expect((await t.api('PATCH', `/api/v1/book/${B}/heroes/sveta`, { fields: { 'behaviour.profile.baseline': 'b' } })).status).to.equal(200);
+        expect(t.readHero(B, 'sveta').behaviour).to.deep.equal({ profile: { baseline: 'b' } });
+        expect((await t.api('POST', `/api/v1/book/${B}/heroes/sveta/rules`, { id: 'sveta.r', when: { emotion: ['joy'] }, then: { action: 'laughs' } })).status).to.equal(201);
+        expect((await t.api('POST', `/api/v1/book/${B}/heroes/sveta/rules`, { id: 'sveta.r', then: { action: 'laughs' } })).status).to.equal(409);
+        expect((await t.api('PATCH', `/api/v1/book/${B}/heroes/sveta/rules/sveta.r`, { fields: { enabled: false } })).status).to.equal(200);
+        expect(t.readHero(B, 'sveta').behaviour.rules).to.deep.equal([{ id: 'sveta.r', when: { emotion: ['joy'] }, then: { action: 'laughs' }, enabled: false }]);
+        expect((await t.api('DELETE', `/api/v1/book/${B}/heroes/sveta/rules/sveta.r`)).status).to.equal(200);
+        expect(disk().rules).to.deep.equal([GLOBAL]);
     });
 
-    it('POST / PATCH / DELETE work in characters.<id>; character delete cascades; rules survive', async () => {
-        expect((await call('POST /api/v1/book/:bookId/behaviors', { bookId }, { character_id: 'side', baseline: 'b' })).statusCode).to.equal(200);
-        expect(disk().characters.side).to.deep.equal({ baseline: 'b' });
-        expect((await call('POST /api/v1/book/:bookId/behaviors', { bookId }, { character_id: 'side' })).statusCode).to.equal(409);
-        expect((await call('POST /api/v1/book/:bookId/behaviors', { bookId }, { character_id: 'rules' })).statusCode).to.equal(404);
-
-        expect((await call('PATCH /api/v1/book/:bookId/behaviors/:characterId', { bookId, characterId: 'side' }, { fields: { quirks: ['q'] } })).statusCode).to.equal(200);
-        expect(disk().characters.side).to.deep.equal({ baseline: 'b', quirks: ['q'] });
-        expect((await call('PATCH /api/v1/book/:bookId/behaviors/:characterId', { bookId, characterId: 'rules' }, { fields: { x: 1 } })).statusCode).to.equal(404);
-
-        expect((await call('DELETE /api/v1/book/:bookId/behaviors/:characterId', { bookId, characterId: 'side' })).statusCode).to.equal(200);
-        expect(disk().characters).to.not.have.property('side');
-        expect((await call('DELETE /api/v1/book/:bookId/behaviors/:characterId', { bookId, characterId: 'schema_version' })).statusCode).to.equal(404);
-
-        expect((await call('DELETE /api/v1/book/:bookId/characters/:characterId', { bookId, characterId: 'hero' })).statusCode).to.equal(200);
-        expect(disk()).to.deep.equal({ schema_version: 2, rules: [RULE], characters: {} });
+    it('DELETE /heroes/:id takes the hero\'s rules with its file; other heroes\' rules and global rules stay', async () => {
+        await t.api('POST', `/api/v1/book/${B}/heroes/sveta/rules`, { id: 'sveta.r', when: { emotion: ['joy'] }, then: { action: 'laughs' } });
+        expect((await t.api('DELETE', `/api/v1/book/${B}/heroes/yura`)).status).to.equal(200);
+        const out = heroRules(harness.bookModule.loadBook(B));
+        expect(out.rules.map((r) => [r.id, r.scope, r.character_id || null])).to.deep.equal([['global.sigh', 'global', null], ['sveta.r', 'character', 'sveta']]);
     });
 
-    it('DELETE /characters/:id cascades: entry + scope:"character" rules of that hero; other rules stay', async () => {
-        const heroRule = { ...RULE, id: 'hero.r', scope: 'character', character_id: 'hero' };
-        const sideRule = { ...RULE, id: 'side.r', scope: 'character', character_id: 'side' };
-        const odd = { ...RULE, id: 'global.with_id', scope: 'global', character_id: 'hero' };
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({
-            schema_version: 2, rules: [RULE, heroRule, sideRule, odd], characters: { hero: { baseline: 'calm' }, side: { baseline: 's' } },
-        }));
-        expect((await call('DELETE /api/v1/book/:bookId/characters/:characterId', { bookId, characterId: 'hero' })).statusCode).to.equal(200);
-        expect(disk()).to.deep.equal({ schema_version: 2, rules: [RULE, sideRule, odd], characters: { side: { baseline: 's' } } });
-    });
-
-    it('legacy v2.1 file on disk: PATCH migrates to v2 and edits characters.<id>', async () => {
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({ hero: { baseline: 'calm' } }));
-        await call('PATCH /api/v1/book/:bookId/behaviors/:characterId', { bookId, characterId: 'hero' }, { fields: { baseline: 'v2' } });
-        expect(disk()).to.deep.equal({ schema_version: 2, rules: [], characters: { hero: { baseline: 'v2' } } });
+    it('a broken behaviour.json: the book saves unchanged, a behaviour write is refused, the file keeps its bytes', async () => {
+        fs.writeFileSync(path.join(t.bookDir(B), 'behaviour.json'), '{ broken');
+        const body = (await t.api('GET', `/api/v1/book/${B}`)).body;
+        expect(body.hero_issues.find((i) => i.file === 'behaviour.json')).to.include({ blocking: true });
+        expect((await t.api('PUT', `/api/v1/book/${B}`, body)).status).to.equal(200);
+        expect((await t.api('PATCH', `/api/v1/book/${B}/behaviour`, { fields: { 'defaults.max_per_scene': 1 } })).body.error).to.equal('behaviour_file_broken');
+        expect(fs.readFileSync(path.join(t.bookDir(B), 'behaviour.json'), 'utf8')).to.equal('{ broken');
     });
 });
 
-// [v4-pending step 4] edit_book paths /behaviors/characters/<id> belong to 3.1;
-// @animastor/assistant 0.3.0 retargets them to /heroes/<id>/behaviour/….
-describe.skip('[v4-pending step 4] assistant edit_book — behaviours in characters.<id>', () => {
+// VBook 4 step 4: edit_book addresses heroes by id — /heroes/<id>/behaviour/…
+// (@animastor/assistant 0.3.0); the 3.1 paths /behaviors/… are refused.
+describe('assistant edit_book — hero behaviour at /heroes/<id>/behaviour', () => {
     const createChatEngine = (cfg) => require('@animastor/assistant').createChatEngine(cfg, {
         validateBundleObject: require('../src/book/bundle-validator.cjs').validateBundleObject,
         aiProfile: null,
     });
     const RULE = { id: 'own', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
     const book = () => ({
-        manifest: { book_id: 'b', vbook_version: '3.1' },
+        manifest: { book_id: 'b', vbook_version: 4 },
         book: { book_id: 'b', structure: { chapters_order: [] } },
-        characters: [{ id: 'hero', name: 'Hero' }],
+        behaviour: { schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [RULE] },
+        heroes: [
+            { schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'Calm.' } },
+            { schema: 'animastor.character/1', id: 'hero', name: 'Hero', behaviour: { profile: { baseline: 'calm' }, rules: [{ id: 'hero.r', when: { emotion: ['sad'] }, then: { action: 'x' } }] } },
+            { schema: 'animastor.character/1', id: 'side', name: 'Side' },
+        ],
         chapters: [],
         locations: {},
-        voices: {},
-        behaviors: { schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'calm' } } },
     });
 
-    it('v2 path /behaviors/characters/<id> is applied as is', () => {
+    it('/heroes/<id>/behaviour/profile/baseline is applied to that hero (the segment is an id, not an index)', () => {
         const ce = createChatEngine({});
-        const r = ce.applyPatchesValidated(book(), [{ op: 'replace', path: '/behaviors/characters/hero/baseline', value: 'x' }]);
+        const r = ce.applyPatchesValidated(book(), [{ op: 'replace', path: '/heroes/hero/behaviour/profile/baseline', value: 'x' }]);
         expect(r.errors).to.deep.equal([]);
-        expect(r.result.behaviors.characters.hero.baseline).to.equal('x');
+        expect(r.result.heroes[1].behaviour.profile.baseline).to.equal('x');
+        expect(r.result.heroes[1].behaviour.rules.map((x) => x.id)).to.deep.equal(['hero.r']);
     });
 
-    it('legacy /behaviors/<id> paths are rewritten into characters.<id>; rules survive', () => {
+    it('add /heroes/<id>/behaviour/profile creates the behaviour of a hero that had none; global rules survive', () => {
         const ce = createChatEngine({});
-        const r = ce.applyPatchesValidated(book(), [
-            { op: 'replace', path: '/behaviors/hero/baseline', value: 'y' },
-            { op: 'add', path: '/behaviors/side', value: { baseline: 'new' } },
-        ]);
+        const r = ce.applyPatchesValidated(book(), [{ op: 'add', path: '/heroes/side/behaviour/profile', value: { baseline: 'new', quirks: ['q'] } }]);
         expect(r.errors).to.deep.equal([]);
-        expect(r.result.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'y' }, side: { baseline: 'new' } } });
+        expect(r.result.heroes[2].behaviour).to.deep.equal({ profile: { baseline: 'new', quirks: ['q'] } });
+        expect(r.result.behaviour.rules).to.deep.equal([RULE]);
     });
 
-    it('replace /behaviors with a flat map → characters; rules / schema_version kept', () => {
+    it('the 3.1 paths /behaviors/… are refused with a hint; nothing is applied', () => {
         const ce = createChatEngine({});
-        const r = ce.applyPatchesValidated(book(), [{ op: 'replace', path: '/behaviors', value: { hero: { baseline: 'z' }, rules: [] } }]);
-        expect(r.errors).to.deep.equal([]);
-        expect(r.result.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE], characters: { hero: { baseline: 'z' } } });
+        for (const p of ['/behaviors/hero/baseline', '/behaviors/characters/hero/baseline', '/behaviors']) {
+            const r = ce.applyPatchesValidated(book(), [{ op: 'replace', path: p, value: 'y' }]);
+            expect(r.result, p).to.equal(null);
+            expect(r.errors[0]).to.match(/not part of VBook 4.*\/heroes\/<hero_id>/);
+        }
     });
 
-    it('deleting a character via edit_book cascades: entry + its scope:"character" rules', () => {
+    it('removing a hero via edit_book takes its rules with it; the narrator cannot be removed', () => {
         const ce = createChatEngine({});
-        const b = book();
-        b.characters.push({ id: 'side', name: 'Side' });
-        b.behaviors.characters.side = { baseline: 's' };
-        const heroRule = { id: 'hero.r', scope: 'character', character_id: 'hero', when: { emotion: ['sad'] }, then: { action: 'x' } };
-        const sideRule = { id: 'side.r', scope: 'character', character_id: 'side', when: { emotion: ['sad'] }, then: { action: 'y' } };
-        b.behaviors.rules.push(heroRule, sideRule);
-        const r = ce.applyPatchesValidated(b, [{ op: 'remove', path: '/characters/0' }]);
+        const r = ce.applyPatchesValidated(book(), [{ op: 'remove', path: '/heroes/hero' }]);
         expect(r.errors).to.deep.equal([]);
-        expect(r.result.behaviors).to.deep.equal({ schema_version: 2, rules: [RULE, sideRule], characters: { side: { baseline: 's' } } });
-        // no character removed → behaviours untouched
-        const r2 = ce.applyPatchesValidated(b, [{ op: 'replace', path: '/characters/0/name', value: 'H' }]);
-        expect(r2.result.behaviors).to.deep.equal(b.behaviors);
+        expect(heroRules(r.result).rules.map((x) => x.id)).to.deep.equal(['own']);
+        const n = ce.applyPatchesValidated(book(), [{ op: 'remove', path: '/heroes/narrator' }]);
+        expect(n.result).to.equal(null);
+        expect(n.errors[0]).to.match(/narrator cannot be removed/);
     });
 
-    it('edit-mode prompt documents /behaviors/characters/{character_id}', () => {
+    it('edit-mode prompt and tool document /heroes/{hero_id}', () => {
         const ce = createChatEngine({});
         const tools = JSON.stringify(ce.getToolsForMode('edit'));
-        expect(tools).to.include('/behaviors/characters/');
+        expect(tools).to.include('/heroes/{hero_id}/');
+        expect(tools).to.not.include('/behaviors/characters/');
+        expect(ce.buildChatSystemPrompt({ mode: 'edit' })).to.include('/heroes/<hero_id>/');
     });
 });

@@ -78,11 +78,9 @@ describe('Scene Participants doctrine — normalization + validation', () => {
         expect(scenes[3].participants).to.deep.equal(['svetlana']);
     });
 
-    // [v4-pending step 4] The assistant (chat-engine.cjs normalizeBookParticipants)
-    // still builds its name → id lookup from book.characters, which VBook 4 does
-    // not have. @animastor/assistant 0.3.0 (VBOOK_FORMAT_V4 §12 step 4) moves it to
-    // book.heroes; until then display names are not mapped.
-    it.skip('[v4-pending step 4] applyPatchesValidated maps display names to character_ids and dedupes', () => {
+    // VBook 4 (@animastor/assistant 0.3.0): the name → id lookup is built from
+    // book.heroes — the exact name (case-insensitive) or the id, nothing fuzzy.
+    it('applyPatchesValidated maps display names to hero ids and dedupes', () => {
         const book = makeFixtureBook();
         const patchResult = chatEngine.applyPatchesValidated(book, [
             // Replace one scene with names-only; the rest are normalized too.
@@ -131,11 +129,9 @@ describe('Scene Participants doctrine — normalization + validation', () => {
         expect(validation.valid).to.be.true;
     });
 
-    // [v4-pending step 4] The assistant (chat-engine.cjs normalizeBookParticipants)
-    // still builds its name → id lookup from book.characters, which VBook 4 does
-    // not have. @animastor/assistant 0.3.0 (VBOOK_FORMAT_V4 §12 step 4) moves it to
-    // book.heroes; until then display names are not mapped.
-    it.skip('[v4-pending step 4] saveBookBundle persists normalized participants and rejects broken ones (defense in depth)', () => {
+    // VBook 4 (@animastor/assistant 0.3.0): the name → id lookup is built from
+    // book.heroes — the exact name (case-insensitive) or the id, nothing fuzzy.
+    it('saveBookBundle persists normalized participants and rejects broken ones (defense in depth)', () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-part-doctrine-'));
         const bookId = 'test-part-doctrine-' + Date.now();
         const bookDir = path.join(tmpDir, bookId);

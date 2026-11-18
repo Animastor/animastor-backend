@@ -1,21 +1,27 @@
 // ======================================================
-// AI Patch Validation — Bundle Contract Guard Tests
+// AI Patch Validation — Bundle Contract Guard Tests (VBook 4)
 // ======================================================
 // Guards the AI mutation pipeline:
 //   AI patch → applyPatchesValidated → contract validation → save
 //
 // Regression coverage for the real incident: the assistant was asked to
-// "add Svetlana's voice + instruction" in the Editor and produced a
-// structurally broken voices.json (a value of the wrong type — what a
-// missing closing brace / truncated tool-call argument degrades into).
-// Android's strict parser then failed to load the book while the
-// lenient Web frontend opened it with the voice instruction missing.
+// "add Svetlana's voice" in the Editor and produced a structurally broken
+// voice (a value of the wrong type — what a missing closing brace /
+// truncated tool-call argument degrades into). Android's strict parser then
+// failed to load the book while the lenient Web frontend opened it with the
+// voice missing.
+//
+// VBook 4 (@animastor/assistant 0.3.0): a voice is a block of a hero file
+// (characters/<id>.json), edit_book addresses heroes by id —
+// /heroes/<id>/voice/… — and the 3.1 paths /voices/… are refused.
 //
 // Contract: a patch that breaks the bundle must be REJECTED —
 //   1. no success report (patches_applied: 0),
 //   2. previous valid canonical state untouched on disk,
 //   3. structured error naming the failing resource,
 //   4. a corrected patch applies normally afterwards.
+
+'use strict';
 
 const { expect } = require('chai');
 const fs = require('fs');
@@ -31,44 +37,29 @@ const config = require('../src/config/runtime-config');
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
-// [v4-pending step 4] These cases drive the assistant's edit_book over the 3.1
-// resource voices.json (/voices/<id>, book.voices). VBook 4 has no such map: a
-// voice is a block of a hero file. @animastor/assistant 0.3.0 (VBOOK_FORMAT_V4
-// §12 step 4) retargets edit_book to /heroes/<id>/… and rejects the old paths;
-// the cases are rewritten there. The guard itself (validate → write, nothing
-// written on a broken value) is covered for v4 in
-// packages/animastor-vbook-runtime/test/input-safety.test.js and
-// test/vbook-v4-format.test.js.
-describe.skip('[v4-pending step 4] AI Patch Validation — bundle contract guard', () => {
+describe('AI Patch Validation — bundle contract guard (VBook 4 heroes)', () => {
     let tmpDir;
     let bookId;
     let bookDir;
+    const heroFile = (id) => path.join(bookDir, 'characters', `${id}.json`);
 
     beforeEach(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-patch-validation-'));
-        bookId = 'test-patch-validation-' + Date.now();
+        bookId = 'test_patch_validation_' + Date.now();
         bookDir = path.join(tmpDir, bookId);
-        fs.mkdirSync(bookDir, { recursive: true });
         fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
+        fs.mkdirSync(path.join(bookDir, 'characters'), { recursive: true });
         config.BOOKS_DIR = tmpDir;
 
-        // Minimal but contract-complete book fixture (voices.json = the
-        // resource from the real incident).
         fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
-            book_id: bookId,
-            vbook_version: '3.1',
-            state: 'BOOTSTRAPPED',
-            created_at: new Date().toISOString(),
+            book_id: bookId, vbook_version: 4, state: 'BOOTSTRAPPED', created_at: new Date().toISOString(),
         }, null, 2));
-
         fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
-            book_id: bookId,
-            title: 'Patch Validation Book',
-            structure: { chapters_order: [] },
+            book_id: bookId, title: 'Patch Validation Book', structure: { chapters_order: [] },
         }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({
-            narrator: { instruction: 'Deep calm voice' },
+        // the narrator's voice = the resource of the real incident
+        fs.writeFileSync(heroFile('narrator'), JSON.stringify({
+            schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'Deep calm voice.' },
         }, null, 2));
     });
 
@@ -78,155 +69,126 @@ describe.skip('[v4-pending step 4] AI Patch Validation — bundle contract guard
     });
 
     // ── The incident, replayed at the engine level ────────────────
-    it('rejects a broken voices.json patch (AI tool-call arguments)', () => {
+    it('rejects a broken voice patch (AI tool-call arguments)', () => {
         const bookData = bookModule.loadBook(bookId);
         // What a truncated/brace-broken AI tool-call argument degrades into:
         // the model supplies a raw string instead of a voice object.
-        const brokenArgs = JSON.stringify({
-            patches: [{
-                op: 'replace',
-                path: '/voices/narrator',
-                value: '{\"instruction\": \"голос Светланы\"' // ← "missing closing brace"
-            }]
-        });
-        const args = JSON.parse(brokenArgs);
-
+        const args = JSON.parse(JSON.stringify({
+            patches: [{ op: 'replace', path: '/heroes/narrator/voice', value: '{"timbre": "голос Светланы"' }],
+        }));
         const patchResult = chatEngine.applyPatchesValidated(bookData, args.patches);
         expect(patchResult.result).to.be.null;
         expect(patchResult.errors).to.have.lengthOf(1);
-        expect(patchResult.errors[0]).to.include('voices');
+        expect(patchResult.errors[0]).to.include('heroes');
         expect(patchResult.validation_errors.join(' ')).to.include('narrator');
     });
 
-    it('rejects the Svetlana add-voice patch and keeps previous voices.json intact', () => {
+    it('rejects the Svetlana add-hero patch with a broken voice and keeps the files intact', () => {
         const bookData = bookModule.loadBook(bookId);
-        const before = fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8');
-
-        const patches = [{ op: 'add', path: '/voices/svetlana', value: 'broken string, not an object' }];
-        const patchResult = chatEngine.applyPatchesValidated(bookData, patches);
-
+        const before = fs.readFileSync(heroFile('narrator'), 'utf8');
+        const patchResult = chatEngine.applyPatchesValidated(bookData, [
+            { op: 'add', path: '/heroes/svetlana', value: { name: 'Светлана', voice: 'broken string, not an object' } },
+        ]);
         expect(patchResult.result).to.be.null;
         expect(patchResult.validation_errors.join(' ')).to.include('svetlana');
-
-        // Canonical state untouched.
-        expect(fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8')).to.equal(before);
+        expect(fs.readFileSync(heroFile('narrator'), 'utf8')).to.equal(before);
+        expect(fs.existsSync(heroFile('svetlana'))).to.equal(false);
     });
 
-    it('applies a corrected Svetlana voice patch on retry', () => {
+    it('applies a corrected Svetlana voice on retry; the file of the new hero appears', () => {
         const bookData = bookModule.loadBook(bookId);
-
-        // Turn 1 — broken patch is rejected.
-        const broken = chatEngine.applyPatchesValidated(bookData, [
-            { op: 'add', path: '/voices/svetlana', value: 'broken' }
-        ]);
+        const broken = chatEngine.applyPatchesValidated(bookData, [{ op: 'add', path: '/heroes/svetlana', value: { name: 'Светлана', voice: 'broken' } }]);
         expect(broken.result).to.be.null;
 
-        // Turn 2 — corrected patch (proper object with instruction).
         const fixed = chatEngine.applyPatchesValidated(bookData, [
-            { op: 'add', path: '/voices/svetlana', value: { instruction: 'Мягкий женский голос, тёплый тембр' } }
+            { op: 'add', path: '/heroes/svetlana', value: { name: 'Светлана', voice: { timbre: 'Мягкий женский голос, тёплый тембр.' } } },
         ]);
         expect(fixed.errors).to.have.lengthOf(0);
-        expect(fixed.result.voices.svetlana.instruction).to.equal('Мягкий женский голос, тёплый тембр');
+        expect(fixed.result.heroes.find((h) => h.id === 'svetlana').voice.timbre).to.equal('Мягкий женский голос, тёплый тембр.');
 
-        // Save succeeds and the value round-trips through the file.
-        bookModule.saveBookBundle(fixed.result);
-        const onDisk = JSON.parse(fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8'));
-        expect(onDisk.svetlana.instruction).to.equal('Мягкий женский голос, тёплый тембр');
-        expect(onDisk.narrator.instruction).to.equal('Deep calm voice');
+        bookModule.saveBookBundle({ ...fixed.result, chapters: [] });
+        const onDisk = JSON.parse(fs.readFileSync(heroFile('svetlana'), 'utf8'));
+        expect(onDisk).to.deep.equal({ schema: 'animastor.character/1', name: 'Светлана', voice: { timbre: 'Мягкий женский голос, тёплый тембр.' }, id: 'svetlana' });
+        expect(JSON.parse(fs.readFileSync(heroFile('narrator'), 'utf8')).voice.timbre).to.equal('Deep calm voice.');
     });
 
-    it('rejects a characters patch that replaces the array with a scalar', () => {
+    it('rejects replacing the whole heroes list (with a scalar or a list)', () => {
         const bookData = bookModule.loadBook(bookId);
-        const patchResult = chatEngine.applyPatchesValidated(bookData, [
-            { op: 'replace', path: '/characters', value: 'oops' }
-        ]);
-        expect(patchResult.result).to.be.null;
-        expect(patchResult.validation_errors.join(' ')).to.include('characters');
+        for (const value of ['oops', []]) {
+            const patchResult = chatEngine.applyPatchesValidated(bookData, [{ op: 'replace', path: '/heroes', value }]);
+            expect(patchResult.result).to.be.null;
+            expect(patchResult.errors.join(' ')).to.include('heroes');
+        }
     });
 
-    it('accepts valid multi-resource patches (voices + characters + bible)', () => {
+    it('accepts valid multi-resource patches (a hero voice + a new hero + bible)', () => {
         fs.writeFileSync(path.join(bookDir, 'bible.json'), JSON.stringify({ country: 'Russia' }, null, 2));
         const reloaded = bookModule.loadBook(bookId);
-
         const patchResult = chatEngine.applyPatchesValidated(reloaded, [
-            { op: 'add', path: '/voices/svetlana', value: { instruction: 'Спокойный голос' } },
-            { op: 'add', path: '/characters/-', value: { id: 'svetlana', name: 'Svetlana' } },
+            { op: 'add', path: '/heroes/narrator/voice/manner', value: 'Спокойно.' },
+            { op: 'add', path: '/heroes/svetlana', value: { name: 'Svetlana', voice: { timbre: 'Спокойный голос.' } } },
             { op: 'replace', path: '/bible/country', value: 'USSR' },
         ]);
         expect(patchResult.errors).to.have.lengthOf(0);
         expect(patchResult.result).to.not.be.null;
     });
 
-    it('saveBookBundle refuses to write a bundle with a broken voices resource (defense in depth)', () => {
+    it('saveBookBundle refuses to write a bundle with a broken hero (defense in depth)', () => {
         const bookData = bookModule.loadBook(bookId);
-        const voicesBefore = fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8');
+        const heroBefore = fs.readFileSync(heroFile('narrator'), 'utf8');
         const manifestBefore = fs.readFileSync(path.join(bookDir, 'manifest.json'), 'utf8');
-        bookData.voices = { narrator: 'not-an-object' };
-
-        expect(() => bookModule.saveBookBundle(bookData)).to.throw(/voices\.json/);
+        bookData.heroes[0].voice = 'not-an-object';
+        expect(() => bookModule.saveBookBundle(bookData)).to.throw(/narrator/);
         // Not a single file was touched — the throw precedes the first write.
-        expect(fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8')).to.equal(voicesBefore);
+        expect(fs.readFileSync(heroFile('narrator'), 'utf8')).to.equal(heroBefore);
         expect(fs.readFileSync(path.join(bookDir, 'manifest.json'), 'utf8')).to.equal(manifestBefore);
     });
 
-    it('validateBundleFile reports resource-level errors with details', () => {
+    it('validateBundleFile reports resource-level errors with details; the 3.1 files are refused', () => {
         const { validateBundleFile } = require('../src/book/bundle-validator.cjs');
-
-        const ok = validateBundleFile('voices.json', { narrator: { timbre: 'ok', manner: '' } });
+        const ok = validateBundleFile('characters/narrator.json', { schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'ok', manner: '' } });
         expect(ok.valid).to.be.true;
-
-        const bad = validateBundleFile('voices.json', { narrator: { timbre: 42 } });
+        const bad = validateBundleFile('characters/narrator.json', { schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 42 } });
         expect(bad.valid).to.be.false;
-        expect(bad.errors[0]).to.include('narrator');
-        expect(bad.errors[0]).to.include('timbre');
-
+        expect(bad.errors.join(' ')).to.include('timbre');
+        expect(validateBundleFile('voices.json', { narrator: { timbre: 'x' } }).valid).to.be.false;
         const nonSerializable = validateBundleFile('book.json', { structure: { chapters_order: [] }, bad: undefined });
         expect(nonSerializable.valid).to.be.true; // undefined keys are dropped by stringify — legal
     });
 
     it('rejects non-JSON-serializable patch values (NaN, circular reference)', () => {
         const bookData = bookModule.loadBook(bookId);
-        const circular = { instruction: 'x' };
+        const circular = { timbre: 'x' };
         circular.self = circular;
-
-        const nanResult = chatEngine.applyPatchesValidated(bookData, [
-            { op: 'replace', path: '/voices/narrator', value: { instruction: NaN } }
-        ]);
+        const nanResult = chatEngine.applyPatchesValidated(bookData, [{ op: 'replace', path: '/heroes/narrator/voice', value: { timbre: NaN } }]);
         expect(nanResult.result).to.be.null;
         expect(nanResult.validation_errors.join(' ')).to.include('non-serializable');
-
-        const circularResult = chatEngine.applyPatchesValidated(bookData, [
-            { op: 'replace', path: '/voices/narrator', value: circular }
-        ]);
+        const circularResult = chatEngine.applyPatchesValidated(bookData, [{ op: 'replace', path: '/heroes/narrator/voice', value: circular }]);
         expect(circularResult.result).to.be.null;
     });
 
-    it('chat route contract: broken patch → rejected:false applied, structured errors surfaced', async () => {
-        // Route-level simulation without HTTP: reuse the exact save-block
-        // semantics from ai-routes.cjs via applyPatchesValidated + save gate.
+    it('chat route contract: a 3.1 path (/voices/…) is refused — nothing applied, the hint names /heroes', () => {
         const bookData = bookModule.loadBook(bookId);
-        const patches = [{ op: 'add', path: '/voices/svetlana', value: 'broken' }];
+        const patches = [{ op: 'add', path: '/voices/svetlana', value: { timbre: 'x' } }];
         const patchResult = chatEngine.applyPatchesValidated(bookData, patches);
-
-        // Save-block gate: errors ⇒ patches reset ⇒ patches_applied stays 0.
         let applied = patches.length;
         if (patchResult.errors.length > 0) applied = 0;
         expect(applied).to.equal(0);
-
-        // The API payload the assistant receives:
-        expect(patchResult.validation_errors.join(' ')).to.include('voices');
-        expect(patchResult.errors[0]).to.include('Bundle validation failed');
+        expect(patchResult.result).to.be.null;
+        expect(patchResult.errors[0]).to.match(/not part of VBook 4.*\/heroes\/<hero_id>/);
+        for (const p of ['/characters/0/name', '/behaviors/yura', '/mentions/x', '/hero_issues/0', '/heroes/0/name', '/heroes/narrator/voice/reference', '/heroes/narrator/id']) {
+            expect(chatEngine.applyPatchesValidated(bookData, [{ op: 'replace', path: p, value: 'x' }]).result, p).to.equal(null);
+        }
     });
 
     it('valid patch → saves and reports success (happy path unchanged)', () => {
         const bookData = bookModule.loadBook(bookId);
         const patchResult = chatEngine.applyPatchesValidated(bookData, [
-            { op: 'add', path: '/voices/svetlana', value: { instruction: 'Голос Светланы' } }
+            { op: 'add', path: '/heroes/svetlana', value: { name: 'Светлана', voice: { timbre: 'Голос Светланы.' } } },
         ]);
         expect(patchResult.errors).to.have.lengthOf(0);
-        bookModule.saveBookBundle(patchResult.result);
-
+        bookModule.saveBookBundle({ ...patchResult.result, chapters: [] });
         const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.voices.svetlana.instruction).to.equal('Голос Светланы');
+        expect(reloaded.heroes.find((h) => h.id === 'svetlana').voice.timbre).to.equal('Голос Светланы.');
     });
 });

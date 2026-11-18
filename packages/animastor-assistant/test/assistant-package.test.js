@@ -131,7 +131,7 @@ describe('PT3: chat engine (package-own logic)', () => {
 
     it('applyPatchesValidated normalizes {"item": x} participants across ALL scenes', () => {
         const book = {
-            characters: [{ id: 'yura', name: 'Юра' }],
+            heroes: [{ schema: 'animastor.character/1', id: 'yura', name: 'Юра' }],
             chapters: [{
                 chapter_id: 'ch-1', scenes: [
                     { scene_id: 'sc-1', participants: { item: ['yura'] } },
