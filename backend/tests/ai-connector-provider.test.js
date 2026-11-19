@@ -349,33 +349,43 @@ describe('Local AI Connector provider binding (LAC-6 §9 seam)', function () {
         });
 
         it('switching local-ai → cloud type requires a real api_key again', async () => {
-            const noKey = await api(srv, 'PUT', '/api/v1/settings/ai/provider', {
-                identity: idA(),
-                body: { provider_type: 'openai-compatible', endpoint: 'https://cloud.example/v1', model: 'm' },
-            });
-            expect(noKey.status).to.equal(400);
-            expect(noKey.body.error).to.equal('api_key is required');
+            // The SSRF guard resolves https://cloud.example (RFC 2606, unresolvable) at
+            // save time. It used to pass only via the host's wildcard search domain
+            // (webhostbox.com); stub DNS to a public address like workspace-ai-provider.
+            const dns = require('dns');
+            const originalLookup = dns.promises.lookup;
+            dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }];
+            try {
+                const noKey = await api(srv, 'PUT', '/api/v1/settings/ai/provider', {
+                    identity: idA(),
+                    body: { provider_type: 'openai-compatible', endpoint: 'https://cloud.example/v1', model: 'm' },
+                });
+                expect(noKey.status).to.equal(400);
+                expect(noKey.body.error).to.equal('api_key is required');
 
-            // With a key the switch works
-            const withKey = await api(srv, 'PUT', '/api/v1/settings/ai/provider', {
-                identity: idA(),
-                body: { provider_type: 'openai-compatible', endpoint: 'https://cloud.example/v1', api_key: 'sk-cloud-test', model: 'm' },
-            });
-            expect(withKey.status).to.equal(200);
-            expect(withKey.body.provider.provider_type).to.equal('openai-compatible');
+                // With a key the switch works
+                const withKey = await api(srv, 'PUT', '/api/v1/settings/ai/provider', {
+                    identity: idA(),
+                    body: { provider_type: 'openai-compatible', endpoint: 'https://cloud.example/v1', api_key: 'sk-cloud-test', model: 'm' },
+                });
+                expect(withKey.status).to.equal(200);
+                expect(withKey.body.provider.provider_type).to.equal('openai-compatible');
 
-            // Switch BACK to local-ai: the stored cloud key is replaced by the
-            // marker — the old credential must not linger in the row.
-            const back = await api(srv, 'PUT', '/api/v1/settings/ai/provider', {
-                identity: idA(),
-                body: { provider_type: 'local-ai', connector_id: connA.connector_id, model: 'qwen3:32b' },
-            });
-            expect(back.status).to.equal(200);
-            const row = (await query(
-                `SELECT endpoint, api_key_enc FROM workspace_ai_providers WHERE workspace_id = $1`, [wsA]
-            )).rows[0];
-            expect(row.api_key_enc).to.equal('local-ai-connector-binding');
-            expect(row.endpoint).to.equal('');
+                // Switch BACK to local-ai: the stored cloud key is replaced by the
+                // marker — the old credential must not linger in the row.
+                const back = await api(srv, 'PUT', '/api/v1/settings/ai/provider', {
+                    identity: idA(),
+                    body: { provider_type: 'local-ai', connector_id: connA.connector_id, model: 'qwen3:32b' },
+                });
+                expect(back.status).to.equal(200);
+                const row = (await query(
+                    `SELECT endpoint, api_key_enc FROM workspace_ai_providers WHERE workspace_id = $1`, [wsA]
+                )).rows[0];
+                expect(row.api_key_enc).to.equal('local-ai-connector-binding');
+                expect(row.endpoint).to.equal('');
+            } finally {
+                dns.promises.lookup = originalLookup;
+            }
         });
     });
 
