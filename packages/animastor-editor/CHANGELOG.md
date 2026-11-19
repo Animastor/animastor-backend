@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.5.0 (2026-11-18, unpublished)
+
+VBook 4 step 4 — the hero API (animastor-docs `architecture/VBOOK_FORMAT_V4.md`
+§8.2, §9, §10.3; `05-frontend/HERO_CARD.md`). Requires
+`@animastor/vbook-runtime ^0.5.0`. **Breaking.**
+
+### Added — `createHeroRoutes` (new registrar, `src/hero-routes.cjs`)
+
+- `GET /book/:id/heroes`, `GET /book/:id/heroes/:heroId`.
+- `POST /book/:id/heroes` `{id?, name, role?, aliases?, notes?, passport?, voice?}` —
+  201; id from the name (existing transliteration); 409 `hero_exists`,
+  409 `hero_file_broken`, 400 `reserved_id` / `invalid_hero_id` / `name_required`.
+  `{id: "narrator"}` re-creates a missing narrator.
+- `PATCH /book/:id/heroes/:heroId` `{fields, if_rev?}` — white list of §8.2,
+  `passport: null` / `voice: null` remove a block, `{}` adds one; 409
+  `rev_conflict` (the answer carries the current `rev`); 400
+  `field_not_editable` / `name_required` / `alias_equals_name` /
+  `too_many_video_tokens` / `too_many_aliases` / `narrator_voice_required` /
+  `invalid_character`. Editing `voice.timbre` marks `timbre_source: "user"`.
+- `DELETE /book/:id/heroes/:heroId` — 409 `narrator_required`; `?broken=1`
+  deletes a broken file under that id (409 `hero_not_broken` for a healthy one).
+- `DELETE /book/:id/hero-files?file=<name>` — a broken file whose name is not a
+  hero id (owner's decision В14): only a name in the current `hero_issues`
+  (404 `not_in_hero_issues`), only one plain name (422 `invalid_file_name`); a
+  symbolic link is removed as a link.
+- Rules: `POST …/heroes/:heroId/rules` (id `<hero>.<three words>`, unique in
+  the book — 409 `rule_exists`), `PATCH …/rules/:ruleId {fields}`,
+  `DELETE …/rules/:ruleId` (404 `rule_not_found`).
+- Looks: `POST …/heroes/:heroId/looks`, `PATCH …/looks/:lookId`,
+  `DELETE …/looks/:lookId` (releases every reference, answers `unassigned`),
+  `POST /book/:id/looks/assign` — 400 `look_empty` / `look_label_required` /
+  `invalid_look_id` / `base_for_chapter`, 404 `look_not_found` /
+  `chapter_not_found` / `scene_not_found`, 409 `look_exists` / `passport_required`.
+- `GET /book/:id/behaviour`, `PATCH /book/:id/behaviour {fields}`
+  (`defaults.max_per_scene`, `rules`) — 409 `behaviour_file_broken`, 400
+  `invalid_behaviour`.
+- Writes of one hero go through the runtime's character store
+  (`editorModel.heroes(bookId)`: read → change → validate → atomic write,
+  synchronously); writes that also touch chapters go through `commit`.
+- Error body of every hero route: `{error: <code>, message, …}`.
+
+### Changed
+
+- `GET /book` — heroes carry the computed fields `rev`,
+  `voice.reference_state`, `voice.reference_outdated`, `image_refs[].state`
+  (never stored); `PUT /book` strips them.
+- `PATCH /scene` — `looks.<hero_id>` and `look_patch.<hero_id>.<field>`;
+  `passport.*` → 400 `legacy_field`.
+- `editorPorts.outputRoot` (read only) — the 9th port: where a hero's reference
+  files live, for the computed states.
+- `dirty_scenes` of hero / look routes is the array of `{chapter_id, scene_id,
+  reason, dirty_layers}`.
+
+### Removed
+
+- `PATCH /characters/:id`, `/voices/:id`, `/behaviors/:id`; `POST` / `DELETE`
+  `/characters`, `/voices`, `/behaviors` (they answered 409
+  `vbook_v4_pending` since 0.5.0-step 1) and `src/vbook4-pending.cjs`.
+
+## 0.4.0 (2026-11-12, unpublished)
+
+Voice references (animastor-docs `architecture/VOICE_REFERENCES.md`).
+
+- `PATCH /voices/:id` edits only `timbre` / `manner` (others → 400); editing `timbre` sets
+  `timbre_source: "user"`. The reference is changed only through the voice-reference API.
+- `POST /voices` creates `{timbre, manner, timbre_source:"user"}` (the `instruction` field is gone).
+- Both go through the `@animastor/vbook-runtime` voice port (^0.4.0).
+
 ## 0.3.0 (2026-11-10, unpublished)
 
 behavior.json schema v2 (animastor-docs `architecture/VBOOK_BEHAVIOUR.md`).

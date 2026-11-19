@@ -28,6 +28,7 @@ const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
 const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { lockReference, toneWav } = require('./helpers/voice-reference-fixture');
 
 const FIX = path.resolve(__dirname, '../../packages/animastor-orchestration/test/gen/fixtures');
 const fixture = (n) => fs.readFileSync(path.join(FIX, n));
@@ -45,12 +46,14 @@ async function fixtureDecodePcm(filePath) {
     throw Object.assign(new Error('no recorded decode'), { code: 'EDECODE' });
 }
 
+// VBook 4: a voice is the `voice` block of a hero (book.heroes[].voice).
+const voiceOf = (b, id) => b.heroes.find((h) => h.id === id).voice;
+
 function bookJson(bookId, buildId) {
     const long = (n) => `Сцена ${n}: достаточно длинный текст повествования, чтобы обойтись без режима добивки коротких фраз.`;
     return {
         manifest: { book_id: bookId, build_id: buildId },
-        voices: { narrator: { instruction: 'calm male narrator' } },
-        characters: [],
+        heroes: [{ schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'calm male narrator', manner: '' } }],
         chapters: [
             { chapter_id: 'ch-1', chapter_title: 'Первая', scenes: [
                 { scene_id: 'sc-1', type: 'narration', audio: { full_text: long(1) } },
@@ -127,6 +130,26 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         });
         routes.mountInternal(app);
         mountBookRoutes(app, routes);
+        require('../src/orchestration-v2/voice-routes').mountVoiceRoutes(app, {
+            host,
+            editorModel: {
+                read: (id) => books.get(id) || null,
+                commit: () => {},
+                // the hero store of the editor model, over the in-memory book
+                heroes: (id) => ({
+                    update: (heroId, mutate) => {
+                        const b = books.get(id);
+                        const i = b ? b.heroes.findIndex((x) => x.id === heroId) : -1;
+                        if (i < 0) return null;
+                        const draft = JSON.parse(JSON.stringify(b.heroes[i]));
+                        const next = mutate(draft) || draft;
+                        b.heroes[i] = next;
+                        return next;
+                    },
+                }),
+            },
+            bookRepo: require('../src/storage/postgres/repositories/book-repo'), getPool, log: () => {},
+        });
         server.removeAllListeners('request');
         server.on('request', app);
     }
@@ -175,6 +198,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         bookId = `${stamp}-${crypto.randomBytes(3).toString('hex')}`;
         buildId = `bld-${bookId}`;
         books.set(bookId, bookJson(bookId, buildId));
+        lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
         bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = $1`, [workerId]);
@@ -459,20 +483,181 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         }
     });
 
-    it('payload аудио-чанка = workflow старого пути (тот же buildSegmentWorkflow, байт-в-байт)', async () => {
-        const provider = require('@animastor/generation').comfyuiProvider;
-        const sent = [];
-        const origGenerate = provider.generate;
-        provider.generate = async (req) => { sent.push(req.workflow); return { sent: true }; };
-        try {
-            const generation = require('../src/audio/generation');
-            const s = require('../src/book').collectScenes(books.get(bookId)).find((x) => x.scene_id === 'sc-1');
-            const r2 = createMockRedis();
-            await generation.generateSceneAudio(r2, s, books.get(bookId), buildId, bookId, 'disp-1');
-        } finally { provider.generate = origGenerate; }
-        await runScene('ch-1', 'sc-1');
+    // VOICE_REFERENCES.md: a chunk is cloned from the narrator's LOCKED reference —
+    // the task carries LoadAudio(vref_<sha>.wav) and the file as a job input (by link)
+    it('аудио-чанк: workflow = buildSegmentWorkflow (клон с референса), референс приходит input_files по ссылке, sha256 сходится', async () => {
+        const ref = lockReference(books.get(bookId), config.OUTPUT_DIR);
+        const r = await runScene('ch-1', 'sc-1');
+        expect(r.status).to.equal(200);
         const t = (await worker.claim()).body.task;
-        expect(sent).to.have.length(1);
-        expect(JSON.stringify(t.params)).to.equal(JSON.stringify(sent[0]));
+        const generation = require('../src/audio/generation');
+        const s = require('../src/book').collectScenes(books.get(bookId)).find((x) => x.scene_id === 'sc-1');
+        const seg = require('../src/audio/segments').buildSegments(s)[0];
+        const built = generation.buildSegmentWorkflow(seg, s, books.get(bookId), host.voiceRefs());
+        expect(JSON.stringify(t.params)).to.equal(JSON.stringify(built.workflow));
+        expect(t.params['90'].inputs.audio).to.equal(ref.name);
+        expect(Object.values(t.params).map((n) => n.class_type)).to.not.include('Qwen3TTSVoiceDesign');
+        expect(t.input_files.map((f) => [f.name, f.sha256])).to.deep.equal([[ref.name, ref.sha256]]);
+        const got = await origFetch(t.input_files[0].url, { headers: { authorization: `Bearer ${t.upload_token}` } });
+        expect(got.status).to.equal(200);
+        expect(crypto.createHash('sha256').update(Buffer.from(await got.arrayBuffer())).digest('hex')).to.equal(ref.sha256);
     });
+
+    it('нет закреплённого референса / sha256 не совпал → 409 voice_reference_required, работ нет (без фолбэка)', async () => {
+        delete voiceOf(books.get(bookId), 'narrator').reference;
+        const r1 = await runScene('ch-1', 'sc-1');
+        expect(r1.status).to.equal(409);
+        expect(r1.body).to.include({ code: 'voice_reference_required' });
+        expect(r1.body.character_ids).to.deep.equal(['narrator']);
+        expect(r1.body.reasons).to.deep.equal({ narrator: 'missing' });
+        const ref = lockReference(books.get(bookId), config.OUTPUT_DIR);
+        fs.appendFileSync(ref.path, Buffer.from([0, 0]));          // the file changed after locking
+        const r2 = await runScene('ch-1', 'sc-1');
+        expect(r2.status).to.equal(409);
+        expect(r2.body.reasons).to.deep.equal({ narrator: 'sha_mismatch' });
+        expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId])).to.equal(0);
+    });
+
+    // ── VOICE_REFERENCES.md: candidates → worker → strict check → lock ──
+    function candidateWav(meta) {
+        const base = toneWav(9);
+        const text = Buffer.concat([Buffer.from(JSON.stringify(meta), 'utf8'), Buffer.from([0])]);
+        const t2 = text.length % 2 ? Buffer.concat([text, Buffer.from([0])]) : text;
+        const icmt = Buffer.concat([Buffer.from('ICMT'), Buffer.from(Uint32Array.of(t2.length).buffer), t2]);
+        const body = Buffer.concat([Buffer.from('INFO'), icmt]);
+        const list = Buffer.concat([Buffer.from('LIST'), Buffer.from(Uint32Array.of(body.length).buffer), body]);
+        const out = Buffer.concat([base, list]);
+        out.writeUInt32LE(out.length - 8, 4);
+        return out;
+    }
+
+    it('референсы голоса на герое: кандидаты по явной команде → воркер → строгая сверка → закрепление; «Очистить кэш» не трогает voices/', async () => {
+        const b = books.get(bookId);
+        b.book = { language: 'ru' };
+        b.heroes.push({ schema: 'animastor.character/1', id: 'anna', voice: { timbre: 'Warm female voice.', manner: 'Teasing.', timbre_source: 'user' } });
+        const phrase = require('../ai/voice-reference-phrases.json').ru.conversational.text;
+        const anna = `/api/v1/book/${bookId}/heroes/anna/voice`;
+
+        // the old routes are gone
+        expect((await api('GET', `/api/v1/book/${bookId}/voices/references`)).status).to.equal(404);
+        expect((await api('POST', `/api/v1/book/${bookId}/voices/anna/reference`, { candidate_id: 'x' })).status).to.equal(404);
+
+        expect((await api('POST', `${anna}/candidates/design`, { count: 2 })).body.error).to.equal('no_user_action');
+        expect((await api('POST', `/api/v1/book/${bookId}/heroes/narrator/voice/candidates/design`, { client_action: { action_id: 'x0' } })).body.error).to.equal('reference_locked');
+        expect((await api('POST', `/api/v1/book/${bookId}/heroes/nobody/voice/candidates/design`, { client_action: { action_id: 'x1' } })).body.error).to.equal('hero_not_found');
+        const c = await api('POST', `${anna}/candidates/design`, { count: 2, client_action: { kind: 'user_click', source: 'hero_card.voice_design', action_id: 'v1', trusted: true } });
+        expect(c.status).to.equal(200);
+        expect(c.body.summary.jobs_created).to.equal(2);
+
+        let list = (await api('GET', `${anna}/candidates`)).body;
+        expect(list.reference_status).to.equal('missing');
+        expect(list.design_description).to.equal('Warm female voice.');      // a character: timbre only
+        expect(list.pending).to.equal(true);
+        expect(list.candidates.map((x) => x.status)).to.deep.equal(['pending', 'pending']);
+        expect(list.phrase.text).to.equal(phrase);
+
+        const t1 = (await worker.claim()).body.task;
+        const t2 = (await worker.claim()).body.task;
+        for (const t of [t1, t2]) {
+            expect(t.kind).to.equal('voice_reference');
+            expect(t.params['1009'].class_type).to.equal('SaveAudioAnimastorReference');
+            expect(t.params['71'].inputs).to.include({ text: phrase, voice_instruction: 'Warm female voice.', language: 'Russian' });
+        }
+        expect(t1.params['71'].inputs.seed).to.not.equal(t2.params['71'].inputs.seed);
+        // case / punctuation / ё differ → still equal after normalisation; one changed word → failed
+        const ok = phrase.toUpperCase().replace(/[.,]/g, '').replace(/е/g, 'ё');
+        const bad = phrase.replace('окна', 'двери');
+        expect((await worker.put(t1, candidateWav({ asr_transcript: ok, verification_model: 'faster-whisper-small', words: [{ w: 'x', start: 0, end: 0.2, p: 0.9 }] }))).status).to.equal(200);
+        expect((await worker.put(t2, candidateWav({ asr_transcript: bad, verification_model: 'faster-whisper-small' }))).status).to.equal(200);
+
+        list = (await api('GET', `${anna}/candidates`)).body;
+        const byJob = (t) => list.candidates.find((x) => x.candidate_id === t.unit_key);
+        const good = byJob(t1); const failed = byJob(t2);
+        expect(list.pending).to.equal(false);
+        expect(good).to.include({ name: `${t1.unit_key}.wav`, status: 'ready', verification: 'passed', source: 'designed', duration_ms: 9000, file: `voices/anna/${t1.unit_key}.wav`, pinned: false });
+        expect(failed.verification).to.equal('failed');
+        expect(failed.verification_problems).to.include('transcript_mismatch');
+        // stored canonical: LIST cut, sha256 = the stored bytes
+        const stored = fs.readFileSync(path.join(config.OUTPUT_DIR, buildId, 'voices', 'anna', `${t1.unit_key}.wav`));
+        const vr = require('../src/audio/voice-references');
+        expect(vr.parseWavMeta(stored)).to.equal(null);
+        expect(vr.sha256(stored)).to.equal(good.sha256);
+        const audio = await origFetch(`${base}${anna}/file/${t1.unit_key}.wav`);
+        expect(audio.status).to.equal(200);
+        expect(audio.headers.get('content-type')).to.equal('audio/wav');
+        expect((await api('GET', `${anna}/file/..%2F..%2Fx.wav`)).status).to.be.oneOf([400, 404]);
+        expect((await api('GET', `${anna}/file/${t1.unit_key}.mp3`)).body.error).to.equal('invalid_name');
+
+        expect((await api('POST', `${anna}/reference`, { name: `${t2.unit_key}.wav`, locked: true })).body.error).to.equal('candidate_not_verified');
+        expect((await api('POST', `${anna}/reference`, { name: `${t1.unit_key}.wav`, locked: false })).body.error).to.equal('locked_required');
+        const lock = await api('POST', `${anna}/reference`, { name: `${t1.unit_key}.wav`, locked: true });
+        expect(lock.status).to.equal(200);
+        const timbreSha = crypto.createHash('sha256').update('Warm female voice.', 'utf8').digest('hex');
+        expect(voiceOf(b, 'anna').reference).to.include({ file: `voices/anna/${t1.unit_key}.wav`, ref_text: phrase, source: 'designed', sha256: good.sha256, verification: 'passed', locked: true, source_timbre_sha256: timbreSha });
+        expect(voiceOf(b, 'anna').reference.seed).to.equal(t1.params['71'].inputs.seed);
+        list = (await api('GET', `${anna}/candidates`)).body;
+        expect(list.reference_status).to.equal('ok');
+        expect(list.reference_outdated).to.equal(false);
+        expect(byJob(t1).pinned).to.equal(true);
+        // a new timbre → reference_outdated; nothing is regenerated by itself
+        voiceOf(b, 'anna').timbre = 'Husky female voice.';
+        expect((await api('GET', `${anna}/candidates`)).body.reference_outdated).to.equal(true);
+        voiceOf(b, 'anna').timbre = 'Warm female voice.';
+        expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND kind = 'voice_reference' AND status = 'queued'`, [bookId])).to.equal(0);
+
+        expect((await api('DELETE', `${anna}/candidates/${t1.unit_key}.wav`)).body.error).to.equal('candidate_locked');
+        expect((await api('DELETE', `${anna}/candidates/${t2.unit_key}.wav`)).status).to.equal(200);
+
+        // В3: cache clear keeps voices/
+        fs.writeFileSync(path.join(config.OUTPUT_DIR, buildId, 'generated.mp3'), 'x');
+        await api('DELETE', `/api/v1/book/${bookId}/cache`);
+        expect(fs.existsSync(path.join(config.OUTPUT_DIR, buildId, 'voices', 'anna', `${t1.unit_key}.wav`))).to.equal(true);
+
+        expect((await api('DELETE', `${anna}/reference`)).status).to.equal(200);
+        expect(voiceOf(b, 'anna')).to.not.have.property('reference');
+    });
+
+    it('загрузка своего образца на герое: multipart (singleUpload), только по явной команде, текст из формы становится ref_text', async () => {
+        const b = books.get(bookId);
+        b.book = { language: 'ru' };
+        b.heroes.push({ schema: 'animastor.character/1', id: 'boris', voice: { timbre: 'Low male voice.' } });
+        const url = `${base}/api/v1/book/${bookId}/heroes/boris/voice/candidates/upload`;
+        const form = (withAction) => {
+            const fd = new FormData();
+            fd.append('file', new Blob([toneWav(6)], { type: 'audio/wav' }), 'sample.wav');
+            fd.append('ref_text', 'Я пришёл домой поздно.');
+            if (withAction) fd.append('client_action', JSON.stringify({ kind: 'user_click', source: 'hero_card.voice_upload', action_id: 'u1', trusted: true }));
+            return fd;
+        };
+        const noAction = await origFetch(url, { method: 'POST', body: form(false) });
+        expect(noAction.status).to.equal(400);
+        expect((await noAction.json()).error).to.equal('no_user_action');
+        const r = await origFetch(url, { method: 'POST', body: form(true) });
+        const body = await r.json();
+        expect(r.status, JSON.stringify(body)).to.equal(200);
+        expect(body.name).to.match(/^c[0-9a-z]+\.wav$/);
+        const list = (await api('GET', `/api/v1/book/${bookId}/heroes/boris/voice/candidates`)).body;
+        expect(list.candidates).to.have.length(1);
+        expect(list.candidates[0]).to.include({ status: 'pending', source: 'uploaded' });
+        const t = (await worker.claim()).body.task;
+        expect(t.kind).to.equal('voice_reference');
+        expect((await worker.put(t, candidateWav({ asr_transcript: 'я пришел домой поздно', verification_model: 'faster-whisper-small' }))).status).to.equal(200);
+        const after = (await api('GET', `/api/v1/book/${bookId}/heroes/boris/voice/candidates`)).body.candidates[0];
+        expect(after).to.include({ status: 'ready', ref_text: 'Я пришёл домой поздно.', ref_text_source: 'user' });
+        // owner's decision (step 5): an uploaded reference keeps no timbre hash
+        // and is never reference_outdated, whatever the timbre becomes
+        const pin = await api('POST', `/api/v1/book/${bookId}/heroes/boris/voice/reference`, { name: after.name, locked: true });
+        expect(pin.status, JSON.stringify(pin.body)).to.equal(200);
+        expect(pin.body.reference.source).to.equal('uploaded');
+        expect(pin.body.reference).to.not.have.property('source_timbre_sha256');
+        voiceOf(b, 'boris').timbre = 'Another timbre entirely.';
+        expect((await api('GET', `/api/v1/book/${bookId}/heroes/boris/voice/candidates`)).body.reference_outdated).to.equal(false);
+        // too large → 413 from the upload limit, nothing stored
+        const big = new FormData();
+        big.append('file', new Blob([Buffer.alloc(21 * 1024 * 1024)], { type: 'audio/wav' }), 'big.wav');
+        big.append('client_action', JSON.stringify({ action_id: 'u2' }));
+        const tooBig = await origFetch(url, { method: 'POST', body: big });
+        expect(tooBig.status).to.equal(413);
+    });
+
 });

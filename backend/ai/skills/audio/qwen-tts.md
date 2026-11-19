@@ -2,9 +2,12 @@
 
 ## Core Principle
 
-Qwen3-TTS builds voices from two inputs: a **voice_instruction** (natural-language
-description) and, optionally, a reference audio sample that captures timbre and
-cadence. The text input should be:
+Animastor voices are built ONCE per character (architecture/VOICE_REFERENCES.md):
+the voice description (timbre; for the narrator timbre + narrator manner) is turned
+into a short neutral reference sample by Qwen3TTSVoiceDesign, verified by Whisper and
+locked. Every chunk is then CLONED from that sample (Base model, VoiceClonePrompt) —
+the clone copies the timbre AND the delivery of the reference; per-line `instruct`
+is ignored by the Base clone. The text input should be:
 
 - clean, well-punctuated text
 - properly formatted for natural speech rhythm

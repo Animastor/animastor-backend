@@ -21,12 +21,25 @@ const {
     normalisePlan, readyParts, mergePartsOf, mergeUnitFor, linkSceneLive, recordSkips, skipSummary,
 } = require('./stage');
 
-const COMMAND_KINDS = Object.freeze(['regenerate', 'generate_all']);
+const COMMAND_KINDS = Object.freeze(['regenerate', 'generate_all', 'voice_reference']);
+// 1.4.0 — voice_reference (VOICE_REFERENCES.md): the command creates
+// voice_reference jobs only; layers = ['audio'] (the worker type), the book
+// layer-config does not apply (a voice reference is not a book layer);
+// scope = {level:'book', voice:{…}} — `voice` is opaque host data (≤ 16 KiB
+// JSON) handed to planUnits via planCtx.kind / scope.voice.
+const VOICE_SCOPE_MAX_BYTES = 16 * 1024;
 const SCOPE_LEVELS = Object.freeze(['book', 'chapter', 'scenes', 'scene', 'unit']);
 const MAX_SCOPE_SCENES = 10_000;
 
-function normaliseScope(scope) {
+function normaliseScope(scope, kind = 'regenerate') {
     const s = scope && typeof scope === 'object' ? scope : null;
+    if (kind === 'voice_reference') {
+        if (!s || s.level !== 'book') throw new GenError('bad_request', 400, 'voice_reference: scope.level must be book');
+        const v = s.voice;
+        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new GenError('bad_request', 400, 'voice_reference: scope.voice object required');
+        if (Buffer.byteLength(JSON.stringify(v)) > VOICE_SCOPE_MAX_BYTES) throw new GenError('bad_request', 400, 'voice_reference: scope.voice too large');
+        return { level: 'book', voice: JSON.parse(JSON.stringify(v)) };
+    }
     if (!s || !SCOPE_LEVELS.includes(s.level)) throw new GenError('bad_request', 400, 'scope.level must be book|chapter|scenes|scene|unit');
     const out = { level: s.level };
     const opt = (k) => { if (s[k] !== undefined && s[k] !== null) out[k] = requireText(s[k], `scope.${k}`); };
@@ -54,8 +67,10 @@ function unitFitsLayer(kind, layer) {
     return layer === 'video' && kind === 'iu_image';
 }
 
-function checkUnit(u, layer) {
-    const ok = u && typeof u === 'object'
+function checkUnit(u, layer, commandKind = 'regenerate') {
+    // a voice_reference command plans voice_reference units only, and no other command does
+    const kindOk = u && ((commandKind === 'voice_reference') === (u.kind === 'voice_reference'));
+    const ok = u && typeof u === 'object' && kindOk
         && FIRST_STAGE_KINDS.includes(u.kind) && unitFitsLayer(u.kind, layer)
         && typeof u.chapter_id === 'string' && u.chapter_id
         && typeof u.scene_id === 'string' && u.scene_id
@@ -105,8 +120,11 @@ function createCommands({ pool, ports, genLog = NOOP_LOG }) {
         const bookId = requireText(params.bookId, 'bookId');
         const kind = params.kind || 'regenerate';
         if (!COMMAND_KINDS.includes(kind)) throw new GenError('bad_request', 400, `kind must be ${COMMAND_KINDS.join('|')}`);
-        const scope = normaliseScope(params.scope);
+        const scope = normaliseScope(params.scope, kind);
         const requested = Array.isArray(params.layers) ? [...new Set(params.layers)] : [];
+        if (kind === 'voice_reference' && (requested.length !== 1 || requested[0] !== 'audio')) {
+            throw new GenError('bad_request', 400, "voice_reference: layers must be ['audio']");
+        }
         if (requested.length === 0 || requested.some((l) => !LAYERS.includes(l))) {
             throw new GenError('bad_request', 400, 'layers must be a non-empty subset of audio|image|video');
         }
@@ -115,7 +133,9 @@ function createCommands({ pool, ports, genLog = NOOP_LOG }) {
 
         // §6.1 п.2: requested ∩ enabled (host layer-config passed in, or the optional port)
         let effective;
-        if (Array.isArray(params.enabledLayers)) {
+        if (kind === 'voice_reference') {
+            effective = ['audio'];                 // not a book layer — layer-config does not apply
+        } else if (Array.isArray(params.enabledLayers)) {
             effective = requested.filter((l) => params.enabledLayers.includes(l));
         } else {
             effective = [];
@@ -160,12 +180,12 @@ function createCommands({ pool, ports, genLog = NOOP_LOG }) {
             // planner (1.3.0) runs on THIS transaction and must see the image / audio jobs
             // this very command has just created (they are what a video scene waits for).
             const bookRef = { bookId, workspaceId, userId };
-            const planCtx = { db: client };
+            const planCtx = { db: client, kind };
             const seen = new Set();
             const takeUnits = (list, layer) => {
                 const out = [];
                 for (const u of list) {
-                    checkUnit(u, layer);
+                    checkUnit(u, layer, kind);
                     if (seen.has(unitKey(u))) continue; // video+image may both plan the same IU
                     seen.add(unitKey(u));
                     out.push(u);

@@ -42,10 +42,20 @@ function meaningfulTokensFromText(text) {
         .filter(t => !CONNECTOR_WORDS.has(t));
 }
 
+// An id with a numeric suffix ("boris_2") was issued because the plain id was
+// taken by ANOTHER person (hero-id.cjs) — as evidence of identity it says the
+// opposite of what its text suggests. When the character has a name, the name
+// speaks for it and such an id stays out of the identity texts.
+function identityId(character) {
+    const id = character.id;
+    if (typeof id === 'string' && /_\d+$/.test(id) && character.name) return null;
+    return id;
+}
+
 function allIdentityTexts(character) {
     if (!character) return [];
     return [
-        character.id,
+        identityId(character),
         character.name,
         character.alias,
         ...(Array.isArray(character.aliases) ? character.aliases : []),
@@ -221,8 +231,32 @@ function mergeCharacterData(existing, incoming) {
         merged.traits = [...traits];
     }
 
-    if (incoming.voice && (!existing.voice || String(incoming.voice).length > String(existing.voice).length)) {
-        merged.voice = incoming.voice;
+    // voice: in VBook 4 the working value is { timbre, manner } (a hero's voice
+    // block); the first one stays — a later window never replaces a voice, it
+    // may only complete an empty one (hero-analysis mergeWindowIntoHero at the
+    // write barrier). A plain string is the pre-v4 working shape and keeps the
+    // old "longer description wins" rule.
+    if (incoming.voice) {
+        const isObject = (v) => v !== null && typeof v === 'object';
+        if (!existing.voice) {
+            merged.voice = incoming.voice;
+        } else if (!isObject(existing.voice) && !isObject(incoming.voice)
+            && String(incoming.voice).length > String(existing.voice).length) {
+            merged.voice = incoming.voice;
+        }
+    }
+
+    // aliases: union, first spelling kept (unique after normalizeForMatch)
+    if (Array.isArray(incoming.aliases) && incoming.aliases.length > 0) {
+        const seen = new Set((existing.aliases || []).map((a) => normalizeForMatch(a)));
+        const aliases = [...(existing.aliases || [])];
+        for (const alias of incoming.aliases) {
+            const key = normalizeForMatch(alias);
+            if (!alias || !key || seen.has(key) || key === normalizeForMatch(existing.name)) continue;
+            seen.add(key);
+            aliases.push(alias);
+        }
+        if (aliases.length > 0) merged.aliases = aliases;
     }
 
     if (!merged.role && incoming.role) merged.role = incoming.role;

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 (2026-11-17, unpublished)
+
+VBook 4, step 3 — generation reads heroes (animastor-docs `architecture/VBOOK_FORMAT_V4.md` §4a.5, §8.2, §12).
+
+- Dirty grammar: `scene.passport` (scene key) and `characters.passport` (cross key) are replaced by ONE
+  derived scene key **`scene.resolved_looks`** → `image`, `video`: for every participant with a passport the
+  look the generation will use (`resolveHeroLook`). `computeSceneDirtyLayers(old, new, context)` takes
+  `{ old: {book, chapter}, new: {book, chapter}, resolveHeroLook }`; `extract(scene, ctx)`. Without a context
+  the key is absent. Breaking: `extractPassport` removed.
+- `characters.voice` and `book.voices` → **`heroes.voice`** (`book.heroes`): audio is dirty only when the
+  LOCKED reference changes (sha256 / ref_text) — the 0.2.0 rule; the narrator's voice → every scene, another
+  hero's → scenes where it takes part or speaks (`unit.audio.speaker`).
+- New exports: `sceneHasSpeaker`, `resolvedLooks`, `voiceKey`.
+- `BookDataPort`: two more operations — `resolveHeroLook(book, chapter, scene, heroId)`,
+  `passportHeroes(book)` (the video builder reads heroes only through the port).
+
+## 0.2.0 (2026-11-12, unpublished)
+
+Voice references (animastor-docs `architecture/VOICE_REFERENCES.md`).
+
+- `assembleMergedDialogueWorkflow({script, defaultInstruct, speakers:[{name, referenceFile, referenceText}]})`:
+  each speaker slot is `LoadAudio(locked reference) → VoiceClonePrompt`; unused slots are removed from
+  the graph; the VoiceDesign loader is gone. Breaking: `speakers[].voice` no longer exists.
+- New: `assembleNarrationWorkflow`, `assembleVoiceReferenceWorkflow`, `assembleVoiceTranscribeWorkflow`,
+  `MAX_DIALOGUE_SPEAKERS`; `WORKFLOW_NAMES.voiceReference` / `voiceTranscribe`.
+- Dirty grammar `book.voices`: audio is dirty only when the LOCKED reference changes (sha256 / ref_text);
+  `timbre` / `manner` edits change no chunk.
+- Depends on `animastor-comfyui-workflow-connector` ^0.2.0 (reference entity types).
+
 ## 0.1.2 (2026-11-10, unpublished)
 
 - Prompt Dependency Registry: explicit unit fields of the behaviour feature —

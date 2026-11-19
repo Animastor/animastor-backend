@@ -27,10 +27,10 @@ const SC = 'sc-1';
 
 function buildBook() {
     return {
-        manifest: { book_id: BOOK_ID, vbook_version: '3.1', build_id: BUILD_ID },
+        manifest: { book_id: BOOK_ID, vbook_version: 4, build_id: BUILD_ID },
         book: { book_id: BOOK_ID, title: BOOK_ID, structure: { chapters_order: [] } },
         bible: { version: '3.0' },
-        characters: [],
+        heroes: [],
         chapters: [{
             chapter_id: CH,
             scenes: [{

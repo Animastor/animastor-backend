@@ -378,7 +378,12 @@ describe('C21 AI Agent contour: generation boundary', () => {
 
     it('voice authoring inside the contour is analysis/authoring only (voice DESCRIPTIONS, never audio rendering)', () => {
         const voices = src(path.join(REPO_ROOT, 'packages/animastor-ai-analysis/src/tasks/character-analyzer/voices.js'));
-        expect(voices, 'voices.js writes voice instruction strings').to.match(/ch\.voice = voices\[ch\.id\]\.instruction/);
+        // VBook 4: the write-back is a voice BLOCK { timbre, manner, timbre_source }
+        // parsed and cleaned by the runtime's voiceFromAnalysis — text only.
+        expect(voices, 'voices.js writes a parsed voice description').to.match(/ch\.voice = parsed\.voice;/);
+        // step 2b: the book language drives the pronunciation suffix (rules v3)
+        expect(voices).to.match(/voiceFromAnalysis\(raw\[ch\.id\], \{ language: input\.language \}\)/);
+        expect(voices, 'no legacy single-string contract').to.not.match(/\.instruction\b/);
         // code-only scan (comments legitimately mention the downstream TTS
         // consumer — the forbidden thing is RENDERING, i.e. audio I/O calls)
         const code = voices.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

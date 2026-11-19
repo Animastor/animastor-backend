@@ -15,9 +15,9 @@
 //
 //   Canonical (this facade reads/writes it via the book module):
 //     - Book bundle / VBook content on disk: manifest.json, book.json,
-//       bible.json, locations.json, voices.json, behavior.json,
-//       characters.json, chapters/*.json (chapters, scenes, assets
-//       references and other canonical book data).
+//       bible.json, locations.json, behaviour.json, characters/<id>.json,
+//       chapters/*.json (chapters, scenes, assets references and other
+//       canonical book data) — VBook 4, architecture/VBOOK_FORMAT_V4.md.
 //
 //   Identity / ownership (PostgreSQL — primary, NOT part of the model):
 //     - book identity as an owned resource, ownership, workspace relation,
@@ -44,9 +44,10 @@
 //     - Both modes use the SAME bookId and the SAME identity semantics:
 //       identity = manifest.book_id from the one canonical manifest.json.
 //     - Errors: BookModelError with a stable `code` for invalid input
-//       (INVALID_BOOK_ID, INVALID_MODE); `null` when the book does not
-//       exist; loader-internal failures resolve to null (never throw),
-//       matching the historical behavior of both loaders.
+//       (INVALID_BOOK_ID, INVALID_MODE) and for a book that exists but is
+//       not VBook 4 (UNSUPPORTED_VBOOK_VERSION — VBOOK_FORMAT_V4 §9; hosts
+//       answer 409); `null` ONLY when the book does not exist; other
+//       loader-internal failures still resolve to null, as before.
 
 const fs = require('fs');
 
@@ -57,17 +58,9 @@ const { getBookDir, getManifestPath } = require('./lazy-book/paths');
 const MODE_FULL = 'full';
 const MODE_LAZY = 'lazy';
 
-class BookModelError extends Error {
-    /**
-     * @param {string} code - stable machine-readable code (INVALID_BOOK_ID | INVALID_MODE)
-     * @param {string} message
-     */
-    constructor(code, message) {
-        super(message);
-        this.name = 'BookModelError';
-        this.code = code;
-    }
-}
+// BookModelError lives next to the version gate so the core loader can throw
+// it without a circular import; this facade re-exports it.
+const { BookModelError, assertSupportedVbookVersion } = require('./vbook-version.cjs');
 
 function assertBookId(bookId) {
     if (typeof bookId !== 'string' || bookId.trim() === '') {
@@ -95,7 +88,10 @@ function loadLazy(bookId) {
     let canonical = null;
     try {
         canonical = bookCore.loadBook(bookId);
-    } catch (_) {
+    } catch (err) {
+        // "The book exists but cannot be opened" is an answer, not a reason
+        // to try the draft loader (which would report the same thing).
+        if (err instanceof BookModelError) throw err;
         canonical = null;
     }
     if (canonical) return canonical;
@@ -107,7 +103,7 @@ function loadLazy(bookId) {
  * @param {string} bookId - canonical book id
  * @param {{ mode?: 'full'|'lazy' }} [options] - defaults to { mode: 'full' }
  * @returns {Object|null} book representation, or null when not found
- * @throws {BookModelError} INVALID_BOOK_ID / INVALID_MODE
+ * @throws {BookModelError} INVALID_BOOK_ID / INVALID_MODE / UNSUPPORTED_VBOOK_VERSION
  */
 function loadBook(bookId, options = {}) {
     assertBookId(bookId);
@@ -159,6 +155,7 @@ module.exports = {
     MODE_FULL,
     MODE_LAZY,
     BookModelError,
+    assertSupportedVbookVersion,
     loadBook,
     getBookIdentity,
     getBookManifest,

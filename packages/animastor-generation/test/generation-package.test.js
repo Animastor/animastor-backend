@@ -79,7 +79,7 @@ describe('@animastor/generation package', () => {
             expect(dg[fn], `dirtyGrammar.${fn}`).to.be.a('function');
         }
         for (const k of ['SCENE_FIELDS', 'CROSS_FIELDS', 'isEqual',
-            'extractPassport', 'SPEECH_SEC_PER_WORD', 'SPEECH_MIN_SEC', 'CYR_LATIN_MAP']) {
+            'sceneHasSpeaker', 'resolvedLooks', 'voiceKey', 'SPEECH_SEC_PER_WORD', 'SPEECH_MIN_SEC', 'CYR_LATIN_MAP']) {
             expect(k in dg, `dirtyGrammar.${k}`).to.equal(true);
         }
         // frozen layer→layer dependency graph: the real object, not undefined
@@ -250,6 +250,8 @@ describe('@animastor/generation package', () => {
             expect(comfyuiProvider.WORKFLOW_NAMES).to.deep.equal({
                 narration: 'tts-qwen-narrator',
                 dialogue: 'tts-qwen-dialogue',
+                voiceReference: 'tts-qwen-voice-reference',
+                voiceTranscribe: 'tts-qwen-voice-transcribe',
                 image: 'img-qwen-image',
                 videoFamily: 'video-ltx',
             });

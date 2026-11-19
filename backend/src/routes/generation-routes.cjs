@@ -101,23 +101,20 @@ module.exports = function(app, redis, deps) {
     // GENERATE (legacy full-book endpoint)
     // ======================================================
     const { requireUser, singleUpload } = require('../middleware/input-guard');
+    const vbookImporter = require('../services/vbook-import.cjs').createVbookImporter({
+        book, importBookAllowed: authContextMiddleware.importBookAllowed, log,
+    });
     app.post('/api/v1/generate', requireUser, singleUpload('file'), async (req, res) => {
         try {
             if (!req.file) return res.status(400).json({ error: 'file missing' });
 
-            const files = book.extractBookBundle(req.file.buffer, { log });
-            log('📦 bundle loaded:', Object.keys(files));
-            const bookData = book.buildBookFromBundle(files);
-            const bookId = bookData.manifest.book_id;
-
-            // Cross-workspace guard for authenticated callers: the bundle
-            // book_id is client-controlled — never overwrite a foreign book.
-            const generateImportCheck = await authContextMiddleware.importBookAllowed(req, bookId, {
-                diskCopyExists: !!book.loadBook(bookId),
-            });
-            if (!generateImportCheck.allowed) {
-                return res.status(generateImportCheck.status).json({ error: generateImportCheck.error });
-            }
+            // The one .vbook importer (services/vbook-import.cjs): version gate,
+            // whitelist, cross-workspace guard (the bundle book_id is
+            // client-controlled — never overwrite a foreign book), object-path
+            // save. An existing book is kept as it is.
+            const imported = await vbookImporter.importVbookArchive(req, req.file.buffer, { tag: 'GENERATE' });
+            if (!imported.ok) return res.status(imported.status).json(imported.body);
+            const { bookId, bookData } = imported;
             try {
                 const workspaceOwnership = require('../middleware/workspace-ownership');
                 await workspaceOwnership.resolveWorkspaceForBook(bookId, { preferredWorkspaceId: req.workspace?.id || null });
@@ -137,9 +134,8 @@ module.exports = function(app, redis, deps) {
 
             await genScope.setScope(redis, bookId, layerConfig.SCOPES.WHOLE_BOOK, null, null);
 
-            const existingBook = book.loadBook(bookId);
+            const existingBook = imported.wasExisting ? imported.loadedBook : null;
             if (existingBook) {
-                log(`Book ${bookId} already exists — keeping existing (edited) version`);
                 const buildId = existingBook.manifest?.build_id || bookData.manifest.build_id || 'default';
                 const layerCfgBody = {
                     audio_enabled: req.body.audio_enabled !== 'false',
@@ -181,12 +177,8 @@ module.exports = function(app, redis, deps) {
                 return res.json({ book_id: bookId, build_id: buildId, chunk_ids: ids, mode });
             }
 
-            await book.resetBook(bookId);
-            book.saveBookBundle(bookData, files);
-
-            const buildId = bookData.manifest.build_id || 'default';
-            const loadedBook = book.loadBook(bookId);
-            console.log(`[API] Loaded book from disk: ${bookId}, chapters: ${loadedBook.chapters?.length}`);
+            const buildId = imported.buildId;
+            const loadedBook = imported.loadedBook;
 
             const layerCfgBody = {
                 audio_enabled: req.body.audio_enabled !== 'false',

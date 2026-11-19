@@ -1,8 +1,9 @@
 // ======================================================
 // EDITOR CONTOUR — Entity CRUD Routes
 // ======================================================
-// Manual add/delete of characters, locations and voices from the Editor
-// (web + Android).
+// Manual add/delete of locations and of the book structure (chapters,
+// scenes, units) from the Editor (web + Android). Heroes (VBook 4) have their
+// own registrar: ./hero-routes.cjs.
 //
 // Editor contour (@animastor/editor — Phase 4 physical move;
 // docs/architecture/editor-module-extraction-audit.md §13/§Phase 4). Moved
@@ -26,13 +27,14 @@
 // ======================================================
 
 const { toEntityId, isCanonicalEntityId } = require('./entity-id.js');
-const { normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cjs');
+const { rebuildFullText } = require('./scene-patch-utils.cjs');
 // The project's single hex-id generator (lazy-book paths): ch-<hex8> / sc-<hex8>
 // / iu-<hex8>. No second generator is ever introduced on the clients.
 const { chapterId, sceneId, unitId, generateBookId } = require('@animastor/vbook-runtime/lazy-book/paths');
-// behavior.json schema v2: entries live under behaviors.characters.<id>
-// (rules are untouched by these routes). Legacy v2.1 maps are migrated in place.
-const { behaviorCharacters, removeCharacterBehaviors } = require('@animastor/vbook-runtime/behavior-schema.cjs');
+// VBook 4 step 4: /characters, /voices, /behaviors are gone — heroes are
+// created and deleted through ./hero-routes.cjs.
+const { emptyBehaviourGlobals } = require('@animastor/vbook-runtime/character-validator.cjs');
+const { defaultNarrator } = require('@animastor/vbook-runtime/lazy-book/draft');
 
 // (redis is not destructured: purge/ownership legs arrive via editorPorts)
 module.exports = function (app, redis, deps) {
@@ -74,18 +76,6 @@ module.exports = function (app, redis, deps) {
         return toEntityId(name || '');
     }
 
-    // ── Passport: keep only real fields, empty values dropped, video_tokens
-    //    normalized like the PATCH path (comma text → array). ──
-    function buildPassport(raw) {
-        if (!raw || typeof raw !== 'object') return {};
-        const passport = {};
-        for (const key of ['appearance', 'clothes', 'video_tokens']) {
-            const v = normalizeFieldValue(key, raw[key]);
-            if (v !== undefined && v !== null && v !== '') passport[key] = v;
-        }
-        return passport;
-    }
-
     function buildLocation(raw) {
         const loc = {};
         if (raw.name && String(raw.name).trim()) loc.name = String(raw.name).trim();
@@ -100,77 +90,6 @@ module.exports = function (app, redis, deps) {
         }
         return loc;
     }
-
-    // ======================================================
-    // CHARACTERS — add / delete
-    // ======================================================
-    app.post('/api/v1/book/:bookId/characters', (req, res) => {
-        try {
-            const { bookId } = req.params;
-            const { id, name, passport } = req.body || {};
-            if (!name || !String(name).trim()) {
-                return res.status(400).json({ error: 'Character name is required' });
-            }
-            const entityId = resolveId(id, name);
-            if (!entityId) {
-                return res.status(400).json({ error: 'Could not derive an id from the character name' });
-            }
-
-            const oldBook = loadBook(bookId);
-            const chars = oldBook.characters || [];
-            if (chars.some(c => c && c.id === entityId)) {
-                return res.status(409).json({ error: `Character "${entityId}" already exists` });
-            }
-
-            chars.push({
-                id: entityId,
-                name: String(name).trim(),
-                passport: buildPassport(passport),
-            });
-            oldBook.characters = chars;
-
-            editorModel.commit(oldBook);
-            log(`[ADD CHARACTER] ${bookId}/${entityId} (name=${String(name).trim().slice(0, 40)})`);
-            return res.json({ saved: true, book_id: bookId, character_id: entityId });
-        } catch (err) {
-            console.error('[ADD CHARACTER] Error:', err.message);
-            return res.status(err.statusCode || 500).json({ error: err.message });
-        }
-    });
-
-    app.delete('/api/v1/book/:bookId/characters/:characterId', (req, res) => {
-        try {
-            const { bookId, characterId } = req.params;
-            const oldBook = loadBook(bookId);
-
-            const before = oldBook.characters || [];
-            const after = before.filter(c => !(c && c.id === characterId));
-            if (after.length === before.length) {
-                return res.status(404).json({ error: `Character ${characterId} not found` });
-            }
-            oldBook.characters = after;
-
-            // Dangling-data cleanup: a voice keyed by the deleted character's id
-            // no longer has a character to belong to (voices mirror character ids).
-            const voices = oldBook.voices || {};
-            if (voices[characterId]) {
-                delete voices[characterId];
-                oldBook.voices = voices;
-            }
-
-            // Same dangling-data cleanup for the character's behavior
-            // (behavior.json v2): characters.<character_id> and every rule
-            // with scope:"character" bound to this id. Global rules stay.
-            removeCharacterBehaviors(oldBook, characterId);
-
-            editorModel.commit(oldBook);
-            log(`[DELETE CHARACTER] ${bookId}/${characterId} (removed ${before.length - after.length} character(s))`);
-            return res.json({ saved: true, book_id: bookId, character_id: characterId });
-        } catch (err) {
-            console.error('[DELETE CHARACTER] Error:', err.message);
-            return res.status(err.statusCode || 500).json({ error: err.message });
-        }
-    });
 
     // ======================================================
     // LOCATIONS — add / delete
@@ -223,132 +142,6 @@ module.exports = function (app, redis, deps) {
             return res.json({ saved: true, book_id: bookId, location_id: locationId });
         } catch (err) {
             console.error('[DELETE LOCATION] Error:', err.message);
-            return res.status(err.statusCode || 500).json({ error: err.message });
-        }
-    });
-
-    // ======================================================
-    // VOICES — add / delete
-    // ======================================================
-    app.post('/api/v1/book/:bookId/voices', (req, res) => {
-        try {
-            const { bookId } = req.params;
-            const body = req.body || {};
-            const name = body.name;
-            if (!name || !String(name).trim()) {
-                return res.status(400).json({ error: 'Voice name is required' });
-            }
-            const entityId = resolveId(body.id, name);
-            if (!entityId) {
-                return res.status(400).json({ error: 'Could not derive an id from the voice name' });
-            }
-
-            const oldBook = loadBook(bookId);
-            const voices = oldBook.voices || {};
-            if (voices[entityId]) {
-                return res.status(409).json({ error: `Voice "${entityId}" already exists` });
-            }
-
-            voices[entityId] = {
-                instruction: body.instruction && String(body.instruction).trim()
-                    ? String(body.instruction).trim()
-                    : '',
-            };
-            oldBook.voices = voices;
-
-            editorModel.commit(oldBook);
-            log(`[ADD VOICE] ${bookId}/${entityId} (name=${String(name).trim().slice(0, 40)})`);
-            return res.json({ saved: true, book_id: bookId, voice_id: entityId });
-        } catch (err) {
-            console.error('[ADD VOICE] Error:', err.message);
-            return res.status(err.statusCode || 500).json({ error: err.message });
-        }
-    });
-
-    app.delete('/api/v1/book/:bookId/voices/:voiceId', (req, res) => {
-        try {
-            const { bookId, voiceId } = req.params;
-            const oldBook = loadBook(bookId);
-
-            const voices = oldBook.voices || {};
-            if (!voices[voiceId]) {
-                return res.status(404).json({ error: `Voice ${voiceId} not found` });
-            }
-            delete voices[voiceId];
-            oldBook.voices = voices;
-
-            editorModel.commit(oldBook);
-            log(`[DELETE VOICE] ${bookId}/${voiceId}`);
-            return res.json({ saved: true, book_id: bookId, voice_id: voiceId });
-        } catch (err) {
-            console.error('[DELETE VOICE] Error:', err.message);
-            return res.status(err.statusCode || 500).json({ error: err.message });
-        }
-    });
-
-    // ======================================================
-    // BEHAVIORS — add / delete (manual, keyed by character_id)
-    //
-    // behavior.json (schema v2) keeps character entries under `characters`,
-    // keyed by the existing character_id
-    // ({"characters": {"berlioz": {"baseline": "..."}}}). A behavior belongs
-    // to a character that must already exist — no id transliteration here,
-    // the key is a character id, not a free-form entity id.
-    // ======================================================
-    app.post('/api/v1/book/:bookId/behaviors', (req, res) => {
-        try {
-            const { bookId } = req.params;
-            const body = req.body || {};
-            const characterId = body.character_id && String(body.character_id).trim()
-                ? String(body.character_id).trim()
-                : null;
-            if (!characterId) {
-                return res.status(400).json({ error: 'character_id is required' });
-            }
-
-            const oldBook = loadBook(bookId);
-            const chars = oldBook.characters || [];
-            if (!chars.some(c => c && c.id === characterId)) {
-                return res.status(404).json({ error: `Character ${characterId} not found` });
-            }
-
-            const behaviors = behaviorCharacters(oldBook);
-            if (behaviors[characterId]) {
-                return res.status(409).json({ error: `Behavior for character "${characterId}" already exists` });
-            }
-
-            // Seed the entry with baseline (schema v2.1 has no instruction
-            // field); quirks/reactions and edits go through PATCH.
-            behaviors[characterId] = {};
-            if (body.baseline && String(body.baseline).trim()) {
-                behaviors[characterId].baseline = String(body.baseline).trim();
-            }
-
-            editorModel.commit(oldBook);
-            log(`[ADD BEHAVIOR] ${bookId}/${characterId}`);
-            return res.json({ saved: true, book_id: bookId, character_id: characterId });
-        } catch (err) {
-            console.error('[ADD BEHAVIOR] Error:', err.message);
-            return res.status(err.statusCode || 500).json({ error: err.message });
-        }
-    });
-
-    app.delete('/api/v1/book/:bookId/behaviors/:characterId', (req, res) => {
-        try {
-            const { bookId, characterId } = req.params;
-            const oldBook = loadBook(bookId);
-
-            const behaviors = behaviorCharacters(oldBook);
-            if (!behaviors[characterId]) {
-                return res.status(404).json({ error: `Behavior for character ${characterId} not found` });
-            }
-            delete behaviors[characterId];
-
-            editorModel.commit(oldBook);
-            log(`[DELETE BEHAVIOR] ${bookId}/${characterId}`);
-            return res.json({ saved: true, book_id: bookId, character_id: characterId });
-        } catch (err) {
-            console.error('[DELETE BEHAVIOR] Error:', err.message);
             return res.status(err.statusCode || 500).json({ error: err.message });
         }
     });
@@ -706,23 +499,24 @@ module.exports = function (app, redis, deps) {
 
             const blankBook = {
                 manifest: {
-                    vbook_version: '3.1',
+                    vbook_version: 4,
                     book_id: bookId,
                     build_id: `manual_${Date.now()}`,
                     created_at: now,
                 },
                 book: {
                     book_id: bookId,
-                    version: '3.0',
                     title: label,
                     author: '',
                     language,
-                    structure: { chapters_order: [chFile] },
+                    structure: { chapters_order: [chFile], characters_order: ['narrator'] },
                     defaults: { narration_voice: 'narrator' },
                 },
                 bible: {},
-                characters: [],
-                voices: {},
+                // A v4 book is born with the narrator's file and behaviour.json
+                // (VBOOK_FORMAT_V4 §4, §6.3).
+                heroes: [defaultNarrator(language)],
+                behaviour: emptyBehaviourGlobals(),
                 locations: {},
                 chapters: [{
                     chapter_id: chFile.replace('.json', ''),

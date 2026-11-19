@@ -20,12 +20,13 @@ module.exports = function(app, redis, deps) {
         utils,
     } = deps;
     const { log } = utils;
-    // Token budget, provider-gated enable_thinking, the one-shot
+    // Token budget, provider-gated enable_thinking (+ the provider's reasoning
+    // settings — chatEngine.chatRequestExtras), the one-shot
     // "Unsupported parameter" retry and upstream error text — package
     // logic (request-extras.cjs) carried by the engine.
     const {
         MAX_TOKENS_WITH_TOOLS, MAX_TOKENS_PLAIN,
-        buildChatRequestExtras, describeUpstreamError, fetchChatCompletion,
+        describeUpstreamError, fetchChatCompletion,
     } = chatEngine.requestExtras;
     // The ports seam is the single host contract of the Assistant contour.
     const {
@@ -492,7 +493,7 @@ module.exports = function(app, redis, deps) {
                     messages: apiMessages,
                     tools: tools.length > 0 ? tools : undefined,
                     tool_choice: tools.length > 0 ? 'auto' : undefined,
-                    ...buildChatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }),
+                    ...chatEngine.chatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }, ai),
                 });
                 clearTimeout(timeout);
 
@@ -1030,7 +1031,7 @@ module.exports = function(app, redis, deps) {
                             messages: apiMessages,
                             tools: tools.length > 0 ? tools : undefined,
                             tool_choice: tools.length > 0 ? 'auto' : undefined,
-                            ...buildChatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }),
+                            ...chatEngine.chatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }, ai),
                         }));
                     } finally {
                         clearTimeout(timeout);

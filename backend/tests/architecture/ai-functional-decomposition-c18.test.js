@@ -21,9 +21,10 @@
 //   6. The parallel-analysis-orchestrator receives analyzers injected
 //      (no hardcoded require of pipeline-steps) — orchestration/business
 //      separation at the orchestrator seam.
-//   7. Cross-contour contract: scene.passport[...].video_tokens written by
-//      the AI contour is consumed GPU-side (video-workflows / prompt-builder)
-//      — the F9 output shape must not drift silently.
+//   7. Cross-contour contract: scene.look_patch[...].video_tokens written by
+//      the AI contour (VBook 4; was scene.passport) is consumed GPU-side
+//      through resolveHeroLook (video-workflows / prompt-builder) — the F9
+//      output shape must not drift silently.
 //
 // Pure static source scans — no runtime imports of the scanned code.
 
@@ -243,11 +244,14 @@ describe('C18 functional decomposition: orchestration seams', () => {
 
 // ── Guard 6: cross-contour contract — video_tokens consumers ────────────────
 describe('C18 functional decomposition: F9 cross-contour contract (video_tokens)', () => {
-    it('GPU-side consumers still read scene.passport[charId].video_tokens written by the AI contour', () => {
+    it('GPU-side consumers read the look_patch video_tokens written by the AI contour through resolveHeroLook (VBook 4)', () => {
         const video = src(path.join(REPO_ROOT, 'backend/src/workflows/video/video-workflows.js'));
-        expect(video, 'video-workflows must consume scene passport video_tokens').to.match(/passport\?\.\[c\.id\]\?\.video_tokens|passport\[c\.id\]\.video_tokens|video_tokens/);
+        expect(video, 'video-workflows must take the tokens from resolveHeroLook').to.match(/resolveHeroLook\(/).and.match(/\.video_tokens/);
+        expect(video, 'video-workflows must not read scene.passport').to.not.match(/scene\??\.passport/);
+        const image = src(path.join(REPO_ROOT, 'backend/src/image/prompt-builder.js'));
+        expect(image, 'prompt-builder must take the look from resolveHeroLook').to.match(/resolveHeroLook\(/).and.not.match(/scene\??\.passport|resolvePassport/);
         const ai = src(path.join(REPO_ROOT, 'backend/src/services/agent/pipeline-runner.js'));
-        expect(ai, 'pipeline-runner must write scene passport video_tokens (applySceneVideoTokens)').to.match(/applySceneVideoTokens/);
+        expect(ai, 'pipeline-runner must write the scene video_tokens (applySceneVideoTokens → look_patch)').to.match(/applySceneVideoTokens/);
     });
 });
 

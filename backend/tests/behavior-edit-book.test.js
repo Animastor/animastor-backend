@@ -1,16 +1,20 @@
 // =====================================================
-// Behavior via edit_book — creation, loading, AI-agent contract
+// Hero behaviour via edit_book — creation, loading, AI-agent contract (VBook 4)
 // =====================================================
-// Verifies that:
-//   1. behavior.json {} (legacy v2.1) loads as an empty schema-v2 document
-//   2. Empty behavior.json loads correctly and is saved back as v2
-//   (schema v2: entries live under behaviors.characters.<id>; the v2.1 paths
-//    /behaviors/<id> used below are rewritten by the assistant guard)
-//   3. edit_book can create behavior for existing character_id
-//   4. edit_book cannot create behavior for unknown character_id
-//   5. edit_book can update existing behavior fields
-//   6. behavior.json survives saveBookBundle roundtrip
-//   7. Existing character/voice artifacts are not broken
+// The VBook 4 successor of the behavior.json contract (VBOOK_FORMAT_V4 §6, §8.2;
+// @animastor/assistant 0.3.0). A hero's character lives in its own file
+// characters/<id>.json → behaviour.profile {baseline, quirks, reactions}; the
+// book-level defaults and global rules live in behaviour.json. edit_book
+// addresses a hero BY ID: /heroes/<id>/behaviour/profile/…
+//   1. a book without behaviour.json loads with the default globals
+//   2. saveBookBundle creates behaviour.json when it is missing
+//   3. edit_book can create the behaviour of an existing hero
+//   4. edit_book cannot create behaviour for an unknown hero id
+//   5. edit_book can update existing behaviour fields
+//   6. behaviour survives saveBookBundle (the hero file) roundtrip
+//   7. other hero data (passport, voice) is not broken
+
+'use strict';
 
 const { expect } = require('chai');
 const fs = require('fs');
@@ -26,7 +30,7 @@ const chatEngineFactory = (cfg) => require('@animastor/assistant').createChatEng
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
-describe('Behavior via edit_book — AI-agent contract', () => {
+describe('Hero behaviour via edit_book — AI-agent contract (VBook 4)', () => {
     let tmpDir;
     let bookId;
     let bookDir;
@@ -34,56 +38,36 @@ describe('Behavior via edit_book — AI-agent contract', () => {
     const CHAPTER_ID = 'ch-abcd1234';
     const CHAR_HERO = 'hero';
     const CHAR_SIDEKICK = 'sidekick';
+    const heroPath = (id) => path.join(bookDir, 'characters', `${id}.json`);
+    const readHero = (id) => JSON.parse(fs.readFileSync(heroPath(id), 'utf8'));
+    const heroOf = (book, id) => book.heroes.find((h) => h.id === id);
 
     beforeEach(() => {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'behavior-editbook-'));
-        bookId = 'test-book-' + Date.now();
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'behaviour-editbook-'));
+        bookId = 'test_book_' + Date.now();
         bookDir = path.join(tmpDir, bookId);
-        fs.mkdirSync(bookDir, { recursive: true });
         fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
-
+        fs.mkdirSync(path.join(bookDir, 'characters'), { recursive: true });
         config.BOOKS_DIR = tmpDir;
 
         fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
-            book_id: bookId,
-            vbook_version: '3.1',
-            build_id: 'build-test',
-            state: 'BOOTSTRAPPED',
-            created_at: new Date().toISOString(),
+            book_id: bookId, vbook_version: 4, build_id: 'build-test', state: 'BOOTSTRAPPED', created_at: new Date().toISOString(),
         }, null, 2));
-
         fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
-            book_id: bookId,
-            version: '3.0',
-            title: 'Test Book',
-            author: 'Test Author',
-            language: 'ru',
-            structure: { chapters_order: [`chapters/${CHAPTER_ID}.json`] },
+            book_id: bookId, title: 'Test Book', author: 'Test Author', language: 'ru',
+            structure: { chapters_order: [`${CHAPTER_ID}.json`], characters_order: ['narrator', CHAR_HERO, CHAR_SIDEKICK] },
         }, null, 2));
-
         fs.writeFileSync(path.join(bookDir, 'chapters', `${CHAPTER_ID}.json`), JSON.stringify({
-            chapter_id: CHAPTER_ID,
-            chapter_title: 'Chapter 1',
-            scenes: [{
-                scene_id: 'sc-abcd1234',
-                type: 'narration',
-                participants: [CHAR_HERO],
-                units: [{ id: 'iu-abcd1234', text: 'The hero arrives.' }],
-            }],
+            chapter_id: CHAPTER_ID, chapter_title: 'Chapter 1',
+            scenes: [{ scene_id: 'sc-abcd1234', type: 'narration', participants: [CHAR_HERO], units: [{ id: 'iu-abcd1234', text: 'The hero arrives.' }] }],
         }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            { id: CHAR_HERO, name: 'Hero', passport: { appearance: 'Tall, dark hair', clothes: 'Black coat' } },
-            { id: CHAR_SIDEKICK, name: 'Sidekick', passport: { appearance: 'Short, red hair', clothes: 'Green jacket' } },
-        ], null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({
-            narrator: { instruction: 'Deep calm voice' },
-            [CHAR_HERO]: { instruction: 'Strong commanding voice' },
-        }, null, 2));
-
-        // behavior.json starts as empty — simulates post-creation state
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({}, null, 2));
+        const heroes = [
+            { schema: 'animastor.character/1', id: 'narrator', role: 'narrator', voice: { timbre: 'Deep calm voice.' } },
+            { schema: 'animastor.character/1', id: CHAR_HERO, name: 'Hero', passport: { appearance: 'Tall, dark hair', clothes: 'Black coat' }, voice: { timbre: 'Strong commanding voice.' } },
+            { schema: 'animastor.character/1', id: CHAR_SIDEKICK, name: 'Sidekick', passport: { appearance: 'Short, red hair', clothes: 'Green jacket' } },
+        ];
+        for (const h of heroes) fs.writeFileSync(heroPath(h.id), JSON.stringify(h, null, 2));
+        // no behaviour.json — a book right after creation of the cast by hand
     });
 
     afterEach(() => {
@@ -91,268 +75,125 @@ describe('Behavior via edit_book — AI-agent contract', () => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
     });
 
-    // ── Test 1: behavior.json loads as empty object ──
-    it('loads behavior.json as empty object when file contains {}', () => {
+    const profile = {
+        baseline: 'Walks with long confident strides, chin slightly raised.',
+        quirks: ['Taps fingers on any surface while thinking'],
+        reactions: [{ trigger: 'When insulted', reaction: 'Narrows eyes and speaks very quietly' }],
+    };
+
+    it('a book without behaviour.json loads with the default globals and no hero behaviour', () => {
         const bookData = bookModule.loadBook(bookId);
         expect(bookData).to.not.be.null;
-        expect(bookData.behaviors).to.deep.equal({ schema_version: 2, rules: [], characters: {} });
+        expect(bookData.behaviour).to.deep.equal({ schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] });
+        expect(heroOf(bookData, CHAR_HERO)).to.not.have.property('behaviour');
+        expect(bookData).to.not.have.property('behaviors');
     });
 
-    // ── Test 2: behavior.json always persists after saveBookBundle ──
-    it('behavior.json persists after saveBookBundle even when empty', () => {
-        const bookData = bookModule.loadBook(bookId);
-        bookModule.saveBookBundle(bookData);
-
-        const bhPath = path.join(bookDir, 'behavior.json');
-        expect(fs.existsSync(bhPath)).to.be.true;
-        const saved = JSON.parse(fs.readFileSync(bhPath, 'utf8'));
-        expect(saved).to.deep.equal({ schema_version: 2, rules: [], characters: {} });
+    it('behaviour.json is created by saveBookBundle when it is missing', () => {
+        bookModule.saveBookBundle(bookModule.loadBook(bookId));
+        const saved = JSON.parse(fs.readFileSync(path.join(bookDir, 'behaviour.json'), 'utf8'));
+        expect(saved).to.deep.equal({ schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] });
     });
 
-    // ── Test 3: edit_book can CREATE behavior for existing character ──
-    it('applyPatches creates behavior via add operation', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('applyPatches creates the behaviour of a hero via add /heroes/<id>/behaviour/profile', () => {
         const engine = chatEngineFactory(config);
-
-        const behaviorData = {
-            baseline: 'Calm, restrained gestures, speaks slowly.',
-            quirks: ['straightens papers before answering', 'removes glasses when thinking'],
-            reactions: [
-                { trigger: 'is contradicted', reaction: 'pauses, then answers with one calm sentence' },
-                { trigger: 'hears bad news', reaction: 'freezes for a moment, asks one clarifying question' },
-            ],
-        };
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'add', path: `/behaviors/${CHAR_HERO}`, value: behaviorData },
-        ]);
-
+        const result = engine.applyPatches(bookModule.loadBook(bookId), [{ op: 'add', path: `/heroes/${CHAR_HERO}/behaviour/profile`, value: profile }]);
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors.characters[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(heroOf(result.result, CHAR_HERO).behaviour).to.deep.equal({ profile });
     });
 
-    // ── Test 4: edit_book can UPDATE behavior fields ──
-    it('applyPatches updates existing behavior via replace operation', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('applyPatches updates existing behaviour via replace', () => {
         const engine = chatEngineFactory(config);
-
-        // First create the behavior
-        bookData.behaviors.characters[CHAR_HERO] = {
-            baseline: 'Old baseline.',
-            quirks: ['old quirk'],
-        };
-
-        // Then update baseline
-        const result = engine.applyPatches(bookData, [
-            { op: 'replace', path: `/behaviors/${CHAR_HERO}/baseline`, value: 'New baseline.' },
-        ]);
-
+        const book = bookModule.loadBook(bookId);
+        heroOf(book, CHAR_HERO).behaviour = { profile: { baseline: 'Old baseline.', quirks: ['old quirk'] } };
+        const result = engine.applyPatches(book, [{ op: 'replace', path: `/heroes/${CHAR_HERO}/behaviour/profile/baseline`, value: 'New baseline.' }]);
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors.characters[CHAR_HERO].baseline).to.equal('New baseline.');
-        // quirks should be preserved
-        expect(result.result.behaviors.characters[CHAR_HERO].quirks).to.deep.equal(['old quirk']);
+        expect(heroOf(result.result, CHAR_HERO).behaviour.profile.baseline).to.equal('New baseline.');
+        expect(heroOf(result.result, CHAR_HERO).behaviour.profile.quirks).to.deep.equal(['old quirk']);
     });
 
-    // ── Test 5: edit_book can replace quirks array ──
-    it('applyPatches replaces quirks array in behavior', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('applyPatches replaces the quirks array', () => {
         const engine = chatEngineFactory(config);
-
-        bookData.behaviors.characters[CHAR_HERO] = {
-            baseline: 'Calm.',
-            quirks: ['old quirk'],
-        };
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'replace', path: `/behaviors/${CHAR_HERO}/quirks`, value: ['new quirk 1', 'new quirk 2'] },
-        ]);
-
+        const book = bookModule.loadBook(bookId);
+        heroOf(book, CHAR_HERO).behaviour = { profile: { quirks: ['old'] } };
+        const result = engine.applyPatches(book, [{ op: 'replace', path: `/heroes/${CHAR_HERO}/behaviour/profile/quirks`, value: ['new quirk 1', 'new quirk 2'] }]);
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors.characters[CHAR_HERO].quirks).to.deep.equal(['new quirk 1', 'new quirk 2']);
+        expect(heroOf(result.result, CHAR_HERO).behaviour.profile.quirks).to.deep.equal(['new quirk 1', 'new quirk 2']);
     });
 
-    // ── Test 6: edit_book can replace reactions array ──
-    it('applyPatches replaces reactions array in behavior', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('applyPatches replaces the reactions array', () => {
         const engine = chatEngineFactory(config);
-
-        bookData.behaviors.characters[CHAR_HERO] = {
-            baseline: 'Calm.',
-            reactions: [{ trigger: 'old trigger', reaction: 'old reaction' }],
-        };
-
-        const newReactions = [
-            { trigger: 'is contradicted', reaction: 'pauses calmly' },
-            { trigger: 'is praised', reaction: 'nods briefly' },
-        ];
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'replace', path: `/behaviors/${CHAR_HERO}/reactions`, value: newReactions },
-        ]);
-
+        const book = bookModule.loadBook(bookId);
+        heroOf(book, CHAR_HERO).behaviour = { profile: { reactions: [] } };
+        const reactions = [{ trigger: 'When laughed at', reaction: 'Laughs louder' }, { trigger: 'When alone', reaction: 'Hums' }];
+        const result = engine.applyPatches(book, [{ op: 'replace', path: `/heroes/${CHAR_HERO}/behaviour/profile/reactions`, value: reactions }]);
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors.characters[CHAR_HERO].reactions).to.deep.equal(newReactions);
+        expect(heroOf(result.result, CHAR_HERO).behaviour.profile.reactions).to.deep.equal(reactions);
     });
 
-    // ── Test 7: full behavior creation + saveBookBundle roundtrip ──
-    it('creates behavior and persists through saveBookBundle', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('creates behaviour and persists it in characters/<id>.json through saveBookBundle', () => {
         const engine = chatEngineFactory(config);
-
-        const behaviorData = {
-            baseline: 'Restless and expressive.',
-            quirks: ['paces while reciting', 'wraps scarf when nervous'],
-            reactions: [
-                { trigger: 'is praised', reaction: 'lights up instantly' },
-                { trigger: 'is criticized', reaction: 'flares up defensively' },
-            ],
-        };
-
-        // Apply patch
-        const result = engine.applyPatches(bookData, [
-            { op: 'add', path: `/behaviors/${CHAR_HERO}`, value: behaviorData },
-        ]);
+        const result = engine.applyPatches(bookModule.loadBook(bookId), [{ op: 'add', path: `/heroes/${CHAR_HERO}/behaviour/profile`, value: profile }]);
         expect(result.errors).to.have.length(0);
-
-        // Save
         bookModule.saveBookBundle(result.result);
-
-        // Reload and verify
-        const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.behaviors.characters[CHAR_HERO]).to.deep.equal(behaviorData);
-
-        // Verify on-disk file
-        const saved = JSON.parse(fs.readFileSync(path.join(bookDir, 'behavior.json'), 'utf8'));
-        expect(saved.schema_version).to.equal(2);
-        expect(saved.characters[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(heroOf(bookModule.loadBook(bookId), CHAR_HERO).behaviour).to.deep.equal({ profile });
+        expect(readHero(CHAR_HERO).behaviour).to.deep.equal({ profile });
+        expect(fs.existsSync(path.join(bookDir, 'behavior.json'))).to.equal(false);
     });
 
-    // ── Test 8: multiple characters behavior ──
-    it('creates behavior for multiple characters via separate patches', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('creates behaviour for several heroes via separate patches', () => {
         const engine = chatEngineFactory(config);
-
-        const heroBehavior = {
-            baseline: 'Calm and restrained.',
-            quirks: ['straightens papers'],
-        };
-
-        const sidekickBehavior = {
-            baseline: 'Energetic and impulsive.',
-            quirks: ['taps foot impatiently'],
-        };
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'add', path: `/behaviors/${CHAR_HERO}`, value: heroBehavior },
-            { op: 'add', path: `/behaviors/${CHAR_SIDEKICK}`, value: sidekickBehavior },
+        const side = { baseline: 'Fidgets constantly.', quirks: [], reactions: [] };
+        const result = engine.applyPatches(bookModule.loadBook(bookId), [
+            { op: 'add', path: `/heroes/${CHAR_HERO}/behaviour/profile`, value: profile },
+            { op: 'add', path: `/heroes/${CHAR_SIDEKICK}/behaviour/profile`, value: side },
         ]);
-
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors.characters[CHAR_HERO]).to.deep.equal(heroBehavior);
-        expect(result.result.behaviors.characters[CHAR_SIDEKICK]).to.deep.equal(sidekickBehavior);
-
-        // Save and reload
         bookModule.saveBookBundle(result.result);
         const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.behaviors.characters[CHAR_HERO]).to.deep.equal(heroBehavior);
-        expect(reloaded.behaviors.characters[CHAR_SIDEKICK]).to.deep.equal(sidekickBehavior);
+        expect(heroOf(reloaded, CHAR_HERO).behaviour.profile).to.deep.equal(profile);
+        expect(heroOf(reloaded, CHAR_SIDEKICK).behaviour.profile).to.deep.equal(side);
     });
 
-    // ── Test 9: behavior creation does not break characters/voices ──
-    it('behavior creation preserves characters.json and voices.json', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('creating behaviour keeps the passport and the voice of the hero', () => {
         const engine = chatEngineFactory(config);
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'add', path: `/behaviors/${CHAR_HERO}`, value: { baseline: 'Calm.' } },
-        ]);
-
+        const result = engine.applyPatches(bookModule.loadBook(bookId), [{ op: 'add', path: `/heroes/${CHAR_HERO}/behaviour/profile`, value: profile }]);
         bookModule.saveBookBundle(result.result);
-
-        // Characters unchanged
-        const chars = JSON.parse(fs.readFileSync(path.join(bookDir, 'characters.json'), 'utf8'));
-        expect(chars).to.be.an('array');
-        expect(chars.find(c => c.id === CHAR_HERO)).to.exist;
-        expect(chars.find(c => c.id === CHAR_SIDEKICK)).to.exist;
-
-        // Voices unchanged
-        const voices = JSON.parse(fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8'));
-        expect(voices.narrator).to.exist;
-        expect(voices[CHAR_HERO]).to.exist;
+        const hero = readHero(CHAR_HERO);
+        expect(hero.passport).to.deep.equal({ appearance: 'Tall, dark hair', clothes: 'Black coat' });
+        expect(hero.voice).to.deep.equal({ timbre: 'Strong commanding voice.' });
+        expect(readHero('narrator').voice.timbre).to.equal('Deep calm voice.');
     });
 
-    // ── Test 10: validated patches also work for behavior ──
-    it('applyPatchesValidated creates behavior and passes validation', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('applyPatchesValidated creates behaviour and passes the bundle validation; an unknown hero id is refused', () => {
         const engine = chatEngineFactory(config);
-
-        const behaviorData = {
-            baseline: 'Still and economical.',
-            quirks: ['taps silver cane once before speaking'],
-            reactions: [
-                { trigger: 'hears a lie', reaction: 'lets a thin ironic smile replace an answer' },
-            ],
-        };
-
-        const result = engine.applyPatchesValidated(bookData, [
-            { op: 'add', path: `/behaviors/${CHAR_HERO}`, value: behaviorData },
-        ]);
-
+        const result = engine.applyPatchesValidated(bookModule.loadBook(bookId), [{ op: 'add', path: `/heroes/${CHAR_HERO}/behaviour/profile`, value: profile }]);
         expect(result.errors).to.have.length(0);
         expect(result.validation_errors).to.have.length(0);
-        expect(result.result).to.not.be.null;
-        expect(result.result.behaviors.characters[CHAR_HERO]).to.deep.equal(behaviorData);
+        expect(heroOf(result.result, CHAR_HERO).behaviour.profile).to.deep.equal(profile);
+        const unknown = engine.applyPatchesValidated(bookModule.loadBook(bookId), [{ op: 'add', path: '/heroes/ghost/behaviour/profile', value: profile }]);
+        expect(unknown.result).to.equal(null);
+        expect(unknown.errors[0]).to.match(/Hero ghost not found/);
     });
 
-    // ── Test 11: remove behavior entry ──
-    it('applyPatches removes behavior entry via remove operation', () => {
-        const bookData = bookModule.loadBook(bookId);
+    it('applyPatches removes the behaviour of a hero via remove', () => {
         const engine = chatEngineFactory(config);
-
-        // Create behavior first
-        bookData.behaviors.characters[CHAR_HERO] = { baseline: 'To be removed.' };
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'remove', path: `/behaviors/${CHAR_HERO}` },
-        ]);
-
+        const book = bookModule.loadBook(bookId);
+        heroOf(book, CHAR_HERO).behaviour = { profile };
+        const result = engine.applyPatches(book, [{ op: 'remove', path: `/heroes/${CHAR_HERO}/behaviour` }]);
         expect(result.errors).to.have.length(0);
-        expect(result.result.behaviors.characters).to.not.have.property(CHAR_HERO);
+        expect(heroOf(result.result, CHAR_HERO)).to.not.have.property('behaviour');
     });
 
-    // ── Test 12: behavior.json survives save/load roundtrip ──
-    it('behavior.json survives saveBookBundle + loadBook roundtrip with full data', () => {
-        const bookData = bookModule.loadBook(bookId);
-        const engine = chatEngineFactory(config);
-
-        const behaviorData = {
-            baseline: 'Calm and composed.',
-            quirks: ['adjusts glasses', 'speaks softly'],
-            reactions: [
-                { trigger: 'surprised', reaction: 'raises one eyebrow' },
-                { trigger: 'angry', reaction: 'voice drops to a whisper' },
-            ],
-        };
-
-        const result = engine.applyPatches(bookData, [
-            { op: 'add', path: `/behaviors/${CHAR_HERO}`, value: behaviorData },
-        ]);
-
-        bookModule.saveBookBundle(result.result);
-
-        // Reload — verify behavior persists
+    it('hero behaviour and global rules survive saveBookBundle + loadBook with full data', () => {
+        const book = bookModule.loadBook(bookId);
+        const rule = { id: 'hero.taps', when: { emotion: ['anxious'] }, then: { action: 'taps fingers' }, enabled: true };
+        heroOf(book, CHAR_HERO).behaviour = { profile, rules: [rule] };
+        book.behaviour = { schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 3 }, rules: [{ id: 'g.sigh', when: { emotion: ['sad'] }, then: { action: 'sighs' } }] };
+        bookModule.saveBookBundle(book);
         const reloaded = bookModule.loadBook(bookId);
-        expect(reloaded.behaviors).to.deep.equal({ schema_version: 2, rules: [], characters: { [CHAR_HERO]: behaviorData } });
-
-        // Reload again — verify still there after multiple loads
-        const reloaded2 = bookModule.loadBook(bookId);
-        expect(reloaded2.behaviors.characters[CHAR_HERO].baseline).to.equal('Calm and composed.');
-        expect(reloaded2.behaviors.characters[CHAR_HERO].quirks).to.have.length(2);
-        expect(reloaded2.behaviors.characters[CHAR_HERO].reactions).to.have.length(2);
-
-        // Verify all other artifacts still intact
-        expect(reloaded2.characters).to.be.an('array').with.length(2);
-        expect(reloaded2.voices).to.have.property('narrator');
-        expect(reloaded2.voices).to.have.property(CHAR_HERO);
+        expect(heroOf(reloaded, CHAR_HERO).behaviour).to.deep.equal({ profile, rules: [rule] });
+        expect(reloaded.behaviour.defaults.max_per_scene).to.equal(3);
+        expect(reloaded.behaviour.rules.map((r) => r.id)).to.deep.equal(['g.sigh']);
     });
 });

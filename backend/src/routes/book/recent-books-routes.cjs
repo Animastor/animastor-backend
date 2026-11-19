@@ -28,12 +28,40 @@ const fs = require('fs');
 
 const DEFAULT_LIMIT = 20;
 
-/** Resolve book status; never throws for a single missing/corrupt book. */
+/** manifest.json / book.json of a book, read directly (no model load); {} when unreadable. */
+function readJsonQuiet(file) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return {}; }
+}
+
+/**
+ * Resolve book status; never throws for a single missing/corrupt book.
+ * A book that exists but is not VBook 4 (3.1, no version, newer — see
+ * VBOOK_FORMAT_V4 §9) is still listed: `unsupported: true`, the title from
+ * its own files, nothing else. The only thing a client can do with it is
+ * delete it.
+ */
 function safeStatus(lazyBook, bookId) {
     try {
         return lazyBook.getBookStatus(bookId);
-    } catch (_) {
-        return null;
+    } catch (err) {
+        if (!err || err.code !== 'UNSUPPORTED_VBOOK_VERSION') return null;
+        try {
+            const dir = lazyBook.getBookDir(bookId);
+            const manifest = readJsonQuiet(lazyBook.getManifestPath(dir));
+            const meta = readJsonQuiet(lazyBook.getBookMetaPath(dir));
+            return {
+                unsupported: true,
+                vbookVersion: err.vbookVersion == null ? null : err.vbookVersion,
+                title: (typeof meta.title === 'string' && meta.title) || (typeof manifest.title === 'string' && manifest.title) || bookId,
+                state: null,
+                updatedAt: manifest.updated_at || null,
+                buildId: typeof manifest.build_id === 'string' ? manifest.build_id : null,
+                parsedChapters: 0,
+                parsedScenes: 0,
+            };
+        } catch (_) {
+            return null;
+        }
     }
 }
 
@@ -47,10 +75,12 @@ function buildIdOf(lazyBook, bookId) {
     }
 }
 
-function toEntry(lazyBook, bookId, { title, state, sourceType, fileHash, updatedAt, parsedChapters, totalScenes, workspaceId }) {
+function toEntry(lazyBook, bookId, { title, state, sourceType, fileHash, updatedAt, parsedChapters, totalScenes, workspaceId, status }) {
+    const unsupported = !!(status && status.unsupported);
     return {
+        ...(unsupported ? { unsupported: true, vbook_version: status.vbookVersion } : {}),
         book_id: bookId,
-        build_id: buildIdOf(lazyBook, bookId),
+        build_id: unsupported ? status.buildId : buildIdOf(lazyBook, bookId),
         title: title || bookId,
         state: state || null,
         source_type: sourceType || 'txt',
@@ -94,6 +124,7 @@ async function collectRecentBooks({ bookSourceRepo, lazyBook, limit = DEFAULT_LI
         const status = safeStatus(lazyBook, row.book_id);
         if (!status) continue; // book no longer on disk — skip stale reference
         entries.set(row.book_id, toEntry(lazyBook, row.book_id, {
+            status,
             title: status.title,
             state: status.state,
             sourceType: row.source_type || 'txt',
@@ -121,6 +152,7 @@ async function collectRecentBooks({ bookSourceRepo, lazyBook, limit = DEFAULT_LI
                 const status = safeStatus(lazyBook, row.book_id);
                 if (!status) continue; // book no longer on disk — skip stale reference
                 entries.set(row.book_id, toEntry(lazyBook, row.book_id, {
+                    status,
                     title: status.title,
                     state: status.state,
                     sourceType: 'registry',
@@ -152,6 +184,7 @@ async function collectRecentBooks({ bookSourceRepo, lazyBook, limit = DEFAULT_LI
                 const status = safeStatus(lazyBook, bookId);
                 if (!status) continue;
                 entries.set(bookId, toEntry(lazyBook, bookId, {
+                    status,
                     title: status.title,
                     state: status.state,
                     sourceType: 'disk',

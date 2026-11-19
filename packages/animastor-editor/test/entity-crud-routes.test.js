@@ -21,6 +21,13 @@ const path = require('path');
 const os = require('os');
 
 require('./vbook-test-bindings.cjs');
+// The real entity-cleanup resolves the purge stage list from the generation
+// media registry (S-2). The registry needs the host GenerationConfig port,
+// which the composition root (backend.cjs) binds before startup; outside the
+// backend mocha config that wiring is missing, so bind it here exactly as the
+// backend test fixture does — otherwise listMediaTypes() is empty and only
+// the IU-cleanup assertions would see `stages: []`.
+require('../../../backend/tests/generation-test-bindings.cjs');
 const bookModule = require('../../../backend/src/book/index');
 const config = require('../../../backend/src/config/runtime-config');
 
@@ -41,6 +48,11 @@ function createResponse() {
     };
 }
 
+// VBook 4 step 4: POST/DELETE /characters and /voices edited the 3.1 maps
+// book.characters / book.voices and are gone. The same cases run against
+// POST/DELETE /heroes (VBOOK_FORMAT_V4 §8.2): a hero is one file
+// characters/<id>.json, a voice is a block of that file. The full contract of
+// the hero API is in hero-routes.test.js.
 describe('ENTITY CRUD ROUTES — manual add/delete', () => {
     let tmpDir;
     let bookId;
@@ -60,12 +72,11 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
             patch() {},
             delete(path, handler) { handlers.set(path, handler); },
         };
-        require('../src/entity-crud-routes.cjs')(app, {}, {
+        const routeDeps = {
             book: bookModule,
-            editorModel: {                       // Phase 6: Editor boundary fake over the real module
-                read: (id) => bookModule.loadBook(id),
-                commit: (b, files) => bookModule.saveBookBundle(b, files),
-            },
+            // Phase 6: the editor boundary over the real module (VBook 4: with
+            // the hero store of the runtime — characters/<id>.json)
+            editorModel: require('../src/editor-model.cjs').createEditorModel({ persistBook: bookModule.saveBookBundle }),
             // Editor contour ports stub (route split): the entity add/delete
             // handlers under test never reach the purge legs; the deep-cleanup
             // suite below mounts the REAL factory through the same seam.
@@ -79,7 +90,9 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
                 recoveryCtx: {},
             },
             utils: { log: () => {} },
-        });
+        };
+        require('../src/entity-crud-routes.cjs')(app, {}, routeDeps);
+        require('../src/hero-routes.cjs')(app, {}, routeDeps);
     }
 
     // Direct handler invocation with explicit params (route templates above are
@@ -88,7 +101,7 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
         const handler = handlers.get(pathTemplate);
         if (!handler) throw new Error(`No handler for ${pathTemplate}`);
         const res = createResponse();
-        return handler({ params, body: body || {} }, res) || res;
+        return handler({ params, body: body || {}, query: {} }, res) || res;
     }
 
     beforeEach(() => {
@@ -102,7 +115,7 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
 
         fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
             book_id: bookId,
-            vbook_version: '3.1',
+            vbook_version: 4,
             build_id: 'build-test',
             state: 'BOOTSTRAPPED',
             created_at: new Date().toISOString(),
@@ -114,7 +127,7 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
             title: 'Test Book',
             author: 'Test Author',
             language: 'ru',
-            structure: { chapters_order: [`chapters/${CHAPTER_ID}.json`] },
+            structure: { chapters_order: [`${CHAPTER_ID}.json`] },
         }, null, 2));
 
         fs.writeFileSync(path.join(bookDir, 'chapters', `${CHAPTER_ID}.json`), JSON.stringify({
@@ -130,25 +143,23 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
             }],
         }, null, 2));
 
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            {
-                id: 'hero',
-                name: 'Hero',
-                passport: {
-                    appearance: 'Tall, dark hair',
-                    clothes: 'dark suit',
-                    video_tokens: ['global video tokens'],
-                },
+        // VBook 4: one file per hero; the voice is a block of the hero file.
+        fs.mkdirSync(path.join(bookDir, 'characters'), { recursive: true });
+        fs.writeFileSync(path.join(bookDir, 'characters', 'hero.json'), JSON.stringify({
+            schema: 'animastor.character/1',
+            id: 'hero',
+            name: 'Hero',
+            passport: {
+                appearance: 'Tall, dark hair',
+                clothes: 'dark suit',
+                video_tokens: ['global video tokens'],
             },
-        ], null, 2));
+            voice: { timbre: 'A calm male voice.', manner: 'Speaks calmly.', timbre_source: 'user' },
+        }, null, 2));
 
         fs.writeFileSync(path.join(bookDir, 'locations.json'), JSON.stringify({
             main_street: { description: 'Main street', environment: { time: 'day' } },
         }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({
-            hero: { instruction: 'A calm male voice.' },
-        }));
 
         registerRoutes();
     });
@@ -158,40 +169,31 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
     });
 
-    function readCharacters() {
-        return JSON.parse(fs.readFileSync(path.join(bookDir, 'characters.json'), 'utf8'));
+    function readHero(id) {
+        return JSON.parse(fs.readFileSync(path.join(bookDir, 'characters', `${id}.json`), 'utf8'));
     }
     function readLocations() {
         return JSON.parse(fs.readFileSync(path.join(bookDir, 'locations.json'), 'utf8'));
     }
-    function readVoices() {
-        return JSON.parse(fs.readFileSync(path.join(bookDir, 'voices.json'), 'utf8'));
-    }
     // When the LAST entity is deleted, saveBookBundle unlinks the registry file
     // (existing mechanism: empty collection → file removed). loadBook is the
     // canonical read path — it defaults to empty lists/maps for absent files.
-    function loadedCharacters() {
-        return bookModule.loadBook(bookId).characters || [];
+    function loadedHeroIds() {
+        return (bookModule.loadBook(bookId).heroes || []).map((h) => h.id);
     }
     function loadedLocations() {
         return bookModule.loadBook(bookId).locations || {};
     }
-    function loadedVoices() {
-        return bookModule.loadBook(bookId).voices || {};
-    }
-
-    const CHAR_POST = '/api/v1/book/:bookId/characters';
-    const CHAR_DEL = '/api/v1/book/:bookId/characters/:characterId';
+    const HERO_POST = '/api/v1/book/:bookId/heroes';
+    const HERO_DEL = '/api/v1/book/:bookId/heroes/:heroId';
     const LOC_POST = '/api/v1/book/:bookId/locations';
     const LOC_DEL = '/api/v1/book/:bookId/locations/:locationId';
-    const VOICE_POST = '/api/v1/book/:bookId/voices';
-    const VOICE_DEL = '/api/v1/book/:bookId/voices/:voiceId';
 
     // ======================================================
-    // Characters
+    // Heroes (VBook 4 — the former characters)
     // ======================================================
-    it('POST character with a canonical id keeps the id and stores the full passport', () => {
-        const res = invoke(CHAR_POST, { bookId }, {
+    it('POST hero with a canonical id keeps the id and stores the full passport in characters/<id>.json', () => {
+        const res = invoke(HERO_POST, { bookId }, {
             id: 'margarita',
             name: 'Margarita',
             passport: {
@@ -200,67 +202,64 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
                 video_tokens: 'black dress, dark hair',
             },
         });
-        expect(res.statusCode).to.equal(200);
-        expect(res.body).to.include({ saved: true, character_id: 'margarita' });
+        expect(res.statusCode).to.equal(201);
+        expect(res.body).to.include({ saved: true, hero_id: 'margarita' });
 
-        const chars = readCharacters();
-        const m = chars.find(c => c.id === 'margarita');
-        expect(m).to.not.be.undefined;
+        const m = readHero('margarita');
         expect(m.name).to.equal('Margarita');
         expect(m.passport.appearance).to.equal('dark-haired beauty, 1930s Moscow');
         expect(m.passport.clothes).to.equal('elegant black dress');
-        // comma text → array (normalizeFieldValue parity with PATCH)
+        // comma text → array (parity with PATCH)
         expect(m.passport.video_tokens).to.deep.equal(['black dress', 'dark hair']);
-        // pre-existing character untouched
-        expect(chars.find(c => c.id === 'hero').name).to.equal('Hero');
+        // pre-existing hero untouched
+        expect(readHero('hero').name).to.equal('Hero');
     });
 
-    it('POST character with a Cyrillic name and no id derives a transliterated snake id', () => {
-        const res = invoke(CHAR_POST, { bookId }, {
+    it('POST hero with a Cyrillic name and no id derives a transliterated snake id', () => {
+        const res = invoke(HERO_POST, { bookId }, {
             name: 'Михаил Александрович Берлиоз',
             passport: { appearance: 'slim intellectual man' },
         });
-        expect(res.statusCode).to.equal(200);
-        expect(res.body.character_id).to.equal('mikhail_aleksandrovich_berlioz');
-        const chars = readCharacters();
-        expect(chars.some(c => c.id === 'mikhail_aleksandrovich_berlioz')).to.equal(true);
+        expect(res.statusCode).to.equal(201);
+        expect(res.body.hero_id).to.equal('mikhail_aleksandrovich_berlioz');
+        expect(loadedHeroIds()).to.include('mikhail_aleksandrovich_berlioz');
     });
 
-    it('POST character with a free-form Cyrillic id transliterates it', () => {
-        const res = invoke(CHAR_POST, { bookId }, {
-            id: 'Воланд',
-            name: 'Woland',
-        });
-        expect(res.statusCode).to.equal(200);
-        expect(res.body.character_id).to.equal('voland');
+    it('POST hero with a free-form Cyrillic id transliterates it', () => {
+        const res = invoke(HERO_POST, { bookId }, { id: 'Воланд', name: 'Woland' });
+        expect(res.statusCode).to.equal(201);
+        expect(res.body.hero_id).to.equal('voland');
     });
 
-    it('POST character rejects a duplicate id with 409', () => {
-        const res = invoke(CHAR_POST, { bookId }, { id: 'hero', name: 'Another Hero' });
+    it('POST hero rejects a duplicate id with 409 hero_exists', () => {
+        const res = invoke(HERO_POST, { bookId }, { id: 'hero', name: 'Another Hero' });
         expect(res.statusCode).to.equal(409);
-        expect(res.body.error).to.include('already exists');
-        expect(readCharacters()).to.have.length(1);
+        expect(res.body.error).to.equal('hero_exists');
+        expect(readHero('hero').name).to.equal('Hero');
     });
 
-    it('POST character rejects a missing name with 400', () => {
-        const res = invoke(CHAR_POST, { bookId }, { id: 'ghost' });
+    it('POST hero rejects a missing name with 400 name_required', () => {
+        const res = invoke(HERO_POST, { bookId }, { id: 'ghost' });
         expect(res.statusCode).to.equal(400);
+        expect(res.body.error).to.equal('name_required');
     });
 
-    it('DELETE character removes the WHOLE object (entire passport), not just the id', () => {
-        const res = invoke(CHAR_DEL, { bookId, characterId: 'hero' });
+    it('DELETE hero removes the WHOLE file (passport, voice, behaviour), not just the id', async () => {
+        const res = await invoke(HERO_DEL, { bookId, heroId: 'hero' });
         expect(res.statusCode).to.equal(200);
-        expect(loadedCharacters()).to.have.length(0);
+        expect(loadedHeroIds()).to.not.include('hero');
+        expect(fs.existsSync(path.join(bookDir, 'characters', 'hero.json'))).to.equal(false);
     });
 
-    it('DELETE character also removes the dangling same-id voice', () => {
-        invoke(CHAR_DEL, { bookId, characterId: 'hero' });
-        expect(loadedVoices()).to.not.have.property('hero');
+    it('DELETE hero removes its voice with it (the voice is a block of the hero file)', async () => {
+        await invoke(HERO_DEL, { bookId, heroId: 'hero' });
+        expect(require('@animastor/vbook-runtime/voice').getCharacterVoice(bookModule.loadBook(bookId), 'hero')).to.equal(null);
     });
 
-    it('DELETE unknown character returns 404', () => {
-        const res = invoke(CHAR_DEL, { bookId, characterId: 'nobody' });
+    it('DELETE unknown hero returns 404 hero_not_found', async () => {
+        const res = await invoke(HERO_DEL, { bookId, heroId: 'nobody' });
         expect(res.statusCode).to.equal(404);
+        expect(res.body.error).to.equal('hero_not_found');
     });
 
     // ======================================================
@@ -297,42 +296,44 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
     });
 
     // ======================================================
-    // Voices
+    // Voices — a voice-only hero (VBook 4: a voice is a block of the hero)
     // ======================================================
-    it('POST voice creates the voice entry', () => {
-        const res = invoke(VOICE_POST, { bookId }, {
+    it('POST a voice-only hero creates the voice block (timbre, manner, timbre_source user)', () => {
+        const res = invoke(HERO_POST, { bookId }, {
             id: 'woland',
             name: 'Woland',
-            instruction: 'A calm deep voice with a foreign accent.',
+            voice: { timbre: 'A calm deep voice with a foreign accent.', manner: 'Speaks slowly and deliberately.' },
         });
-        expect(res.statusCode).to.equal(200);
-        expect(res.body).to.include({ saved: true, voice_id: 'woland' });
-        const voices = readVoices();
-        expect(voices.woland.instruction).to.equal('A calm deep voice with a foreign accent.');
-        expect(voices.hero.instruction).to.equal('A calm male voice.');
+        expect(res.statusCode).to.equal(201);
+        expect(res.body).to.include({ saved: true, hero_id: 'woland' });
+        const woland = readHero('woland');
+        expect(woland).to.not.have.property('passport');
+        expect(woland.voice).to.deep.equal({ timbre: 'A calm deep voice with a foreign accent.', timbre_source: 'user', manner: 'Speaks slowly and deliberately.' });
+        expect(readHero('hero').voice.timbre).to.equal('A calm male voice.');
+        expect(readHero('hero').voice.manner).to.equal('Speaks calmly.');
     });
 
-    it('POST voice rejects duplicates and DELETE removes the whole entry', () => {
-        const dup = invoke(VOICE_POST, { bookId }, { id: 'hero', name: 'Hero' });
+    it('POST a voice-only hero rejects duplicates and DELETE removes the whole file', async () => {
+        const dup = invoke(HERO_POST, { bookId }, { id: 'hero', name: 'Hero', voice: {} });
         expect(dup.statusCode).to.equal(409);
 
-        const res = invoke(VOICE_DEL, { bookId, voiceId: 'hero' });
+        const res = await invoke(HERO_DEL, { bookId, heroId: 'hero' });
         expect(res.statusCode).to.equal(200);
-        expect(loadedVoices()).to.not.have.property('hero');
+        expect(loadedHeroIds()).to.not.include('hero');
     });
 
     // ======================================================
     // Persistence is real — a fresh loadBook sees the changes
     // ======================================================
-    it('a freshly loaded book sees entities added through the routes', () => {
-        invoke(CHAR_POST, { bookId }, { id: 'kisa', name: 'Kisa Vorobyaninov' });
+    it('a freshly loaded book sees heroes and locations added through the routes', () => {
+        invoke(HERO_POST, { bookId }, { id: 'kisa', name: 'Kisa Vorobyaninov', voice: { timbre: 'A nervous voice.' } });
         invoke(LOC_POST, { bookId }, { id: 'stargorod', name: 'Stargorod' });
-        invoke(VOICE_POST, { bookId }, { id: 'kisa', name: 'Kisa', instruction: 'A nervous voice.' });
 
         const fresh = bookModule.loadBook(bookId);
-        expect(fresh.characters.some(c => c.id === 'kisa')).to.equal(true);
+        expect(fresh.heroes.some((h) => h.id === 'kisa' && h.voice.timbre === 'A nervous voice.')).to.equal(true);
         expect(fresh.locations).to.have.property('stargorod');
-        expect(fresh.voices).to.have.property('kisa');
+        expect(fresh).to.not.have.property('characters');
+        expect(fresh).to.not.have.property('voices');
     });
 });
 
@@ -491,12 +492,12 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         fs.mkdirSync(bookDir, { recursive: true });
         fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
         fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
-            book_id: bookId, vbook_version: '3.1', build_id: 'build-test',
+            book_id: bookId, vbook_version: 4, build_id: 'build-test',
             state: 'BOOTSTRAPPED', created_at: new Date().toISOString(),
         }));
         fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
             book_id: bookId, version: '3.0', title: 'Test Book', author: 'Test Author', language: 'ru',
-            structure: { chapters_order: [`chapters/${CHAPTER_ID}.json`] },
+            structure: { chapters_order: [`${CHAPTER_ID}.json`] },
         }));
         fs.writeFileSync(path.join(bookDir, 'chapters', `${CHAPTER_ID}.json`), JSON.stringify({
             chapter_id: CHAPTER_ID,
@@ -521,11 +522,11 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
                 },
             ],
         }));
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            { id: 'hero', name: 'Hero', passport: {} },
-        ]));
+        fs.mkdirSync(path.join(bookDir, 'characters'), { recursive: true });
+        fs.writeFileSync(path.join(bookDir, 'characters', 'hero.json'), JSON.stringify({
+            schema: 'animastor.character/1', id: 'hero', name: 'Hero', passport: {},
+        }));
         fs.writeFileSync(path.join(bookDir, 'locations.json'), JSON.stringify({}));
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({}));
     }
 
     const SCENE_DEL = '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId';
@@ -712,8 +713,8 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         // Update book.json to reference both chapters.
         const bookData = JSON.parse(fs.readFileSync(path.join(bookDir, 'book.json'), 'utf8'));
         bookData.structure.chapters_order = [
-            `chapters/${CHAPTER_ID}.json`,
-            `chapters/${CHAPTER2_ID}.json`,
+            `${CHAPTER_ID}.json`,
+            `${CHAPTER2_ID}.json`,
         ];
         fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify(bookData, null, 2));
 
@@ -762,8 +763,8 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         }, null, 2));
         const bookData = JSON.parse(fs.readFileSync(path.join(bookDir, 'book.json'), 'utf8'));
         bookData.structure.chapters_order = [
-            `chapters/${CHAPTER_ID}.json`,
-            `chapters/${CHAPTER2_ID}.json`,
+            `${CHAPTER_ID}.json`,
+            `${CHAPTER2_ID}.json`,
         ];
         fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify(bookData, null, 2));
 

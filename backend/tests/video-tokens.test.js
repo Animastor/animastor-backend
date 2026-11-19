@@ -100,89 +100,142 @@ describe('buildSceneTokensContext (stage 2 prompt context)', () => {
         expect(pipelineSteps.buildSceneTokensContext([], characters)).to.equal('None');
     });
 
-    it('prefers scene override tokens over global for the context', () => {
+    it('the current tokens are the RESOLVED look: scene.look_patch wins over the passport', () => {
+        const scenes = [{ title: 'S', participants: ['a', 'b'], look_patch: { a: { video_tokens: ['red scarf'] } } }];
+        const ctx = pipelineSteps.buildSceneTokensContext(scenes, characters);
+        expect(ctx).to.include('- a (A): current_tokens="red scarf"');
+        expect(ctx).to.include('- b (B): current_tokens="hat"');
+    });
+
+    it('…and so does a look assigned in the scene (resolveHeroLook, not a private lookup)', () => {
+        const withLook = [
+            { id: 'a', name: 'A', passport: { appearance: 'bald', clothes: 'suit', video_tokens: ['tie'] }, looks: [{ id: 'coat', label: 'Coat', fields: { video_tokens: ['grey coat'] } }] },
+            characters[1],
+        ];
+        const ctx = pipelineSteps.buildSceneTokensContext([{ title: 'S', participants: ['a', 'b'], looks: { a: 'coat' } }], withLook);
+        expect(ctx).to.include('- a (A): current_tokens="grey coat"');
+    });
+
+    it('a scene cached by a pre-v4 analysis (scene.passport) is read as look_patch', () => {
         const scenes = [{ title: 'S', participants: ['a', 'b'], passport: { a: { video_tokens: ['red scarf'] } } }];
         const ctx = pipelineSteps.buildSceneTokensContext(scenes, characters);
         expect(ctx).to.include('current_tokens="red scarf"');
+        expect(scenes[0]).to.not.have.property('passport');
+    });
+
+    it('tokens kept as one comma-separated string by an older window still count', () => {
+        const legacy = [{ id: 'a', name: 'A', video_tokens: 'tie, round glasses' }, characters[1]];
+        const ctx = pipelineSteps.buildSceneTokensContext([{ title: 'S', participants: ['a', 'b'] }], legacy);
+        expect(ctx).to.include('- a (A): current_tokens="tie, round glasses"');
     });
 });
 
-describe('applySceneVideoTokens (stage 2 persistence)', () => {
+// VBook 4 (VBOOK_FORMAT_V4 §4a.4, §12 step 2): the reconciliation result is
+// scene.look_patch[hero_id].video_tokens. The CURRENT tokens are read through
+// resolveHeroLook (passport ← look ← an existing look_patch) and a patch is
+// written only when the agent's tokens differ. scene.passport is never written.
+describe('applySceneVideoTokens (stage 2 persistence → scene.look_patch)', () => {
     const characters = [
         { id: 'a', name: 'A', video_tokens: ['tie'] },
-        { id: 'b', name: 'B', video_tokens: ['hat'] },
+        { id: 'b', name: 'B', passport: { appearance: 'tall', clothes: 'coat', video_tokens: ['hat'] } },
     ];
 
-    it('writes scene.passport override when agent tokens differ from global', () => {
+    it('writes scene.look_patch when the agent tokens differ from the hero\'s tokens', () => {
         const scenes = [{ participants: ['a', 'b'] }];
         applySceneVideoTokens(scenes, [
             { scene_index: 0, tokens: { a: ['red scarf'], b: ['hat'] } },
         ], characters);
-        // a changed → override written; b unchanged → global still applies (no override)
-        expect(scenes[0].passport.a.video_tokens).to.deep.equal(['red scarf']);
-        expect(scenes[0].passport.b).to.be.undefined;
+        // a changed → patch written; b unchanged → the passport still applies (no patch)
+        expect(scenes[0].look_patch).to.deep.equal({ a: { video_tokens: ['red scarf'] } });
+        expect(scenes[0]).to.not.have.property('passport');
     });
 
-    it('does not write when agent tokens equal the global tokens', () => {
+    it('does not write when the agent tokens equal the current tokens', () => {
         const scenes = [{ participants: ['a', 'b'] }];
         applySceneVideoTokens(scenes, [
-            { scene_index: 0, tokens: { a: ['tie'], b: ['hat'] } },
+            { scene_index: 0, tokens: { a: ['tie'], b: [' hat '] } },
         ], characters);
-        expect(scenes[0].passport).to.be.undefined;
+        expect(scenes[0]).to.not.have.property('look_patch');
+        expect(scenes[0]).to.not.have.property('passport');
     });
 
-    it('merges into existing scene.passport preserving other fields', () => {
+    it('merges into an existing look_patch preserving its other fields and other heroes', () => {
         const scenes = [{
             participants: ['a', 'b'],
-            passport: { b: { video_tokens: ['x'], appearance: 'keep me' } },
+            look_patch: { b: { video_tokens: ['x'], clothes: 'keep me' }, a: { clothes: 'bathrobe' } },
         }];
         applySceneVideoTokens(scenes, [
             { scene_index: 0, tokens: { a: ['red scarf'] } },
         ], characters);
-        expect(scenes[0].passport.a.video_tokens).to.deep.equal(['red scarf']);
-        expect(scenes[0].passport.b.appearance).to.equal('keep me');
-        expect(scenes[0].passport.b.video_tokens).to.deep.equal(['x']);
+        expect(scenes[0].look_patch).to.deep.equal({
+            a: { clothes: 'bathrobe', video_tokens: ['red scarf'] },
+            b: { video_tokens: ['x'], clothes: 'keep me' },
+        });
     });
 
-    it('ignores tokens for characters that are not scene participants', () => {
-        const scenes = [{ participants: ['a'] }];
+    it('ignores tokens for characters that are not scene participants or not heroes', () => {
+        const scenes = [{ participants: ['a', 'ghost'] }];
         applySceneVideoTokens(scenes, [
-            { scene_index: 0, tokens: { z: ['intruder'], a: ['red scarf'] } },
+            { scene_index: 0, tokens: { z: ['intruder'], b: ['cap'], ghost: ['mist'], a: ['red scarf'] } },
         ], characters);
-        expect(scenes[0].passport.z).to.be.undefined;
-        expect(scenes[0].passport.a.video_tokens).to.deep.equal(['red scarf']);
+        expect(scenes[0].look_patch).to.deep.equal({ a: { video_tokens: ['red scarf'] } });
     });
 
-    it('keeps an existing scene override as the current value (no downgrade)', () => {
-        const scenes = [{
-            participants: ['a', 'b'],
-            passport: { a: { video_tokens: ['scarf'] } },
-        }];
+    it('an existing look_patch is the current value: the same tokens are not written again, new ones replace it', () => {
+        const scenes = [{ participants: ['a', 'b'], look_patch: { a: { video_tokens: ['scarf'] } } }];
+        const before = scenes[0].look_patch;
+        applySceneVideoTokens(scenes, [{ scene_index: 0, tokens: { a: ['scarf'] } }], characters);
+        expect(scenes[0].look_patch).to.equal(before); // untouched object — no write at all
+        applySceneVideoTokens(scenes, [{ scene_index: 0, tokens: { a: ['tie'] } }], characters);
+        // back to the passport tokens is a change against the current patch → written
+        expect(scenes[0].look_patch.a.video_tokens).to.deep.equal(['tie']);
+    });
+
+    it('the current tokens come from the look assigned in the scene, not from the base passport', () => {
+        const withLook = [{ id: 'a', name: 'A', passport: { appearance: 'x', clothes: 'y', video_tokens: ['tie'] },
+            looks: [{ id: 'coat', label: 'Coat', fields: { video_tokens: ['grey coat'] } }] }];
+        const scenes = [{ participants: ['a'], looks: { a: 'coat' } }, { participants: ['a'], looks: { a: 'coat' } }];
         applySceneVideoTokens(scenes, [
-            { scene_index: 0, tokens: { a: ['scarf'] } },
+            { scene_index: 0, tokens: { a: ['grey coat'] } },   // equals the look → nothing
+            { scene_index: 1, tokens: { a: ['tie'] } },         // equals the BASE, differs from the look → written
+        ], withLook);
+        expect(scenes[0]).to.not.have.property('look_patch');
+        expect(scenes[1].look_patch).to.deep.equal({ a: { video_tokens: ['tie'] } });
+    });
+
+    it('a scene cached by a pre-v4 analysis (scene.passport) is read as look_patch and loses the old key', () => {
+        const scenes = [{ participants: ['a', 'b'], passport: { a: { video_tokens: ['scarf'] } } }];
+        applySceneVideoTokens(scenes, [{ scene_index: 0, tokens: { a: ['scarf'], b: ['cap'] } }], characters);
+        expect(scenes[0]).to.not.have.property('passport');
+        expect(scenes[0].look_patch).to.deep.equal({ a: { video_tokens: ['scarf'] }, b: { video_tokens: ['cap'] } });
+    });
+
+    it('tokens are sanitized (trimmed, at most four) and an empty list is never written', () => {
+        const scenes = [{ participants: ['a', 'b'] }];
+        applySceneVideoTokens(scenes, [
+            { scene_index: 0, tokens: { a: [' one ', 'two', 'three', 'four', 'five'], b: [] } },
         ], characters);
-        // unchanged — no write, but the existing override stays
-        expect(scenes[0].passport.a.video_tokens).to.deep.equal(['scarf']);
+        expect(scenes[0].look_patch).to.deep.equal({ a: { video_tokens: ['one', 'two', 'three', 'four'] } });
     });
 
     it('does nothing for empty rows or unknown scene indexes', () => {
         const scenes = [{ participants: ['a', 'b'] }];
         applySceneVideoTokens(scenes, [], characters);
         applySceneVideoTokens(scenes, [{ scene_index: 7, tokens: { a: ['x'] } }], characters);
-        expect(scenes[0].passport).to.be.undefined;
+        expect(scenes[0]).to.deep.equal({ participants: ['a', 'b'] });
     });
 });
 
 describe('buildCharLines duplicate guard (order-insensitive)', () => {
     it('treats the same feature set in different order as a collision', () => {
         const book = {
-            characters: [
+            heroes: [
                 { id: 'a', name: 'A', passport: { video_tokens: ['tie', 'red jacket'] } },
                 { id: 'b', name: 'B', passport: { video_tokens: ['blue shirt'] } },
             ],
         };
         const scene = {
-            passport: {
+            look_patch: {
                 a: { video_tokens: ['tie', 'red jacket'] },
                 b: { video_tokens: ['red jacket', 'tie'] }, // same set, different order
             },

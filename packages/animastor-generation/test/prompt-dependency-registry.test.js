@@ -40,41 +40,29 @@ describe('Prompt Dependency Registry', () => {
         });
     });
 
-    describe('extractPassport', () => {
-        it('extracts passport fields from a character', () => {
-            const char = {
-                passport: {
-                    appearance: 'tall',
-                    clothes: 'robe',
-                    video_tokens: ['tie'],
-                },
-            };
-            const result = registry.extractPassport(char);
-            expect(result).to.deep.equal({
-                appearance: 'tall',
-                clothes: 'robe',
-                video_tokens: ['tie'],
-            });
+    describe('resolvedLooks (VBook 4: the derived key scene.resolved_looks)', () => {
+        const looks = { a: { appearance: 'tall', clothes: 'robe', video_tokens: ['tie'] } };
+        const resolveHeroLook = (book, chapter, scene, id) => (looks[id] ? { ...looks[id], base: looks[id] } : null);
+
+        it('participants with a passport → their resolved look (appearance, clothes, video_tokens)', () => {
+            const out = registry.resolvedLooks({ participants: ['a', 'b', 'a'] }, { book: {}, chapter: {}, resolveHeroLook });
+            expect(out).to.deep.equal({ a: { appearance: 'tall', clothes: 'robe', video_tokens: ['tie'] } });
         });
 
-        it('returns null for null character', () => {
-            expect(registry.extractPassport(null)).to.be.null;
+        it('without a book or a resolver in the context the key is absent', () => {
+            expect(registry.resolvedLooks({ participants: ['a'] }, null)).to.equal(undefined);
+            expect(registry.resolvedLooks({ participants: ['a'] }, { book: {} })).to.equal(undefined);
         });
 
-        it('defaults missing passport fields', () => {
-            const char = { passport: { appearance: 'tall' } };
-            const result = registry.extractPassport(char);
-            expect(result.appearance).to.equal('tall');
-            expect(result.clothes).to.be.undefined;
-            expect(result.video_tokens).to.be.undefined;
-        });
-
-        it('detects video_tokens change as a passport difference', () => {
-            const field = registry.getCrossFields().find(f => f.key === 'characters.passport');
-            expect(field.isChanged(
-                { passport: { appearance: 'tall', video_tokens: ['tie'] } },
-                { passport: { appearance: 'tall', video_tokens: ['red jacket'] } }
-            )).to.be.true;
+        it('computeSceneDirtyLayers compares the RESULT: a changed look → image + video, no audio', () => {
+            let v = 'tall';
+            const resolver = (book, chapter, scene, id) => (id === 'a' ? { appearance: book.v, clothes: '', video_tokens: [], base: {} } : null);
+            const scene = { participants: ['a'] };
+            const r = registry.computeSceneDirtyLayers(scene, scene, { old: { book: { v } }, new: { book: { v: 'short' } }, resolveHeroLook: resolver });
+            expect(r.dirtyLayers).to.have.members(['image', 'video']);
+            expect(r.changes.scene_resolved_looks).to.deep.equal({ changed: true });
+            const same = registry.computeSceneDirtyLayers(scene, scene, { old: { book: { v } }, new: { book: { v } }, resolveHeroLook: resolver });
+            expect(same.dirtyLayers).to.deep.equal([]);
         });
     });
 
@@ -154,21 +142,10 @@ describe('Prompt Dependency Registry', () => {
             expect(result.dirtyLayers).to.include.members(['image', 'video']);
         });
 
-        it('detects scene.passport override change → image + video (no audio)', () => {
+        it('scene.passport (3.1) is not a key any more: its change marks nothing', () => {
             const oldScene = { passport: { 'char-1': { clothing_base: 'grey coat' } } };
             const newScene = { passport: { 'char-1': { clothing_base: 'black suit' } } };
             const result = registry.computeSceneDirtyLayers(oldScene, newScene);
-            expect(result.dirtyLayers).to.include.members(['image', 'video']);
-            expect(result.dirtyLayers).to.not.include('audio');
-            expect(result.changes.scene_passport).to.deep.equal({ changed: true });
-        });
-
-        it('does not mark dirty when scene.passport unchanged', () => {
-            const scene = { passport: { 'char-1': { clothing_base: 'grey coat' } } };
-            const result = registry.computeSceneDirtyLayers(
-                JSON.parse(JSON.stringify(scene)),
-                JSON.parse(JSON.stringify(scene))
-            );
             expect(result.dirtyLayers).to.deep.equal([]);
         });
 
@@ -257,70 +234,43 @@ describe('Prompt Dependency Registry', () => {
     });
 
     describe('getCrossFields', () => {
-        it('returns 4 cross-cutting fields', () => {
+        it('returns 2 cross-cutting fields (VBook 4: looks are the derived scene key)', () => {
             const fields = registry.getCrossFields();
-            expect(fields).to.have.length(4);
+            expect(fields).to.have.length(2);
         });
 
-        it('includes characters.passport, characters.voice, bible.locations, book.voices', () => {
+        it('includes heroes.voice and bible.locations; no characters.* / book.voices', () => {
             const keys = registry.getCrossFields().map(f => f.key);
-            expect(keys).to.include('characters.passport');
-            expect(keys).to.include('characters.voice');
-            expect(keys).to.include('bible.locations');
-            expect(keys).to.include('book.voices');
+            expect(keys).to.deep.equal(['heroes.voice', 'bible.locations']);
         });
 
-        describe('book.voices entitySource', () => {
-            it('extracts voices map entries with id from book', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'book.voices');
-                const book = { voices: { narrator: { instruction: 'a' }, dialogue: { instruction: 'b' } } };
-                const entities = field.entitySource(book);
-                expect(entities).to.have.length(2);
-                expect(entities[0].id).to.equal('narrator');
+        describe('heroes.voice', () => {
+            const field = () => registry.getCrossFields().find(f => f.key === 'heroes.voice');
+
+            it('entitySource: the heroes of the book', () => {
+                expect(field().entitySource({ heroes: [{ id: 'narrator' }, { id: 'a' }, { name: 'no id' }] }).map((h) => h.id)).to.deep.equal(['narrator', 'a']);
+                expect(field().entitySource({})).to.deep.equal([]);
             });
 
-            it('isChanged compares instruction strings', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'book.voices');
-                expect(field.isChanged({ instruction: 'x' }, { instruction: 'y' })).to.equal(true);
-                expect(field.isChanged({ instruction: 'x' }, { instruction: 'x' })).to.equal(false);
-            });
-        });
-
-        describe('characters.passport entitySource', () => {
-            it('extracts characters array from book', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'characters.passport');
-                const book = { characters: [{ id: 'c1' }, { id: 'c2' }] };
-                expect(field.entitySource(book)).to.have.length(2);
+            it('isChanged follows the LOCKED reference only (sha256 + ref_text), not timbre / manner', () => {
+                const ref = (sha, text, locked = true) => ({ voice: { reference: { sha256: sha, ref_text: text, locked } } });
+                expect(field().isChanged({ voice: { timbre: 'x' } }, { voice: { timbre: 'y', manner: 'z' } })).to.equal(false);
+                expect(field().isChanged(ref('a', 't'), ref('b', 't'))).to.equal(true);
+                expect(field().isChanged(ref('a', 't'), ref('a', 'u'))).to.equal(true);
+                expect(field().isChanged(ref('a', 't'), ref('a', 't', false))).to.equal(true);
+                expect(field().isChanged({}, ref('a', 't', false))).to.equal(false);
+                expect(field().isChanged({ name: 'A', voice: {} }, { name: 'B', notes: 'x', voice: {} })).to.equal(false);
             });
 
-            it('returns empty array for missing characters', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'characters.passport');
-                expect(field.entitySource({})).to.deep.equal([]);
-            });
-
-            it('isChanged detects passport differences', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'characters.passport');
-                const oldChar = { passport: { appearance: 'tall' } };
-                const newChar = { passport: { appearance: 'short' } };
-                expect(field.isChanged(oldChar, newChar)).to.be.true;
-            });
-
-            it('isChanged ignores non-passport fields', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'characters.passport');
-                const oldChar = { name: 'Alice', passport: { appearance: 'tall' } };
-                const newChar = { name: 'Alice', passport: { appearance: 'tall' } };
-                expect(field.isChanged(oldChar, newChar)).to.be.false;
-            });
-
-            it('findAffectedScenes finds scenes with matching participant', () => {
-                const field = registry.getCrossFields().find(f => f.key === 'characters.passport');
+            it('findAffectedScenes: narrator → every scene; a hero → scenes where it takes part or speaks', () => {
                 const scenes = [
-                    { participants: ['c1'], scene: {} },
-                    { participants: ['c2'], scene: {} },
+                    { participants: ['a'], scene: {} },
+                    { participants: [], scene: { units: [{ audio: { speaker: 'a' } }] } },
+                    { participants: ['b'], scene: { dialogue_blocks: [{ units: [{ audio: { speaker: 'b' } }] }] } },
                 ];
-                const affected = field.findAffectedScenes(scenes, 'c1');
-                expect(affected).to.have.length(1);
-                expect(affected[0].participants).to.include('c1');
+                expect(field().findAffectedScenes(scenes, 'narrator')).to.have.length(3);
+                expect(field().findAffectedScenes(scenes, 'a')).to.deep.equal(scenes.slice(0, 2));
+                expect(field().findAffectedScenes(scenes, 'b')).to.deep.equal([scenes[2]]);
             });
         });
 

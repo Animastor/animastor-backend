@@ -63,6 +63,7 @@ const FROZEN_PORTS = [
     'resolveOwnership',  // workspace-ownership.resolveWorkspaceForBook
     'rollbackOwnership', // book-repo registry-row rollback (failed blank commit)
     'recoveryCtx',       // read-recovery ctx (redis chunk repair)
+    'outputRoot',        // VBook 4 step 4: artifact root, read only (state of hero reference files)
 ];
 
 /** Strip comments so doc mentions are not legs; keep code structure. */
@@ -85,6 +86,7 @@ describe('E4: dependency matrix — contour deps legs stay frozen', () => {
             'editorModel.commit',           // canonical writer (facade)
             'editorModel.read',             // canonical reader (facade)
             'editorPorts.auditCoverage',    // GET source-coverage
+            'editorPorts.outputRoot',       // VBook 4: computed state of hero reference files (GET book)
             'editorPorts.placeholderAudio', // GET book read-repair
             'editorPorts.promptLimit',      // prompt length ceiling
             'editorPorts.recoveryCtx',      // GET book chunk recovery
@@ -294,8 +296,8 @@ describe('E6: package require closure reaches only intra-package files + builtin
 });
 
 // ── E7 — Editor package boundary (post-move) ──────────────────────────────
-describe('E7: the editor package is carried by exactly the 9 src files', () => {
-    it('packages/animastor-editor/src/** contains exactly the nine package files (no strays)', () => {
+describe('E7: the editor package is carried by exactly its src files', () => {
+    it('packages/animastor-editor/src/** contains exactly the package files (no strays)', () => {
         const files = listSourceFiles(EDITOR_DIR).map((f) => rel(f)).sort();
         expect(files).to.deep.equal([
             'packages/animastor-editor/src/cyr-latin-map.js',
@@ -304,9 +306,13 @@ describe('E7: the editor package is carried by exactly the 9 src files', () => {
             'packages/animastor-editor/src/editor-routes.cjs',
             'packages/animastor-editor/src/entity-crud-routes.cjs',
             'packages/animastor-editor/src/entity-id.js',
+            // VBook 4 step 4: the hero API (VBOOK_FORMAT_V4 §8.2)
+            'packages/animastor-editor/src/hero-api.cjs',
+            'packages/animastor-editor/src/hero-routes.cjs',
             'packages/animastor-editor/src/index.cjs',
             'packages/animastor-editor/src/read-recovery.cjs',
             'packages/animastor-editor/src/scene-patch-utils.cjs',
+            // (VBook 4 step 4 deleted vbook4-pending.cjs with the 3.1 routes)
         ]);
     });
 

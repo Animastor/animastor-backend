@@ -15,6 +15,8 @@
 // purgeAssistantForBook port — this route must not know the Assistant's
 // storage details.
 
+const { PRESERVED_ENTRIES } = require('../../utils/build-dir');
+
 module.exports = function registerCacheRoutes(app, ctx) {
     const { redis, config, storage, path, fs, getAllChunks, getChunk, cleanBookRedisKeys, purgeAssistantForBook, log } = ctx;
 
@@ -74,9 +76,11 @@ module.exports = function registerCacheRoutes(app, ctx) {
 
             // Clean up build directories
             const OUTPUT_DIR = config.OUTPUT_DIR;
+            // VOICE_REFERENCES.md: voices/ (locked / uploaded references) survives a cache clear
             try {
                 require('../../services/book-artifacts.cjs').removeBookArtifacts({
                     outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds,
+                    buildScoped: PRESERVED_ENTRIES, preserve: PRESERVED_ENTRIES,
                     log: (m) => console.warn(`[CACHE] ${m}`),
                 });
             } catch (e) {

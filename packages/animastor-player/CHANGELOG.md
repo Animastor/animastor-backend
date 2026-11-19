@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 (2026-11-18, unpublished)
+
+`@animastor/vbook-runtime` ^0.5.0 (VBook 4). The reader paths are unchanged; the
+nested 0.3.1 copy leaves the backend tree.
+
 ## 0.1.4 (2026-11-13)
 
 `@animastor/vbook-runtime` ^0.3.1 (input validation + `behavior.json` v2).

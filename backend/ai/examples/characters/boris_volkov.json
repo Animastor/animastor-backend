@@ -1,0 +1,44 @@
+{
+  "schema": "animastor.character/1",
+  "id": "boris_volkov",
+  "name": "Boris Volkov",
+  "passport": {
+    "appearance": "young poet in his late twenties, energetic and impulsive presence, strong build, lively brown eyes, short tousled dark hair, expressive face with quick-changing emotions",
+    "clothes": "loose grey shirt, worn leather jacket, red scarf, open collar",
+    "video_tokens": [
+      "red scarf",
+      "tousled hair",
+      "leather jacket"
+    ]
+  },
+  "voice": {
+    "timbre": "A young Russian male voice, bright tenor with an energetic edge. Native Russian pronunciation.",
+    "manner": "Fast and emotionally charged, speaks with conviction.",
+    "timbre_source": "analysis"
+  },
+  "behaviour": {
+    "profile": {
+      "baseline": "restless and expressive; cannot stay still for long, gestures with his whole arms, shifts his weight, speaks fast and loud, face mirrors every emotion immediately",
+      "quirks": [
+        "paces back and forth while reciting his own verses",
+        "wraps and unwraps his red scarf when he is nervous",
+        "runs a hand through his hair before every bold statement"
+      ],
+      "reactions": [
+        {
+          "trigger": "is praised",
+          "reaction": "lights up instantly, straightens to his full height and talks twice as fast"
+        },
+        {
+          "trigger": "is criticized",
+          "reaction": "flares up defensively, argues back with sweeping gestures, then quickly deflates and becomes sullen and quiet"
+        },
+        {
+          "trigger": "is frightened",
+          "reaction": "backs away, voice breaks into a higher pitch, clutches the nearest object with both hands"
+        }
+      ]
+    },
+    "rules": []
+  }
+}

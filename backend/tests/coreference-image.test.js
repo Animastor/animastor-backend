@@ -235,7 +235,7 @@ describe('Coreference — resolveLocationFromPrompt', () => {
 describe('Coreference — buildCharacters from scene.participants', () => {
 
     const book = {
-        characters: [
+        heroes: [
             { id: 'mikhail_aleksandrovich_berlioz', name: 'Михаил Александрович Берлиоз', passport: { appearance: 'Маленького роста, упитан, лыс' } },
             { id: 'ivan_nikolaevich_ponyrev', name: 'Иван Николаевич Понырев', passport: { appearance: 'Плечистый, рыжеватый, вихрастый' } },
         ],
@@ -273,7 +273,7 @@ describe('Coreference — buildCharacters from scene.participants', () => {
 
     it('builds passport string with appearance and clothing', () => {
         const bookDetailed = {
-            characters: [{
+            heroes: [{
                 id: 'berlioz',
                 name: 'Берлиоз',
                 passport: {
@@ -291,7 +291,7 @@ describe('Coreference — buildCharacters from scene.participants', () => {
 
     it('deduplicates participant IDs', () => {
         const bookDedup = {
-            characters: [{ id: 'berlioz', name: 'Берлиоз', passport: {} }],
+            heroes: [{ id: 'berlioz', name: 'Берлиоз', passport: {} }],
         };
         const scene = { participants: ['berlioz', 'berlioz', 'berlioz'] };
         const result = buildCharacters(scene, {}, {}, bookDedup);
@@ -306,7 +306,7 @@ describe('Coreference — buildCharacters from scene.participants', () => {
 describe('Coreference — buildImagePrompt passport injection', () => {
 
     const bookPayload = {
-        characters: [
+        heroes: [
             { id: 'berlioz', name: 'Берлиоз', passport: { appearance: 'маленького роста' } },
             { id: 'bezdomny', name: 'Бездомный', passport: { appearance: 'плечистый рыжий' } },
         ],
@@ -382,7 +382,7 @@ describe('Coreference — buildImagePrompt passport injection', () => {
 
 describe('buildImagePrompt — typography page text injection', () => {
 
-    const bookPayload = { characters: [], locations: {} };
+    const bookPayload = { heroes: [], locations: {} };
 
     it('injects the page text when image.prompt carries only the style instruction', () => {
         const unit = {
@@ -438,7 +438,7 @@ describe('buildImagePrompt — typography page text injection', () => {
 describe('Location environment template — buildImagePrompt fallback', () => {
 
     const bookPayload = {
-        characters: [],
+        heroes: [],
         locations: {
             moscow_patriarskie: {
                 description: 'Патриаршие пруды',
@@ -490,7 +490,7 @@ describe('Location environment template — buildImagePrompt fallback', () => {
     it('no location environment and no scene environment → no env fields', () => {
         const unit = { type: 'narration', image: { prompt: 'plain shot' } };
         const scene = { location: { id: 'unknown_place' } };
-        const result = buildImagePrompt(unit, scene, {}, { characters: [], locations: {} });
+        const result = buildImagePrompt(unit, scene, {}, { heroes: [], locations: {} });
         expect(result).to.include('plain shot');
         expect(result).to.not.include('warm evening');
     });
@@ -506,7 +506,7 @@ describe('Location environment template — buildImagePrompt fallback', () => {
 describe('buildImagePrompt — default composition order (general → specific)', () => {
 
     const bookPayload = {
-        characters: [
+        heroes: [
             { id: 'berlioz', name: 'Берлиоз', passport: { appearance: 'short and stout', clothes: 'gray summer suit' } },
             { id: 'bezdomny', name: 'Бездомный', passport: { appearance: 'broad-shouldered, ginger hair' } },
         ],

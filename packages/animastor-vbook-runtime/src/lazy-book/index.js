@@ -30,7 +30,7 @@ const metadataModule = require('./metadata');
 // Re-export paths and parsers (kept as separate files)
 const {
     getBooksDir, getBookDir, getSourcePath, getManifestPath, getBookMetaPath,
-    getCharactersPath, getBiblePath, getChapterDir, getChapterPath,
+    getCharactersDir, getBehaviourPath, getBiblePath, getChapterDir, getChapterPath,
     chapterId, sceneId, unitId, generateBookId,
 } = require('./paths');
 
@@ -47,7 +47,7 @@ module.exports = {
 
     // Paths
     getBooksDir, getBookDir, getSourcePath, getManifestPath, getBookMetaPath,
-    getCharactersPath, getBiblePath, getChapterDir, getChapterPath,
+    getCharactersDir, getBehaviourPath, getBiblePath, getChapterDir, getChapterPath,
 
     // Parsers
     splitIntoChapters, splitIntoScenes, splitIntoUnits,

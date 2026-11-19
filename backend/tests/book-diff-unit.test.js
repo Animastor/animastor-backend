@@ -248,7 +248,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
 
     it('detects character passport changes and marks scenes', () => {
         const oldBook = {
-            characters: [
+            heroes: [
                 { id: 'hero', passport: { appearance: 'tall' } },
             ],
             chapters: [{
@@ -257,7 +257,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
             }],
         };
         const newBook = {
-            characters: [
+            heroes: [
                 { id: 'hero', passport: { appearance: 'short' } },
             ],
             chapters: [{
@@ -266,18 +266,20 @@ describe('Book Diff — Cross-cutting dependencies', () => {
             }],
         };
         const result = bookDiff.computeBookDiff(oldBook, newBook);
-        // Scene itself is unchanged, but character change marks it dirty
+        // Scene itself is unchanged, but its resolved look changed (VBook 4:
+        // the derived key scene.resolved_looks, not an entity-level entry)
         const dirty = result.dirty_scenes;
         expect(dirty).to.have.length(1);
-        expect(dirty[0].reason).to.equal('characters_passport_changed');
+        expect(dirty[0].reason).to.equal('changed');
+        expect(dirty[0].changes).to.have.property('scene_resolved_looks');
         expect(dirty[0].dirty_layers).to.include.members(['image', 'video']);
         expect(dirty[0].dirty_layers).to.not.include('audio');
     });
 
-    it('detects character voice changes and marks scenes (audio only)', () => {
+    it('detects a change of a hero\'s LOCKED voice reference and marks scenes (audio only)', () => {
         const oldBook = {
-            characters: [
-                { id: 'hero', voice: { instruction: 'deep' } },
+            heroes: [
+                { id: 'hero', voice: { timbre: 'deep', manner: '', reference: { sha256: 'a'.repeat(64), ref_text: 'Да.', locked: true } } },
             ],
             chapters: [{
                 chapter: 'ch-1',
@@ -285,8 +287,8 @@ describe('Book Diff — Cross-cutting dependencies', () => {
             }],
         };
         const newBook = {
-            characters: [
-                { id: 'hero', voice: { instruction: 'soft' } },
+            heroes: [
+                { id: 'hero', voice: { timbre: 'deep', manner: '', reference: { sha256: 'b'.repeat(64), ref_text: 'Да.', locked: true } } },
             ],
             chapters: [{
                 chapter: 'ch-1',
@@ -296,7 +298,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
         const result = bookDiff.computeBookDiff(oldBook, newBook);
         const dirty = result.dirty_scenes;
         expect(dirty).to.have.length(1);
-        expect(dirty[0].reason).to.equal('characters_voice_changed');
+        expect(dirty[0].reason).to.equal('heroes_voice_changed');
         expect(dirty[0].dirty_layers).to.deep.equal(['audio']);
     });
 
@@ -328,7 +330,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
 
     it('character change affects all scenes referencing that character', () => {
         const oldBook = {
-            characters: [
+            heroes: [
                 { id: 'hero', passport: { appearance: 'tall' } },
                 { id: 'sidekick', passport: { appearance: 'short' } },
             ],
@@ -342,7 +344,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
             }],
         };
         const newBook = {
-            characters: [
+            heroes: [
                 { id: 'hero', passport: { appearance: 'very tall' } },  // changed
                 { id: 'sidekick', passport: { appearance: 'short' } },  // unchanged
             ],
@@ -360,19 +362,19 @@ describe('Book Diff — Cross-cutting dependencies', () => {
         // sc-1 and sc-3 reference 'hero' which changed → both dirty
         const dirtyIds = dirty.map(d => d.scene_id).sort();
         expect(dirtyIds).to.deep.equal(['sc-1', 'sc-3']);
-        expect(result.changes['characters.passport']).to.equal(1);  // 1 char changed
+        expect(result.changes.modified).to.equal(2);  // their resolved look changed
     });
 
     it('new character is detected', () => {
         const oldBook = {
-            characters: [{ id: 'hero', passport: { appearance: 'tall' } }],
+            heroes: [{ id: 'hero', passport: { appearance: 'tall' } }],
             chapters: [{
                 chapter: 'ch-1',
                 scenes: [{ scene_id: 'sc-1', participants: ['hero', 'sidekick'] }],
             }],
         };
         const newBook = {
-            characters: [
+            heroes: [
                 { id: 'hero', passport: { appearance: 'tall' } },
                 { id: 'sidekick', passport: { appearance: 'short' } },  // new
             ],
@@ -389,7 +391,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
 
     it('removed character marks scenes', () => {
         const oldBook = {
-            characters: [
+            heroes: [
                 { id: 'hero', passport: { appearance: 'tall' } },
                 { id: 'sidekick', passport: { appearance: 'short' } },
             ],
@@ -399,7 +401,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
             }],
         };
         const newBook = {
-            characters: [{ id: 'hero', passport: { appearance: 'tall' } }],  // sidekick removed
+            heroes: [{ id: 'hero', passport: { appearance: 'tall' } }],  // sidekick removed
             chapters: [{
                 chapter: 'ch-1',
                 scenes: [{ scene_id: 'sc-1', participants: ['hero', 'sidekick'] }],
@@ -411,7 +413,7 @@ describe('Book Diff — Cross-cutting dependencies', () => {
 
     it('unchanged book produces no dirty scenes', () => {
         const book = {
-            characters: [{ id: 'hero', passport: { appearance: 'tall' } }],
+            heroes: [{ id: 'hero', passport: { appearance: 'tall' } }],
             locations: { forest: { description: 'Dark' } },
             chapters: [{
                 chapter: 'ch-1',

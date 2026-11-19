@@ -44,23 +44,6 @@ function splitDialogueIntoChunks(text, maxChars = 250) {
     return chunks;
 }
 
-function narratorVoice(scene, book) {
-    const rawVoiceId = scene?.audio?.voice;
-    // 🔧 FIX: "dialogue" — это идентификатор типа сцены, а не voice ID.
-    // Если scene.audio.voice установлен в "dialogue", игнорируем его
-    // и используем narrator voice по умолчанию.
-    const isFakeVoiceId = rawVoiceId === 'dialogue' || rawVoiceId === 'narration';
-    const voiceId = (!rawVoiceId || isFakeVoiceId)
-        ? (book?.book?.defaults?.narration_voice || "narrator")
-        : rawVoiceId;
-    if (voiceId === "narrator") {
-        return book?.voices?.narrator?.instruction || book?.bible?.narrator?.voice?.instruction || "";
-    }
-    return book?.voices?.[voiceId]?.instruction
-        || book?.characters?.find(x => x.id === voiceId)?.voice?.instruction
-        || "";
-}
-
 function padShortText(text) {
     if (text.length >= 40) return text;
     return text + " " + text;
@@ -355,7 +338,6 @@ function buildSegments(runtimeEntry) {
 module.exports = {
     splitTextIntoChunks,
     splitDialogueIntoChunks,
-    narratorVoice,
     padShortText,
     buildSegments,
     extractNarrationFromDialogueUnit,

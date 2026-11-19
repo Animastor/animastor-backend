@@ -15,8 +15,18 @@ const layerConfig = require('../layer-config');
 const { PROGRESS_STAGES, resolveBookLanguage } = require('../agent-prompts');
 const pipelineSteps = require('./pipeline-steps');
 const pipelineRunner = require('./pipeline-runner');
+const heroAnalysis = require('@animastor/vbook-runtime/hero-analysis.cjs');
 const textUtils = require('./text-utils');
 const profileOverride = require('../profile-override');
+
+// Structured fields of an error progress event (owner, step 6): the code and
+// who can change the provider (reasoning_budget_exhausted → system/personal).
+function errorProgressFields(err) {
+    const out = {};
+    if (err && typeof err.code === 'string') out.error_code = err.code;
+    if (err && err.providerSource) out.provider_source = err.providerSource;
+    return out;
+}
 
 /**
  * Read chunk_size from Redis layer-config for the given book (default 3).
@@ -165,7 +175,11 @@ async function bootstrapWithAgentInner(bookId, draft, progress, publishProgress,
         const analysisConfig = await _readAnalysisConfig(redis, bookId);
         console.log(`[AGENT] bootstrapWithAgent: analysis_mode=${analysisConfig.analysis_mode}, parallelism=${analysisConfig.analysis_parallelism} for book ${bookId}`);
 
-        const result = await pipelineRunner.runPipeline(sessionId, windowInfo.text, [], [], 0, _progress, 0, {
+        // The first window starts from the heroes the book already has — a
+        // person may have added some before the analysis (the narrator is not
+        // a character and is not part of the registry).
+        const result = await pipelineRunner.runPipeline(sessionId, windowInfo.text, heroAnalysis.registryFromBook(draft, []), [], 0, _progress, 0, {
+            existingMentions: heroAnalysis.mentionsFromBook(draft, {}),
             rawWindowText: windowInfo.fullChapter,
             sourceOffsetBase: windowInfo.windowStartOffset,
             publishProgress,
@@ -232,6 +246,7 @@ async function bootstrapWithAgentInner(bookId, draft, progress, publishProgress,
             locations: result.locations,
             mentions: result.mentions,
             scenes: result.scenes,
+            possibleDuplicates: result.possibleDuplicates,
             chapterTitle: chapterTitle,
             maxScenes: chunkSize,
             structure: structure,
@@ -269,7 +284,7 @@ async function bootstrapWithAgentInner(bookId, draft, progress, publishProgress,
                 status: 'failed',
                 progress_msg: `Ошибка: ${err.message}`,
             }).catch(() => {});
-            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}` });
+            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}`, ...errorProgressFields(err) });
         } else {
             // Отправляем статус «Отменено» через publishProgress (progress-колбэк — no-op)
             try {
@@ -468,9 +483,15 @@ async function _bootstrapNextWindowInner(bookId, progress, publishProgress, redi
         );
     }
 
-    const existingChars = windowData?.all_characters || [];
+    // The character registry of the next window is read from the BOOK — the
+    // hero files (VBOOK_FORMAT_V4 §8.1) — not from the previous window's
+    // memory: what a person changed, added or deleted in the editor between
+    // windows is what the analysis sees. PG window data only contributes the
+    // analysis-only working fields (description, traits) and the mentions
+    // whose target is not a hero.
+    const existingChars = heroAnalysis.registryFromBook(draft, windowData?.all_characters);
     const existingLocs = windowData?.all_locations || [];
-    const existingMentions = windowData?.all_mentions || {};
+    const existingMentions = heroAnalysis.mentionsFromBook(draft, windowData?.all_mentions);
 
     // ── Check for cached scenes first ──
     const cachedScenes = windowData?.cached_scenes || [];
@@ -718,6 +739,7 @@ async function _bootstrapNextWindowInner(bookId, progress, publishProgress, redi
             locations: result.locations,
             mentions: result.mentions,
             scenes: result.scenes,
+            possibleDuplicates: result.possibleDuplicates,
             maxScenes: chunkSize,
             chapterTitle: windowInfo.chapterTitle || null,
             chapterIndex: nextChapterIndex,
@@ -781,7 +803,7 @@ async function _bootstrapNextWindowInner(bookId, progress, publishProgress, redi
                 status: 'failed',
                 progress_msg: `Ошибка: ${err.message}`,
             }).catch(() => {});
-            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}` });
+            _progress({ stage: 'error', message: `✗ Ошибка: ${err.message}`, ...errorProgressFields(err) });
         } else {
             // Отправляем статус «Отменено» через publishProgress (progress-колбэк — no-op)
             try {

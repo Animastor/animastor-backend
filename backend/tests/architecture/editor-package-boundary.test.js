@@ -128,10 +128,11 @@ describe('PB3: the package root exposes exactly the public API', () => {
         'createEditorModel',
         'createEditorRoutes',
         'createEntityCrudRoutes',
+        'createHeroRoutes',       // VBook 4 step 4: the hero API registrar
         'createEditorPorts',
     ].sort();
 
-    it('exports exactly the four public factories (nothing more)', () => {
+    it('exports exactly the five public factories (nothing more)', () => {
         expect(Object.keys(api).sort()).to.deep.equal(PUBLIC_API);
     });
 
@@ -141,7 +142,7 @@ describe('PB3: the package root exposes exactly the public API', () => {
         }
     });
 
-    it('the ports factory is the frozen 8-port seam (no expansion)', () => {
+    it('the ports factory is the frozen 9-port seam (no expansion)', () => {
         const ports = api.createEditorPorts({
             deps: {
                 sceneAssetsRepo: {}, placeholderAudio: {}, auditCoverage: {},
@@ -151,6 +152,7 @@ describe('PB3: the package root exposes exactly the public API', () => {
         expect(Object.keys(ports).sort()).to.deep.equal([
             'sceneAssetsRepo', 'placeholderAudio', 'auditCoverage', 'promptLimit',
             'purge', 'resolveOwnership', 'rollbackOwnership', 'recoveryCtx',
+            'outputRoot', // VBook 4 step 4 (read-only artifact root)
         ].sort());
     });
 });

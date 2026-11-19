@@ -8,6 +8,10 @@
 'use strict';
 
 const { isValidBookId, isValidBuildId } = require('@animastor/vbook-runtime/safe-paths');
+// Hero ids (VBOOK_FORMAT_V4 §4): ONE grammar — the runtime's canonical
+// snake_case, up to 64 characters, one segment (no dot, no separator). It is
+// the file name characters/<id>.json, so nothing else may reach a route.
+const { isCanonicalHeroId, CANONICAL_ID_RE } = require('@animastor/vbook-runtime/heroes.cjs');
 
 const BOOK_KEYS = ['bookId', 'book_id'];
 const BUILD_KEYS = ['buildId', 'build_id'];
@@ -16,7 +20,12 @@ const BUILD_KEYS = ['buildId', 'build_id'];
 // (artifact file names are built from the book, chapter and scene ids): it
 // must be a single path segment — no separators, no NUL/control chars, no `..`.
 const SEGMENT_PARAMS = ['chapterId', 'sceneId', 'iuId', 'unitId', 'characterId', 'locationId',
-    'voiceId', 'name', 'id', 'jobId', 'workerId', 'endpointId', 'connectorId'];
+    'voiceId', 'name', 'id', 'jobId', 'workerId', 'endpointId', 'connectorId', 'ruleId'];
+
+// Look ids are snake_case too (§4a.2) — the same canonical grammar, ≤ 64.
+function isLookId(v) {
+    return typeof v === 'string' && v.length <= 64 && CANONICAL_ID_RE.test(v);
+}
 const SEGMENT_FIELDS = ['chapter_id', 'scene_id', 'unit_id', 'iu_id', 'chapterId', 'sceneId', 'unitId', 'iuId'];
 
 function isSafeSegment(v) {
@@ -27,7 +36,7 @@ function isSafeSegment(v) {
 // Book-creation sub-paths of /api/v1/book/:bookId (not ids).
 const CREATE_BOOK_SUBPATHS = new Set(['import', 'import-txt', 'import-text', 'load-vbook', 'blank']);
 
-const REJECT_CODES = { 'book id': 'invalid_book_id', 'build id': 'invalid_build_id', id: 'invalid_id' };
+const REJECT_CODES = { 'book id': 'invalid_book_id', 'build id': 'invalid_build_id', 'hero id': 'invalid_hero_id', 'look id': 'invalid_look_id', id: 'invalid_id' };
 function reject(res, what) {
     return res.status(400).json({ error: `invalid ${what}`, code: REJECT_CODES[what] || 'invalid_id' });
 }
@@ -52,6 +61,8 @@ function registerParamGuards(app) {
     for (const key of SEGMENT_PARAMS) {
         app.param(key, (req, res, next, value) => (isSafeSegment(value) ? next() : reject(res, 'id')));
     }
+    app.param('heroId', (req, res, next, value) => (isCanonicalHeroId(value) ? next() : reject(res, 'hero id')));
+    app.param('lookId', (req, res, next, value) => (isLookId(value) ? next() : reject(res, 'look id')));
 }
 
 /** Query string + JSON body ids (mounted after the body parser on /api/v1). */
@@ -77,10 +88,16 @@ function bookIdPathGuard(req, res, next) {
 // additionally limited in entry count and unpacked size by vbook-runtime).
 const UPLOAD_LIMITS = Object.freeze({ fileSize: 64 * 1024 * 1024, files: 1, fields: 20, parts: 24 });
 
-/** multer single-file upload with limits; limit errors → 413/400, never 500. */
-function singleUpload(field = 'file') {
+/**
+ * multer single-file upload with limits; limit errors → 413/400, never 500.
+ * `options.fileSize` lowers the file limit for a route (never raises it above
+ * UPLOAD_LIMITS.fileSize). The file stays in memory (req.file.buffer).
+ */
+function singleUpload(field = 'file', options = {}) {
     const multer = require('multer');
-    const mw = multer({ limits: UPLOAD_LIMITS }).single(field);
+    const fileSize = Number.isSafeInteger(options.fileSize) && options.fileSize > 0
+        ? Math.min(options.fileSize, UPLOAD_LIMITS.fileSize) : UPLOAD_LIMITS.fileSize;
+    const mw = multer({ limits: { ...UPLOAD_LIMITS, fileSize } }).single(field);
     return (req, res, next) => mw(req, res, (err) => {
         if (!err) return next();
         if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'file too large', code: 'file_too_large' });
@@ -101,6 +118,7 @@ module.exports = {
     bookIdPathGuard,
     requireUser,
     isSafeSegment,
+    isLookId,
     singleUpload,
     UPLOAD_LIMITS,
 };

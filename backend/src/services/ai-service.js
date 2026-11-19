@@ -9,6 +9,7 @@ const config = require('../config/runtime-config');
 const { safeFetch } = require('@animastor/url-safety');
 
 const AI_API_BASE_URL = process.env.AI_API_BASE_URL || 'https://api.aicredits.in/v1';
+const aiReasoning = require('./ai-reasoning');
 
 // ======================================================
 // LOW-LEVEL AI CALL
@@ -74,6 +75,8 @@ async function callAI(messages, options = {}, provider = null) {
                     max_tokens: maxTokens,
                     temperature,
                     stream: false,
+                    // provider reasoning settings (disable_thinking / reasoning_effort)
+                    ...aiReasoning.reasoningBodyFields(provider),
                 }),
                 signal: AbortSignal.timeout(options.timeout || 60000),
                 // SSRF guard applies to the USER-controlled workspace endpoint;
@@ -106,6 +109,15 @@ async function callAI(messages, options = {}, provider = null) {
             const choice = data.choices?.[0]?.message;
             const content = choice?.content || '';
             console.log(`[AI-SERVICE] Response: finish=${data.choices?.[0]?.finish_reason || 'stop'}, ${content.length} chars, tokens=${data.usage?.total_tokens || '?'}`);
+            // A reasoning model spent the whole budget on reasoning: the same
+            // request gives the same nothing — a clear, non-retryable error.
+            if (!content.trim() && data.choices?.[0]?.finish_reason === 'length') {
+                throw aiReasoning.reasoningExhaustedError({
+                    maxTokens,
+                    reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens,
+                    provider,
+                });
+            }
             return {
                 content,
                 finishReason: data.choices?.[0]?.finish_reason || 'stop',
@@ -113,8 +125,8 @@ async function callAI(messages, options = {}, provider = null) {
             };
         } catch (err) {
             lastError = err;
-            // Don't retry 4xx (re-throw immediately)
-            if (err.message?.startsWith('AI API error (4')) {
+            // Don't retry 4xx (re-throw immediately), nor what cannot change
+            if (err.message?.startsWith('AI API error (4') || err.nonRetryable) {
                 throw err;
             }
             if (attempt < maxRetries) {

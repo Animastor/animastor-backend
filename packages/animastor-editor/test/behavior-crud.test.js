@@ -1,384 +1,148 @@
 // ======================================================
-// BEHAVIOR CRUD ROUTES — manual Behavior editor (behavior.json schema v2)
+// BEHAVIOUR of a hero — the manual behaviour editor (VBook 4)
 // ======================================================
-// Verifies the endpoints the Editors use for the Behaviors tab:
-//   1. behavior.json v2 keeps entries under `characters`, keyed by the
-//      EXISTING character_id (no id transliteration); `rules` and
-//      `schema_version` are never touched by these routes; a legacy v2.1
-//      flat file is migrated on the first write.
-//      Fields: baseline (string), quirks (string[]), reactions
-//      ([{trigger, reaction}]) — the pass-1 `instruction` field is gone.
-//   2. POST /behaviors requires character_id (400), an existing character
-//      (404) and no behavior yet for that character (409); seeds {baseline}.
-//   3. PATCH /behaviors/{characterId} merges fields via setDeep — unknown
-//      keys pass through so a future schema extension survives round-trips.
-//   4. DELETE removes the whole entry; deleting the CHARACTER removes the
-//      dangling behavior too.
-//   5. Persistence goes through the EXISTING book.loadBook/saveBookBundle
-//      (no parallel storage path); buildBookFromBundle parses behavior.json
-//      on vbook import.
-//
-// Mounts the real sub-registrar with minimal deps, like
-// entity-crud-routes.test.js; fixtures follow the same pattern.
+// The VBook 4 successor of the /behaviors CRUD (behavior.json v2): the
+// character of a hero lives in its own file — behaviour.profile {baseline,
+// quirks, reactions} and behaviour.rules — and is edited through
+// PATCH /heroes/:id (behaviour.profile.*) and the rules routes; the book-level
+// defaults and global rules live in behaviour.json (GET/PATCH /behaviour).
+// VBOOK_FORMAT_V4 §6, §8.2; HERO_CARD.md §5. No dirty layer: rules are
+// snapshotted into unit.behaviour at pipeline time (VBOOK_BEHAVIOUR.md).
+
+'use strict';
 
 const { expect } = require('chai');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const h = require('./hero-harness.cjs');
+const { heroRules } = require('@animastor/vbook-runtime/heroes.cjs');
 
-require('./vbook-test-bindings.cjs');
-const bookModule = require('../../../backend/src/book/index');
-const config = require('../../../backend/src/config/runtime-config');
+const B = 'behaviour_book_1';
 
-const ORIG_BOOKS_DIR = config.BOOKS_DIR;
+describe('BEHAVIOUR of a hero — profile and rules (VBook 4)', function () {
+    this.timeout(20000);
+    let t;
 
-function createResponse() {
-    return {
-        statusCode: 200,
-        body: null,
-        status(code) {
-            this.statusCode = code;
-            return this;
-        },
-        json(body) {
-            this.body = body;
-            return this;
-        },
-    };
-}
+    beforeEach(async () => {
+        t = await h.startHeroServer();
+        h.writeBook(t.booksDir, B);
+    });
+    afterEach(async () => { await t.close(); });
 
-describe('BEHAVIOR CRUD ROUTES — manual Behavior editor', () => {
-    let tmpDir;
-    let bookId;
-    let bookDir;
-    let handlers;
-    let app;
+    const patch = (id, fields) => t.api('PATCH', `/api/v1/book/${B}/heroes/${id}`, { fields });
+    const behaviourJson = () => fs.readFileSync(path.join(t.bookDir(B), 'behaviour.json'), 'utf8');
 
-    const CHAPTER_ID = 'ch-123456';
-
-    function registerRoutes() {
-        handlers = new Map();
-        app = {
-            post(path, handler) { handlers.set('POST ' + path, handler); },
-            get() {},
-            put() {},
-            patch(path, handler) { handlers.set('PATCH ' + path, handler); },
-            delete(path, handler) { handlers.set('DELETE ' + path, handler); },
-        };
-        const editorFacade = {                  // Phase 6: Editor boundary fake over the real module
-            read: (id) => bookModule.loadBook(id),
-            commit: (b, files) => bookModule.saveBookBundle(b, files),
-        };
-        // Editor contour ports stub (route split): the registrar destructures
-        // editorPorts at mount time; the behaviors/characters handlers under
-        // test never reach the fan-out legs, so a minimal port object is
-        // enough (the real seam wiring is covered by the architecture suite).
-        const editorPortsStub = {
-            sceneAssetsRepo: { bumpSceneVersions: async () => 0, setDirtyUnitIds: async () => 0 },
-            placeholderAudio: { recoverMissingPlaceholders: async () => ({ created: 0, errors: [] }) },
-            auditCoverage: { auditBookCoverage: () => ({}) },
-            promptLimit: 2000,
-            purge: { purgeScene: async () => ({ complete: true, steps: [] }), purgeUnit: async () => ({ complete: true, steps: [] }) },
-            resolveOwnership: async () => ({}),
-            recoveryCtx: {},
-        };
-        require('../src/entity-crud-routes.cjs')(app, {}, {
-            book: bookModule,
-            editorModel: editorFacade,
-            editorPorts: editorPortsStub,
-            utils: { log: () => {} },
-        });
-        require('../src/editor-routes.cjs')(app, {}, {
-            book: bookModule,
-            editorModel: editorFacade,
-            editorPorts: editorPortsStub,
-            utils: { log: () => {} },
-        });
-    }
-
-    // Direct handler invocation with explicit params (route templates above are
-    // registered once; tests pass concrete ids via params). PATCH and DELETE
-    // share the path template, so the method is part of the key. Async handlers
-    // (core-routes PATCH) execute synchronously up to their first await — the
-    // response object is populated after the call either way.
-    function invoke(pathTemplate, params, body) {
-        const handler = handlers.get(pathTemplate);
-        if (!handler) throw new Error(`No handler for ${pathTemplate}`);
-        const res = createResponse();
-        handler({ params, body: body || {} }, res);
-        return res;
-    }
-
-    beforeEach(() => {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'behavior-crud-'));
-        bookId = 'test-book-' + Date.now();
-        bookDir = path.join(tmpDir, bookId);
-        fs.mkdirSync(bookDir, { recursive: true });
-        fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
-
-        config.BOOKS_DIR = tmpDir;
-
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
-            book_id: bookId,
-            vbook_version: '3.1',
-            build_id: 'build-test',
-            state: 'BOOTSTRAPPED',
-            created_at: new Date().toISOString(),
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
-            book_id: bookId,
-            version: '3.0',
-            title: 'Test Book',
-            author: 'Test Author',
-            language: 'ru',
-            structure: { chapters_order: [`chapters/${CHAPTER_ID}.json`] },
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'chapters', `${CHAPTER_ID}.json`), JSON.stringify({
-            chapter_id: CHAPTER_ID,
-            chapter_title: 'Chapter 1',
-            scenes: [{
-                scene_id: 'sc-123456',
-                type: 'narration',
-                participants: ['hero'],
-                units: [{ id: 'iu-123456', text: 'The hero arrives.' }],
-            }],
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            { id: 'hero', name: 'Hero', passport: { appearance: 'Tall, dark hair' } },
-            { id: 'sidekick', name: 'Sidekick', passport: { appearance: 'Short, red hair' } },
-        ], null, 2));
-
-        registerRoutes();
+    it('a baseline creates behaviour.profile inside the hero file', async () => {
+        const r = await patch('sveta', { 'behaviour.profile.baseline': 'Spirited, moves fast.' });
+        expect(r.status).to.equal(200);
+        expect(t.readHero(B, 'sveta').behaviour).to.deep.equal({ profile: { baseline: 'Spirited, moves fast.' } });
     });
 
-    afterEach(() => {
-        config.BOOKS_DIR = ORIG_BOOKS_DIR;
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    it('quirks alone create a profile with quirks only (no empty baseline)', async () => {
+        await patch('sveta', { 'behaviour.profile.quirks': ['tucks hair behind her ear'] });
+        expect(t.readHero(B, 'sveta').behaviour).to.deep.equal({ profile: { quirks: ['tucks hair behind her ear'] } });
     });
 
-    function readBehaviorsDoc() {
-        return JSON.parse(fs.readFileSync(path.join(bookDir, 'behavior.json'), 'utf8'));
-    }
-    function writeBehaviorsDoc(doc) {
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify(doc, null, 2));
-    }
-    // Character entries of the on-disk v2 document (asserts the schema).
-    function readBehaviorsFile() {
-        const doc = readBehaviorsDoc();
-        expect(doc.schema_version).to.equal(2);
-        expect(doc.rules).to.be.an('array');
-        return doc.characters;
-    }
-    // When the LAST behavior is deleted, saveBookBundle unlinks the registry
-    // file (empty collection → file removed). loadBook is the canonical read
-    // path — it defaults to an empty map for an absent file.
-    function loadedBehaviors() {
-        return bookModule.loadBook(bookId).behaviors.characters;
-    }
-
-    const BEH_POST = 'POST /api/v1/book/:bookId/behaviors';
-    const BEH_PATCH = 'PATCH /api/v1/book/:bookId/behaviors/:characterId';
-    const BEH_DEL = 'DELETE /api/v1/book/:bookId/behaviors/:characterId';
-    const CHAR_DEL = 'DELETE /api/v1/book/:bookId/characters/:characterId';
-
-    // ======================================================
-    // POST — create
-    // ======================================================
-    it('POST creates behavior.json keyed by the existing character_id', () => {
-        const res = invoke(BEH_POST, { bookId }, {
-            character_id: 'hero',
-            baseline: 'Calm, restrained gestures, speaks slowly.',
-        });
-        expect(res.statusCode).to.equal(200);
-        expect(res.body).to.include({ saved: true, character_id: 'hero' });
-
-        const behaviors = readBehaviorsFile();
-        expect(behaviors.hero).to.deep.equal({ baseline: 'Calm, restrained gestures, speaks slowly.' });
-        // Sidekick untouched — no phantom entries.
-        expect(Object.keys(behaviors)).to.deep.equal(['hero']);
+    it('PATCH without fields is rejected (400 bad_request)', async () => {
+        const r = await t.api('PATCH', `/api/v1/book/${B}/heroes/sveta`, { baseline: 'x' });
+        expect(r.status).to.equal(400);
+        expect(r.body.error).to.equal('bad_request');
     });
 
-    it('POST without baseline seeds an empty behavior object', () => {
-        const res = invoke(BEH_POST, { bookId }, { character_id: 'hero' });
-        expect(res.statusCode).to.equal(200);
-        expect(readBehaviorsFile().hero).to.deep.equal({});
+    it('PATCH for an unknown hero is rejected (404 hero_not_found)', async () => {
+        const r = await patch('nobody', { 'behaviour.profile.baseline': 'x' });
+        expect(r.status).to.equal(404);
+        expect(r.body.error).to.equal('hero_not_found');
     });
 
-    it('POST without character_id is rejected (400)', () => {
-        const res = invoke(BEH_POST, { bookId }, { baseline: 'no owner' });
-        expect(res.statusCode).to.equal(400);
+    it('a second rule with a taken id is rejected (409 rule_exists)', async () => {
+        const r = await t.api('POST', `/api/v1/book/${B}/heroes/sveta/rules`, { id: 'yura.praised', then: { action: 'laughs' } });
+        expect(r.status).to.equal(409);
+        expect(r.body.error).to.equal('rule_exists');
     });
 
-    it('POST for an unknown character is rejected (404)', () => {
-        const res = invoke(BEH_POST, { bookId }, { character_id: 'ghost', baseline: 'x' });
-        expect(res.statusCode).to.equal(404);
+    it('structured fields (baseline, quirks, reactions) are stored verbatim', async () => {
+        const reactions = [{ trigger: 'is teased', reaction: 'rolls her eyes' }, { trigger: 'is scared', reaction: 'grabs a sleeve' }];
+        await patch('sveta', { 'behaviour.profile.baseline': 'calm', 'behaviour.profile.quirks': ['hums', 'taps'], 'behaviour.profile.reactions': reactions });
+        expect(t.readHero(B, 'sveta').behaviour.profile).to.deep.equal({ baseline: 'calm', quirks: ['hums', 'taps'], reactions });
     });
 
-    it('POST a second behavior for the same character is rejected (409)', () => {
-        expect(invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'a' }).statusCode).to.equal(200);
-        const res = invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'b' });
-        expect(res.statusCode).to.equal(409);
-        // The original entry is intact.
-        expect(readBehaviorsFile().hero.baseline).to.equal('a');
+    it('PATCH baseline keeps unknown keys of the profile (schema-tolerant storage, reported as unknown_key)', async () => {
+        const yura = t.readHero(B, 'yura');
+        yura.behaviour.profile.instruction = 'pass-1 text';
+        fs.writeFileSync(t.heroFile(B, 'yura'), JSON.stringify(yura, null, 2));
+        await patch('yura', { 'behaviour.profile.baseline': 'nervous' });
+        const profile = t.readHero(B, 'yura').behaviour.profile;
+        expect(profile).to.include({ baseline: 'nervous', instruction: 'pass-1 text' });
+        const issues = (await t.api('GET', `/api/v1/book/${B}`)).body.hero_issues;
+        expect(issues.some((i) => i.code === 'unknown_key' && i.hero_id === 'yura' && i.blocking === false)).to.equal(true);
     });
 
-    // ======================================================
-    // PATCH — edit (free-form fields, passthrough of unknown keys)
-    // ======================================================
-    it('PATCH accepts structured fields (baseline, quirks, reactions) and stores them verbatim', () => {
-        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'seed' });
-        const res = invoke(BEH_PATCH, { bookId, characterId: 'hero' }, {
-            fields: {
-                baseline: 'Usually composed and measured.',
-                quirks: ['adjusts his tie', 'taps the table'],
-                reactions: [
-                    { trigger: 'is contradicted in public', reaction: 'freezes, then smiles coldly' },
-                    { trigger: 'is praised', reaction: null },
-                ],
-            },
-        });
-        expect(res.statusCode).to.equal(200);
-        expect(readBehaviorsFile().hero).to.deep.equal({
-            baseline: 'Usually composed and measured.',
-            quirks: ['adjusts his tie', 'taps the table'],
-            reactions: [
-                { trigger: 'is contradicted in public', reaction: 'freezes, then smiles coldly' },
-                { trigger: 'is praised', reaction: null },
-            ],
-        });
+    it('an untouched reaction keeps its unknown keys (the card never sends an untouched list)', async () => {
+        await patch('yura', { 'behaviour.profile.baseline': 'nervous' });
+        expect(t.readHero(B, 'yura').behaviour.profile.reactions[0]).to.deep.equal({ trigger: 'is praised', reaction: 'looks away', note: 'kept' });
     });
 
-    it('PATCH updates baseline and keeps unknown keys (schema-tolerant storage)', () => {
-        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'first draft' });
-        // A future schema writes an extra key straight into behavior.json.
-        const doc = readBehaviorsDoc();
-        doc.characters.hero.gestures = 'minimal';
-        writeBehaviorsDoc(doc);
-
-        const res = invoke(BEH_PATCH, { bookId, characterId: 'hero' }, {
-            fields: { baseline: 'edited baseline' },
-        });
-        expect(res.statusCode).to.equal(200);
-
-        const after = readBehaviorsFile();
-        expect(after.hero.baseline).to.equal('edited baseline');
-        expect(after.hero.gestures).to.equal('minimal');
+    it('PATCH of a rule the hero does not have is rejected (404 rule_not_found)', async () => {
+        const r = await t.api('PATCH', `/api/v1/book/${B}/heroes/sveta/rules/yura.praised`, { fields: { enabled: false } });
+        expect(r.status).to.equal(404);
+        expect(r.body.error).to.equal('rule_not_found');
     });
 
-    it('pass-1 instruction key survives as an inert passthrough key (no special handling)', () => {
-        // A pre-v2.1 file: the old `instruction` field is no longer part of the
-        // schema — it must not break anything, it just passes through untouched.
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({
-            hero: { instruction: 'Calm.' },
-        }, null, 2));
-
-        const res = invoke(BEH_PATCH, { bookId, characterId: 'hero' }, { fields: { baseline: 'Calm and deliberate.' } });
-        expect(res.statusCode).to.equal(200);
-        expect(readBehaviorsFile().hero).to.deep.equal({ instruction: 'Calm.', baseline: 'Calm and deliberate.' });
+    it('PATCHing one field never rewrites sibling fields', async () => {
+        await patch('yura', { 'behaviour.profile.quirks': ['bites his lip'] });
+        const b = t.readHero(B, 'yura').behaviour;
+        expect(b.profile.baseline).to.equal('calm');
+        expect(b.profile.quirks).to.deep.equal(['bites his lip']);
+        expect(b.rules.map((r) => r.id)).to.deep.equal(['yura.praised']);
     });
 
-    it('PATCH for a character without behavior is rejected (404)', () => {
-        const res = invoke(BEH_PATCH, { bookId, characterId: 'sidekick' }, { fields: { baseline: 'x' } });
-        expect(res.statusCode).to.equal(404);
+    it('clearing the whole profile removes behaviour from the file when no rules are left', async () => {
+        await patch('sveta', { 'behaviour.profile.baseline': 'calm' });
+        await patch('sveta', { 'behaviour.profile.baseline': null });
+        expect(t.readHero(B, 'sveta')).to.not.have.property('behaviour');
+        await patch('yura', { 'behaviour.profile.baseline': null, 'behaviour.profile.quirks': null, 'behaviour.profile.reactions': null });
+        expect(t.readHero(B, 'yura').behaviour).to.deep.equal({ rules: t.readHero(B, 'yura').behaviour.rules });
     });
 
-    it('PATCHing one field never rewrites sibling fields (future per-reaction keys survive untouched cards)', () => {
-        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'seed' });
-        const reactions = [{ trigger: 'x', reaction: 'y', intensity: 0.7 }];
-        const doc = readBehaviorsDoc();
-        doc.characters.hero.reactions = reactions;
-        writeBehaviorsDoc(doc);
-
-        invoke(BEH_PATCH, { bookId, characterId: 'hero' }, { fields: { baseline: 'b' } });
-        expect(readBehaviorsFile().hero.reactions).to.deep.equal(reactions);
+    it('DELETE of a missing rule is rejected (404 rule_not_found)', async () => {
+        const r = await t.api('DELETE', `/api/v1/book/${B}/heroes/sveta/rules/nope`);
+        expect(r.status).to.equal(404);
+        expect(r.body.error).to.equal('rule_not_found');
     });
 
-    // ======================================================
-    // DELETE — remove behavior / character
-    // ======================================================
-    it('DELETE removes the whole behavior entry; the file stays (empty characters) when empty', () => {
-        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'a' });
-        invoke(BEH_POST, { bookId }, { character_id: 'sidekick', baseline: 'b' });
-
-        const res = invoke(BEH_DEL, { bookId, characterId: 'hero' });
-        expect(res.statusCode).to.equal(200);
-        expect(loadedBehaviors().sidekick.baseline).to.equal('b');
-
-        invoke(BEH_DEL, { bookId, characterId: 'sidekick' });
-        // behavior.json persists as an empty v2 document (always present after book creation)
-        expect(fs.existsSync(path.join(bookDir, 'behavior.json'))).to.equal(true);
-        expect(loadedBehaviors()).to.deep.equal({});
+    it('DELETE hero removes its behaviour with the file (no dangling entry anywhere)', async () => {
+        await t.api('DELETE', `/api/v1/book/${B}/heroes/yura`);
+        const book = h.bookModule.loadBook(B);
+        expect(book.heroes.map((x) => x.id)).to.not.include('yura');
+        expect(heroRules(book).rules.map((r) => r.id)).to.deep.equal(['global.sigh']);
     });
 
-    it('DELETE for a missing behavior is rejected (404)', () => {
-        const res = invoke(BEH_DEL, { bookId, characterId: 'hero' });
-        expect(res.statusCode).to.equal(404);
+    it('buildBookFromBundle reads hero behaviour from characters/<id>.json and the globals from behaviour.json', () => {
+        const files = {};
+        const dir = t.bookDir(B);
+        for (const name of ['manifest.json', 'book.json', 'behaviour.json', 'locations.json']) files[name] = fs.readFileSync(path.join(dir, name), 'utf8');
+        for (const name of fs.readdirSync(path.join(dir, 'characters'))) files[`characters/${name}`] = fs.readFileSync(path.join(dir, 'characters', name), 'utf8');
+        for (const name of fs.readdirSync(path.join(dir, 'chapters'))) files[`chapters/${name}`] = fs.readFileSync(path.join(dir, 'chapters', name), 'utf8');
+        const book = h.bookModule.buildBookFromBundle(files);
+        expect(book.heroes.find((x) => x.id === 'yura').behaviour.profile.baseline).to.equal('calm');
+        expect(book.behaviour.rules.map((r) => r.id)).to.deep.equal(['global.sigh']);
+        expect(book).to.not.have.property('behaviors');
     });
 
-    it('DELETE character removes the dangling behavior (dangling-data cleanup)', () => {
-        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'a' });
-
-        const res = invoke(CHAR_DEL, { bookId, characterId: 'hero' });
-        expect(res.statusCode).to.equal(200);
-
-        const chars = JSON.parse(fs.readFileSync(path.join(bookDir, 'characters.json'), 'utf8'));
-        expect(chars.find(c => c.id === 'hero')).to.be.undefined;
-        expect(loadedBehaviors()).to.deep.equal({});
+    it('DELETE hero removes its rules; global rules and other heroes\' rules stay', async () => {
+        await t.api('POST', `/api/v1/book/${B}/heroes/sveta/rules`, { id: 'sveta.laughs', when: { emotion: ['joy'] }, then: { action: 'laughs' } });
+        await t.api('DELETE', `/api/v1/book/${B}/heroes/yura`);
+        const ids = heroRules(h.bookModule.loadBook(B)).rules.map((r) => [r.id, r.scope, r.character_id || null]);
+        expect(ids).to.deep.equal([['global.sigh', 'global', null], ['sveta.laughs', 'character', 'sveta']]);
     });
 
-    // ======================================================
-    // Persistence roundtrip — vbook import parses behavior.json
-    // ======================================================
-    it('buildBookFromBundle parses behavior.json from a vbook bundle', () => {
-        fs.writeFileSync(path.join(bookDir, 'behavior.json'), JSON.stringify({
-            hero: {
-                baseline: 'Composed.',
-                quirks: ['adjusts his tie'],
-                reactions: [{ trigger: 'is contradicted', reaction: 'smiles coldly' }],
-            },
-        }, null, 2));
-
-        const AdmZip = require('adm-zip');
-        const zip = new AdmZip();
-        bookModule.addDirToZip(zip, bookDir, '');
-        const built = bookModule.buildBookFromBundle(bookModule.extractBookBundle(zip.toBuffer()));
-
-        // A v2.1 file inside the bundle is migrated to schema v2 on import.
-        expect(built.behaviors).to.deep.equal({
-            schema_version: 2,
-            rules: [],
-            characters: {
-                hero: {
-                    baseline: 'Composed.',
-                    quirks: ['adjusts his tie'],
-                    reactions: [{ trigger: 'is contradicted', reaction: 'smiles coldly' }],
-                },
-            },
-        });
-    });
-
-    it('DELETE character also removes its scope:"character" rules; global and other heroes\' rules stay', () => {
-        const g = { id: 'g', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
-        const h = { id: 'h', scope: 'character', character_id: 'hero', when: { emotion: ['sad'] }, then: { action: 'x' } };
-        const k = { id: 'k', scope: 'character', character_id: 'sidekick', when: { emotion: ['sad'] }, then: { action: 'y' } };
-        writeBehaviorsDoc({ schema_version: 2, rules: [g, h, k], characters: { hero: { baseline: 'a' } } });
-        expect(invoke(CHAR_DEL, { bookId, characterId: 'hero' }).statusCode).to.equal(200);
-        expect(readBehaviorsDoc()).to.deep.equal({ schema_version: 2, rules: [g, k], characters: {} });
-    });
-
-    it('routes never touch rules / schema_version of a v2 document', () => {
-        const rule = { id: 'r1', scope: 'global', when: { emotion: ['sad'] }, then: { action: 'sighs' } };
-        writeBehaviorsDoc({ schema_version: 2, rules: [rule], characters: {} });
-        invoke(BEH_POST, { bookId }, { character_id: 'hero', baseline: 'a' });
-        invoke(BEH_PATCH, { bookId, characterId: 'hero' }, { fields: { baseline: 'b' } });
-        invoke(BEH_POST, { bookId }, { character_id: 'sidekick' });
-        invoke(BEH_DEL, { bookId, characterId: 'sidekick' });
-        expect(readBehaviorsDoc()).to.deep.equal({ schema_version: 2, rules: [rule], characters: { hero: { baseline: 'b' } } });
-        // reserved keys are not character ids
-        expect(invoke(BEH_PATCH, { bookId, characterId: 'rules' }, { fields: { x: 1 } }).statusCode).to.equal(404);
-        expect(invoke(BEH_DEL, { bookId, characterId: 'schema_version' }).statusCode).to.equal(404);
+    it('hero routes never touch behaviour.json (the book-level defaults and global rules)', async () => {
+        const before = behaviourJson();
+        await patch('yura', { 'behaviour.profile.baseline': 'nervous' });
+        await t.api('POST', `/api/v1/book/${B}/heroes/yura/rules`, { when: { emotion: ['sad'] }, then: { action: 'sighs' } });
+        await t.api('PATCH', `/api/v1/book/${B}/heroes/yura/rules/yura.praised`, { fields: { enabled: false } });
+        await t.api('DELETE', `/api/v1/book/${B}/heroes/sveta`);
+        expect(behaviourJson()).to.equal(before);
     });
 });

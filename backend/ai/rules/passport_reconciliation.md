@@ -87,6 +87,7 @@ Scene participants with current tokens:
 }
 ```
 
-Return ONLY valid JSON. Do NOT add or remove units. Return exactly the same number of
-units as received. video_tokens must include every scene with 2+ participants from the
-list above; scenes with fewer participants or missing from the list should be omitted.
+Return ONLY valid JSON. In "units" include ONLY the units whose image.prompt you change,
+each with its scene_index and unit_index exactly as received; a unit you leave out stays as
+it is. Do NOT invent units. If no prompt needs a change, return "units": [].
+video_tokens must include every scene with 2+ participants from the list above; scenes with fewer participants or missing from the list should be omitted.

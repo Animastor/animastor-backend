@@ -57,6 +57,8 @@ const PROVIDER_NAME = 'comfyui';
 const WORKFLOW_NAMES = {
     narration: 'tts-qwen-narrator',
     dialogue: 'tts-qwen-dialogue',
+    voiceReference: 'tts-qwen-voice-reference',
+    voiceTranscribe: 'tts-qwen-voice-transcribe',
     image: 'img-qwen-image',
     videoFamily: 'video-ltx',
 };
@@ -149,49 +151,101 @@ function profileNameFromConnector(connector, type) {
 //   clone prompt nodes  73/81/83 (Qwen3TTSVoiceClonePrompt) — prompt_N links [id, 0]
 const MERGED_DIALOGUE_NODE_IDS = {
     script: '108',
-    voiceDesign: ['71', '80', '82'],
+    // VOICE_REFERENCES.md: each speaker slot = LoadAudio(locked reference) → VoiceClonePrompt
+    loadAudio: ['71', '80', '82'],
     roleBank: '74',
-    clonePrompt: [73, 81, 83],
+    clonePrompt: ['73', '81', '83'],
 };
+const MAX_DIALOGUE_SPEAKERS = MERGED_DIALOGUE_NODE_IDS.loadAudio.length;
 
 /**
- * Assemble the merged dialogue workflow: N speakers (≤3) wired into the
- * dialogue RoleBank. Domain data (script, default instruct, speaker names
- * + voice instructions) arrives pre-resolved from the media executor.
+ * Assemble the dialogue workflow: N speakers (1..3), each cloned from its
+ * locked voice reference. Unused slots (LoadAudio + ClonePrompt + RoleBank
+ * entries) are REMOVED from the graph — ComfyUI then neither loads nor runs
+ * them. Used for a merged pure-dialogue scene and for a single dialogue line.
  * @param {{script:string, defaultInstruct:string,
- *          speakers: Array<{name:string, voice:string}>}} spec
- * @returns {object|null} patched workflow clone, or null when the base
- *          workflow/connector is unavailable (connectors are mandatory at
- *          startup, so null is a hard-failure signal for the executor to
- *          fall back to per-segment dispatch)
+ *          speakers: Array<{name:string, referenceFile:string, referenceText:string}>}} spec
+ *        referenceFile — the file name in ComfyUI/input (vref_<sha>.wav, delivered as a job input)
+ * @returns {object|null} patched workflow clone; null when the base workflow /
+ *          connector is unavailable or the speaker count is out of range
  */
 function assembleMergedDialogueWorkflow({ script, defaultInstruct, speakers }) {
+    if (!Array.isArray(speakers) || speakers.length < 1 || speakers.length > MAX_DIALOGUE_SPEAKERS) return null;
     const wfAudio = loadWorkflow(WORKFLOW_NAMES.dialogue);
     if (!wfAudio) return null;
     if (!getConnector(WORKFLOW_NAMES.dialogue)) return null;
 
-    // Script node: script + programmatic default instruct (from the active
-    // audio assembly profile). Node 108 carries exactly these two inputs.
     wfAudio[MERGED_DIALOGUE_NODE_IDS.script].inputs = {
         script,
         default_instruct: defaultInstruct || ""
     };
 
-    // Per-speaker wiring: voice instruction on the slot's VoiceDesign node;
-    // role name + clone-prompt link on the RoleBank node.
-    const { voiceDesign, roleBank, clonePrompt } = MERGED_DIALOGUE_NODE_IDS;
-    for (let i = 0; i < speakers.length; i++) {
-        const idx = i + 1;
+    const { loadAudio, roleBank, clonePrompt } = MERGED_DIALOGUE_NODE_IDS;
+    const bank = { };
+    for (let i = 0; i < MAX_DIALOGUE_SPEAKERS; i++) {
         const speaker = speakers[i];
-        // ComfyUI rejects an empty voice instruction — leave the template
-        // default when no voice was resolved (executor logs the gap).
-        if (speaker.voice) {
-            wfAudio[voiceDesign[i]].inputs.voice_instruction = speaker.voice;
+        if (!speaker) {
+            delete wfAudio[loadAudio[i]];
+            delete wfAudio[clonePrompt[i]];
+            continue;
         }
-        wfAudio[roleBank].inputs[`role_name_${idx}`] = speaker.name;
-        wfAudio[roleBank].inputs[`prompt_${idx}`] = [String(clonePrompt[i]), 0];
+        if (!speaker.referenceFile || !speaker.referenceText) {
+            throw Object.assign(new Error(`dialogue speaker ${speaker.name}: voice reference required`), { code: 'voice_reference_required' });
+        }
+        wfAudio[loadAudio[i]].inputs.audio = speaker.referenceFile;
+        wfAudio[clonePrompt[i]].inputs.ref_text = speaker.referenceText;
+        bank[`role_name_${i + 1}`] = speaker.name;
+        bank[`prompt_${i + 1}`] = [clonePrompt[i], 0];
     }
+    wfAudio[roleBank].inputs = bank;
     return wfAudio;
+}
+
+/**
+ * Narration workflow: the chunk text cloned from the narrator's locked reference.
+ * @param {{text:string, referenceFile:string, referenceText:string, language:string}} spec
+ */
+function assembleNarrationWorkflow({ text, referenceFile, referenceText, language }) {
+    const wf = loadWorkflow(WORKFLOW_NAMES.narration);
+    if (!wf || !getConnector(WORKFLOW_NAMES.narration)) return null;
+    if (!referenceFile || !referenceText) {
+        throw Object.assign(new Error('narration: voice reference required'), { code: 'voice_reference_required' });
+    }
+    applyValue(wf, WORKFLOW_NAMES.narration, 'narrationText', text);
+    applyValue(wf, WORKFLOW_NAMES.narration, 'referenceAudio', referenceFile);
+    applyValue(wf, WORKFLOW_NAMES.narration, 'referenceText', referenceText);
+    if (language) applyValue(wf, WORKFLOW_NAMES.narration, 'language', language);
+    return wf;
+}
+
+/**
+ * Voice-reference candidate: VoiceDesign(description, template phrase, seed) →
+ * SaveAudioAnimastorReference (normalise + Whisper).
+ */
+function assembleVoiceReferenceWorkflow({ description, phrase, language, seed, whisperModel = 'small', filenamePrefix }) {
+    const name = WORKFLOW_NAMES.voiceReference;
+    const wf = loadWorkflow(name);
+    if (!wf || !getConnector(name)) return null;
+    applyValue(wf, name, 'voiceInstruction', description);
+    applyValue(wf, name, 'referencePhrase', phrase);
+    applyValue(wf, name, 'language', language);
+    applyValue(wf, name, 'asrLanguage', language);
+    applyValue(wf, name, 'seed', seed);
+    applyValue(wf, name, 'whisperModel', whisperModel);
+    if (filenamePrefix) applyValue(wf, name, 'outputFilenamePrefix', filenamePrefix);
+    return wf;
+}
+
+/** Uploaded sample: LoadAudio → SaveAudioAnimastorReference (normalise + Whisper). */
+function assembleVoiceTranscribeWorkflow({ inputFile, language, whisperModel = 'small', filenamePrefix }) {
+    const name = WORKFLOW_NAMES.voiceTranscribe;
+    const wf = loadWorkflow(name);
+    if (!wf || !getConnector(name)) return null;
+    applyValue(wf, name, 'referenceAudio', inputFile);
+    applyValue(wf, name, 'asrLanguage', language);
+    applyValue(wf, name, 'whisperModel', whisperModel);
+    if (filenamePrefix) applyValue(wf, name, 'outputFilenamePrefix', filenamePrefix);
+    return wf;
 }
 
 // ── dispatch transport (the single Generation → GPU transport seam) ─────
@@ -254,6 +308,10 @@ module.exports = {
     getBinding,
     profileNameFromConnector,
     assembleMergedDialogueWorkflow,
+    assembleNarrationWorkflow,
+    assembleVoiceReferenceWorkflow,
+    assembleVoiceTranscribeWorkflow,
+    MAX_DIALOGUE_SPEAKERS,
 
     // dispatch
     generate,

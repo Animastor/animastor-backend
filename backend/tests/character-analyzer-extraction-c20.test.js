@@ -103,25 +103,116 @@ describe('C20 character-analyzer: generateVoices contract (F7)', () => {
         ...over,
     });
 
-    it('writes voice instructions into characters[i].voice in place', async () => {
+    // VBook 4 (VBOOK_FORMAT_V4 §5.1, §12 step 2): a voice is { timbre, manner }.
+    const TIMBRE = 'Warm low female alto, mid-thirties. Native Russian pronunciation.';
+    const MANNER = 'Speaks slowly and evenly.';
+
+    it('writes { timbre, manner, timbre_source } into characters[i].voice in place', async () => {
         const ch = realChar();
-        const { ports, calls } = makePorts({ voices: { anna_smirnova: { instruction: 'Warm low voice.' } } });
+        const { ports, calls } = makePorts({ voices: { anna_smirnova: { timbre: TIMBRE, manner: MANNER } } });
         const out = await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
-        expect(out).to.deep.equal({ voices: { anna_smirnova: { instruction: 'Warm low voice.' } } });
-        expect(ch.voice).to.equal('Warm low voice.');
+        const voice = { timbre: TIMBRE, manner: MANNER, timbre_source: 'analysis' };
+        expect(out).to.deep.equal({ voices: { anna_smirnova: voice } });
+        expect(ch.voice).to.deep.equal(voice);
         expect(calls.complete).to.equal(1);
     });
 
-    it('never overwrites an existing meaningful voice', async () => {
-        const ch = realChar({ voice: 'An already crafted, detailed voice instruction for TTS' });
-        const { ports } = makePorts({ voices: { anna_smirnova: { instruction: 'NEW VOICE' } } });
+    it('the model returned no manner → the voice is written with an empty manner', async () => {
+        const ch = realChar();
+        const { ports } = makePorts({ voices: { anna_smirnova: { timbre: TIMBRE } } });
         await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
-        expect(ch.voice).to.equal('An already crafted, detailed voice instruction for TTS');
+        expect(ch.voice).to.deep.equal({ timbre: TIMBRE, manner: '', timbre_source: 'analysis' });
+    });
+
+    it('a plot-bound sentence reaches neither field (rule cleanup); the voice is marked cleaned', async () => {
+        const ch = realChar();
+        const { ports } = makePorts({ voices: { anna_smirnova: {
+            timbre: `${TIMBRE} When she is angry, the voice turns sharp.`,
+            manner: `${MANNER} Rising intonation on the word «поехали». Whispers "never" to Boris.`,
+        } } });
+        await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
+        expect(ch.voice).to.deep.equal({ timbre: TIMBRE, manner: MANNER, timbre_source: 'cleaned' });
+        expect(JSON.stringify(ch.voice)).to.not.match(/angry|поехали|never|Boris/);
+    });
+
+    it('the model returned the voice as one string, or as { instruction } → taken as timbre, marked cleaned', async () => {
+        for (const raw of ['Deep male bass. Slow.', { instruction: 'Deep male bass. Slow.' }]) {
+            const ch = realChar();
+            const { ports } = makePorts({ voices: { anna_smirnova: raw } });
+            await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
+            // rules v3 (step 2b): the pronunciation suffix of the book language (ru) is added
+            expect(ch.voice).to.deep.equal({ timbre: 'Deep male bass. Slow. Native Russian pronunciation.', manner: '', timbre_source: 'cleaned' });
+        }
+    });
+
+    const REFUSED = [
+        ['a manner without a timbre', { manner: MANNER }, 'timbre_empty'],
+        ['a timbre made only of plot text', { timbre: 'When angry, she shouts.', manner: MANNER }, 'timbre_empty'],
+        ['a number', 42, 'bad_shape'],
+        ['an array', [TIMBRE], 'bad_shape'],
+        ['an empty object', {}, 'empty'],
+        ['null', null, 'empty'],
+    ];
+    for (const [label, raw, reason] of REFUSED) {
+        it(`the model returned ${label} → no voice is written, the refusal is reported (${reason})`, async () => {
+            const ch = realChar();
+            const { ports, calls } = makePorts({ voices: { anna_smirnova: raw } });
+            const out = await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
+            expect(out).to.deep.equal({ voices: {}, rejected: { anna_smirnova: reason } });
+            expect(ch).to.not.have.property('voice');
+            expect(calls.complete).to.equal(1);
+            expect(calls.fail).to.equal(0);
+        });
+    }
+
+    it('a voice for an id that is not in the list is dropped (the model cannot add speakers)', async () => {
+        const ch = realChar();
+        const { ports } = makePorts({ voices: { anna_smirnova: { timbre: TIMBRE }, zhenshchina_v_budochke: { timbre: 'Sharp.' }, narrator: { timbre: 'Deep.' } } });
+        const out = await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
+        expect(Object.keys(out.voices)).to.deep.equal(['anna_smirnova']);
+    });
+
+    it('never overwrites an existing voice — a { timbre, manner } block from an earlier window or the hero file', async () => {
+        const existing = { timbre: 'Edited by hand.', manner: '' };
+        const ch = realChar({ voice: existing });
+        const other = realChar({ id: 'boris_volkov', name: 'Boris' });
+        let asked = null;
+        const { ports } = makePorts({ voices: { anna_smirnova: { timbre: 'NEW VOICE' }, boris_volkov: { timbre: TIMBRE } } }, {
+            ports: { callAI: async (messages) => { asked = messages; return { voices: { anna_smirnova: { timbre: 'NEW VOICE' }, boris_volkov: { timbre: TIMBRE } } }; } },
+        });
+        const out = await generateVoices({ ...baseInput, characters: [ch, other], promptProfiles: {} }, ports);
+        expect(ch.voice).to.equal(existing);
+        expect(other.voice.timbre).to.equal(TIMBRE);
+        expect(Object.keys(out.voices)).to.deep.equal(['boris_volkov']);
+        // the model is shown the existing voice as two fields, never as "instruction"
+        const prompt = asked.map((m) => m.content).join('\n');
+        expect(prompt).to.include('current_voice: timbre: Edited by hand.');
+        expect(prompt).to.not.include('[object Object]');
+    });
+
+    it('skips the AI call entirely when every character already has a voice', async () => {
+        const ch = realChar({ voice: { timbre: TIMBRE, manner: MANNER } });
+        const { ports, calls } = makePorts({ voices: { anna_smirnova: { timbre: 'NEW VOICE' } } });
+        const out = await generateVoices({ ...baseInput, characters: [ch], promptProfiles: {} }, ports);
+        expect(out).to.deep.equal({ voices: {} });
+        expect(ch.voice.timbre).to.equal(TIMBRE);
+        expect(calls.complete).to.equal(0);
+    });
+
+    it('the prompt of the step asks for timbre and manner and forbids plot directions (voice_generation.md)', () => {
+        const fs = require('fs');
+        const path = require('path');
+        const rule = fs.readFileSync(path.join(__dirname, '..', 'ai', 'rules', 'voice_generation.md'), 'utf8');
+        expect(rule).to.match(/"timbre":/).and.match(/"manner":/);
+        expect(rule).to.match(/### `timbre` — WHO is speaking/).and.match(/### `manner` — HOW the character usually speaks/);
+        expect(rule).to.match(/on the word/).and.match(/NO situational or plot directions/);
+        expect(rule).to.not.match(/"instruction":/);
+        expect(rule).to.match(/Do NOT include narrator/);
     });
 
     it('skips a dialogue-only participant without described appearance (no voice invented)', async () => {
         const phantom = { id: 'unknown', name: 'unknown' };
-        const { ports } = makePorts({ voices: { unknown: { instruction: 'X' } } });
+        const { ports } = makePorts({ voices: { unknown: { timbre: 'X' } } });
         const out = await generateVoices({ ...baseInput, characters: [phantom], promptProfiles: {} }, ports);
         expect(out).to.deep.equal({ voices: {} });
         expect(phantom.voice).to.equal(undefined);

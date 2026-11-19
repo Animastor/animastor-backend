@@ -1,0 +1,9 @@
+{
+  "description": "Эталон приёмки 2.6 (VBOOK_FORMAT_V4 §12, шаг 2): герои с паспортом первых двух окон «Мастера и Маргариты», как их давал анализ до v4 (MiM.vbook, characters.json: berlioz, bezdomny, woland). keys — написания, по которым героя узнают в name / aliases / id новой книги (сравнение после normalizeForMatch, по вхождению). speaks — герой говорит в этих окнах, у него должны быть timbre и manner.",
+  "source": "MiM.vbook (VBook 3.1), characters.json + voices.json",
+  "characters": [
+    { "id": "berlioz", "name": "Михаил Александрович Берлиоз", "keys": ["берлиоз", "berlioz"], "speaks": true },
+    { "id": "bezdomny", "name": "Иван Бездомный", "keys": ["бездомный", "bezdomny", "понырев", "ponyrev"], "speaks": true },
+    { "id": "woland", "name": "Воланд", "keys": ["воланд", "woland", "иностранец", "inostranets"], "speaks": true }
+  ]
+}

@@ -2,8 +2,10 @@
 // Guest Workspace MVP Tests
 // ======================================================
 // Anonymous temporary identities + temporary workspaces:
-//   1.  guest provisioning happens only on WRITE (POST/PUT/PATCH /api/v1),
-//       never on GET — pre-auth reads keep listing everything;
+//   1.  a guest is NEVER provisioned (owner's decision 18.11, VBook v4
+//       step 5): an anonymous write answers 401 login_required and no row of
+//       users / workspaces / guests appears; guests minted before keep
+//       resolving (here they are made through authService.createGuest);
 //   2.  guest cookie `animastor_gid` is HttpOnly; the `animastor_sid`
 //       session cookie is untouched for guests;
 //   3.  books created by a guest belong to the guest's temporary workspace;
@@ -28,7 +30,7 @@ const authService = require('../src/auth/auth-service');
 const guestRepo = require('../src/storage/postgres/repositories/guest-repo');
 const registerAuthRoutes = require('../src/routes/auth-routes.cjs');
 const registerRecentBooksRoutes = require('../src/routes/book/recent-books-routes.cjs');
-const { authContext, checkBookAccess, requireBookAccess, WorkspaceExpiredError } = require('../src/middleware/auth-context');
+const { authContext, requireIdentityForWrites, checkBookAccess, requireBookAccess, WorkspaceExpiredError } = require('../src/middleware/auth-context');
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -51,6 +53,7 @@ function buildApp() {
     const app = express();
     app.use(express.json());
     app.use(authContext);
+    app.use(requireIdentityForWrites);
     registerAuthRoutes(app, null, {});
     registerRecentBooksRoutes(app, null, {
         bookSourceRepo: {
@@ -110,6 +113,18 @@ async function cleanupGuestWorkspaces(startSec) {
     await query(`DELETE FROM workspaces WHERE id = ANY($1)`, [ids]);
 }
 
+/** A guest as one minted before 18.11: the service, never a route. */
+async function existingGuest() {
+    const created = await authService.createGuest();
+    return { cookie: `${authService.GUEST_COOKIE_NAME}=${created.token}`, workspaceId: created.workspace.id };
+}
+
+async function identityRows() {
+    const { rows } = await query(`SELECT (SELECT COUNT(*)::int FROM users) AS users,
+        (SELECT COUNT(*)::int FROM workspaces) AS workspaces, (SELECT COUNT(*)::int FROM guests) AS guests`);
+    return rows[0];
+}
+
 // ── suite ───────────────────────────────────────────────────────────────
 
 describe('Guest Workspace MVP', () => {
@@ -147,23 +162,36 @@ describe('Guest Workspace MVP', () => {
             expect(cookieByName(res, 'animastor_gid')).to.equal(null);
         });
 
-        it('2. POST /api/v1 (no cookies) provisions a guest with HttpOnly cookie', async () => {
+        it('2. an anonymous write (POST/PUT/PATCH/DELETE /api/v1) → 401 login_required; no guest, no rows', async () => {
+            const before = await identityRows();
+            for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+                const res = await fetch(`${base}/api/v1/probe-write`, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                expect(res.status, method).to.equal(401);
+                expect(await res.json(), method).to.deep.equal({ error: 'Authentication required', code: 'login_required' });
+                expect(res.headers.get('set-cookie'), method).to.equal(null);
+            }
+            // any anonymous request to /api/v1/book/* — a read included
+            const read = await fetch(`${base}/api/v1/book/${stamp}-any`);
+            expect(read.status).to.equal(401);
+            expect(cookieByName(read, 'animastor_gid')).to.equal(null);
+            expect(await identityRows()).to.deep.equal(before);
+        });
+
+        it('2a. the guest cookie of a guest minted before still resolves (HttpOnly header shape kept)', async () => {
+            const guest = await existingGuest();
             const res = await fetch(`${base}/api/v1/probe-write`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', Cookie: guest.cookie },
                 body: JSON.stringify({}),
             });
-            const body = await res.json();
             expect(res.status).to.equal(200);
-            expect(body.kind).to.equal('guest');
-            expect(body.workspace_id).to.be.a('string');
-
-            const raw = res.headers.get('set-cookie');
-            expect(raw).to.be.a('string');
-            expect(raw.toLowerCase()).to.contain('httponly');
-            expect(raw).to.contain('animastor_gid=');
-            // Session cookie must not be set for a guest.
-            expect(raw).to.not.contain('animastor_sid=');
+            expect(await res.json()).to.deep.equal({ kind: 'guest', workspace_id: guest.workspaceId });
+            expect(res.headers.get('set-cookie')).to.equal(null); // nothing new is minted
+            expect(authService.guestCookieHeader('tok', { secure: false }).toLowerCase()).to.contain('httponly');
         });
 
         it('3. /api/v1/auth/* is exempt — register/login never become guests here', async () => {
@@ -187,14 +215,9 @@ describe('Guest Workspace MVP', () => {
         let guestWorkspaceId;
 
         it('4. fresh guest workspace is type=temporary with a deadline', async () => {
-            const res = await fetch(`${base}/api/v1/probe-write`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
-            });
-            guestCookie = cookieByName(res, 'animastor_gid');
-            expect(guestCookie).to.be.a('string');
-            guestWorkspaceId = (await res.json()).workspace_id;
+            const guest = await existingGuest();
+            guestCookie = guest.cookie;
+            guestWorkspaceId = guest.workspaceId;
 
             const { rows } = await query(`SELECT type, expires_at, owner_user_id FROM workspaces WHERE id = $1`, [guestWorkspaceId]);
             expect(rows).to.have.length(1);
@@ -255,14 +278,8 @@ describe('Guest Workspace MVP', () => {
 
     describe('register conversion', () => {
         it('9. register with a live guest cookie converts the workspace in place', async () => {
-            // Fresh guest + one book in its workspace.
-            const provision = await fetch(`${base}/api/v1/probe-write`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
-            });
-            const cookie = cookieByName(provision, 'animastor_gid');
-            const workspaceId = (await provision.json()).workspace_id;
+            // A guest minted before 18.11 + one book in its workspace.
+            const { cookie, workspaceId } = await existingGuest();
             const bookId = `${stamp}-convert-book`;
             await query(`INSERT INTO books (book_id, title, workspace_id) VALUES ($1, $2, $3)`, [bookId, 'kept', workspaceId]);
 

@@ -87,7 +87,17 @@ function probeCuda(io) {
 }
 
 function gitInfo(io, dir) {
-    if (!io.fs.isDirectory(path.join(dir, '.git'))) return null;
+    if (!io.fs.isDirectory(path.join(dir, '.git'))) {
+        // 0.2.11: a node copied from a repository subdirectory carries its source
+        // in .animastor-source.json (engine/nodes.js) — the pin stays verifiable
+        const marker = path.join(dir, '.animastor-source.json');
+        if (!io.fs.existsSync(marker)) return null;
+        try {
+            const m = JSON.parse(io.fs.readFileSync(marker, 'utf8'));
+            if (m && typeof m.repository === 'string' && typeof m.commit === 'string') return { repository: m.repository, commit: m.commit, tag: null };
+        } catch (_) { /* unreadable marker → plain directory */ }
+        return null;
+    }
     const remote = io.exec('git', ['-C', dir, 'remote', 'get-url', 'origin']);
     const head = io.exec('git', ['-C', dir, 'rev-parse', 'HEAD']);
     const tag = io.exec('git', ['-C', dir, 'describe', '--tags', '--exact-match']);
@@ -599,6 +609,7 @@ module.exports = {
     probeNvidiaGpu,
     probeAmdGpu,
     probeComfyui,
+    probeCustomNodes,
     probeWorker,
     parseEnvKeys,
     renderDetection,

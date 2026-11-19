@@ -579,7 +579,7 @@ describe('Setup contract — projections (unit)', () => {
 
         it('filters by profile and rejects no secrets', () => {
             const workflows = sc.listWorkflowArtifacts({ profileId: 'audio/qwen-tts' });
-            expect(workflows.map((w) => w.id).sort()).to.deep.equal(['tts-qwen-dialogue', 'tts-qwen-narrator']);
+            expect(workflows.map((w) => w.id).sort()).to.deep.equal(['tts-qwen-dialogue', 'tts-qwen-narrator', 'tts-qwen-voice-reference', 'tts-qwen-voice-transcribe']);
             const json = JSON.stringify(workflows);
             expect(json).to.not.contain('token');
             expect(json).to.not.contain('repository_path');

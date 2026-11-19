@@ -31,8 +31,10 @@ function workerProbe(workerType) {
 }
 
 const WORKFLOW_HASHES = {
-    'tts-qwen-narrator': '87180aee01288be6e23240b2d873ce2d451f63cf404dec331a3b221bb9f8b8c1',
-    'tts-qwen-dialogue': '7dcdc6997d36aaeb1a54e1578c69f0c534be29698c7a7b48813f637c740e69db',
+    'tts-qwen-narrator': '3c99707a3e78c2432bcbd6ec7be3dc8638c636185c79eabb732d671768ac561e',
+    'tts-qwen-dialogue': '48db08cfcad19c25fd8bbb8d17e0cd0324a20afd012bcdeb085f5f672d5672da',
+    'tts-qwen-voice-reference': 'f2df67267445bbf48df60dbd8219ef70b3c7db1ab808d99fadff33275392ef9e',
+    'tts-qwen-voice-transcribe': '4df13e1d914cdac97fb552802fb0ccdfedb3926f0fe3a1333a8e1539dd2cb12b',
     'img-qwen-image': 'd2cb4c4edead909b7358e1353fdd0e0e4d5efc231abfcad28749f1c0bc99d5be',
     'video-ltx-1p': 'b675a572934f95a8fb475e4832e94a78d495f4b89b1e8a1e99e93fc4b6ef30d7',
     'video-ltx-2p': 'c6bc34f3a5eb36009e203deedd7a6467a1ae3d60b9ef4abb2f0122c02c352f62',
@@ -174,12 +176,14 @@ describe('Compatibility Resolver', () => {
             const r = resolver.resolveInstallation({ manifests: [AUDIO()], environment: resolver.createEmptyEnvironment(), mode: 'managed' });
             expect(r.mode).to.equal('managed');
             // workflows are OPTIONAL demo artifacts — never counted as missing required
-            expect(r.summary.missing_required).to.equal(8); // comfyui, torch, python, nodejs + 1 node + 2 model repos + worker
+            expect(r.summary.missing_required).to.equal(13); // comfyui, torch, python, nodejs + 2 nodes + 2 model repos + 4 whisper files + worker
             expect(r.summary.by_status.incompatible).to.equal(0);
-            expect(r.summary.by_status.missing).to.equal(11); // + 2 optional workflows (install offered) + optional manager (action none)
+            expect(r.summary.by_status.missing).to.equal(18); // + voice-ref node + 4 whisper files + 4 optional workflows (install offered) + optional manager (action none)
             for (const id of ['runtime:comfyui', 'runtime:torch', 'custom-node:comfyui-qwen3-tts',
                 'model-repo:qwen3-tts-12hz-1.7b-voicedesign', 'model-repo:qwen3-tts-12hz-1.7b-base',
-                'workflow:tts-qwen-narrator', 'workflow:tts-qwen-dialogue', 'worker:audio/qwen-tts']) {
+                'workflow:tts-qwen-narrator', 'workflow:tts-qwen-dialogue', 'worker:audio/qwen-tts',
+                'custom-node:animastor-voice-ref', 'model:audio.whisper.faster-whisper-small.model-bin',
+                'workflow:tts-qwen-voice-reference', 'workflow:tts-qwen-voice-transcribe']) {
                 expect(entry(r, id).status).to.equal('missing');
                 expect(entry(r, id).action).to.equal('install');
             }
@@ -349,9 +353,15 @@ describe('Compatibility Resolver', () => {
             const env = imageCompatibleEnv();
             env.custom_nodes.push({ directory: 'qwen3-tts', commit: '2ee1131' });
             env.models.push(...audioModelFiles());
+            // VOICE_REFERENCES (2026-11-12): animastor-voice-ref node (subdirectory source) + faster-whisper small
+            env.custom_nodes.push({ directory: 'animastor-voice-ref', repository: 'https://github.com/Animastor/animastor-worker', commit: '6a88ad960e47df9fa6e76e4cce5308d9590297c3' });
+            env.models.push(...AUDIO().dependencies.filter((d) => d.kind === 'model' && /faster-whisper/.test(d.target_dir))
+                .map((d) => ({ path: `${d.target_dir}/${d.filename}`, size_bytes: d.size_bytes_approx, sha256: d.checksum.value })));
             env.workflows.push(
                 baselineWorkflow('audio', 'tts-qwen-narrator'),
-                baselineWorkflow('audio', 'tts-qwen-dialogue')
+                baselineWorkflow('audio', 'tts-qwen-dialogue'),
+                baselineWorkflow('audio', 'tts-qwen-voice-reference'),
+                baselineWorkflow('audio', 'tts-qwen-voice-transcribe')
             );
             env.worker = [env.worker, workerProbe('audio')];
             const r = resolver.resolveInstallation({ manifests: [AUDIO(), IMAGE()], environment: env, mode: 'shared' });

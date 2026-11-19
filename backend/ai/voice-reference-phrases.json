@@ -1,0 +1,42 @@
+{
+  "_comment": "Template phrases for voice-reference candidates (VOICE_REFERENCES.md). 8-15 s of speech, no plot, no digits (the transcript check is strict). 'narrative' — the narrator (timbre + narrator manner); 'conversational' — characters (neutral). Bump 'version' of a phrase whenever its text changes.",
+  "ru": {
+    "language": "Russian",
+    "narrative": {
+      "id": "ru-narrative-1",
+      "version": 1,
+      "text": "Вечер опускался на город медленно и тихо. В окнах зажигался тёплый свет, по мостовой шли редкие прохожие, а где-то вдали звучала негромкая музыка."
+    },
+    "conversational": {
+      "id": "ru-conversational-1",
+      "version": 1,
+      "text": "Здравствуйте, рад вас видеть. Давайте присядем у окна и спокойно поговорим, времени у нас достаточно, а торопиться сегодня некуда."
+    }
+  },
+  "en": {
+    "language": "English",
+    "narrative": {
+      "id": "en-narrative-1",
+      "version": 1,
+      "text": "Evening settled over the town slowly and quietly. Warm light appeared in the windows, a few people walked along the street, and somewhere far away soft music was playing."
+    },
+    "conversational": {
+      "id": "en-conversational-1",
+      "version": 1,
+      "text": "Hello, it is good to see you. Let us sit by the window and talk for a while, we have plenty of time and nothing to hurry about today."
+    }
+  },
+  "de": {
+    "language": "German",
+    "narrative": {
+      "id": "de-narrative-1",
+      "version": 1,
+      "text": "Der Abend senkte sich langsam und still über die Stadt. In den Fenstern ging warmes Licht an, nur wenige Menschen gingen über die Straße, und irgendwo in der Ferne spielte leise Musik."
+    },
+    "conversational": {
+      "id": "de-conversational-1",
+      "version": 1,
+      "text": "Guten Tag, schön, Sie zu sehen. Setzen wir uns doch ans Fenster und reden in Ruhe, wir haben genug Zeit und müssen uns heute nicht beeilen."
+    }
+  }
+}

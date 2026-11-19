@@ -29,6 +29,7 @@ const {
 // prompt-profiles layer — the VBook→image edge (recon finding) is gone.
 const { normalizeCharacterRefs } = require('@animastor/generation').promptProfiles.characterUtils;
 const { sanitizeVideoTokens, tokensToString } = require('../../book/lazy-book/appearance');
+const heroLooks = require('./hero-looks');
 const { findUnverifiedSnakeTokens, canonicalizeText, desnakeifyText, findCrossPromptGaps, participantFieldIds } = require('../../utils/snake-guard');
 // Shared pure prompt-context builder lives in the ai-agent contour (C21):
 // the location registry context block is consumed by contour tasks (scenes)
@@ -218,11 +219,14 @@ async function stepAnalyzeStructure(sessionId, sourceText, stepIndex, progress, 
 // Character Analysis means replacing character-analyzer, not touching this
 // adapter's siblings (structure/locations/scenes/units/visuals).
 
-async function stepExtractCharacters(sessionId, text, stepIndex, progress, language) {
+// knownHeroes — the registry of the book ({ id, name, aliases }): the model
+// returns a known hero under its id (VBOOK_FORMAT_V4 §12б).
+async function stepExtractCharacters(sessionId, text, stepIndex, progress, language, knownHeroes = []) {
     const aiAgent = require('../ai-agent');
     return aiAgent.extractCharacters(
         {
             windowText: text,
+            knownHeroes,
             language,
             sessionId,
             stepIndex,
@@ -336,14 +340,13 @@ async function stepGenerateVoices(sessionId, text, characters, stepIndex, progre
 }
 
 /**
- * Resolve the effective video tokens for a character in a scene: the scene-level
- * override (scene.passport[charId].video_tokens) wins, then the global passport
- * token, then the top-level agent field. Returns the raw value (array | string).
+ * The effective video tokens of a character in a scene, through the one
+ * resolver of VBook 4 (resolveHeroLook, VBOOK_FORMAT_V4 §4a.5): base passport ←
+ * look ← scene.look_patch. Returns an array, or null when there are none.
  */
-function effectiveSceneTokens(scene, c) {
-    const sceneTok = scene?.passport?.[c.id]?.video_tokens;
-    if (sceneTok) return sceneTok;
-    return c.passport?.video_tokens || c.video_tokens || null;
+function effectiveSceneTokens(scene, c, book) {
+    const tokens = heroLooks.currentSceneTokens(book || heroLooks.workingBook([c]), scene, c.id);
+    return tokens.length > 0 ? tokens : null;
 }
 
 /**
@@ -355,10 +358,11 @@ function effectiveSceneTokens(scene, c) {
  */
 function buildSceneTokensContext(scenes, characters) {
     const charMap = new Map((characters || []).map(c => [c.id, c]));
+    const book = heroLooks.workingBook(characters);
     const parts = [];
     (scenes || []).forEach((scene, si) => {
         const rows = (scene.participants || [])
-            .map(id => ({ id, ch: charMap.get(id), tokens: charMap.has(id) ? effectiveSceneTokens(scene, charMap.get(id)) : null }))
+            .map(id => ({ id, ch: charMap.get(id), tokens: charMap.has(id) ? effectiveSceneTokens(scene, charMap.get(id), book) : null }))
             .filter(r => r.ch && r.tokens && tokensToString(r.tokens));
         if (rows.length < 2) return;
         const lines = rows.map(r => {
@@ -397,6 +401,31 @@ function parseSceneVideoTokens(rawRows) {
             return { scene_index: Number(r.scene_index), tokens };
         })
         .filter(r => Object.keys(r.tokens).length > 0);
+}
+
+// ── Output budget of the per-unit steps (VBook 4 step 2b) ───────────────
+// A flat 4096 cut the JSON of long scenes / windows (acceptance 2.6: 11
+// responses with finish_reason=length). The budget follows the number of
+// units the model must write back; measured on that run:
+//   visuals                ≈ 140–175 output tokens per unit (all units back)
+//   reconcile / polish     ≈ 72 per unit when every unit came back; now only
+//                            the CHANGED units come back
+// Per-unit norms below leave ~25–40% headroom; the floor keeps short windows
+// as before, the ceiling keeps prompt + output inside a 32–40k context.
+const UNIT_OUTPUT_MIN_TOKENS = 4096;
+const UNIT_OUTPUT_MAX_TOKENS = 16384;
+const VISUALS_TOKENS_PER_UNIT = 200;
+const REVIEW_TOKENS_PER_UNIT = 100;
+//   video_action_polish    returns EVERY unit (only video.action); rerun of
+//                          acceptance 2.6: 14 units → 763, 26 → 1340, 23 → 1064,
+//                          84 → 3759 output tokens, i.e. 45–55 per unit. 60 per
+//                          unit + the 1024 base: 84 units → 6064 (+61% over
+//                          the measured 3759); 4096 stays the floor up to 51
+//                          units, the 16384 ceiling is reached at 256 units.
+const VIDEO_ACTION_TOKENS_PER_UNIT = 60;
+function unitOutputBudget(unitCount, tokensPerUnit, base = 1024) {
+    const want = base + Math.max(0, Number(unitCount) || 0) * tokensPerUnit;
+    return Math.min(UNIT_OUTPUT_MAX_TOKENS, Math.max(UNIT_OUTPUT_MIN_TOKENS, want));
 }
 
 async function stepReconcilePassports(sessionId, allVisualUnits, characters, stepIndex, progress, scenes) {
@@ -451,11 +480,12 @@ async function stepReconcilePassports(sessionId, allVisualUnits, characters, ste
 
     const messages = [
         { role: 'system', content: prompt },
-        { role: 'user', content: `Reconcile these ${polishable.length} visual units against character passports:\n\n${unitsStr}` },
+        // the units are in the system prompt (%UNITS%) — not repeated here
+        { role: 'user', content: `Reconcile the ${polishable.length} visual units listed under "Input units to reconcile" against character passports. Return only the units you change.` },
     ];
 
     try {
-        const result = await aiCaller.callAI(messages, { maxTokens: 4096 });
+        const result = await aiCaller.callAI(messages, { maxTokens: unitOutputBudget(polishable.length, REVIEW_TOKENS_PER_UNIT) });
         const reconciled = result.units || [];
 
         // Stage 2 output: per-scene adjusted video tokens. Sanitize: keep only
@@ -664,11 +694,12 @@ async function stepPolishStoryboard(sessionId, allVisualUnits, characters, locat
 
     const messages = [
         { role: 'system', content: prompt },
-        { role: 'user', content: `Review and polish these ${polishable.length} visual units for storyboard continuity:\n\n${unitsStr}${crossHintsBlock}` },
+        // the units are in the system prompt (%UNITS%) — not repeated here
+        { role: 'user', content: `Review and polish the ${polishable.length} visual units listed under "Input units to polish" for storyboard continuity. Return only the units you change.${crossHintsBlock}` },
     ];
 
     try {
-        const result = await aiCaller.callAI(messages, { maxTokens: 4096 });
+        const result = await aiCaller.callAI(messages, { maxTokens: unitOutputBudget(polishable.length, REVIEW_TOKENS_PER_UNIT) });
         const polishedUnits = result.units || [];
 
         // Merge AI results back, preserving original fields and only updating visual
@@ -792,7 +823,7 @@ async function stepPolishVideoActions(sessionId, allVisualUnits, characters, loc
     ];
 
     try {
-        const result = await aiCaller.callAI(messages, { maxTokens: 4096 });
+        const result = await aiCaller.callAI(messages, { maxTokens: unitOutputBudget(polishable.length, VIDEO_ACTION_TOKENS_PER_UNIT) });
         const polishedUnits = result.units || [];
 
         // Merge AI results back, preserving original fields and only updating video.action
@@ -967,11 +998,12 @@ async function stepCreateVisuals(sessionId, scene, units, sceneIndex, characters
 
     const messages = [
         { role: 'system', content: prompt },
-        { role: 'user', content: `Add visual prompts to each unit. Return the same units with visual fields added.\n\n${unitsStr}` },
+        // the units are in the system prompt (%UNITS%) — not repeated here
+        { role: 'user', content: `Add visual prompts to each of the ${units.length} units listed under "Input units to describe". Return the same units, in the same order, with visual fields added.` },
     ];
 
     try {
-        const result = await aiCaller.callAI(messages, { maxTokens: 4096 });
+        const result = await aiCaller.callAI(messages, { maxTokens: unitOutputBudget(units.length, VISUALS_TOKENS_PER_UNIT) });
         const visualUnits = result.units || [];
 
         const merged = units.map((u, i) => {
@@ -1344,5 +1376,7 @@ module.exports = {
     canonicalizeVisualUnit,
     // Cross-prompt consistency helpers (pure — exported for tests)
     buildCrossPromptHints,
+    unitOutputBudget,
+    VIDEO_ACTION_TOKENS_PER_UNIT,
     stillMissingIds,
 };

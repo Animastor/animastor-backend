@@ -1,0 +1,74 @@
+{
+  "connectorVersion": "2.0.0",
+  "workflow": "tts-qwen-voice-transcribe",
+  "workflowHash": "",
+  "label": "Uploaded voice sample → reference",
+  "description": "User-uploaded sample: LoadAudio → normalise + faster-whisper (ref_text proposal)",
+  "type": "audio",
+  "profile": {
+    "audioProfile": "qwen-tts"
+  },
+  "metadata": {
+    "author": "Animastor",
+    "updated": "2026-11-12",
+    "category": "audio-generation"
+  },
+  "compatibility": {
+    "nodeClasses": {
+      "90": "LoadAudio",
+      "1009": "SaveAudioAnimastorReference"
+    }
+  },
+  "inputs": {
+    "referenceAudio": {
+      "nodeId": "90",
+      "field": "inputs.audio",
+      "expectedClass": "LoadAudio",
+      "entityType": "referenceAudio",
+      "label": "Uploaded Audio",
+      "required": true
+    }
+  },
+  "outputs": {
+    "generatedAudio": {
+      "nodeId": "1009",
+      "field": "inputs.audio",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "generatedAudio",
+      "label": "Reference candidate (WAV + RIFF JSON)"
+    }
+  },
+  "parameters": {
+    "whisperModel": {
+      "nodeId": "1009",
+      "field": "inputs.whisper_model",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "whisperModel",
+      "label": "Whisper Model",
+      "default": "small"
+    },
+    "whisperDevice": {
+      "nodeId": "1009",
+      "field": "inputs.device",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "whisperDevice",
+      "label": "Whisper Device",
+      "default": "auto"
+    },
+    "outputFilenamePrefix": {
+      "nodeId": "1009",
+      "field": "inputs.filename_prefix",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "outputFilenamePrefix",
+      "label": "Output Filename Prefix"
+    },
+    "asrLanguage": {
+      "nodeId": "1009",
+      "field": "inputs.language",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "language",
+      "label": "ASR Language",
+      "default": "Russian"
+    }
+  }
+}

@@ -242,8 +242,10 @@ describe('G7: @animastor/generation package boundary', () => {
             'estimateSpeechDurationSec', 'cyrToLatin']) {
             expect(generation.dirtyGrammar[fn], `dirtyGrammar.${fn}`).to.be.a('function');
         }
+        // VBook 4 step 3: extractPassport is gone (looks are the derived scene
+        // key scene.resolved_looks); sceneHasSpeaker / resolvedLooks / voiceKey added
         for (const k of ['SCENE_FIELDS', 'CROSS_FIELDS', 'isEqual',
-            'extractPassport', 'SPEECH_SEC_PER_WORD', 'SPEECH_MIN_SEC', 'CYR_LATIN_MAP']) {
+            'sceneHasSpeaker', 'resolvedLooks', 'voiceKey', 'SPEECH_SEC_PER_WORD', 'SPEECH_MIN_SEC', 'CYR_LATIN_MAP']) {
             expect(k in generation.dirtyGrammar, `dirtyGrammar.${k}`).to.equal(true);
         }
         // DEPENDENCY_GRAPH must be the real object (not undefined) with the

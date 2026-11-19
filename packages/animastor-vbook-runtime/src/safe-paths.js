@@ -9,6 +9,7 @@
 'use strict';
 
 const path = require('path');
+const { isValidHeroId } = require('./heroes.cjs');
 
 // Book ids: generated ids are `<slug>_<ms>` where the slug may contain Latin
 // or Cyrillic letters (lazy-book/paths.js generateBookId); imported ids use
@@ -22,11 +23,17 @@ const BUILD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
 const CHAPTER_FILE_RE = /^ch-[a-f0-9]{6,64}\.json$/;
 
 class InvalidInputError extends Error {
-    constructor(code, message) {
+    /**
+     * @param {string} code
+     * @param {string} message
+     * @param {{status?: number}} [details] extra fields copied onto the error
+     */
+    constructor(code, message, details = {}) {
         super(message);
         this.name = 'InvalidInputError';
         this.code = code;
         this.status = 400;
+        Object.assign(this, details);
     }
 }
 
@@ -81,11 +88,16 @@ function joinInside(root, ...segments) {
     return assertInside(root, target);
 }
 
-// ── .vbook (format 3.1) archive entries ─────────────────────────────────
+// ── .vbook (format 4) archive entries — VBOOK_FORMAT_V4 §3 ──────────────
+// The whole format, by exact path. Nothing is matched by suffix and nothing
+// is looked up under a prefix folder. The 3.1 files (characters.json,
+// voices.json, behavior.json, mentions.json) are NOT on the list.
 const BUNDLE_ROOT_FILES = new Set([
-    'manifest.json', 'book.json', 'bible.json', 'locations.json', 'voices.json',
-    'characters.json', 'behavior.json', 'mentions.json', 'source.txt',
+    'manifest.json', 'book.json', 'bible.json', 'locations.json',
+    'behaviour.json', 'source.txt',
 ]);
+const CHAPTERS_PREFIX = 'chapters/';
+const CHARACTERS_PREFIX = 'characters/';
 
 const BUNDLE_LIMITS = Object.freeze({
     maxEntries: 2000,            // all entries incl. directories
@@ -103,11 +115,34 @@ function isUnsafeEntryName(name) {
     return parts.some((p) => p === '..' || p === '.' || p === '');
 }
 
-/** Whitelisted payload entries of format 3.1 (others are skipped, not written). */
+/**
+ * Where an archive entry belongs in format 4:
+ *   'root'          — one of BUNDLE_ROOT_FILES, at the archive root
+ *   'chapter'       — chapters/ch-<hex>.json
+ *   'character'     — characters/<hero id>.json (canonical, not reserved id)
+ *   'bad_character' — anything else below characters/ that is not a service
+ *                     file: a broken hero file, the archive is refused (§10.3)
+ *   null            — outside the format: skipped, never written to disk
+ */
+function classifyBundleEntry(name) {
+    if (typeof name !== 'string') return null;
+    if (BUNDLE_ROOT_FILES.has(name)) return 'root';
+    if (name.startsWith(CHAPTERS_PREFIX)) {
+        return CHAPTER_FILE_RE.test(name.slice(CHAPTERS_PREFIX.length)) ? 'chapter' : null;
+    }
+    if (name.startsWith(CHARACTERS_PREFIX)) {
+        const rest = name.slice(CHARACTERS_PREFIX.length);
+        if (rest === '' || rest.startsWith('.')) return null; // service entries (§4)
+        if (rest.endsWith('.json') && isValidHeroId(rest.slice(0, -'.json'.length))) return 'character';
+        return 'bad_character';
+    }
+    return null;
+}
+
+/** Whitelisted payload entries of format 4 (others are skipped, not written). */
 function isAllowedBundleEntry(name) {
-    if (BUNDLE_ROOT_FILES.has(name)) return true;
-    if (name.startsWith('chapters/')) return CHAPTER_FILE_RE.test(name.slice('chapters/'.length));
-    return CHAPTER_FILE_RE.test(name); // legacy: chapter files at the bundle root
+    const kind = classifyBundleEntry(name);
+    return kind === 'root' || kind === 'chapter' || kind === 'character';
 }
 
 function isChapterFileName(name) {
@@ -122,6 +157,7 @@ function isSafeChapterFile(name) {
 
 module.exports = {
     BOOK_ID_RE, BUILD_ID_RE, CHAPTER_FILE_RE, BUNDLE_ROOT_FILES, BUNDLE_LIMITS,
+    CHAPTERS_PREFIX, CHARACTERS_PREFIX, classifyBundleEntry,
     InvalidInputError,
     isValidBookId, isValidBuildId, assertBookId, assertBuildId,
     isInside, assertInside, joinInside,

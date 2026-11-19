@@ -9,6 +9,7 @@
 //   5. Lazy parse further scenes on demand
 // ======================================================
 
+const characterStore = require('@animastor/vbook-runtime/character-store.cjs');
 const fs = require('fs');
 const config = require('../config/runtime-config');
 const lazyBook = require('../book/lazy-book');
@@ -179,7 +180,6 @@ async function bootstrapImportedText(bookId, progress, publishProgress, redis) {
     // Clean up partial bootstrap artifacts from previous failed attempts
     const bookDir = lazyBook.getBookDir(bookId);
     const chDir = lazyBook.getChapterDir(bookDir);
-    const charPath = lazyBook.getCharactersPath(bookDir);
     const biblePath = lazyBook.getBiblePath(bookDir);
 
     if (fs.existsSync(chDir)) {
@@ -191,9 +191,12 @@ async function bootstrapImportedText(bookId, progress, publishProgress, redis) {
             }
         }
     }
-    if (fs.existsSync(charPath)) {
-        console.log('[BOOTSTRAP] Removing partial characters.json...');
-        fs.unlinkSync(charPath);
+    // Heroes of the failed attempt (VBook 4: one file per hero). The narrator
+    // is created with the book and stays; broken files are never touched.
+    const partialHeroes = characterStore.listCharacters(bookDir).heroes.filter(h => h.id !== 'narrator');
+    if (partialHeroes.length > 0) {
+        console.log(`[BOOTSTRAP] Removing ${partialHeroes.length} partial hero file(s)...`);
+        for (const hero of partialHeroes) characterStore.removeCharacter(bookDir, hero.id);
     }
     if (fs.existsSync(biblePath)) {
         console.log('[BOOTSTRAP] Removing partial bible.json...');

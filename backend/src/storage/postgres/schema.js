@@ -1915,6 +1915,22 @@ async function runMigrations() {
         console.error('[PG] WLOG workers.log_shipping migration failed:', err.message);
     }
 
+    // ── RSN-1: reasoning settings of an AI provider (VBook 4 step 2b) ──
+    // disable_thinking → chat_template_kwargs {enable_thinking:false};
+    // reasoning_effort → OpenAI-style reasoning_effort (NULL = not sent).
+    // Additive, defaults keep every existing provider unchanged
+    // (services/ai-reasoning.js).
+    try {
+        for (const table of ['system_ai_providers', 'workspace_ai_providers']) {
+            await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS disable_thinking BOOLEAN NOT NULL DEFAULT FALSE`);
+            await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS reasoning_effort TEXT`);
+        }
+        console.log('[PG] RSN-1: provider reasoning settings (disable_thinking, reasoning_effort) ensured');
+    } catch (err) {
+        console.error('[PG] RSN-1 provider reasoning settings migration failed:', err.message);
+        throw err;
+    }
+
     // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
     // DDL lives here (guardrail PG-5 — single DDL owner). The statements
     // are executed ONLY while the IU_IMAGE_VERSIONED kill-switch is on, so

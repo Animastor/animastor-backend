@@ -1,29 +1,28 @@
 {
-  "connectorVersion": "1.0.0",
+  "connectorVersion": "2.0.0",
   "workflow": "tts-qwen-dialogue",
   "workflowHash": "",
-  "label": "TTS Dialogue (Qwen)",
-  "description": "Multi-character dialogue TTS using Qwen3-TTS Role Bank and Advanced Dialogue Engine",
+  "label": "TTS Dialogue (Qwen, voice clone)",
+  "description": "Multi-speaker dialogue: each speaker = LoadAudio(locked reference) → VoiceClonePrompt → RoleBank → AdvancedDialogue (Base model only). Unused slots are removed from the graph by the provider.",
   "type": "audio",
   "profile": {
     "audioProfile": "qwen-tts"
   },
   "metadata": {
     "author": "Animastor",
-    "updated": "2026-06-19",
+    "updated": "2026-11-12",
     "category": "audio-generation"
   },
   "compatibility": {
     "nodeClasses": {
-      "71": "Qwen3TTSVoiceDesign",
+      "71": "LoadAudio",
       "73": "Qwen3TTSVoiceClonePrompt",
       "74": "Qwen3TTSRoleBank",
       "75": "Qwen3TTSAdvancedDialogue",
-      "78": "Qwen3TTSLoader",
       "79": "Qwen3TTSLoader",
-      "80": "Qwen3TTSVoiceDesign",
+      "80": "LoadAudio",
       "81": "Qwen3TTSVoiceClonePrompt",
-      "82": "Qwen3TTSVoiceDesign",
+      "82": "LoadAudio",
       "83": "Qwen3TTSVoiceClonePrompt",
       "108": "Qwen3TTSScriptProcessor",
       "1008": "SaveAudioMP3"
@@ -46,28 +45,28 @@
       "label": "Default Instruction",
       "required": false
     },
-    "character1Voice": {
-      "nodeId": "71",
-      "field": "inputs.voice_instruction",
-      "expectedClass": "Qwen3TTSVoiceDesign",
-      "entityType": "character1Voice",
-      "label": "Character 1 Voice",
-      "required": false
-    },
-    "character2Voice": {
-      "nodeId": "80",
-      "field": "inputs.voice_instruction",
-      "expectedClass": "Qwen3TTSVoiceDesign",
-      "entityType": "character2Voice",
-      "label": "Character 2 Voice",
-      "required": false
-    },
     "roleName1": {
       "nodeId": "74",
       "field": "inputs.role_name_1",
       "expectedClass": "Qwen3TTSRoleBank",
       "entityType": "roleName1",
       "label": "Role Name 1",
+      "required": false
+    },
+    "speaker1ReferenceAudio": {
+      "nodeId": "71",
+      "field": "inputs.audio",
+      "expectedClass": "LoadAudio",
+      "entityType": "speaker1ReferenceAudio",
+      "label": "Speaker 1 Reference Audio",
+      "required": false
+    },
+    "speaker1ReferenceText": {
+      "nodeId": "73",
+      "field": "inputs.ref_text",
+      "expectedClass": "Qwen3TTSVoiceClonePrompt",
+      "entityType": "speaker1ReferenceText",
+      "label": "Speaker 1 Reference Text",
       "required": false
     },
     "roleName2": {
@@ -78,12 +77,20 @@
       "label": "Role Name 2",
       "required": false
     },
-    "character3Voice": {
-      "nodeId": "82",
-      "field": "inputs.voice_instruction",
-      "expectedClass": "Qwen3TTSVoiceDesign",
-      "entityType": "character3Voice",
-      "label": "Character 3 Voice",
+    "speaker2ReferenceAudio": {
+      "nodeId": "80",
+      "field": "inputs.audio",
+      "expectedClass": "LoadAudio",
+      "entityType": "speaker2ReferenceAudio",
+      "label": "Speaker 2 Reference Audio",
+      "required": false
+    },
+    "speaker2ReferenceText": {
+      "nodeId": "81",
+      "field": "inputs.ref_text",
+      "expectedClass": "Qwen3TTSVoiceClonePrompt",
+      "entityType": "speaker2ReferenceText",
+      "label": "Speaker 2 Reference Text",
       "required": false
     },
     "roleName3": {
@@ -92,6 +99,22 @@
       "expectedClass": "Qwen3TTSRoleBank",
       "entityType": "roleName3",
       "label": "Role Name 3",
+      "required": false
+    },
+    "speaker3ReferenceAudio": {
+      "nodeId": "82",
+      "field": "inputs.audio",
+      "expectedClass": "LoadAudio",
+      "entityType": "speaker3ReferenceAudio",
+      "label": "Speaker 3 Reference Audio",
+      "required": false
+    },
+    "speaker3ReferenceText": {
+      "nodeId": "83",
+      "field": "inputs.ref_text",
+      "expectedClass": "Qwen3TTSVoiceClonePrompt",
+      "entityType": "speaker3ReferenceText",
+      "label": "Speaker 3 Reference Text",
       "required": false
     }
   },
@@ -112,6 +135,14 @@
       "entityType": "seed",
       "label": "Seed"
     },
+    "temperature": {
+      "nodeId": "75",
+      "field": "inputs.temperature",
+      "expectedClass": "Qwen3TTSAdvancedDialogue",
+      "entityType": "temperature",
+      "label": "Temperature",
+      "default": 0.9
+    },
     "quality": {
       "nodeId": "1008",
       "field": "inputs.quality",
@@ -127,14 +158,6 @@
       "entityType": "outputFilenamePrefix",
       "label": "Output Filename Prefix",
       "default": "audio/dialogue"
-    },
-    "temperature": {
-      "nodeId": "75",
-      "field": "inputs.temperature",
-      "expectedClass": "Qwen3TTSAdvancedDialogue",
-      "entityType": "temperature",
-      "label": "Temperature",
-      "default": 0.9
     }
   }
 }

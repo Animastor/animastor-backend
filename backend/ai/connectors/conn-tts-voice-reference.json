@@ -1,0 +1,98 @@
+{
+  "connectorVersion": "2.0.0",
+  "workflow": "tts-qwen-voice-reference",
+  "workflowHash": "",
+  "label": "Voice reference candidate (Qwen VoiceDesign)",
+  "description": "One voice-reference candidate: VoiceDesign on the template phrase of the book language → normalise + faster-whisper (SaveAudioAnimastorReference)",
+  "type": "audio",
+  "profile": {
+    "audioProfile": "qwen-tts"
+  },
+  "metadata": {
+    "author": "Animastor",
+    "updated": "2026-11-12",
+    "category": "audio-generation"
+  },
+  "compatibility": {
+    "nodeClasses": {
+      "78": "Qwen3TTSLoader",
+      "71": "Qwen3TTSVoiceDesign",
+      "1009": "SaveAudioAnimastorReference"
+    }
+  },
+  "inputs": {
+    "referencePhrase": {
+      "nodeId": "71",
+      "field": "inputs.text",
+      "expectedClass": "Qwen3TTSVoiceDesign",
+      "entityType": "referencePhrase",
+      "label": "Reference Phrase",
+      "required": true
+    },
+    "voiceInstruction": {
+      "nodeId": "71",
+      "field": "inputs.voice_instruction",
+      "expectedClass": "Qwen3TTSVoiceDesign",
+      "entityType": "voiceInstruction",
+      "label": "Voice Description",
+      "required": true
+    }
+  },
+  "outputs": {
+    "generatedAudio": {
+      "nodeId": "1009",
+      "field": "inputs.audio",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "generatedAudio",
+      "label": "Reference candidate (WAV + RIFF JSON)"
+    }
+  },
+  "parameters": {
+    "whisperModel": {
+      "nodeId": "1009",
+      "field": "inputs.whisper_model",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "whisperModel",
+      "label": "Whisper Model",
+      "default": "small"
+    },
+    "whisperDevice": {
+      "nodeId": "1009",
+      "field": "inputs.device",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "whisperDevice",
+      "label": "Whisper Device",
+      "default": "auto"
+    },
+    "outputFilenamePrefix": {
+      "nodeId": "1009",
+      "field": "inputs.filename_prefix",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "outputFilenamePrefix",
+      "label": "Output Filename Prefix"
+    },
+    "language": {
+      "nodeId": "71",
+      "field": "inputs.language",
+      "expectedClass": "Qwen3TTSVoiceDesign",
+      "entityType": "language",
+      "label": "Language",
+      "default": "Russian"
+    },
+    "asrLanguage": {
+      "nodeId": "1009",
+      "field": "inputs.language",
+      "expectedClass": "SaveAudioAnimastorReference",
+      "entityType": "language",
+      "label": "ASR Language",
+      "default": "Russian"
+    },
+    "seed": {
+      "nodeId": "71",
+      "field": "inputs.seed",
+      "expectedClass": "Qwen3TTSVoiceDesign",
+      "entityType": "seed",
+      "label": "Seed"
+    }
+  }
+}

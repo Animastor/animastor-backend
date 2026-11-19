@@ -1,6 +1,5 @@
 {
   "book_id": "evening_city_demo",
-  "version": "3.0",
   "title": "Вечер в городе",
   "author": "М. Демин",
   "structure": {
@@ -9,6 +8,12 @@
       "ch-2a7fee78.json",
       "ch-ce87fec4.json",
       "ch-319c798a.json"
+    ],
+    "characters_order": [
+      "narrator",
+      "anna_smirnova",
+      "boris_volkov",
+      "dmitry_orekhov"
     ]
   },
   "defaults": {

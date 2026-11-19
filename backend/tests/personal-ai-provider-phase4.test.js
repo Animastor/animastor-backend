@@ -150,10 +150,16 @@ describe('Personal AI Provider (Phase 4)', () => {
         after(() => server && server.close());
 
         it('no provider → GET /provider and /providers both empty; meta never echoes the key', async () => {
-            // Anonymous PUT auto-provisions a guest workspace (authContext), then we GET it.
+            // No route mints a guest (owner, 18.11): an anonymous PUT is 401;
+            // a guest made before that (the service) writes its own workspace.
+            const anon = await fetch(`${base}/api/v1/settings/ai/provider`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: 'https://or.example/v1', api_key: 'k' }),
+            });
+            expect(anon.status).to.equal(401);
+            const guest = await require('../src/auth/auth-service').createGuest();
             const put = await fetch(`${base}/api/v1/settings/ai/provider`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', Cookie: `animastor_gid=${guest.token}` },
                 body: JSON.stringify({
                     provider_type: 'openrouter',
                     endpoint: 'https://or.example/v1',

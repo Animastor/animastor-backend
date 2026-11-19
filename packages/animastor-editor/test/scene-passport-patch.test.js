@@ -1,349 +1,102 @@
 // ======================================================
-// Scene PATCH — scene.passport overrides
+// Scene PATCH — one-off look of a hero in a scene (VBook 4)
 // ======================================================
-// Tests that PATCH /api/v1/book/:bookId/scene/:chapterId/:sceneId with flat
-// passport.<charId>.<field> keys (sent WITHOUT unit_id, so they hit the scene
-// branch of the handler) correctly:
-//   1. Applies overrides to scene.passport[charId][field] via setDeep
-//   2. Empty string → null clears the field (falls back to global passport)
-//   3. bookDiff detects the change → image + video dirty (no audio)
-//   4. resolvePassport() prefers the scene override over the global passport
-//
-// The test follows the project's route-testing pattern (book-metadata-patch.test.js):
-// it simulates exactly what the PATCH handler does (setDeep over fields + save)
-// rather than spinning up the express app.
+// The VBook 4 successor of the scene.passport overrides (VBOOK_FORMAT_V4 §4a.3,
+// §4a.4, §8.2): the scene PATCH takes
+//   looks.<hero_id>                  — a look id, "base" or null
+//   look_patch.<hero_id>.<field>     — appearance | clothes | video_tokens
+// and the resolver is resolveHeroLook (the full table of cases:
+// packages/animastor-vbook-runtime/test/looks.test.js). Dirty: image + video of
+// exactly the scene whose resolved look changed.
+
+'use strict';
 
 const { expect } = require('chai');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const h = require('./hero-harness.cjs');
+const { resolveHeroLook } = require('@animastor/vbook-runtime/looks.cjs');
 
-require('./vbook-test-bindings.cjs');
-const bookModule = require('../../../backend/src/book/index');
-const config = require('../../../backend/src/config/runtime-config');
-const { setDeep, normalizeFieldValue } = require('../src/scene-patch-utils.cjs');
-const promptBuilder = require('../../../backend/src/image/prompt-builder');
+const B = 'scene_look_book_1';
+const S1 = 'sc-00000001';
 
-const ORIG_BOOKS_DIR = config.BOOKS_DIR;
+describe('Scene PATCH — looks.<hero_id> and look_patch.<hero_id>.<field> (VBook 4)', function () {
+    this.timeout(20000);
+    let t;
 
-// Stub deps for the book-diff factory (mirrors book-diff-unit.test.js)
-function createBookDiff() {
-    const state = {
-        SceneState: {
-            NEW: 'new', AUDIO_PENDING: 'audio_pending', AUDIO_GENERATING: 'audio_generating',
-            AUDIO_READY: 'audio_ready', IMAGE_PENDING: 'image_pending', IMAGE_GENERATING: 'image_generating',
-            IMAGE_READY: 'image_ready', VIDEO_PENDING: 'video_pending', VIDEO_GENERATING: 'video_generating',
-            VIDEO_READY: 'video_ready', FAILED: 'failed',
-        },
-        AssetState: {
-            NEW: 'new', DIRTY: 'dirty', PENDING: 'pending', GENERATING: 'generating',
-            READY: 'ready', FAILED: 'failed', PLACEHOLDER: 'placeholder',
-        },
-        SCENE_STATE_KEY_PREFIX: 'animastor:scene-state',
-        ASSET_STATE_KEY_PREFIX: 'animastor:asset-state',
-        setAssetState: async () => {},
-        setAssetStates: async () => {},
-        getAssetStates: async () => ({ audio: 'new', image: 'new', video: 'new' }),
-        setSceneStateWithBuildId: async () => {},
-        validateAssetTransition: () => ({ valid: true }),
+    beforeEach(async () => {
+        t = await h.startHeroServer();
+        h.writeBook(t.booksDir, B);
+    });
+    afterEach(async () => { await t.close(); });
+
+    const patch = (fields) => t.api('PATCH', `/api/v1/book/${B}/scene/${h.CH1}/${S1}`, { fields });
+    const scene = () => t.readChapter(B, h.CH1).scenes[0];
+    const resolved = (heroId) => {
+        const book = h.bookModule.loadBook(B);
+        return resolveHeroLook(book, book.chapters[0], book.chapters[0].scenes[0], heroId);
     };
 
-    const book = {
-        loadBook: () => null,
-        findSceneRuntimeData: () => null,
-        collectScenes: () => [],
-    };
-
-    const layerConfig = { get: async () => null, set: async () => null };
-    const genScope = { getScope: async () => null, scopeBounds: () => ({ startIndex: 0, endIndex: 0 }) };
-    const activeScenes = { addActiveScene: async () => ({ added: true }) };
-    const getChunk = async () => null;
-    const saveChunk = async () => {};
-
-    const deps = {
-        state,
-        book,
-        layerConfig,
-        genScope,
-        activeScenes,
-        getChunk,
-        saveChunk,
-        utils: {
-            log: () => {},
-            collectScenes: (bookData) => {
-                if (!bookData || !bookData.chapters) return [];
-                const scenes = [];
-                for (const ch of bookData.chapters) {
-                    for (const sc of (ch.scenes || [])) {
-                        scenes.push({
-                            chapter_id: ch.chapter_id,
-                            scene_id: sc.scene_id,
-                            scene_order: sc.scene_order || 0,
-                            participants: sc.participants || [],
-                            location: sc.location || null,
-                            scene: sc,
-                            payload: sc,
-                        });
-                    }
-                }
-                return scenes;
-            },
-        },
-    };
-
-    const bookDiffFactory = require('../../../backend/src/services/book-diff.cjs');
-    return bookDiffFactory({}, {}, deps);
-}
-
-describe('Scene PATCH — scene.passport overrides', () => {
-
-    let tmpDir;
-    let bookId;
-    let bookDir;
-    let bookDiff;
-
-    const CHAPTER_ID = 'ch-test';
-    const SCENE_ID = 'sc-0001';
-
-    before(() => {
-        bookDiff = createBookDiff();
+    it('applies look_patch.<hero>.<field> keys to scene.look_patch', async () => {
+        const r = await patch({ 'look_patch.yura.appearance': 'wet hair, tired' });
+        expect(r.status).to.equal(200);
+        expect(scene().look_patch).to.deep.equal({ yura: { appearance: 'wet hair, tired' } });
     });
 
-    beforeEach(() => {
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-passport-patch-'));
-        bookId = 'test-passport-' + Date.now();
-        bookDir = path.join(tmpDir, bookId);
-        fs.mkdirSync(bookDir, { recursive: true });
-        fs.mkdirSync(path.join(bookDir, 'chapters'), { recursive: true });
-
-        config.BOOKS_DIR = tmpDir;
-
-        fs.writeFileSync(path.join(bookDir, 'manifest.json'), JSON.stringify({
-            book_id: bookId,
-            vbook_version: '3.1',
-            build_id: 'build-test',
-            state: 'BOOTSTRAPPED',
-            created_at: new Date().toISOString(),
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'book.json'), JSON.stringify({
-            book_id: bookId,
-            version: '3.0',
-            title: 'Test Book',
-            author: 'Test Author',
-            language: 'ru',
-            structure: { chapters_order: ['chapters/ch-test.json'] },
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'chapters', 'ch-test.json'), JSON.stringify({
-            chapter_id: CHAPTER_ID,
-            chapter_title: 'Chapter 1',
-            scenes: [{
-                scene_id: SCENE_ID,
-                scene_title: 'Opening',
-                type: 'narration',
-                participants: ['hero'],
-                location: { id: 'main_street' },
-                units: [{ id: 'u1', text: 'The hero arrives.' }],
-            }],
-        }, null, 2));
-
-        // characters.json with a global passport
-        fs.writeFileSync(path.join(bookDir, 'characters.json'), JSON.stringify([
-            {
-                id: 'hero',
-                name: 'Hero',
-                passport: {
-                    appearance: 'Tall, dark hair',
-                    clothes: 'dark suit',
-                    video_tokens: 'global video tokens',
-                },
-            },
-        ], null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'locations.json'), JSON.stringify({
-            main_street: { description: 'Main street', environment: { time: 'day' } },
-        }, null, 2));
-
-        fs.writeFileSync(path.join(bookDir, 'voices.json'), JSON.stringify({}));
+    it('applies several fields for one hero', async () => {
+        await patch({ 'look_patch.yura.appearance': 'wet hair', 'look_patch.yura.clothes': 'raincoat' });
+        expect(scene().look_patch.yura).to.deep.equal({ appearance: 'wet hair', clothes: 'raincoat' });
     });
 
-    afterEach(() => {
-        config.BOOKS_DIR = ORIG_BOOKS_DIR;
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    it('removes a field when an empty string is sent', async () => {
+        await patch({ 'look_patch.yura.appearance': 'wet hair', 'look_patch.yura.clothes': 'raincoat' });
+        await patch({ 'look_patch.yura.appearance': '' });
+        expect(scene().look_patch.yura).to.deep.equal({ clothes: 'raincoat' });
     });
 
-    // ── Helper: simulate the scene branch of the PATCH handler ──
-    // (fields without unit_id → applied to the scene via setDeep)
-    function applySceneFieldsPatch(fields) {
-        const oldBook = bookModule.loadBook(bookId);
-        const bookBeforePatch = JSON.parse(JSON.stringify(oldBook));
-
-        let targetScene = null;
-        for (const ch of oldBook.chapters) {
-            if (ch.chapter_id === CHAPTER_ID && ch.scenes) {
-                targetScene = ch.scenes.find(s => s.scene_id === SCENE_ID);
-                if (targetScene) break;
-            }
-        }
-        if (!targetScene) throw new Error('Scene not found');
-
-        for (const [key, value] of Object.entries(fields)) {
-            const resolvedKey = key.startsWith('env.') ? 'location.environment.' + key.slice(4) : key;
-            setDeep(targetScene, resolvedKey, normalizeFieldValue(resolvedKey, value));
-        }
-
-        bookModule.saveBookBundle(oldBook, null);
-        const newBook = bookModule.loadBook(bookId) || oldBook;
-        const diff = bookDiff.computeBookDiff(bookBeforePatch, newBook);
-        return { newBook, diff };
-    }
-
-    // ======================================================
-    // Test 1: passport.<charId>.<field> lands on scene.passport
-    // ======================================================
-    it('applies passport.<charId>.<field> keys to scene.passport', () => {
-        applySceneFieldsPatch({
-            'passport.hero.clothes': 'long grey coat',
-        });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        expect(scene.passport.hero.clothes).to.equal('long grey coat');
-        // Other passport fields untouched — override is per-field
-        expect(scene.passport.hero.appearance).to.be.undefined;
+    it('book diff: a look_patch change → image + video dirty for this scene only', async () => {
+        const r = await patch({ 'look_patch.yura.clothes': 'raincoat' });
+        expect(r.body.dirty_scenes).to.equal(1);
+        const dirty = t.calls.bump[0];
+        expect(dirty.map((d) => d.scene_id)).to.deep.equal([S1]);
+        expect(dirty[0].dirty_layers).to.include.members(['image', 'video']).and.not.include('audio');
     });
 
-    // ======================================================
-    // Test 2: multiple fields for the same character
-    // ======================================================
-    it('applies multiple override fields for one character', () => {
-        applySceneFieldsPatch({
-            'passport.hero.appearance': 'tall and thin',
-            'passport.hero.clothes': 'long grey coat',
-            'passport.hero.video_tokens': 'scene override tokens',
-        });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        expect(scene.passport.hero).to.deep.equal({
-            appearance: 'tall and thin',
-            clothes: 'long grey coat',
-            video_tokens: ['scene override tokens'],
-        });
+    it('no dirty scenes when the override does not change the resolved look', async () => {
+        await patch({ 'look_patch.yura.clothes': 'raincoat' });
+        t.resetCalls();
+        const r = await patch({ 'look_patch.yura.clothes': 'raincoat' });
+        expect(r.body.dirty_scenes).to.equal(0);
+        expect(t.calls.bump).to.deep.equal([]);
     });
 
-    // ======================================================
-    // Test 3: empty string clears the field (null)
-    // ======================================================
-    it('clears a previously-set override when empty string is sent', () => {
-        // First set the override
-        applySceneFieldsPatch({ 'passport.hero.clothes': 'long grey coat' });
-        // Then clear it — the frontend sends '' for removed values
-        applySceneFieldsPatch({ 'passport.hero.clothes': '' });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        expect(scene.passport.hero.clothes).to.be.null;
+    it('resolveHeroLook prefers the scene patch over the look and the base passport', async () => {
+        await patch({ 'looks.yura': 'coat', 'look_patch.yura.clothes': 'raincoat' });
+        const look = resolved('yura');
+        expect(look).to.include({ look_id: 'coat', source: 'scene', clothes: 'raincoat', appearance: 'tall man, dark hair' });
+        expect(look.video_tokens).to.deep.equal(['man', 'grey coat']);
+        expect(look.patched).to.deep.equal(['clothes']);
     });
 
-    // ======================================================
-    // Test 4: bookDiff marks image + video dirty (no audio)
-    // ======================================================
-    it('bookDiff detects scene.passport change → image + video dirty', () => {
-        const { diff } = applySceneFieldsPatch({
-            'passport.hero.clothes': 'long grey coat',
-        });
-
-        expect(diff.dirty_scenes).to.have.length(1);
-        expect(diff.dirty_scenes[0].scene_id).to.equal(SCENE_ID);
-        expect(diff.dirty_scenes[0].dirty_layers).to.include.members(['image', 'video']);
-        expect(diff.dirty_scenes[0].dirty_layers).to.not.include('audio');
+    it('splits comma-joined video_tokens into an array on save', async () => {
+        await patch({ 'look_patch.yura.video_tokens': 'man,wet hair,raincoat' });
+        expect(scene().look_patch.yura.video_tokens).to.deep.equal(['man', 'wet hair', 'raincoat']);
     });
 
-    // ======================================================
-    // Test 5: no dirty scenes when nothing changed
-    // ======================================================
-    it('produces no dirty scenes when the override is unchanged', () => {
-        applySceneFieldsPatch({ 'passport.hero.clothes': 'long grey coat' });
-        // Same value again → no diff
-        const { diff } = applySceneFieldsPatch({ 'passport.hero.clothes': 'long grey coat' });
-        expect(diff.dirty_scenes).to.have.length(0);
+    it('splits video_tokens with standard ", " spacing into an array', async () => {
+        await patch({ 'look_patch.yura.video_tokens': 'man, wet hair, raincoat' });
+        expect(scene().look_patch.yura.video_tokens).to.deep.equal(['man', 'wet hair', 'raincoat']);
     });
 
-    // ======================================================
-    // Test 6: resolvePassport prefers the scene override
-    // ======================================================
-    it('resolvePassport prefers the scene override over the global passport', () => {
-        const book = bookModule.loadBook(bookId);
-        const hero = book.characters.find(c => c.id === 'hero');
-        const scene = {
-            scene_id: SCENE_ID,
-            passport: { hero: { clothes: 'long grey coat' } },
-        };
-
-        const resolved = promptBuilder.resolvePassport(hero, {}, scene);
-
-        // Overridden field → scene value
-        expect(resolved.clothes).to.equal('long grey coat');
-        // Non-overridden fields → global passport
-        expect(resolved.appearance).to.equal('Tall, dark hair');
+    it('clears the video_tokens override when an empty string is sent (empty maps are dropped)', async () => {
+        await patch({ 'look_patch.yura.video_tokens': 'man, raincoat' });
+        await patch({ 'look_patch.yura.video_tokens': '' });
+        expect(scene()).to.not.have.property('look_patch');
     });
 
-    // ======================================================
-    // Test 7: video_tokens comma-joined text → array (agent scheme format),
-    // even when the editor sends commas WITHOUT a trailing space (the exact
-    // regression from the user report: "bald head,large black glasses,...")
-    // ======================================================
-    it('splits comma-joined video_tokens into an array on save', () => {
-        applySceneFieldsPatch({
-            'passport.hero.video_tokens': 'bald head,large black glasses,gray suit,trembling hands',
-        });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        expect(scene.passport.hero.video_tokens).to.deep.equal([
-            'bald head', 'large black glasses', 'gray suit', 'trembling hands',
-        ]);
-    });
-
-    // ======================================================
-    // Test 8: video_tokens with proper "a, b, c" spacing also splits cleanly
-    // ======================================================
-    it('splits video_tokens with standard ", " spacing into an array', () => {
-        applySceneFieldsPatch({
-            'passport.hero.video_tokens': 'red beard, cowboy jacket, white jeans',
-        });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        expect(scene.passport.hero.video_tokens).to.deep.equal(['red beard', 'cowboy jacket', 'white jeans']);
-    });
-
-    // ======================================================
-    // Test 9: empty video_tokens string clears the override (null)
-    // ======================================================
-    it('clears video_tokens override when empty string is sent', () => {
-        applySceneFieldsPatch({ 'passport.hero.video_tokens': 'old token' });
-        applySceneFieldsPatch({ 'passport.hero.video_tokens': '' });
-
-        const book = bookModule.loadBook(bookId);
-        const scene = book.chapters[0].scenes[0];
-        expect(scene.passport.hero.video_tokens).to.be.null;
-    });
-
-    // ======================================================
-    // Test 10: resolvePassport falls back to global after a clear
-    // ======================================================
-    it('resolvePassport falls back to global passport once the override is cleared', () => {
-        const book = bookModule.loadBook(bookId);
-        const hero = book.characters.find(c => c.id === 'hero');
-        const scene = {
-            scene_id: SCENE_ID,
-            passport: { hero: { clothes: null } },  // '' → null on the server
-        };
-
-        const resolved = promptBuilder.resolvePassport(hero, {}, scene);
-        expect(resolved.clothes).to.equal('dark suit');  // global fallback
+    it('resolveHeroLook falls back to the base passport once the override is cleared', async () => {
+        await patch({ 'looks.yura': 'coat' });
+        expect(resolved('yura').clothes).to.equal('grey wool coat');
+        await patch({ 'looks.yura': null });
+        expect(resolved('yura')).to.include({ look_id: 'base', source: 'base', clothes: 'leather jacket' });
+        expect(scene()).to.not.have.property('looks');
     });
 });

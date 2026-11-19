@@ -46,6 +46,8 @@ const EDITOR_DIR = path.join(REPO_ROOT, 'packages', 'animastor-editor', 'src');
 const EDITOR_REGISTRARS = [
     path.join(EDITOR_DIR, 'editor-routes.cjs'),
     path.join(EDITOR_DIR, 'entity-crud-routes.cjs'),
+    // VBook 4 step 4: the hero API registrar (VBOOK_FORMAT_V4 §8.2)
+    path.join(EDITOR_DIR, 'hero-routes.cjs'),
 ];
 const EDITOR_PORTS = path.join(EDITOR_DIR, 'editor-ports.cjs');
 const BOOK_ROUTES = path.join(BACKEND_SRC, 'routes', 'book-routes.cjs');
@@ -59,7 +61,8 @@ const HOST_CONTOUR_DIRS = [
     path.join(REPO_ROOT, 'packages', 'animastor-player', 'src'),
 ];
 
-// ── The frozen edit HTTP surface (pre-split inventory, 26 endpoints) ────
+// ── The frozen edit HTTP surface (pre-split inventory, 26 endpoints; VBook 4
+//    step 4: −9 routes of 3.1, +15 hero routes = 32) ────
 // 11 from the old core-routes.cjs + 15 from the old entity-crud-routes.cjs.
 // (The audit's 28-endpoint de-facto contract counts POST /book/:id/snapshot
 // in parse-routes.cjs and GET /config in config-routes.cjs — those two stay
@@ -73,26 +76,34 @@ const EDITOR_ROUTES = [
     ['patch', '/api/v1/book/:bookId/scene/:chapterId/:sceneId'],
     ['patch', '/api/v1/book/:bookId/metadata'],
     ['patch', '/api/v1/book/:bookId/locations/:locationId'],
-    ['patch', '/api/v1/book/:bookId/characters/:characterId'],
-    ['patch', '/api/v1/book/:bookId/voices/:voiceId'],
-    ['patch', '/api/v1/book/:bookId/behaviors/:characterId'],
     ['delete', '/api/v1/book/:bookId'],
     // entity-crud-routes.cjs (15)
     ['post', '/api/v1/book/blank'],
-    ['post', '/api/v1/book/:bookId/characters'],
-    ['delete', '/api/v1/book/:bookId/characters/:characterId'],
     ['post', '/api/v1/book/:bookId/locations'],
     ['delete', '/api/v1/book/:bookId/locations/:locationId'],
-    ['post', '/api/v1/book/:bookId/voices'],
-    ['delete', '/api/v1/book/:bookId/voices/:voiceId'],
-    ['post', '/api/v1/book/:bookId/behaviors'],
-    ['delete', '/api/v1/book/:bookId/behaviors/:characterId'],
     ['post', '/api/v1/book/:bookId/chapters'],
     ['delete', '/api/v1/book/:bookId/chapters/:chapterId'],
     ['post', '/api/v1/book/:bookId/chapters/:chapterId/scenes'],
     ['delete', '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId'],
     ['post', '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units'],
     ['delete', '/api/v1/book/:bookId/chapters/:chapterId/scenes/:sceneId/units/:unitId'],
+    // hero-routes.cjs (15) — VBook 4 step 4; the nine 3.1 routes /characters,
+    // /voices, /behaviors (3 PATCH in core, 6 POST/DELETE in entity CRUD) are gone
+    ['get', '/api/v1/book/:bookId/heroes'],
+    ['get', '/api/v1/book/:bookId/heroes/:heroId'],
+    ['post', '/api/v1/book/:bookId/heroes'],
+    ['patch', '/api/v1/book/:bookId/heroes/:heroId'],
+    ['delete', '/api/v1/book/:bookId/heroes/:heroId'],
+    ['delete', '/api/v1/book/:bookId/hero-files'],
+    ['post', '/api/v1/book/:bookId/heroes/:heroId/rules'],
+    ['patch', '/api/v1/book/:bookId/heroes/:heroId/rules/:ruleId'],
+    ['delete', '/api/v1/book/:bookId/heroes/:heroId/rules/:ruleId'],
+    ['post', '/api/v1/book/:bookId/heroes/:heroId/looks'],
+    ['patch', '/api/v1/book/:bookId/heroes/:heroId/looks/:lookId'],
+    ['delete', '/api/v1/book/:bookId/heroes/:heroId/looks/:lookId'],
+    ['post', '/api/v1/book/:bookId/looks/assign'],
+    ['get', '/api/v1/book/:bookId/behaviour'],
+    ['patch', '/api/v1/book/:bookId/behaviour'],
 ];
 
 // Non-editor surface literals that must never appear in the contour files.
@@ -159,12 +170,11 @@ describe('E1: editor registrars register exactly the frozen edit surface', () =>
             app[m] = (p, h) => registered.push({ method: m, path: p });
         }
         const deps = stubDeps();
-        require(EDITOR_REGISTRARS[0])(app, {}, deps);
-        require(EDITOR_REGISTRARS[1])(app, {}, deps);
+        for (const registrar of EDITOR_REGISTRARS) require(registrar)(app, {}, deps);
         return registered;
     }
 
-    it('registers exactly the 26 frozen method+path pairs (nothing more)', () => {
+    it('registers exactly the 32 frozen method+path pairs (nothing more)', () => {
         const got = register().map((r) => [r.method, r.path]).sort();
         expect(got, 'edit route surface changed').to.deep.equal([...EDITOR_ROUTES].sort());
     });

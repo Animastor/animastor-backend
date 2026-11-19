@@ -184,7 +184,9 @@ describe('Stage 96 — DATA_ROOT (runtime-config)', () => {
         it('task-handler.cjs: snapshot-путь только из config.BOOKS_DIR', () => {
             const src = read('src/services/task-handler.cjs');
             expect(src).to.not.include("config.BOOKS_DIR || '/data/books'");
-            expect((src.match(/path\.join\(config\.BOOKS_DIR,/g) || []).length).to.equal(2);
+            // one place builds the snapshot path, from config.BOOKS_DIR, through joinInside
+            expect((src.match(/joinInside\(config\.BOOKS_DIR,/g) || []).length).to.equal(1);
+            expect(src).to.not.match(/path\.join\(config\.BOOKS_DIR,/);
         });
 
         it('book-deletion.cjs: snapshot-путь только из config.BOOKS_DIR', () => {

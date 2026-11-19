@@ -1,0 +1,57 @@
+{
+  "78": {
+    "inputs": {
+      "model_repo": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "download_source": "ModelScope",
+      "precision": "bf16",
+      "attn_mode": "sdpa",
+      "auto_download": true
+    },
+    "class_type": "Qwen3TTSLoader",
+    "_meta": {
+      "title": "Qwen3-TTS Loader 🚀"
+    }
+  },
+  "71": {
+    "inputs": {
+      "text": "",
+      "voice_instruction": "A neutral adult voice.",
+      "language": "Russian",
+      "output_mode": "Concatenate (Merge)",
+      "seed": 1,
+      "max_new_tokens": 2048,
+      "temperature": 0.9,
+      "top_p": 1,
+      "top_k": 50,
+      "repetition_penalty": 1.05,
+      "subtalker_temperature": 0.9,
+      "subtalker_top_p": 1,
+      "subtalker_top_k": 50,
+      "model_obj": [
+        "78",
+        0
+      ]
+    },
+    "class_type": "Qwen3TTSVoiceDesign",
+    "_meta": {
+      "title": "Qwen3-TTS Voice Design 🎨 (reference candidate)"
+    }
+  },
+  "1009": {
+    "inputs": {
+      "filename_prefix": "voices/ref",
+      "language": "Russian",
+      "whisper_model": "small",
+      "device": "auto",
+      "compute_type": "auto",
+      "audio": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "SaveAudioAnimastorReference",
+    "_meta": {
+      "title": "Animastor voice reference (normalise + Whisper)"
+    }
+  }
+}

@@ -6,6 +6,12 @@
 
 const helpers = require('./helpers');
 const charUtils = require('@animastor/generation').promptProfiles.characterUtils;
+// VBook 4 (VBOOK_FORMAT_V4 §4a.5, §8.1): heroes are read through the runtime
+// helpers, appearance ONLY through resolveHeroLook (scene look → chapter look →
+// base passport, then scene.look_patch). This module keeps what is not look
+// resolution: placeholder stripping and gluing the description.
+const { passportHeroes } = require('@animastor/vbook-runtime/heroes.cjs');
+const { resolveHeroLook } = require('@animastor/vbook-runtime/looks.cjs');
 const assembly = require('@animastor/generation').promptProfiles.assemblyProfile;
 
 function resolveRenderMode(scene, book) {
@@ -28,26 +34,6 @@ function resolveSceneLocation(scene) {
     return {
         id: scene.location.id || null,
         environment: scene.location.environment || {},
-    };
-}
-
-function resolveField(field, globalP, chapterP, sceneP) {
-    return sceneP?.[field]
-        || chapterP?.[field]
-        || globalP?.[field]
-        || "";
-}
-
-function resolvePassport(c, chapter, scene) {
-    const globalP = c.passport || {};
-    const chapterP = chapter?.character?.[c.id] || {};
-    const sceneV = scene?.visual?.character?.[c.id] || {};
-    // scene.passport[characterId] — прямое переопределение паспорта на уровне сцены.
-    // Любое поле, заданное здесь, ПОЛНОСТЬЮ замещает соответствующее глобальное поле.
-    const sceneOverride = scene?.passport?.[c.id] || {};
-    return {
-        appearance: sceneOverride.appearance ?? resolveField("appearance", globalP, chapterP, sceneV),
-        clothes: sceneOverride.clothes ?? resolveField("clothes", globalP, chapterP, sceneV),
     };
 }
 
@@ -75,35 +61,24 @@ function buildCharacters(scenePayload, unit, chapter, book) {
         return [];
     }
 
+    // Heroes with a passport (the former book.characters). A participant is
+    // taken ONLY by its exact hero id (owner's decision 18.11, VBook 4 step 4):
+    // the fuzzy match by the first four letters of a name token is gone, the
+    // same rule as video. An unknown id is a non-blocking warning of the book
+    // (hero_issues `unknown_participant`), not a guess.
+    const heroes = passportHeroes(book);
     const seen = new Set();
     const chars = participantIds
         .filter(id => (seen.has(id) ? false : (seen.add(id), true)))
-        .map(id => {
-            const exact = book.characters?.find(c => c.id === id);
-            if (exact) return exact;
-            const idNorm = helpers.normalizeForMatch(id);
-            for (const c of (book.characters || [])) {
-                const cNameNorm = helpers.normalizeForMatch(c.name || '');
-                if (idNorm && cNameNorm) {
-                    const idTokens = new Set(idNorm.split(/\s+/).filter(Boolean));
-                    const nameTokens = cNameNorm.split(/\s+/).filter(Boolean);
-                    if ([...idTokens].some(t => t.length >= 4 && nameTokens.some(nt =>
-                        nt.startsWith(t.slice(0, 4)) || t.startsWith(nt.slice(0, 4))
-                    ))) {
-                        return c;
-                    }
-                }
-            }
-            return null;
-        })
+        .map(id => heroes.find(c => c.id === id) || null)
         .filter(Boolean);
 
     if (!chars.length) return [];
 
     const result = [];
     for (const c of chars) {
-        const resolvedP = resolvePassport(c, chapter, scenePayload);
-        const { appearance, clothing } = buildCharacterPassport(resolvedP);
+        const look = resolveHeroLook(book, chapter, scenePayload, c.id);
+        const { appearance, clothing } = buildCharacterPassport(look);
         const state = resolveState(c, chapter, scenePayload);
         let desc;
         if (appearance) {
@@ -269,7 +244,7 @@ const IMAGE_SECTIONS = {
     characters: ({ scenePayload, iuPayload, chapterPayload, bookPayload }) =>
         buildCharacters(scenePayload, iuPayload, chapterPayload, bookPayload),
     directPrompt: ({ directPrompt, bookPayload }) =>
-        directPrompt ? charUtils.normalizeCharacterRefs(directPrompt, bookPayload?.characters) : null,
+        directPrompt ? charUtils.normalizeCharacterRefs(directPrompt, passportHeroes(bookPayload)) : null,
     quality: ({ iuPayload, scenePayload, defaults }) => {
         if (resolveImageField(iuPayload, 'quality')) return `image quality: ${resolveImageField(iuPayload, 'quality')}`;
         if (scenePayload?.visual?.quality) return `image quality: ${scenePayload.visual.quality}`;
@@ -391,8 +366,6 @@ function generateIUImageWorkflow(unit, scenePayload, chapterPayload, bookPayload
 module.exports = {
     resolveRenderMode,
     resolveSceneLocation,
-    resolveField,
-    resolvePassport,
     buildCharacterPassport,
     resolveState,
     buildCharacters,

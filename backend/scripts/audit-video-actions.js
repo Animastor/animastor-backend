@@ -20,11 +20,18 @@
 //      INFO — cross-prompt (SOFT): image.prompt shows participants that
 //      video.action doesn't name — normal when only a subset moves.
 //
+//   6. VBook 4 (step 3): the cast is characters/<id>.json — FAIL for a broken
+//      hero file (it is not part of the cast), WARN for an alias two heroes
+//      claim (it names nobody: buildAliasIndex). The 3.1 files characters.json /
+//      mentions.json are not read.
+//
 // Exit code 0 when no FAIL/WARN; 1 otherwise.
 
 const path = require('path');
 const fs = require('fs');
-const { findCanonicalId, snakeTokensInText, KNOWN_NON_CHARACTER_SNAKE, hasMixedScript, isSnakeLike, GROUP_NOUNS, PRONOUNS, findCrossPromptGaps } = require('../src/utils/snake-guard');
+const { findCanonicalId, snakeTokensInText, KNOWN_NON_CHARACTER_SNAKE, hasMixedScript, GROUP_NOUNS, PRONOUNS, findCrossPromptGaps } = require('../src/utils/snake-guard');
+const { listCharacters } = require('@animastor/vbook-runtime/character-store.cjs');
+const { buildAliasIndex } = require('@animastor/vbook-runtime/heroes.cjs');
 
 const BOOKS_DIR = process.env.BOOKS_DIR || '/data/books';
 const PASS = '\x1b[32m✓\x1b[0m';
@@ -54,23 +61,23 @@ function hasAnyWord(text, words) {
 // of truth used by the pipeline repair step (stepRepairFantasyIds) and the
 // lazy-book write barrier. Keeps audit and pipeline in lockstep.
 
-function loadBook(bookId) {
-    const dir = path.join(BOOKS_DIR, bookId);
+function loadBook(bookId, booksDir = BOOKS_DIR) {
+    const dir = path.join(booksDir, bookId);
     if (!fs.existsSync(dir)) {
-        console.error(`Book ${bookId} not found at ${dir}`);
-        process.exit(1);
+        throw Object.assign(new Error(`Book ${bookId} not found at ${dir}`), { code: 'not_found' });
     }
-    const characters = fs.existsSync(path.join(dir, 'characters.json'))
-        ? JSON.parse(fs.readFileSync(path.join(dir, 'characters.json'), 'utf8'))
-        : [];
+    // VBook 4: one file per hero (characters/<id>.json); broken files are issues
+    const cast = listCharacters(dir);
+    const heroes = cast.heroes;
+    const heroIssues = cast.issues.filter((i) => i.blocking);
     const locations = fs.existsSync(path.join(dir, 'locations.json'))
         ? JSON.parse(fs.readFileSync(path.join(dir, 'locations.json'), 'utf8'))
         : {};
-    const charIds = new Set(characters.map(c => c.id).filter(Boolean));
+    const charIds = new Set(heroes.map(c => c.id).filter(Boolean));
     const locIds = new Set(Object.keys(locations || {}));
     // Display-name words ("Mikhail", "Berlioz") for possessive detection
     const nameWords = new Set();
-    for (const c of characters) {
+    for (const c of heroes) {
         const name = (c.name || c.id || '').replace(/\(.*?\)/g, ' ').split(/[\s,.;!?]+/);
         for (const w of name) {
             const norm = w.toLowerCase();
@@ -85,7 +92,7 @@ function loadBook(bookId) {
             chapters.push(JSON.parse(fs.readFileSync(path.join(chDir, f), 'utf8')));
         }
     }
-    return { bookId, charIds, locIds, nameWords, chapters };
+    return { bookId, dir, heroes, heroIssues, charIds, locIds, nameWords, chapters };
 }
 
 function auditUnit(unit, scene, ctx) {
@@ -172,17 +179,8 @@ function auditUnit(unit, scene, ctx) {
     return findings;
 }
 
-function main() {
-    const targetBookId = process.argv[2];
-    if (!targetBookId) {
-        console.error('Usage: node scripts/audit-video-actions.js <bookId>');
-        process.exit(1);
-    }
-
-    const ctx = loadBook(targetBookId);
-    console.log(`\n## ${ctx.bookId}`);
-    console.log(`Characters: ${[...ctx.charIds].join(', ') || '(none)'}`);
-
+/** Every finding of a book: { unitsSeen, findings: [{level, where, msg}] }. */
+function auditBook(ctx) {
     const all = [];
     let unitsSeen = 0;
     for (const ch of ctx.chapters) {
@@ -197,32 +195,43 @@ function main() {
     // Mixed-script registry ids ("patriarshie_pруды") — the chimera class in the
     // registries themselves. The write barrier normalizes them on creation, so
     // a surviving one means the fix did not run.
-    const dir = path.join(BOOKS_DIR, targetBookId);
     for (const id of ctx.charIds) {
-        if (hasMixedScript(id)) all.push({ level: 'FAIL', where: 'characters.json', msg: `mixed-script (latin+cyrillic) id "${id}" — should be normalized` });
+        if (hasMixedScript(id)) all.push({ level: 'FAIL', where: `characters/${id}.json`, msg: `mixed-script (latin+cyrillic) id "${id}" — should be normalized` });
     }
     for (const id of ctx.locIds) {
         if (hasMixedScript(id)) all.push({ level: 'FAIL', where: 'locations.json', msg: `mixed-script (latin+cyrillic) id "${id}" — should be normalized` });
     }
 
-    // mentions.json — alias targets must resolve to a real character id
-    const mentionsPath = path.join(dir, 'mentions.json');
-    if (fs.existsSync(mentionsPath)) {
-        const mentions = JSON.parse(fs.readFileSync(mentionsPath, 'utf8')) || {};
-        for (const [alias, target] of Object.entries(mentions)) {
-            const low = String(target).toLowerCase();
-            if (ctx.charIds.has(low)) continue;
-            // Natural-designation targets ("женщина в будочке") are not ids —
-            // only snake-shaped targets are checked for chimeras/inventions.
-            if (!isSnakeLike(target)) continue;
-            const canonical = findCanonicalId(target, ctx.charIds);
-            if (canonical) {
-                all.push({ level: 'FAIL', where: 'mentions.json', msg: `CHIMERA mention "${alias}" -> ${target} should be "${canonical}"` });
-            } else {
-                all.push({ level: 'FAIL', where: 'mentions.json', msg: `INVENTED mention target "${target}" for "${alias}" (not in characters.json)` });
-            }
-        }
+    // VBook 4: a broken hero file is not part of the cast; an alias two heroes
+    // claim names nobody (VBOOK_FORMAT_V4 §7, buildAliasIndex).
+    for (const issue of ctx.heroIssues || []) {
+        all.push({ level: 'FAIL', where: issue.file, msg: `broken hero file (${issue.code}): ${issue.message}` });
     }
+    for (const alias of buildAliasIndex(ctx.heroes || []).ambiguous) {
+        all.push({ level: 'WARN', where: 'characters/*.json', msg: `ambiguous alias "${alias}" — claimed by more than one hero, names nobody` });
+    }
+
+    return { unitsSeen, findings: all };
+}
+
+function main() {
+    const targetBookId = process.argv[2];
+    if (!targetBookId) {
+        console.error('Usage: node scripts/audit-video-actions.js <bookId>');
+        process.exit(1);
+    }
+
+    let ctx;
+    try {
+        ctx = loadBook(targetBookId);
+    } catch (err) {
+        console.error(err.message);
+        process.exit(1);
+    }
+    console.log(`\n## ${ctx.bookId}`);
+    console.log(`Characters: ${[...ctx.charIds].join(', ') || '(none)'}`);
+
+    const { unitsSeen, findings: all } = auditBook(ctx);
 
     const byLevel = { FAIL: [], WARN: [], INFO: [] };
     for (const f of all) byLevel[f.level].push(f);
@@ -238,4 +247,6 @@ function main() {
     process.exit(byLevel.FAIL.length + byLevel.WARN.length > 0 ? 1 : 0);
 }
 
-main();
+module.exports = { loadBook, auditUnit, auditBook };
+
+if (require.main === module) main();

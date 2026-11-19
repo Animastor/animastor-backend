@@ -460,6 +460,17 @@ collectAsync('11. engine: managed CPU install → CPU torch index, --cpu flag, o
                 return { code: 0, stdout: '', stderr: '' };
             },
             'git -C /tmp/comfy/custom_nodes/qwen3-tts checkout 2ee1131': { code: 0, stdout: '', stderr: '' },
+            // animastor-voice-ref: cloned OUTSIDE custom_nodes, subdirectory copied (VOICE_REFERENCES)
+            'git clone https://github.com/Animastor/animastor-worker /tmp/comfy/.animastor-node-sources/animastor-voice-ref': ({ fs: mfs }) => {
+                mfs.mkdirSync('/tmp/comfy/.animastor-node-sources/animastor-voice-ref/comfyui-nodes/animastor-voice-ref', { recursive: true });
+                mfs.writeFileSync('/tmp/comfy/.animastor-node-sources/animastor-voice-ref/comfyui-nodes/animastor-voice-ref/requirements.txt', 'faster-whisper==1.2.1\n');
+                return { code: 0, stdout: '', stderr: '' };
+            },
+            'cp -a /tmp/comfy/.animastor-node-sources/animastor-voice-ref/comfyui-nodes/animastor-voice-ref /tmp/comfy/custom_nodes/animastor-voice-ref': ({ fs: mfs }) => {
+                mfs.mkdirSync('/tmp/comfy/custom_nodes/animastor-voice-ref', { recursive: true });
+                mfs.writeFileSync('/tmp/comfy/custom_nodes/animastor-voice-ref/requirements.txt', 'faster-whisper==1.2.1\n');
+                return { code: 0, stdout: '', stderr: '' };
+            },
             'npm install --omit=dev --no-audit --no-fund': { code: 0, stdout: '', stderr: '' },
         },
         files: {
@@ -623,7 +634,8 @@ collectAsync('15. resolveAndPlan: real audio/qwen-tts manifest — pre/post-prom
     assert.strictEqual(nodesStep.decision, 'yes', 'custom nodes approved');
     assert.strictEqual(modelsStep.decision, 'yes', 'models approved');
     assert.strictEqual(wfStep.decision, 'all', 'workflows approved');
-    assert.strictEqual(nodesStep.missing.length, 1, 'only the required node is installed (optional manager excluded)');
+    // VOICE_REFERENCES (2026-11-12): qwen3-tts + animastor-voice-ref are required; the optional manager is excluded
+    assert.strictEqual(nodesStep.missing.length, 2, 'only the required nodes are installed (optional manager excluded)');
 
     // CPU torch resolution survives the rebuild (engine's source of truth)
     const picked = pickTorchSpec(manifests, decisions, [], 'cpu');
@@ -700,6 +712,8 @@ function createRealManifestEngineIo(overrides = {}) {
             // canonical production workflows — real content so baseline_sha256 matches
             '/tmp/repo/backend/ai/workflows/tts-qwen-narrator.json': realFs.readFileSync(path.join(repoRootReal, 'backend/ai/workflows/tts-qwen-narrator.json'), 'utf8'),
             '/tmp/repo/backend/ai/workflows/tts-qwen-dialogue.json': realFs.readFileSync(path.join(repoRootReal, 'backend/ai/workflows/tts-qwen-dialogue.json'), 'utf8'),
+            '/tmp/repo/backend/ai/workflows/tts-qwen-voice-reference.json': realFs.readFileSync(path.join(repoRootReal, 'backend/ai/workflows/tts-qwen-voice-reference.json'), 'utf8'),
+            '/tmp/repo/backend/ai/workflows/tts-qwen-voice-transcribe.json': realFs.readFileSync(path.join(repoRootReal, 'backend/ai/workflows/tts-qwen-voice-transcribe.json'), 'utf8'),
         },
         httpResults: {
             // ModelScope listing — real API shape: Data.Files, tree recursion via Root=
@@ -712,7 +726,8 @@ function createRealManifestEngineIo(overrides = {}) {
                 json: () => ({
                     Qwen3TTSVoiceDesign: {}, Qwen3TTSLoader: {}, Qwen3TTSVoiceClonePrompt: {},
                     Qwen3TTSRoleBank: {}, Qwen3TTSAdvancedDialogue: {}, Qwen3TTSScriptProcessor: {},
-                    SaveAudioMP3: {},
+                    Qwen3TTSVoiceClone: {}, SaveAudioAnimastorReference: {},
+                    SaveAudioMP3: {}, LoadAudio: {},
                 }),
             },
         },
@@ -720,7 +735,18 @@ function createRealManifestEngineIo(overrides = {}) {
     for (const k of ['execResults', 'httpResults', 'files']) {
         base[k] = { ...base[k], ...(overrides[k] || {}) };
     }
-    return createMockIo(base);
+    const made = createMockIo(base);
+    // faster-whisper files are pinned by sha256 in the manifest: the mock hash
+    // of a downloaded whisper file is its manifest checksum (the bytes are mocks)
+    const whisper = Object.fromEntries(require('../src/installer/install-manifest').loadManifest('audio/qwen-tts').dependencies
+        .filter((d) => d.kind === 'model' && /faster-whisper/.test(d.target_dir || ''))
+        .map((d) => [path.posix.join(d.target_dir, d.filename), d.checksum.value]));
+    const plainHash = made.io.hashFile;
+    made.io.hashFile = async (filePath, algo) => {
+        const hit = Object.keys(whisper).find((k) => String(filePath).replace(/\.part$/, '').endsWith(k));
+        return hit ? whisper[hit] : plainHash(filePath, algo);
+    };
+    return made;
 }
 
 // ========================== 16b. D1 consent gate =======================
@@ -799,7 +825,11 @@ collectAsync('16. engine: managed CPU install from REAL audio/qwen-tts manifest 
     assert.strictEqual(reqCall.args[reqCall.args.indexOf('--index-url') + 1], 'https://download.pytorch.org/whl/cpu', 'requirements prefer the pinned index');
 
     // Models: both ModelScope repos preloaded incl. nested speech_tokenizer file
-    const modelResults = result.results.models;
+    // + the four faster-whisper-small files (VOICE_REFERENCES, checked separately)
+    const whisperResults = result.results.models.filter((mr) => /faster-whisper/.test(mr.id));
+    assert.strictEqual(whisperResults.length, 4, `four whisper files: ${JSON.stringify(whisperResults)}`);
+    for (const mr of whisperResults) assert.strictEqual(mr.status, 'downloaded', `${mr.id}: ${mr.status} ${mr.reason || ''}`);
+    const modelResults = result.results.models.filter((mr) => !/faster-whisper/.test(mr.id));
     assert.strictEqual(modelResults.length, 2, `two model repos: ${JSON.stringify(modelResults)}`);
     for (const mr of modelResults) {
         assert.strictEqual(mr.status, 'downloaded', `${mr.id}: ${mr.status} ${mr.reason || ''}`);
@@ -812,7 +842,7 @@ collectAsync('16. engine: managed CPU install from REAL audio/qwen-tts manifest 
     assert.ok(downloadUrls.some((u) => u.includes('FilePath=speech_tokenizer%2Fmodel.safetensors')), 'nested file downloaded via FilePath');
 
     // Workflows: canonical repo content, sha256-verified against the manifest
-    assert.strictEqual(result.results.workflows.length, 2, 'two workflows');
+    assert.strictEqual(result.results.workflows.length, 4, 'four workflows (narrator, dialogue, voice-reference, voice-transcribe)');
     for (const wf of result.results.workflows) {
         assert.strictEqual(wf.status, 'installed', `${wf.id}: ${wf.status} ${wf.reason || ''}`);
         assert.strictEqual(wf.grade, 'sha256-verified');
@@ -1567,6 +1597,7 @@ collectAsync('25. engine: re-run heals a present-but-broken node (deps retry + m
     const classRegistry = {
         Qwen3TTSVoiceDesign: {}, Qwen3TTSLoader: {}, Qwen3TTSVoiceClonePrompt: {},
         Qwen3TTSRoleBank: {}, Qwen3TTSAdvancedDialogue: {}, Qwen3TTSScriptProcessor: {},
+        Qwen3TTSVoiceClone: {}, SaveAudioAnimastorReference: {}, LoadAudio: {},
         SaveAudioMP3: {},
     };
     const repoRootReal = path.resolve(__dirname, '..', '..', '..');
@@ -1580,6 +1611,15 @@ collectAsync('25. engine: re-run heals a present-but-broken node (deps retry + m
             '/tmp/comfy/custom_nodes/qwen3-tts/__init__.py': '# node',
             '/tmp/comfy/custom_nodes/qwen3-tts/nodes.py': '# node',
             '/tmp/comfy/custom_nodes/qwen3-tts/requirements.txt': 'soundfile\nfunasr\n',
+            '/tmp/comfy/custom_nodes/animastor-voice-ref/__init__.py': '# node',
+            '/tmp/comfy/custom_nodes/animastor-voice-ref/requirements.txt': 'faster-whisper==1.2.1\n',
+            '/tmp/comfy/custom_nodes/animastor-voice-ref/.animastor-source.json': JSON.stringify({ repository: 'https://github.com/Animastor/animastor-worker', commit: '6a88ad960e47df9fa6e76e4cce5308d9590297c3', subdirectory: 'comfyui-nodes/animastor-voice-ref' }),
+            '/tmp/comfy/models/whisper/faster-whisper-small/config.json': 'm',
+            '/tmp/comfy/models/whisper/faster-whisper-small/model.bin': 'm',
+            '/tmp/comfy/models/whisper/faster-whisper-small/tokenizer.json': 'm',
+            '/tmp/comfy/models/whisper/faster-whisper-small/vocabulary.txt': 'm',
+            '/tmp/comfy/user/default/workflows/animastor/audio/tts-qwen-voice-reference.json': workflowContent('tts-qwen-voice-reference.json'),
+            '/tmp/comfy/user/default/workflows/animastor/audio/tts-qwen-voice-transcribe.json': workflowContent('tts-qwen-voice-transcribe.json'),
             '/tmp/comfy/models/TTS/Qwen/Qwen3-TTS-12Hz-1.7B-Base/model.safetensors': 'm',
             '/tmp/comfy/models/TTS/Qwen/Qwen3-TTS-12Hz-1.7B-Base/speech_tokenizer/model.safetensors': 'm',
             '/tmp/comfy/models/TTS/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign/model.safetensors': 'm',
@@ -1598,6 +1638,8 @@ collectAsync('25. engine: re-run heals a present-but-broken node (deps retry + m
                     'model-repo:qwen3-tts-12hz-1.7b-base': { status: 'installed' },
                     'workflow:tts-qwen-narrator': { status: 'verified' },
                     'workflow:tts-qwen-dialogue': { status: 'verified' },
+                    'workflow:tts-qwen-voice-reference': { status: 'verified' },
+                    'workflow:tts-qwen-voice-transcribe': { status: 'verified' },
                     'worker:audio/qwen-tts': { status: 'installed' },
                     env: { status: 'installed' },
                 },

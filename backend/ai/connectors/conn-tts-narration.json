@@ -1,41 +1,51 @@
 {
-  "connectorVersion": "1.0.0",
+  "connectorVersion": "2.0.0",
   "workflow": "tts-qwen-narrator",
   "workflowHash": "",
-  "label": "TTS Narration (Qwen)",
-  "description": "Text-to-speech narration using Qwen3-TTS Voice Design",
+  "label": "TTS Narration (Qwen, voice clone)",
+  "description": "Narration by cloning the narrator's locked voice reference (Base model + LoadAudio → VoiceClonePrompt → VoiceClone)",
   "type": "audio",
   "profile": {
     "audioProfile": "qwen-tts"
   },
   "metadata": {
     "author": "Animastor",
-    "updated": "2026-06-19",
+    "updated": "2026-11-12",
     "category": "audio-generation"
   },
   "compatibility": {
     "nodeClasses": {
-      "108": "Qwen3TTSVoiceDesign",
-      "78": "Qwen3TTSLoader",
+      "79": "Qwen3TTSLoader",
+      "90": "LoadAudio",
+      "91": "Qwen3TTSVoiceClonePrompt",
+      "108": "Qwen3TTSVoiceClone",
       "1008": "SaveAudioMP3"
     }
   },
   "inputs": {
     "narrationText": {
       "nodeId": "108",
-      "field": "inputs.text",
-      "expectedClass": "Qwen3TTSVoiceDesign",
+      "field": "inputs.target_text",
+      "expectedClass": "Qwen3TTSVoiceClone",
       "entityType": "narrationText",
       "label": "Narration Text",
       "required": true
     },
-    "voiceInstruction": {
-      "nodeId": "108",
-      "field": "inputs.voice_instruction",
-      "expectedClass": "Qwen3TTSVoiceDesign",
-      "entityType": "voiceInstruction",
-      "label": "Voice Instruction",
-      "required": false
+    "referenceAudio": {
+      "nodeId": "90",
+      "field": "inputs.audio",
+      "expectedClass": "LoadAudio",
+      "entityType": "referenceAudio",
+      "label": "Reference Audio",
+      "required": true
+    },
+    "referenceText": {
+      "nodeId": "91",
+      "field": "inputs.ref_text",
+      "expectedClass": "Qwen3TTSVoiceClonePrompt",
+      "entityType": "referenceText",
+      "label": "Reference Text",
+      "required": true
     }
   },
   "outputs": {
@@ -51,9 +61,25 @@
     "seed": {
       "nodeId": "108",
       "field": "inputs.seed",
-      "expectedClass": "Qwen3TTSVoiceDesign",
+      "expectedClass": "Qwen3TTSVoiceClone",
       "entityType": "seed",
       "label": "Seed"
+    },
+    "language": {
+      "nodeId": "108",
+      "field": "inputs.target_language",
+      "expectedClass": "Qwen3TTSVoiceClone",
+      "entityType": "language",
+      "label": "Language",
+      "default": "Russian"
+    },
+    "temperature": {
+      "nodeId": "108",
+      "field": "inputs.temperature",
+      "expectedClass": "Qwen3TTSVoiceClone",
+      "entityType": "temperature",
+      "label": "Temperature",
+      "default": 0.9
     },
     "quality": {
       "nodeId": "1008",
@@ -70,22 +96,6 @@
       "entityType": "outputFilenamePrefix",
       "label": "Output Filename Prefix",
       "default": "audio/tts"
-    },
-    "language": {
-      "nodeId": "108",
-      "field": "inputs.language",
-      "expectedClass": "Qwen3TTSVoiceDesign",
-      "entityType": "language",
-      "label": "Language",
-      "default": "Russian"
-    },
-    "temperature": {
-      "nodeId": "108",
-      "field": "inputs.temperature",
-      "expectedClass": "Qwen3TTSVoiceDesign",
-      "entityType": "temperature",
-      "label": "Temperature",
-      "default": 0.9
     }
   }
 }

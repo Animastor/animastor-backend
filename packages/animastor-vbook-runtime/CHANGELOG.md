@@ -1,5 +1,144 @@
 # Changelog
 
+## 0.5.0 (2026-11-14, unpublished)
+
+### Step 4 additions (2026-11-18)
+
+- `character-store.removeCharacterEntry(bookDir, name)` / `isPlainEntryName` —
+  delete one entry of `characters/` by its file name (a broken file whose name
+  is not a hero id, owner's decision В14); a link is removed as a link.
+- `voice.reference.source_timbre_sha256` — sha256 of the timbre a reference was
+  made from (schema, validator, port); `voice.timbreSha256`,
+  `voice.isReferenceOutdated` (owner's decision 18.11).
+- `heroes.addPossibleDuplicates(bookMeta, entries)` — `book.json`
+  `analysis.possible_duplicates`; the loaders show live entries as
+  non-blocking `hero_issues` `possible_duplicate` (`lazy-book/create.js` writes
+  `analysis.possibleDuplicates` of a window).
+- `heroes.collectSceneHeroIssues(book)` — non-blocking `unknown_participant`
+  for a scene participant that names no hero; the full and draft loaders and
+  `buildBookFromBundle` add it.
+
+VBook 4 — "one file per hero" (animastor-docs `architecture/VBOOK_FORMAT_V4.md`,
+step 1 of §12). **Breaking: VBook 3.1 is not readable and there is no
+migration.**
+
+### Format
+
+- Layout on disk and in a `.vbook`, by exact path: `manifest.json`
+  (`vbook_version: 4`, integer; `"4"` and `"4.x"` are also read), `book.json`
+  (`structure.chapters_order`, `structure.characters_order`), optional
+  `bible.json` / `locations.json` / `source.txt`, `behaviour.json`,
+  `characters/<id>.json` (schema `animastor.character/1`), `chapters/ch-*.json`.
+  `characters.json`, `voices.json`, `behavior.json`, `mentions.json` are gone.
+- In memory: `{ manifest, book, bible, locations, behaviour, heroes[],
+  hero_issues[], chapters[] }`. `book.characters` / `voices` / `behaviors` /
+  `mentions` are removed; a book object that still carries one is refused.
+
+### Added
+
+- `src/heroes.cjs` — `findHero`, `passportHeroes`, `narrator`, `voiceInstruct`,
+  `buildAliasIndex`, `heroRules`, `sortHeroes`, `collectBookHeroIssues`,
+  `CANONICAL_ID_RE`, `RESERVED_HERO_IDS`, `isCanonicalHeroId`, `isValidHeroId`.
+- `src/looks.cjs` — `resolveHeroLook(book, chapter, scene, heroId)`.
+- `src/character-store.cjs` — the only writer of hero files: `listCharacters`,
+  `inspectCharacter`, `readCharacter`, `writeCharacter`, `updateCharacter`,
+  `removeCharacter`, `atomicWriteFile` / `atomicWriteJson`,
+  `cleanStaleTempFiles`, `HeroStoreError` (`invalid_hero_id`, `reserved_id`,
+  `invalid_character`, `hero_file_broken`, `narrator_required`,
+  `path_is_link`). Paths go through `joinInside`; symbolic links are never
+  followed; writes are temp file → fsync → rename.
+- `src/character-validator.cjs` — `validateCharacterFile(doc, {filename})`,
+  `validateBehaviourGlobals(doc)` (also exported from `bundle-validator.cjs`).
+- `src/vbook-version.cjs` — `assertSupportedVbookVersion(manifest)`,
+  `BookModelError('UNSUPPORTED_VBOOK_VERSION')`, `unsupportedVersionBody`.
+- `exportBookBundle(bookId, {skipBroken})`, `bundleFilesFromBook(book)` — one
+  serializer for save and export; export goes by the format whitelist.
+- Voice port: `resolveReferenceFile(buildDir, ref, heroId?)`,
+  `referenceState(buildDir, ref, heroId?)`.
+- `schemas/character-1.schema.json` (byte copy of the normative schema),
+  `schemas/vbook-bundle-4.schema.json`.
+
+### Changed (breaking)
+
+- `loadBook` / `loadDraftBook` / `bookModel.loadBook` throw
+  `BookModelError('UNSUPPORTED_VBOOK_VERSION')` for a 3.1 book, a book without
+  a version and a newer one; `null` now means only "no such book".
+- `saveBookBundle(book)` saves the object only; the raw-files mode
+  (`saveBookBundle(book, files)`) is removed. Everything is validated before
+  the first write; hero files are written only when changed, and a broken hero
+  file is never overwritten or deleted.
+- `extractBookBundle` / `buildBookFromBundle` take exact paths: no suffix
+  search, no prefix folder (`MANIFEST_NOT_IN_ROOT`), no chapter files in the
+  archive root. An archive with a broken hero file is refused
+  (`HERO_FILE_BROKEN`, status 422, `.issues`).
+- `safe-paths`: the entry whitelist is the v4 layout; `classifyBundleEntry`.
+- Voice port storage: `voices.json[id]` → `characters/<id>.json` → `voice`.
+  Names, fields and checks of the port are unchanged; a reference must point
+  into the hero's own folder; `model` / `seed` without a value are stored as
+  absent keys.
+- lazy-book: a new book is created with `characters/narrator.json` and
+  `behaviour.json`; `create.js` writes heroes through the character store, no
+  longer writes `mentions.json`, keeps the voice of an existing hero, and
+  writes `scene.look_patch` instead of `scene.passport`. `getCharactersPath`,
+  `getMentionsPath`, `getVoicesPath`, `getBehaviorPath` are removed
+  (`getCharactersDir`, `getBehaviourPath`).
+
+### Step 2 — the analysis writes heroes (same unpublished 0.5.0)
+
+- `src/hero-id.cjs` — `normalizeHeroId` (fixed Cyrillic table, lower case,
+  `_`, ≤ 64), `assignHeroIds` (a hero keeps its id across windows — matched by
+  name / alias, or by its own id incl. after transliteration unless that id is
+  shared; collisions inside a window and reserved ids get `_2`, `_3`),
+  `mergeAliases`.
+- `src/hero-analysis.cjs` — `registryFromBook`, `mentionsFromBook`,
+  `normalizeWindowCharacters`, `aliasAdditions`, `mergeWindowIntoHero`.
+- Voice port: `voiceFromAnalysis` (`{timbre, manner}` → a voice block,
+  plot-bound sentences dropped, refused without a timbre), `isVoiceProtected`,
+  `isReferenceVerified`; cleanup rules v2.
+- `lazy-book/create.js`: ids are normalised (nothing is skipped for its id),
+  aliases come from the mentions of the window, a later window only adds what
+  a hero lacks; `scene.look_patch` is written only where it differs from the
+  resolved look.
+- `character-identity`: an id with a collision suffix is not identity
+  evidence; working voices `{timbre, manner}` and aliases are merged without
+  replacing.
+- Owner's decisions on step 1 (В1–В9): the reference schema equals the port
+  (.wav only; `ref_text`, `source`, `locked` required), reserved ids
+  `chapters` / `source`, a broken `behaviour.json` opens with defaults
+  (`behaviour_file_broken` on write / export), an empty look value is an
+  absent value (`empty_value`), `narrator_missing` is a warning.
+
+### Removed
+
+- `src/behavior-schema.cjs` (subpath `./behavior-schema.cjs`, `behaviorSchema`
+  on the root), `addDirToZip`, `schemas/vbook-bundle-3.1.schema.json`.
+
+## 0.4.0 (2026-11-12, unpublished)
+
+Character voice port + voice references (animastor-docs
+`architecture/VOICE_REFERENCES.md`).
+
+### Added
+
+- Stricter input validation for book storage (same change as 0.2.1 / 0.3.1,
+  see 0.3.1 below).
+
+- `src/voice.js` (subpath export `./voice`, also `voice` on the root) — the ONE
+  access point to a character's voice: `getCharacterVoice`, `listVoiceIds`,
+  `setCharacterVoiceReference`, `setCharacterVoiceDescription`,
+  `narratorVoiceId`, `voiceDesignDescription`, `cleanVoiceDescription` /
+  `voiceFromDescription` (rule-based cleanup, no LLM), `referenceProblem`.
+
+### Changed (breaking)
+
+- `voices.json[id]` is `{timbre, manner, timbre_source, reference}`; the
+  `instruction` field is no longer read or written. Lazy-book create stores
+  analysis descriptions through `voiceFromDescription` (timbre_source
+  `cleaned`); the default narrator is `{timbre, manner}`.
+- Bundle validator checks `timbre` / `manner` / `timbre_source` and the
+  `reference` link (`voices/<id>/<candidate>.wav`, sha256, source,
+  verification, locked). Audio files are never part of the bundle.
+
 ## 0.3.1 (2026-11-13)
 
 Stricter input validation for book storage.
@@ -12,7 +151,6 @@ Stricter input validation for book storage.
   entry count are limited.
 - `resetBook` removes only a book directory inside the books root.
 - Book export skips links.
-
 ## 0.2.1 (2026-11-13)
 
 Same input-validation fix, published as 0.2.1 for the incident hotfix; see

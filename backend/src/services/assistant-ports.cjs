@@ -36,7 +36,6 @@
 //   log                           — host logger
 
 const path = require('path');
-const fs = require('fs');
 
 function createAssistantPorts({
     bookModel, book, lazyBook, bundleValidator,
@@ -65,12 +64,17 @@ function createAssistantPorts({
 
     // ── Book write ───────────────────────────────────
     // ONE save semantics for the Assistant:
-    //   - chapters intact → full multi-file bundle save (bible → bible.json,
-    //     locations → locations.json, …) via saveBookBundle;
+    //   - chapters intact → full bundle save via saveBookBundle (heroes go
+    //     through the runtime's character store there);
     //   - chapters array empty (corrupted load) → targeted save of every
     //     non-chapter file, chapters deliberately skipped so orphaned
-    //     chapter files survive; every target file is validated BEFORE the
-    //     first write — a failing file aborts the whole save.
+    //     chapter files survive. Root files (manifest, book, bible,
+    //     locations, behaviour) are validated BEFORE the first write — a
+    //     failing file aborts the whole save — and written atomically; heroes
+    //     (VBook 4, characters/<id>.json) ONLY through the character store
+    //     (validated, atomic, broken files never overwritten): a hero is
+    //     written when it changed and removed when it is no longer in the
+    //     bundle (the narrator never is) — the saveBookBundle rule.
     // Both chat routes (non-streaming + stream) call this port — the
     // fallback logic is not duplicated per route any more.
     const BUNDLE_TARGETS = [
@@ -78,8 +82,7 @@ function createAssistantPorts({
         ['book.json', 'book'],
         ['bible.json', 'bible'],
         ['locations.json', 'locations'],
-        ['voices.json', 'voices'],
-        ['characters.json', 'characters'],
+        ['behaviour.json', 'behaviour'],
     ];
 
     function persistBook(bookId, bundle) {
@@ -88,10 +91,13 @@ function createAssistantPorts({
             return { mode: 'bundle' };
         }
         // Zero-chapter fallback — targeted save (chapters skipped).
+        const store = book.characterStore;
+        if (!store || typeof store.writeCharacter !== 'function') throw new Error('assistantPorts: book.characterStore is required (VBook 4 hero writes)');
         const bookDir = lazyBook.getBookDir(bookId);
         const targets = BUNDLE_TARGETS
             .map(([file, key]) => [file, bundle[key]])
             .filter(([, data]) => data != null);
+        const heroes = Array.isArray(bundle.heroes) ? bundle.heroes : null;
         // Validate EVERY file BEFORE the first write — a failing file
         // aborts the whole save, previous state stays intact.
         for (const [file, data] of targets) {
@@ -100,8 +106,30 @@ function createAssistantPorts({
                 throw new Error(`Bundle validation failed (${fileCheck.errors.join('; ')})`);
             }
         }
+        for (const hero of heroes || []) {
+            const fileCheck = bundleValidator.validateBundleFile(`characters/${hero && hero.id}.json`, hero);
+            if (!fileCheck.valid) {
+                throw new Error(`Bundle validation failed (${fileCheck.errors.join('; ')})`);
+            }
+        }
+        // a broken behaviour.json is never overwritten (§10.3, В5)
+        const behaviourBroken = typeof book.inspectBehaviourFile === 'function'
+            && book.inspectBehaviourFile(bookDir).state === 'broken';
         for (const [file, data] of targets) {
-            fs.writeFileSync(path.join(bookDir, file), JSON.stringify(data, null, 2));
+            if (file === 'behaviour.json' && behaviourBroken) continue;
+            store.atomicWriteFile(path.join(bookDir, file), JSON.stringify(data, null, 2));
+        }
+        if (heroes) {
+            const wanted = new Set(heroes.map((h) => h.id));
+            for (const hero of heroes) {
+                const found = store.inspectCharacter(bookDir, hero.id);
+                if (found.state === 'ok' && store.serializeCharacter(found.hero) === store.serializeCharacter(hero)) continue;
+                store.writeCharacter(bookDir, hero);
+            }
+            for (const onDisk of store.listCharacters(bookDir).heroes) {
+                if (wanted.has(onDisk.id) || onDisk.id === 'narrator') continue;
+                store.removeCharacter(bookDir, onDisk.id);
+            }
         }
         return { mode: 'targeted' };
     }

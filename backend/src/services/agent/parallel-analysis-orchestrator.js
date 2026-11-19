@@ -79,6 +79,7 @@ const ANALYZERS = Object.freeze({
                 ctx.stepIndex,
                 ctx.publishVBook,
                 ctx.language,
+                ctx.characters || [], // the registry of the book (§12б)
             );
         },
     },

@@ -34,15 +34,15 @@ const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
 function makeFixtureBook(overrides = {}) {
     return {
-        manifest: { book_id: 'test-part', vbook_version: '3.1', state: 'BOOTSTRAPPED' },
+        manifest: { book_id: 'test-part', vbook_version: 4, state: 'BOOTSTRAPPED' },
         book: { book_id: 'test-part', title: 'Participants Test', structure: { chapters_order: [] } },
         bible: {},
         locations: {},
-        voices: {},
-        behaviors: {},
-        characters: [
-            { id: 'yura', name: 'Юра' },
-            { id: 'svetlana', name: 'Светлана' },
+        behaviour: { schema: 'animastor.behaviour-globals/1', defaults: { max_per_scene: 2 }, rules: [] },
+        heroes: [
+            { schema: 'animastor.character/1', id: 'narrator', role: 'narrator' },
+            { schema: 'animastor.character/1', id: 'yura', name: 'Юра', passport: { appearance: 'tall' } },
+            { schema: 'animastor.character/1', id: 'svetlana', name: 'Светлана', passport: { appearance: 'fair' } },
         ],
         chapters: [
             {
@@ -78,7 +78,9 @@ describe('Scene Participants doctrine — normalization + validation', () => {
         expect(scenes[3].participants).to.deep.equal(['svetlana']);
     });
 
-    it('applyPatchesValidated maps display names to character_ids and dedupes', () => {
+    // VBook 4 (@animastor/assistant 0.3.0): the name → id lookup is built from
+    // book.heroes — the exact name (case-insensitive) or the id, nothing fuzzy.
+    it('applyPatchesValidated maps display names to hero ids and dedupes', () => {
         const book = makeFixtureBook();
         const patchResult = chatEngine.applyPatchesValidated(book, [
             // Replace one scene with names-only; the rest are normalized too.
@@ -127,6 +129,8 @@ describe('Scene Participants doctrine — normalization + validation', () => {
         expect(validation.valid).to.be.true;
     });
 
+    // VBook 4 (@animastor/assistant 0.3.0): the name → id lookup is built from
+    // book.heroes — the exact name (case-insensitive) or the id, nothing fuzzy.
     it('saveBookBundle persists normalized participants and rejects broken ones (defense in depth)', () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-part-doctrine-'));
         const bookId = 'test-part-doctrine-' + Date.now();
@@ -136,7 +140,7 @@ describe('Scene Participants doctrine — normalization + validation', () => {
         try {
             // Fix corrupted value on disk first: unwrap {"item": ...} via the
             // normalized engine result, then save.
-            const book = makeFixtureBook({ manifest: { book_id: bookId, vbook_version: '3.1', state: 'BOOTSTRAPPED' }, book: { book_id: bookId, title: 'Participants Test', structure: { chapters_order: [] } } });
+            const book = makeFixtureBook({ manifest: { book_id: bookId, vbook_version: 4, state: 'BOOTSTRAPPED' }, book: { book_id: bookId, title: 'Participants Test', structure: { chapters_order: [] } } });
             const fixed = chatEngine.applyPatchesValidated(book, []).result;
             expect(fixed).to.not.be.null;
             bookModule.saveBookBundle(fixed);

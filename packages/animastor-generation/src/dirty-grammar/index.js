@@ -34,7 +34,9 @@
 //   computeSceneHash, computeBookHash, shortHash, generateBuildId,
 //   estimateSpeechDurationSec, SPEECH_SEC_PER_WORD, SPEECH_MIN_SEC,
 //   cyrToLatin, CYR_LATIN_MAP,
-//   isEqual, extractPassport (testing seams, moved verbatim)
+//   isEqual (testing seam, moved verbatim);
+//   sceneHasSpeaker, resolvedLooks, voiceKey (0.3.0, VBook 4 step 3 —
+//   extractPassport removed: looks are the derived key scene.resolved_looks)
 //
 // Consumed by the host through the package ROOT namespace property
 // (dirtyGrammar) or the './dirty-grammar' subpath export — never by a
@@ -57,7 +59,9 @@ module.exports = {
     CROSS_FIELDS: registry.CROSS_FIELDS,
     // moved verbatim for testing parity (the host book-diff re-exports it)
     isEqual: registry.isEqual,
-    extractPassport: registry.extractPassport,
+    sceneHasSpeaker: registry.sceneHasSpeaker,
+    resolvedLooks: registry.resolvedLooks,
+    voiceKey: registry.voiceKey,
 
     // ── layer→layer regeneration graph ────────────────────────────────
     resolveDirtyLayers: dependencyGraph.resolveDirtyLayers,

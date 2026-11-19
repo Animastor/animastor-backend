@@ -51,7 +51,7 @@ function writeBookFile(bookId, relPath, content) {
 // Canonical bundle: manifest.json + book.json + chapters per chapters_order.
 function createCanonicalBook(bookId) {
     writeBookFile(bookId, 'manifest.json', JSON.stringify({
-        vbook_version: '3.1',
+        vbook_version: 4,
         book_id: bookId,
         state: 'READY',
     }));
@@ -71,7 +71,7 @@ function createCanonicalBook(bookId) {
 // Draft-only book: manifest + book.json + source.txt, no canonical chapter set.
 function createDraftBook(bookId) {
     writeBookFile(bookId, 'manifest.json', JSON.stringify({
-        vbook_version: '3.1',
+        vbook_version: 4,
         book_id: bookId,
         state: 'RAW_IMPORTED',
     }));
@@ -88,7 +88,7 @@ function createDraftBook(bookId) {
 // the lazy/draft load still succeeds (draft loader skips bad chapter files).
 function createCorruptCanonicalBook(bookId) {
     writeBookFile(bookId, 'manifest.json', JSON.stringify({
-        vbook_version: '3.1',
+        vbook_version: 4,
         book_id: bookId,
         state: 'PARSING',
     }));

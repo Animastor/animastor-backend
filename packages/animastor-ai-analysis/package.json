@@ -1,6 +1,6 @@
 {
     "name": "@animastor/ai-analysis",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "description": "AI Analysis \u2014 semantic analysis layer: structure, character, location, scene, unit analysis and voice authoring. Uses @animastor/ai-agent for the execution mechanism; owns prompts, contracts, and domain-specific analysis logic.",
     "main": "src/index.js",
     "exports": {
@@ -36,7 +36,7 @@
     },
     "dependencies": {
         "@animastor/ai-agent": "^0.1.0",
-        "@animastor/vbook-runtime": "^0.3.1"
+        "@animastor/vbook-runtime": "^0.5.0"
     },
     "devDependencies": {
         "chai": "^6.2.2",

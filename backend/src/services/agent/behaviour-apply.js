@@ -24,7 +24,7 @@ const { loadEffectiveSettings } = require('./behaviour-rules');
  * @param {object} opts
  * @param {string} opts.bookId
  * @param {object[]} [opts.characters]
- * @param {string|null} [opts.bookDir] — book directory (book rules come from its behavior.json)
+ * @param {string|null} [opts.bookDir] — book directory (book rules: behaviour.json + hero files, VBook 4)
  * @param {object[]} [opts.rules] — effective rules (tests); default: loaded from bookDir
  * @param {number|null} [opts.maxPerScene] — scene limit with explicit rules (tests); default: from settings
  * @returns {{rules:number, applied:number}}

@@ -1,0 +1,28 @@
+{
+  "90": {
+    "inputs": {
+      "audio": "vupl_upload.wav"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Uploaded voice sample"
+    }
+  },
+  "1009": {
+    "inputs": {
+      "filename_prefix": "voices/upload",
+      "language": "Russian",
+      "whisper_model": "small",
+      "device": "auto",
+      "compute_type": "auto",
+      "audio": [
+        "90",
+        0
+      ]
+    },
+    "class_type": "SaveAudioAnimastorReference",
+    "_meta": {
+      "title": "Animastor voice reference (normalise + Whisper)"
+    }
+  }
+}

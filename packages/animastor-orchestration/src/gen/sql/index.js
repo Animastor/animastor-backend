@@ -7,6 +7,7 @@ const { GEN_CORE_SQL } = require('./001-gen-core');
 const { GEN_COMMAND_JOBS_SQL } = require('./002-command-jobs');
 const { GEN_SCOPE_SCENES_SQL } = require('./003-scope-scenes');
 const { GEN_COMMAND_SKIPS_SQL } = require('./004-command-skips');
+const { GEN_VOICE_REFERENCE_SQL } = require('./005-voice-reference');
 const { withTx } = require('../util');
 
 const MIGRATIONS = Object.freeze([
@@ -14,6 +15,7 @@ const MIGRATIONS = Object.freeze([
     Object.freeze({ id: '002-command-jobs', statements: GEN_COMMAND_JOBS_SQL }),
     Object.freeze({ id: '003-scope-scenes', statements: GEN_SCOPE_SCENES_SQL }),
     Object.freeze({ id: '004-command-skips', statements: GEN_COMMAND_SKIPS_SQL }),
+    Object.freeze({ id: '005-voice-reference', statements: GEN_VOICE_REFERENCE_SQL }),
 ]);
 
 /**

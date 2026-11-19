@@ -105,6 +105,7 @@ const TIMEOUT_MS = Object.freeze({
     video_group: 60 * 60_000,
     audio_merge: 10 * 60_000,
     video_merge: 20 * 60_000,
+    voice_reference: 15 * 60_000,
 });
 function defaultTimeoutFor(kind) { return TIMEOUT_MS[kind]; }
 

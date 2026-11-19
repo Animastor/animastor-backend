@@ -60,48 +60,106 @@ const ENTITIES = {
     description: 'Default TTS instruction for dialogue'
   },
 
-  // ─── Character Voices ───────────────────────────
-  character1Voice: {
-    key: 'character1Voice',
-    label: 'Character 1 Voice',
-    type: 'string',
-    kind: 'input',
-    description: 'Voice instruction for dialogue character 1'
-  },
-  character2Voice: {
-    key: 'character2Voice',
-    label: 'Character 2 Voice',
-    type: 'string',
-    kind: 'input',
-    description: 'Voice instruction for dialogue character 2'
-  },
+  // ─── Dialogue speakers (voice references, VOICE_REFERENCES.md) ───
   roleName1: {
     key: 'roleName1',
     label: 'Role Name 1',
     type: 'string',
     kind: 'input',
-    description: 'Name/ID of dialogue character 1'
+    description: 'Name/ID of dialogue speaker 1'
+  },
+  speaker1ReferenceAudio: {
+    key: 'speaker1ReferenceAudio',
+    label: 'Speaker 1 Reference Audio',
+    type: 'string',
+    kind: 'input',
+    description: 'File name (ComfyUI/input) of the locked voice reference of dialogue speaker 1'
+  },
+  speaker1ReferenceText: {
+    key: 'speaker1ReferenceText',
+    label: 'Speaker 1 Reference Text',
+    type: 'string',
+    kind: 'input',
+    description: 'Exact transcript of the voice reference of dialogue speaker 1'
   },
   roleName2: {
     key: 'roleName2',
     label: 'Role Name 2',
     type: 'string',
     kind: 'input',
-    description: 'Name/ID of dialogue character 2'
+    description: 'Name/ID of dialogue speaker 2'
   },
-  character3Voice: {
-    key: 'character3Voice',
-    label: 'Character 3 Voice',
+  speaker2ReferenceAudio: {
+    key: 'speaker2ReferenceAudio',
+    label: 'Speaker 2 Reference Audio',
     type: 'string',
     kind: 'input',
-    description: 'Voice instruction for dialogue character 3'
+    description: 'File name (ComfyUI/input) of the locked voice reference of dialogue speaker 2'
+  },
+  speaker2ReferenceText: {
+    key: 'speaker2ReferenceText',
+    label: 'Speaker 2 Reference Text',
+    type: 'string',
+    kind: 'input',
+    description: 'Exact transcript of the voice reference of dialogue speaker 2'
   },
   roleName3: {
     key: 'roleName3',
     label: 'Role Name 3',
     type: 'string',
     kind: 'input',
-    description: 'Name/ID of dialogue character 3'
+    description: 'Name/ID of dialogue speaker 3'
+  },
+  speaker3ReferenceAudio: {
+    key: 'speaker3ReferenceAudio',
+    label: 'Speaker 3 Reference Audio',
+    type: 'string',
+    kind: 'input',
+    description: 'File name (ComfyUI/input) of the locked voice reference of dialogue speaker 3'
+  },
+  speaker3ReferenceText: {
+    key: 'speaker3ReferenceText',
+    label: 'Speaker 3 Reference Text',
+    type: 'string',
+    kind: 'input',
+    description: 'Exact transcript of the voice reference of dialogue speaker 3'
+  },
+
+  // ─── Voice references ───────────────────────────
+  referenceAudio: {
+    key: 'referenceAudio',
+    label: 'Reference Audio',
+    type: 'string',
+    kind: 'input',
+    description: 'File name (ComfyUI/input) of a voice reference WAV for LoadAudio'
+  },
+  referenceText: {
+    key: 'referenceText',
+    label: 'Reference Text',
+    type: 'string',
+    kind: 'input',
+    description: 'Exact transcript of the voice reference (Qwen3TTSVoiceClonePrompt.ref_text)'
+  },
+  referencePhrase: {
+    key: 'referencePhrase',
+    label: 'Reference Phrase',
+    type: 'string',
+    kind: 'input',
+    description: 'Template phrase spoken by a voice-reference candidate'
+  },
+  whisperModel: {
+    key: 'whisperModel',
+    label: 'Whisper Model',
+    type: 'string',
+    kind: 'parameter',
+    description: 'faster-whisper model size for reference verification (small | medium)'
+  },
+  whisperDevice: {
+    key: 'whisperDevice',
+    label: 'Whisper Device',
+    type: 'string',
+    kind: 'parameter',
+    description: 'Device for reference verification (auto | cuda | cpu)'
   },
 
   // ─── Images ─────────────────────────────────────

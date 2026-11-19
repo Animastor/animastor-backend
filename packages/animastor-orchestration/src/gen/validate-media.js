@@ -133,6 +133,56 @@ function createAudioValidator(opts = {}) {
     };
 }
 
+// ── WAV (1.4.0, voice_reference): RIFF/WAVE, PCM s16le, data present, not silence ──
+/**
+ * Parse the chunk list of a RIFF/WAVE buffer.
+ * @returns {{ok:true, chunks:Array<{id:string, offset:number, size:number}>, fmt:{format:number, channels:number,
+ *           sampleRate:number, bitsPerSample:number}, data:{offset:number, size:number}, durationSec:number}
+ *          | {ok:false, reason:string}}
+ */
+function inspectWav(buf) {
+    if (!Buffer.isBuffer(buf) || buf.length < 12 || buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WAVE') {
+        return { ok: false, reason: 'not_wav' };
+    }
+    const chunks = [];
+    let pos = 12;
+    while (pos + 8 <= buf.length) {
+        const id = buf.toString('latin1', pos, pos + 4);
+        const size = buf.readUInt32LE(pos + 4);
+        if (pos + 8 + size > buf.length) return { ok: false, reason: 'truncated_chunk' };
+        chunks.push({ id, offset: pos + 8, size });
+        pos += 8 + size + (size & 1);
+    }
+    const fmtC = chunks.find((c) => c.id === 'fmt ');
+    const dataC = chunks.find((c) => c.id === 'data');
+    if (!fmtC || fmtC.size < 16) return { ok: false, reason: 'no_fmt' };
+    if (!dataC || dataC.size === 0) return { ok: false, reason: 'no_data' };
+    const fmt = {
+        format: buf.readUInt16LE(fmtC.offset),
+        channels: buf.readUInt16LE(fmtC.offset + 2),
+        sampleRate: buf.readUInt32LE(fmtC.offset + 4),
+        bitsPerSample: buf.readUInt16LE(fmtC.offset + 14),
+    };
+    if (fmt.format !== 1 || fmt.bitsPerSample !== 16 || fmt.channels < 1 || fmt.sampleRate <= 0) return { ok: false, reason: 'not_pcm_s16' };
+    const frames = Math.floor(dataC.size / (2 * fmt.channels));
+    return { ok: true, chunks, fmt, data: { offset: dataC.offset, size: dataC.size }, durationSec: frames / fmt.sampleRate };
+}
+
+function createWavValidator(opts = {}) {
+    const threshold = Number.isFinite(opts.rmsThresholdDbfs) ? opts.rmsThresholdDbfs : DEFAULT_RMS_THRESHOLD_DBFS;
+    return async function validateWav(tmpPath) {
+        const buf = await fs.promises.readFile(tmpPath);
+        const w = inspectWav(buf);
+        if (!w.ok) return w;
+        const n = Math.floor(w.data.size / 2);
+        const samples = new Int16Array(n);
+        for (let i = 0; i < n; i += 1) samples[i] = buf.readInt16LE(w.data.offset + i * 2);
+        const level = rmsDbfs(samples);
+        if (!(level >= threshold)) return { ok: false, reason: 'silence', durationSec: w.durationSec, rmsDbfs: level };
+        return { ok: true, durationSec: w.durationSec, rmsDbfs: level };
+    };
+}
+
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 // ── PNG (1.1.0): structure + dimensions + «not a blank frame» ────────────
@@ -340,11 +390,13 @@ async function validateMp4(tmpPath) {
  */
 function createDefaultValidateResult(opts = {}) {
     const audio = createAudioValidator(opts);
+    const wav = createWavValidator(opts);
     const png = createPngValidator({ minLumaStddev: opts.minLumaStddev });
     return async function validateResult(job, tmpPath) {
         switch (job && job.kind) {
             case 'audio_chunk':
             case 'audio_merge': return audio(tmpPath);
+            case 'voice_reference': return wav(tmpPath);
             case 'iu_image': return png(tmpPath);
             case 'video_group':
             case 'video_merge': return validateMp4(tmpPath);
@@ -360,6 +412,8 @@ module.exports = {
     ffmpegDecodePcm,
     createAudioValidator,
     createDefaultValidateResult,
+    inspectWav,
+    createWavValidator,
     validatePng,
     validateMp4,
     inspectPng,

@@ -5,6 +5,7 @@
 const { SceneStatus } = require('./constants');
 const { splitIntoChapters } = require('@animastor/parser');
 const draft = require('./draft');
+const { passportHeroes } = require('../heroes.cjs');
 
 function getBookStatus(bookId) {
     const d = draft.loadDraftBook(bookId);
@@ -20,6 +21,11 @@ function getBookStatus(bookId) {
         totalScenes += ch.scenes ? ch.scenes.length : 0;
     }
 
+    // "Characters" of a book are heroes with a passport (VBOOK_FORMAT_V4 §4);
+    // the narrator and voice-only speakers are heroes but not characters.
+    const characters = passportHeroes(d);
+    const aliasCount = d.heroes.reduce((n, h) => n + (Array.isArray(h.aliases) ? h.aliases.length : 0), 0);
+
     return {
         bookId,
         state: d.manifest.state,
@@ -28,14 +34,16 @@ function getBookStatus(bookId) {
         author: d.book.author,
         language: d.book.language,
         hasSource: !!d.sourceText,
-        hasCharacters: d.characters.length > 0,
+        hasCharacters: characters.length > 0,
         hasBible: Object.keys(d.bible).length > 0,
         totalChapters,
         parsedChapters: d.chapters.length,
         totalScenes,
         parsedScenes: totalScenes,
-        characterCount: d.characters.length,
-        mentionsCount: Object.keys(d.mentions || {}).length,
+        characterCount: characters.length,
+        heroCount: d.heroes.length,
+        aliasCount,
+        heroIssues: d.hero_issues.filter((i) => i.blocking).length,
         locationCount: Object.keys(d.locations || {}).length,
         sourceSize: d.manifest.import_meta?.original_size || 0,
         updatedAt: d.manifest.updated_at,

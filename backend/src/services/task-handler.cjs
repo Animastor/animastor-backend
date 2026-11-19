@@ -7,6 +7,8 @@
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { isValidBookId, joinInside } = require('@animastor/vbook-runtime/safe-paths');
+const { assertSupportedVbookVersion } = require('@animastor/vbook-runtime/vbook-version.cjs');
 const { publishProgress } = require('./progress-pubsub.cjs');
 const jobSchema = require('../runtime/job-schema');
 // S-4: filename grammar composed from the canonical owner (bytes unchanged)
@@ -699,16 +701,31 @@ module.exports = function(redis, config, deps) {
     }
 
     // ── Book snapshot ─────────────────────────────────
+    // <book_id>.snapshot.json is the serialized book model, so it carries the
+    // format version in manifest.vbook_version. A snapshot is written only for
+    // a VBook 4 book (loadBook refuses anything else) and restored only when
+    // its own version is supported: 3.1 snapshots are not restorable
+    // (VBOOK_FORMAT_V4 §9). hero_issues is load-time state and is not stored.
+    function snapshotPathOf(bookId) {
+        if (!isValidBookId(bookId)) return null;
+        return joinInside(config.BOOKS_DIR, `${bookId}.snapshot.json`);
+    }
+
     async function saveBookSnapshot(bookId) {
         try {
+            const snapshotPath = snapshotPathOf(bookId);
+            if (!snapshotPath) {
+                log(`⚠️ saveBookSnapshot: invalid book id`);
+                return null;
+            }
             const bookData = book.loadBook(bookId);
             if (!bookData) {
                 log(`⚠️ saveBookSnapshot: book ${bookId} not found`);
                 return null;
             }
-            const snapshotPath = path.join(config.BOOKS_DIR, `${bookId}.snapshot.json`);
-            fs.writeFileSync(snapshotPath, JSON.stringify(bookData, null, 2));
-            log(`💾 Book snapshot saved: ${bookId}`);
+            const { hero_issues: _loadTimeOnly, ...snapshot } = bookData;
+            fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
+            log(`💾 Book snapshot saved: ${bookId} (vbook_version ${snapshot.manifest && snapshot.manifest.vbook_version})`);
             return snapshotPath;
         } catch (err) {
             console.error(`❌ saveBookSnapshot failed for ${bookId}:`, err.message);
@@ -718,12 +735,18 @@ module.exports = function(redis, config, deps) {
 
     async function loadBookSnapshot(bookId) {
         try {
-            const snapshotPath = path.join(config.BOOKS_DIR, `${bookId}.snapshot.json`);
-            if (!fs.existsSync(snapshotPath)) {
+            const snapshotPath = snapshotPathOf(bookId);
+            if (!snapshotPath || !fs.existsSync(snapshotPath)) {
                 log(`⚠️ loadBookSnapshot: no snapshot found for ${bookId}`);
                 return null;
             }
             const data = JSON.parse(fs.readFileSync(snapshotPath, 'utf-8'));
+            try {
+                assertSupportedVbookVersion(data && data.manifest);
+            } catch (versionErr) {
+                log(`⚠️ loadBookSnapshot: snapshot of ${bookId} is not VBook 4 (version ${versionErr.vbookVersion}) — not restorable`);
+                return null;
+            }
             log(`📖 Book snapshot loaded: ${bookId}`);
             return data;
         } catch (err) {

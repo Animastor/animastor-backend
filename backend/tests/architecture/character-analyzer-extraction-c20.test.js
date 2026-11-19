@@ -178,9 +178,14 @@ describe('C20 Character Analyzer boundary: dependency surface', () => {
         expect(external, 'index.js must require nothing but ./voices + @animastor/ai-agent').to.deep.equal([]);
     });
 
-    it('voices.js depends only on the shared identity predicate package export', () => {
+    it('voices.js depends only on vbook-runtime package exports: the identity predicate and the voice port', () => {
         const specs = requireSpecifiers(src(path.join(REPO_ROOT, 'packages/animastor-ai-analysis/src/tasks/character-analyzer/voices.js')));
-        expect(specs, 'voices.js must consume character-identity through the package export').to.deep.equal(['@animastor/vbook-runtime/character-identity']);
+        // VBook 4 step 2: the voice an analysis returns is parsed by the ONE
+        // voice port (voiceFromAnalysis) — the same rules as the hero file.
+        expect(specs, 'voices.js must consume the runtime through package exports only').to.deep.equal([
+            '@animastor/vbook-runtime/character-identity',
+            '@animastor/vbook-runtime/voice',
+        ]);
     });
 
     it('no import cycle: character-analyzer ↔ pipeline files (module never requires the host back)', () => {

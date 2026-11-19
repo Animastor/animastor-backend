@@ -30,6 +30,8 @@ require('@animastor/generation').ports.profileStore.setProfileStore({
 require('@animastor/generation').ports.bookData.setBookData({
     collectSceneUnits: require('./book').collectSceneUnits,
     tokensToString: require('./book/lazy-book/appearance').tokensToString,
+    resolveHeroLook: require('@animastor/vbook-runtime/looks.cjs').resolveHeroLook,
+    passportHeroes: require('@animastor/vbook-runtime/heroes.cjs').passportHeroes,
 });
 // O-2: PERSISTENCE PORT — runtime/orchestration persistence composition.
 // The two tiers consume PG/Redis-registry/filesystem persistence ONLY
@@ -307,9 +309,20 @@ const fs = require('fs');
 const { PORT = 3000, HUB_URL = 'https://animastor.org/gpu', BUILD_TTL_HOURS = 48 } = process.env;
 const crypto = require('crypto');
 
-// REDIS_PASSWORD (optional): set together with `requirepass` on the Redis
-// service; unset keeps the historical password-less connection.
-const redis = new Redis({ host: 'redis', port: 6379, ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}) });
+// Infrastructure hosts only from the environment (owner, VBook v4 step 6):
+// REDIS_HOST / REDIS_PORT / PG_HOST missing → the process stops here, before
+// any connection. No short-name default: on the VPS a bare `redis` resolves
+// through the hoster's wildcard search domain to a foreign machine
+// (config/infra-env.js). REDIS_PASSWORD (optional): set together with
+// `requirepass` on the Redis service.
+const infraEnv = require('./config/infra-env');
+try {
+    infraEnv.assertInfraEnv();
+} catch (err) {
+    console.error(`[FATAL] ${err.message}`);
+    process.exit(1);
+}
+const redis = new Redis(infraEnv.redisOptions());
 // Stage 114 — the GPU dispatcher needs the Redis client for the queue
 // idempotency claim and the executor-availability gate (both must run BEFORE
 // a job reaches the hub queue). Registering it here keeps a single
@@ -346,10 +359,12 @@ const { noStoreForPolling } = require('./middleware/no-store');
 app.use('/api/v1', noStoreForPolling);
 
 // Auth context middleware (session cookie → req.user / req.workspace).
-// Requests without a valid session stay anonymous (pre-auth compatibility —
-// no global requireAuth); authenticated requests get real identity.
-const { authContext, requireBookAccess } = require('./middleware/auth-context');
+// Requests without a valid session stay anonymous; an anonymous write and
+// any anonymous /api/v1/book/* request answer 401 (no guest is minted —
+// owner's decision 18.11).
+const { authContext, requireBookAccess, requireIdentityForWrites } = require('./middleware/auth-context');
 app.use(authContext);
+app.use(requireIdentityForWrites);
 
 // Input guard: book/build ids from the URL, query string and JSON body must
 // match the storage grammar before any route runs (400 otherwise).
@@ -388,6 +403,15 @@ app.use('/api/v1/book/:bookId', inputGuard.bookIdPathGuard, (req, res, next) => 
     if (CREATE_BOOK_SUBPATHS.has(req.params.bookId)) return next();
     return bookAccessGuard(req, res, next);
 });
+// VBOOK_FORMAT_V4 §9: a book of an unsupported format (3.1, no version,
+// newer) answers every book route — generation, analysis, editor — with the
+// 409 body of GET /book; deleting the book stays allowed. Runs AFTER the
+// access guard: a stranger learns nothing about the format of a book.
+const vbookVersionGate = require('./middleware/vbook-version-gate');
+app.use('/api/v1/book/:bookId', vbookVersionGate.createBookVersionGate({
+    getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
+    skip: CREATE_BOOK_SUBPATHS,
+}));
 app.use('/api/v1/scene/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
 app.use('/api/v1/iu-image/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
 app.use('/api/v1/preview/:bookId', inputGuard.bookIdPathGuard, requireBookAccess('bookId'));
@@ -409,6 +433,10 @@ app.use('/api/v1/ai', (req, res, next) => {
     if (/^\/sessions\/[^/]+/.test(req.path)) return next(); // handled above
     return aiBookGuard(req, res, next);
 });
+// The assistant on a book of an unsupported format: the same 409 (§9).
+app.use('/api/v1/ai', vbookVersionGate.createScopedBookVersionGate({
+    getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
+}));
 
 // Request ID + HTTP logging
 app.use((req, res, next) => {
@@ -477,6 +505,9 @@ const chatEngine = createChatEngine(config, {
     aiProfile: require('./services/assistant-profile-loader.cjs').loadAssistantProfile(),
     // Chat fallback base URL — operator env knob passed as injected config.
     aiApiBaseUrl: process.env.AI_API_BASE_URL,
+    // Provider reasoning settings (disable_thinking / reasoning_effort) — the
+    // ONE helper the analysis and the provider test use (VBOOK_FORMAT_V4 §12, step 4).
+    withReasoning: require('./services/ai-reasoning').withReasoning,
 });
 const windowGenerator = require('./services/window-generator.cjs')({
     redis, txtImporter, genSessionRepo, state, activeScenes,
@@ -627,7 +658,10 @@ const routeDeps = {
     bookDeletion: createBookDeletion({
         book, redis, config, storage,
         // Scoped build-output cleanup (validated ids, only this book's files).
-        removeBookArtifacts: require('./services/book-artifacts.cjs').removeBookArtifacts,
+        // voices/ (VOICE_REFERENCES.md) belongs to the build dir itself: removed with the book.
+        removeBookArtifacts: (opts) => require('./services/book-artifacts.cjs').removeBookArtifacts({
+            ...opts, buildScoped: require('./utils/build-dir').PRESERVED_ENTRIES,
+        }),
         getAllChunks, getChunk, cleanBookRedisKeys,
         // Stage 116 (D4): queue-idempotency port (injected — the Book Model
         // layer must not depend on backend/src/helpers).
@@ -721,6 +755,9 @@ const routeDeps = {
             // Blank book never got a snapshot — deleteBookSnapshots drops
             // just the fresh books row.
             rollbackOwnership: (bookId) => bookRepo.deleteBookSnapshots(bookId),
+            // VBook 4 (§8.2): artifact root — state of a hero's reference files
+            // in the API (voice.reference_state, image_refs[].state), read only.
+            outputRoot: config.OUTPUT_DIR,
             recoveryCtx: {
                 redis, book, state, activeScenes, config, getAllChunks, saveChunk,
                 isBookRegistered,
@@ -739,6 +776,15 @@ routeDeps.bookDeletion.configureOrchV2({
 });
 
 require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, bookDiff, windowGenerator });
+// Voice references (VOICE_REFERENCES.md) — orchestration v2 only; the book
+// guard of /api/v1/book/:bookId applies (registered above).
+require('./orchestration-v2/voice-routes').mountVoiceRoutes(app, {
+    host: orchV2Host,
+    editorModel: routeDeps.editorModel,
+    bookRepo: require('./storage/postgres/repositories/book-repo'),
+    getPool: () => storage.postgres.getPool(),
+    log: utils.log,
+});
 // Player (playback) routes — registered through the @animastor/player
 // package API (the playback HTTP contour lives in
 // packages/animastor-player; the host must not require package internals —

@@ -32,57 +32,67 @@ module.exports = function(config, deps = {}) {
     // Chat fallback base URL — injected by the composition root (operator
     // env knob). The literal default is the last-resort contract value.
     const AI_API_BASE_URL = deps.aiApiBaseUrl || 'https://integrate.api.nvidia.com/v1';
+    // Provider reasoning settings (disable_thinking / reasoning_effort) — the
+    // host's ONE helper (ai-reasoning.withReasoning), injected by the
+    // composition root so the chat body is built exactly like the analysis
+    // body and the provider connection test. Not injected → extras unchanged.
+    const withReasoning = typeof deps.withReasoning === 'function' ? deps.withReasoning : (extras) => ({ ...(extras || {}) });
+
+    /** Token budget + thinking switch of the model, with the provider's reasoning settings on top. */
+    function chatRequestExtras(input, ai) {
+        return withReasoning(requestExtras.buildChatRequestExtras(input), ai || null);
+    }
 
     // ── Mode-specific system prompts ──────────────────
     const MODE_PROMPTS = {
         conversation: 'You are a creative assistant in Conversational mode. Answer questions, discuss ideas, explain concepts, and brainstorm. Do NOT make any changes to the book — this is a read-only discussion.',
         import: 'You are an Import specialist. Convert arbitrary text into Animastor book structure. Analyze the text and automatically determine chapters, scenes, and units. If a book is already open, decide whether the text is a new chapter, continuation of current chapter, or extension of current scene. If no book is open, create a new book with manifest, metadata, chapters, scenes, and units. The user must NOT manually mark chapters/scenes/units — determine the structure from content. Always produce a valid Animastor book JSON.',
         edit: [
-            'You are an Editor. You can modify scenes, characters, locations, behavior, and book structure.',
+            'You are an Editor. You can modify scenes, heroes, locations, behaviour, and book structure.',
             'Use the `edit_book` tool to apply changes. Always confirm changes with the user before applying.',
             '',
+            '## Heroes (VBook 4)',
+            'Every character of the book — including the narrator — is a hero: one object in `heroes` (one file `characters/<id>.json`).',
+            'A hero is addressed by its id, NEVER by an array index: `/heroes/<hero_id>/<field>`.',
+            'Hero fields: `name`, `role`, `aliases` (how the author names the hero in the text), `notes` (for people only),',
+            '`passport` {appearance, clothes, video_tokens: 1-4 short visible features}, `looks` (named passport overrides),',
+            '`voice` {timbre, manner, reference}, `behaviour` {profile: {baseline, quirks, reactions}, rules: [...]}.',
+            'Never write `voice.reference` (a pinned audio file — only the hero card pins it), `id`, `schema`, `rev` or `hero_issues`.',
+            'A new hero: `add /heroes/<new_id>` with the whole hero object (`schema: "animastor.character/1"`, `id` equal to <new_id>).',
+            'The narrator (`/heroes/narrator`) cannot be removed.',
+            'The paths `/characters`, `/voices`, `/behaviors`, `/mentions` do not exist any more — they are refused.',
+            '',
             '## Scene Participants',
-            '`scene.participants` is ALWAYS a JSON array of character_id strings taken from `characters.json` — never display names, never a bare string, never an object like {"item": ...}.',
+            '`scene.participants` is ALWAYS a JSON array of hero ids (character_id) taken from `heroes` — never display names, never a bare string, never an object like {"item": ...}.',
             'Example: `["yura", "svetlana"]` — NOT `["Юра", "yura"]` and NOT `{"item": ["yura", "svetlana"]}`.',
             'When the user asks to fix participants across the whole book, apply the change to EVERY scene in EVERY chapter — do not stop after one scene. List one patch per affected scene.',
             '',
-            '## Character Behavior',
-            'Each character can have a Behavior entry in the book data under `behaviors.characters` (keyed by character_id).',
-            '`behaviors` is schema v2: `{"schema_version": 2, "rules": [...], "characters": {...}}`. Edit ONLY `behaviors.characters.<character_id>`; never change `schema_version` or `rules` unless the user explicitly asks about behaviour rules.',
-            'Behavior describes HOW a character acts — their mannerisms, habits, and reactions.',
-            '',
-            'Behavior schema:',
+            '## Hero Behaviour',
+            'The character of a hero lives in `/heroes/<hero_id>/behaviour/profile`:',
             '```json',
             '{',
-            '  "characters": {',
-            '    "<character_id>": {',
-            '      "baseline": "How the character normally behaves — characteristic manner of movement, expressions, gestures, posture, speech patterns.",',
-            '      "quirks": ["Repeated characteristic habit or mannerism."],',
-            '      "reactions": [',
-            '        {',
-            '          "trigger": "A situation or emotional state.",',
-            '          "reaction": "The observable behavioral response."',
-            '        }',
-            '      ]',
-            '    }',
-            '  }',
+            '  "baseline": "How the hero normally behaves — characteristic manner of movement, expressions, gestures, posture, speech patterns.",',
+            '  "quirks": ["Repeated characteristic habit or mannerism."],',
+            '  "reactions": [',
+            '    { "trigger": "A situation or emotional state.", "reaction": "The observable behavioral response." }',
+            '  ]',
             '}',
             '```',
-            '',
             'Field meanings:',
-            '- **baseline**: how the character behaves NORMALLY — characteristic manner of movement, expressions, gestures, posture, speech rhythm.',
-            '- **quirks**: recurring habits or mannerisms specific to this character (one string per entry).',
+            '- **baseline**: how the hero behaves NORMALLY — characteristic manner of movement, expressions, gestures, posture, speech rhythm.',
+            '- **quirks**: recurring habits or mannerisms specific to this hero (one string per entry).',
             '- **reactions**: trigger→reaction patterns. `trigger` = situation or state; `reaction` = observable behavioral response.',
+            'Do not touch `behaviour.rules` unless the user explicitly asks about behaviour rules.',
             '',
-            'When the user asks to create or modify character behavior:',
-            '1. Find the character by character_id from `characters` in the book data.',
-            '2. Study the character passport (appearance, clothes, description) to understand their personality.',
-            '3. Create behavior that matches the character personality — distinct, specific, believable.',
-            '4. Use `edit_book` to write to `/behaviors/characters/{character_id}` with the full behavior object.',
-            '5. Do NOT create a new character. Do NOT modify passport or voice unless asked.',
+            'When the user asks to create or modify the behaviour of a hero:',
+            '1. Find the hero by id (or by `name` / `aliases`) in `heroes`.',
+            '2. Study the passport (appearance, clothes) and notes to understand the personality.',
+            '3. Create behaviour that matches the personality — distinct, specific, believable.',
+            '4. Use `edit_book` with `add /heroes/<hero_id>/behaviour/profile` and the full profile object (add creates or replaces).',
+            '5. Do NOT create a new hero. Do NOT modify passport or voice unless asked.',
             '',
             'Example user request: "Придумай поведение для Юры и Светланы."',
-            'Agent action: find characters Yuri and Svetlana, analyze passports, write individualized baseline/quirks/reactions via edit_book.',
+            'Agent action: find heroes yura and svetlana, analyze passports, write individualized baseline/quirks/reactions via edit_book.',
         ].join('\n'),
         director: 'You are a Film Director. Advise on camera angles, composition, lighting, mood, and atmosphere for scenes. You can write into storyboard_elements for the current scene. Think visually and cinematically.',
         extraction: 'You are an Extraction specialist. Extract structured entities from the text such as characters, objects, locations, and key terms.',
@@ -93,7 +103,7 @@ module.exports = function(config, deps = {}) {
     const TOPIC_PROMPTS = {
         book: 'You are a creative assistant helping with a visual book project. Answer questions about the book, its plot, characters, and structure.',
         scene: 'You are a scene editor assistant. Help refine the current scene: visuals, audio, pacing, and dialogue. Use the current position context (chapter/scene/unit) when relevant.',
-        characters: 'You are a character development assistant. Help design, refine, and track characters for the visual book.',
+        characters: 'You are a character development assistant. Help design, refine, and track the heroes of the visual book (book.heroes — one object per hero, the narrator included).',
         script: 'You are a scriptwriting assistant. Help with plot structure, narrative flow, scene transitions, and story arc.',
     };
 
@@ -270,10 +280,10 @@ module.exports = function(config, deps = {}) {
         lines.push('Full book JSON is too large for this transport — use this structural summary instead.');
         lines.push(`Book: ${bookData.book?.title || bookData.manifest?.title || 'Untitled'}`);
         lines.push(`Locked: ${bookData.manifest?.locked === true}`);
-        const characters = Array.isArray(bookData.characters) ? bookData.characters : [];
-        if (characters.length > 0) {
-            const names = characters.slice(0, 30).map((c) => `${c.id || c.character_id || '?'}${c.name ? ` (${c.name})` : ''}`).join(', ');
-            lines.push(`Characters: ${names}`);
+        const heroes = Array.isArray(bookData.heroes) ? bookData.heroes : [];
+        if (heroes.length > 0) {
+            const names = heroes.slice(0, 30).map((h) => `${(h && h.id) || '?'}${h && h.name ? ` (${h.name})` : ''}`).join(', ');
+            lines.push(`Heroes: ${names}`);
         }
         const chapters = Array.isArray(bookData.chapters) ? bookData.chapters : [];
         lines.push(`Chapters: ${chapters.length}`);
@@ -292,7 +302,7 @@ module.exports = function(config, deps = {}) {
         type: 'function',
         function: {
             name: 'edit_book',
-            description: 'Apply changes to the current book. Call this when the user asks to edit the book content (title, author, characters, scenes, text, behavior, etc.). Supports writing to /behaviors/characters/{character_id} for character behavior. Do NOT call if the book is locked.',
+            description: 'Apply changes to the current book. Call this when the user asks to edit the book content (title, author, heroes, scenes, text, behaviour, etc.). Heroes are addressed by id: /heroes/{hero_id}/... (for example /heroes/yura/behaviour/profile). Do NOT call if the book is locked.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -303,7 +313,7 @@ module.exports = function(config, deps = {}) {
                             type: 'object',
                             properties: {
                                 op: { type: 'string', enum: ['replace', 'add', 'remove'], description: 'Operation type' },
-                                path: { type: 'string', description: 'JSON path like /book/title, /chapters/0/scenes/1/units/0/text, /behaviors/characters/character_id/baseline' },
+                                path: { type: 'string', description: 'JSON path like /book/title, /chapters/0/scenes/1/units/0/text, /heroes/yura/passport/clothes, /heroes/yura/behaviour/profile' },
                                 value: { description: 'New value (for replace/add)' },
                             },
                             required: ['op', 'path'],
@@ -393,13 +403,33 @@ module.exports = function(config, deps = {}) {
         return { parent: current, key: lastKey, value: current ? current[lastKey] : undefined };
     }
 
+    function ensureObjectParents(obj, pathStr) {
+        const parts = String(pathStr || '').split('/').filter(Boolean);
+        let current = obj;
+        for (let i = 0; i < parts.length - 1; i++) {
+            if (current === null || typeof current !== 'object') return;
+            const key = Array.isArray(current) && /^\d+$/.test(parts[i]) ? Number(parts[i]) : parts[i];
+            if (current[key] === undefined || current[key] === null) {
+                if (Array.isArray(current) || /^\d+$/.test(parts[i + 1]) || parts[i + 1] === '-') return;
+                current[key] = {};
+            }
+            current = current[key];
+        }
+    }
+
     // ── JSON Patch application ────────────────────────
     function applyPatches(obj, patches) {
         const result = JSON.parse(JSON.stringify(obj));
         const errors = [];
+        const guarded = normalizeHeroPatches(result, patches || []);
+        errors.push(...guarded.errors);
+        if (guarded.errors.length > 0) return { result, errors };
 
-        for (const patch of normalizeBehaviorPatches(obj, patches || [])) {
+        for (const patch of guarded.patches) {
             const { op, path: pathStr, value } = patch;
+            // `add` creates missing intermediate OBJECTS (never arrays): adding
+            // /heroes/<id>/behaviour/profile to a hero without behaviour works
+            if (op === 'add') ensureObjectParents(result, pathStr);
             const { parent, key, value: oldValue } = resolvePath(result, pathStr);
 
             if (!parent && op !== 'add') {
@@ -461,33 +491,7 @@ module.exports = function(config, deps = {}) {
             }
         }
 
-        cascadeDeletedCharacterBehaviors(obj, result);
         return { result, errors };
-    }
-
-    // ── Character-removal cascade for behavior.json v2 ──
-    // A character removed by the patches (present in obj.characters, gone in
-    // result.characters) loses its behaviors.characters entry and every rule
-    // with scope:"character" bound to it — same contract as the editor's
-    // character removal route. Global rules stay. Legacy (no schema_version)
-    // in-memory maps only lose the entry.
-    function cascadeDeletedCharacterBehaviors(before, after) {
-        if (!after || !after.behaviors || typeof after.behaviors !== 'object') return;
-        const ids = (list) => new Set((Array.isArray(list) ? list : []).map(c => c && c.id).filter(Boolean));
-        const was = ids(before && before.characters);
-        if (was.size === 0) return;
-        const now = ids(after.characters);
-        const gone = [...was].filter(id => !now.has(id));
-        if (gone.length === 0) return;
-        const bh = after.behaviors;
-        const isV2 = bh.schema_version != null;
-        const chars = isV2 ? bh.characters : bh;
-        for (const id of gone) {
-            if (chars && typeof chars === 'object') delete chars[id];
-            if (isV2 && Array.isArray(bh.rules)) {
-                bh.rules = bh.rules.filter(r => !(r && r.scope === 'character' && r.character_id === id));
-            }
-        }
     }
 
     // ── Deterministic scene-participants guard ─────────
@@ -500,13 +504,14 @@ module.exports = function(config, deps = {}) {
     // partial or malformed model patch can never leave the field broken:
     //   - {"item": x}            → unwrapped to x
     //   - bare string            → wrapped into an array
-    //   - display name (Юра)     → mapped to its character_id (yura)
+    //   - display name (Юра)     → mapped to its hero id (yura) — the EXACT name
+    //                              (case-insensitive) of a hero, nothing fuzzy
     //   - duplicates             → removed, order preserved
     function normalizeBookParticipants(book) {
         if (!book || !Array.isArray(book.chapters)) return book;
         const lookup = new Map();
-        if (Array.isArray(book.characters)) {
-            for (const ch of book.characters) {
+        if (Array.isArray(book.heroes)) {
+            for (const ch of book.heroes) {
                 if (!ch || typeof ch !== 'object') continue;
                 const id = ch.id;
                 if (typeof id === 'string' && id) {
@@ -554,42 +559,100 @@ module.exports = function(config, deps = {}) {
     // state. On violation the result is withheld (null) so no caller can
     // persist broken JSON; errors name the failing file/resource so the
     // assistant (or the user) can issue a corrective patch in the next turn.
-    // ── Deterministic behavior.json v2 guard ───────────
-    // In memory `behaviors` is schema v2 ({schema_version, rules, characters}).
-    // Models (and older prompts) still write the v2.1 paths, so before the
-    // patches run:
-    //   /behaviors/<character_id>[/...]  → /behaviors/characters/<character_id>[/...]
-    //   add|replace /behaviors with a flat map (schema_version !== 2)
-    //                                    → the map becomes `characters`,
-    //                                      stored rules/schema_version survive.
-    // Runs inside applyPatches, so every caller gets it. Reserved top-level
-    // keys are never treated as character ids. A legacy
-    // in-memory book (no schema_version) is left alone — it is migrated on save.
-    const BEHAVIOR_RESERVED_KEYS = ['schema_version', 'rules', 'characters', 'defaults'];
-    function normalizeBehaviorPatches(obj, patches) {
-        const stored = obj && obj.behaviors;
-        const isV2 = stored && typeof stored === 'object' && !Array.isArray(stored) && stored.schema_version != null;
-        if (!isV2 || !Array.isArray(patches)) return patches;
-        return patches.map((patch) => {
-            if (!patch || typeof patch.path !== 'string') return patch;
-            const p = patch.path;
-            if (p === '/behaviors' && (patch.op === 'add' || patch.op === 'replace')) {
-                const v = patch.value;
-                if (v && typeof v === 'object' && !Array.isArray(v) && v.schema_version !== 2) {
-                    const characters = {};
-                    for (const [k, entry] of Object.entries(v)) {
-                        if (!BEHAVIOR_RESERVED_KEYS.includes(k)) characters[k] = entry;
-                    }
-                    return { ...patch, value: { ...stored, characters } };
-                }
-                return patch;
+    // ── Hero path guard (VBOOK_FORMAT_V4 §8.2) ─────────
+    // `heroes` is an array in memory, but the segment after /heroes/ is a HERO
+    // ID, never an array index: the guard turns /heroes/<id>/… into
+    // /heroes/<index>/… before the patches run. Refused (with a hint):
+    //   - the 3.1 maps /characters, /voices, /behaviors, /behavior_rules,
+    //     /mentions, /behavior;
+    //   - computed fields: /hero_issues, /scene_list, /heroes/<id>/rev;
+    //   - replacing or removing the whole /heroes list (a stale list would
+    //     wipe the cast) and indexes /heroes/-, /heroes/<n> addressing;
+    //   - removing the narrator; changing a hero's id or schema;
+    //   - writing voice.reference (only the hero card pins a reference).
+    // `add /heroes/<new_id>` appends a new hero (its value.id must be <new_id>).
+    const LEGACY_ROOTS = ['characters', 'voices', 'behaviors', 'behavior_rules', 'mentions', 'behavior'];
+    const COMPUTED_ROOTS = ['hero_issues', 'scene_list'];
+    const LEGACY_HINT = 'VBook 4 keeps every character in `heroes`: use /heroes/<hero_id>/… (for example /heroes/yura/behaviour/profile)';
+    function normalizeHeroPatches(book, patches) {
+        const errors = [];
+        const out = [];
+        const heroes = book && Array.isArray(book.heroes) ? book.heroes : null;
+        const indexOf = (id) => (heroes ? heroes.findIndex((h) => h && h.id === id) : -1);
+        const added = new Set();
+        for (const patch of Array.isArray(patches) ? patches : []) {
+            if (!patch || typeof patch.path !== 'string') { out.push(patch); continue; }
+            const parts = patch.path.split('/');
+            const root = parts[1];
+            if (LEGACY_ROOTS.includes(root)) {
+                errors.push(`Path ${patch.path} is not part of VBook 4. ${LEGACY_HINT}`);
+                continue;
             }
-            const m = /^\/behaviors\/([^/]+)(\/.*)?$/.exec(p);
-            if (!m) return patch;
-            const seg = m[1];
-            if (BEHAVIOR_RESERVED_KEYS.includes(seg)) return patch;
-            return { ...patch, path: `/behaviors/characters/${seg}${m[2] || ''}` };
-        });
+            if (COMPUTED_ROOTS.includes(root)) {
+                errors.push(`Path ${patch.path} is computed by the server and cannot be written`);
+                continue;
+            }
+            if (root !== 'heroes') { out.push(patch); continue; }
+            if (parts.length < 3 || parts[2] === '') {
+                errors.push(`Path ${patch.path}: the whole heroes list cannot be ${patch.op === 'remove' ? 'removed' : 'replaced'} — edit one hero: /heroes/<hero_id>/…`);
+                continue;
+            }
+            const heroId = parts[2];
+            const rest = parts.slice(3);
+            if (heroId === '-') {
+                errors.push(`Path ${patch.path}: heroes are addressed by id — add a new hero with add /heroes/<new_id>`);
+                continue;
+            }
+            if (!/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(heroId) || heroId.length > 64) {
+                errors.push(`Path ${patch.path}: "${heroId}" is not a hero id (latin snake_case; the segment after /heroes/ is an id, not an index)`);
+                continue;
+            }
+            const field = rest[0];
+            if (field === 'id' || field === 'schema' || field === 'rev') {
+                errors.push(`Path ${patch.path}: ${field} of a hero cannot be changed`);
+                continue;
+            }
+            if (field === 'voice' && (rest[1] === 'reference' || ((patch.op === 'add' || patch.op === 'replace') && rest.length === 1
+                && patch.value && typeof patch.value === 'object' && 'reference' in patch.value))) {
+                errors.push(`Path ${patch.path}: voice.reference is pinned only from the hero card`);
+                continue;
+            }
+            const idx = indexOf(heroId);
+            if (rest.length === 0) {
+                if (patch.op === 'remove') {
+                    if (heroId === 'narrator') { errors.push('The narrator cannot be removed'); continue; }
+                    if (idx < 0) { errors.push(`Hero ${heroId} not found`); continue; }
+                    out.push({ ...patch, path: `/heroes/${idx}` });
+                    continue;
+                }
+                const value = patch.value;
+                if (!value || typeof value !== 'object' || Array.isArray(value)) {
+                    errors.push(`Path ${patch.path}: a hero is an object`);
+                    continue;
+                }
+                if (value.id !== undefined && value.id !== heroId) {
+                    errors.push(`Path ${patch.path}: value.id "${value.id}" differs from the id in the path`);
+                    continue;
+                }
+                if (value.voice && typeof value.voice === 'object' && 'reference' in value.voice) {
+                    const current = idx >= 0 ? heroes[idx] : null;
+                    const same = current && current.voice && JSON.stringify(current.voice.reference) === JSON.stringify(value.voice.reference);
+                    if (!same) { errors.push(`Path ${patch.path}: voice.reference is pinned only from the hero card`); continue; }
+                }
+                const hero = { schema: 'animastor.character/1', ...value, id: heroId };
+                if (patch.op === 'add' && idx < 0 && !added.has(heroId)) {
+                    added.add(heroId);
+                    out.push({ op: 'add', path: '/heroes/-', value: hero });
+                    continue;
+                }
+                if (idx < 0) { errors.push(`Hero ${heroId} not found`); continue; }
+                out.push({ op: 'replace', path: `/heroes/${idx}`, value: hero });
+                continue;
+            }
+            if (idx < 0) { errors.push(`Hero ${heroId} not found (add it first: add /heroes/${heroId})`); continue; }
+            out.push({ ...patch, path: `/heroes/${idx}/${rest.join('/')}` });
+        }
+        return { patches: out, errors };
     }
 
     function applyPatchesValidated(obj, patches) {
@@ -625,8 +688,9 @@ module.exports = function(config, deps = {}) {
         resolvePath,
         applyPatches,
         applyPatchesValidated,
-        normalizeBehaviorPatches,
+        normalizeHeroPatches,
         normalizeBookParticipants,
+        chatRequestExtras,
         validateBundleObject,
         toolDefinitions: {
             EDIT_BOOK_TOOL,

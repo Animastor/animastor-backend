@@ -78,6 +78,8 @@ const wfManager = require('../src/services/workflow-manager');
 function startProfilesServer() {
     const app = express();
     app.use(express.json());
+    // connector writes are platform-admin only (step 6, step6-write-guards.test.js)
+    app.use((req, _res, next) => { req.user = { userId: 'u-admin', username: 'admin', role: 'admin' }; next(); });
     connectorRoutes(app, null, { wfManager, utils: { log: () => {} } });
     return new Promise((resolve) => {
         const server = app.listen(0, () => {

@@ -1,0 +1,44 @@
+{
+  "schema": "animastor.character/1",
+  "id": "anna_smirnova",
+  "name": "Anna Smirnova",
+  "passport": {
+    "appearance": "tall elegant woman in her mid-thirties, newspaper editor, composed and observant presence, sharp intelligent face, grey-green eyes, dark brown hair in a neat low bun, calm focused expression",
+    "clothes": "beige trench coat over a dark dress, small round glasses, low heels",
+    "video_tokens": [
+      "round glasses",
+      "low bun",
+      "trench coat"
+    ]
+  },
+  "voice": {
+    "timbre": "A mature Russian female voice, medium pitch, clear and firm. Native Russian pronunciation.",
+    "manner": "Calm and controlled, precise wording, even pace.",
+    "timbre_source": "analysis"
+  },
+  "behaviour": {
+    "profile": {
+      "baseline": "composed and measured; sits or stands still, moves deliberately, speaks in a low even voice with precise wording, keeps her eyes on the person she talks to",
+      "quirks": [
+        "straightens the papers on her desk before answering a difficult question",
+        "removes her glasses and holds them loosely when she is thinking",
+        "closes her eyes for a second before making a final decision"
+      ],
+      "reactions": [
+        {
+          "trigger": "is contradicted in public",
+          "reaction": "pauses without changing expression, then answers with one calm, exact sentence that ends the argument"
+        },
+        {
+          "trigger": "is praised",
+          "reaction": "deflects briefly with a small nod and immediately turns the conversation to work"
+        },
+        {
+          "trigger": "hears bad news",
+          "reaction": "freezes for a moment, sets down whatever she is holding, then asks one short clarifying question"
+        }
+      ]
+    },
+    "rules": []
+  }
+}

@@ -55,6 +55,10 @@ services:
       - net
     environment:
       - HUB_URL=http://gpu-hub:5000
+      # Infrastructure hosts are REQUIRED (no defaults in the backend): the
+      # docker service names, explicit here (config/infra-env.js).
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - PG_HOST=postgres
       - PG_PORT=5432
       - PG_DB=animastor

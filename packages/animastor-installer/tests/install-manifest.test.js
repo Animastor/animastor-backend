@@ -141,7 +141,7 @@ describe('Install Manifest — loader & validator', () => {
 
     describe('Phase 1.5: baseline workflows as first-class artifacts', () => {
         const EXPECTED_WORKFLOWS = {
-            'audio/qwen-tts': ['workflow:tts-qwen-narrator', 'workflow:tts-qwen-dialogue'],
+            'audio/qwen-tts': ['workflow:tts-qwen-narrator', 'workflow:tts-qwen-dialogue', 'workflow:tts-qwen-voice-reference', 'workflow:tts-qwen-voice-transcribe'],
             'image/qwen-image': ['workflow:img-qwen-image'],
             'video/ltx-2.3': ['workflow:video-ltx-1p', 'workflow:video-ltx-2p', 'workflow:video-ltx-3p', 'workflow:video-ltx-4p'],
         };

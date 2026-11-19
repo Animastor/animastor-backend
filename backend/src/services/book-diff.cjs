@@ -14,6 +14,9 @@ const artifactNaming = require('@animastor/generation').artifactNaming;
 const registry = require('@animastor/generation').dirtyGrammar;
 // S-2: default dirty layers resolved from media registry
 const { listMediaTypes: _mediaTypes } = require('@animastor/generation').mediaRegistry;
+// VBook 4 (VBOOK_FORMAT_V4 §4a.5): the derived key scene.resolved_looks of the
+// registry needs the book, the chapter and the one look resolver.
+const { resolveHeroLook } = require('@animastor/vbook-runtime/looks.cjs');
 
 module.exports = function(redis, config, deps) {
     const { state, book, layerConfig, genScope, activeScenes, getChunk, saveChunk } = deps;
@@ -45,11 +48,13 @@ module.exports = function(redis, config, deps) {
     }
 
     // ── Scene diff ────────────────────────────────────
-    function diffScene(oldScene, newScene) {
+    function diffScene(oldScene, newScene, context) {
         // Delegated to Prompt Dependency Registry — the single source of truth
         // for which scene-level fields affect which generation layers.
         // See prompt-dependency-registry.js for the full list of fields.
-        const result = registry.computeSceneDirtyLayers(oldScene, newScene);
+        // context { old: {book, chapter}, new: {book, chapter} } — for the
+        // derived key scene.resolved_looks.
+        const result = registry.computeSceneDirtyLayers(oldScene, newScene, context ? { ...context, resolveHeroLook } : undefined);
         return {
             dirty_layers: result.dirtyLayers,
             changes: result.changes,
@@ -118,7 +123,10 @@ module.exports = function(redis, config, deps) {
                 });
             } else {
                 // Check for changes
-                const diff = diffScene(oldS.scene, newS.scene);
+                const diff = diffScene(oldS.scene, newS.scene, {
+                    old: { book: oldBook, chapter: oldS.chapter },
+                    new: { book: newBook, chapter: newS.chapter },
+                });
                 if (diff.dirty_layers.length > 0) {
                     dirtyScenes.push({
                         chapter_id: newS.chapter_id,

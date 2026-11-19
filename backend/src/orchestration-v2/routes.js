@@ -30,7 +30,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function sendGenError(res, err, context) {
     const status = Number(err && err.status) || 500;
     if (status >= 500) console.error(`[ORCH-V2] ${context}: ${err && err.message}`);
-    return res.status(status).json({ code: (err && err.code) || 'internal', error: (err && err.message) || 'error' });
+    // details: e.g. voice_reference_required → {character_ids, reasons} (VOICE_REFERENCES.md)
+    const details = err && err.details && typeof err.details === 'object' ? err.details : {};
+    return res.status(status).json({ ...details, code: (err && err.code) || 'internal', error: (err && err.message) || 'error' });
 }
 
 function bearer(req) {
@@ -391,4 +393,4 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     return { mountInternal, regenerate, cancelGeneration, cancelWorker, onLayersDisabled, progressPanel, purgeBook, cancelBook, isV2Book: host.isV2Book };
 }
 
-module.exports = { createV2Routes, LEGACY_TO_SCOPE };
+module.exports = { createV2Routes, LEGACY_TO_SCOPE, sendGenError };

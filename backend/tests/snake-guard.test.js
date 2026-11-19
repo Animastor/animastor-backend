@@ -825,8 +825,10 @@ describe('buildCrossPromptHints (pipeline polish wiring)', () => {
 
     it('stepPolishStoryboard injects the cross-prompt hint block into the user message', async () => {
         let sentUser = '';
+        let sentSystem = '';
         const { mod } = loadModule({
             callAI: async (messages) => {
+                sentSystem = messages[0].content;
                 sentUser = messages[1].content;
                 return { units: [] };
             },
@@ -850,6 +852,8 @@ describe('buildCrossPromptHints (pipeline polish wiring)', () => {
         expect(sentUser).to.include('Cross-prompt consistency — image.prompt must use character_ids');
         expect(sentUser).to.include('missing_ids');
         expect(sentUser).to.include('mikhail_berlioz');
-        expect(sentUser).to.include('Two citizens');
+        // step 2b: the units are sent once — in the system prompt (%UNITS%), not repeated in the user message
+        expect(sentSystem).to.include('Two citizens');
+        expect(sentUser).to.not.include('sitting on a bench');
     });
 });

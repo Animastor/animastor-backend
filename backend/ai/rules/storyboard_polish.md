@@ -59,7 +59,7 @@ Scene texts are provided to help you understand what is happening. You may use t
 ## Input units to polish
 %UNITS%
 
-## Output format — return ALL units in order
+## Output format — return ONLY the units you change
 ```json
 {
   "units": [
@@ -74,4 +74,6 @@ Scene texts are provided to help you understand what is happening. You may use t
   ]
 }
 ```
-Return ONLY valid JSON. Do NOT add or remove units. Return exactly the same number of units as received.
+Return ONLY valid JSON. Include ONLY the units whose image.prompt or image.shot you change, each
+with its scene_index and unit_index exactly as received; a unit you leave out stays as it is.
+Do NOT invent units. If nothing needs a change, return { "units": [] }.
