@@ -75,7 +75,10 @@ describe('provider reasoning settings — one helper for analysis, chat and the 
         });
         it('both chat routes (non-streaming and SSE) build the body through chatRequestExtras with the provider snapshot', () => {
             const src = fs.readFileSync(path.join(__dirname, '../../packages/animastor-assistant/src/assistant-routes.cjs'), 'utf8');
-            expect(src.match(/chatEngine\.chatRequestExtras\(\{ model: ai\.model, baseUrl: ai\.baseUrl, tools \}, ai\)/g)).to.have.length(2);
+            // 0.3.1: ONE cloud body builder (cloudChatCompletion) serves both
+            // routes through runCloudTurn.
+            expect(src.match(/chatEngine\.chatRequestExtras\(\{ model: ai\.model, baseUrl: ai\.baseUrl, tools \}, ai\)/g)).to.have.length(1);
+            expect(src.match(/await runCloudTurn\(ai, apiMessages, tools, bookData, bookId,/g)).to.have.length(2);
             expect(src).to.not.match(/\.\.\.buildChatRequestExtras\(/);
         });
         it('the chat provider snapshot carries the reasoning settings (provider gateway)', async () => {

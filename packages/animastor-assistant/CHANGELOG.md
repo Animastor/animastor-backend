@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.1 (2026-11-22, unpublished)
+
+Honest edit turns (animastor-docs `CHANGELOG.md` 2026-11-22;
+reports/2026-11-22/assistant-edit-bug.md). The assistant answered "Done. I've
+added … as Scene 2" while nothing was saved: the model never called
+`edit_book`, and the routes relayed its text as is.
+
+- Book context is a **read-only snapshot**: the header no longer asks the model
+  to "return the full changed version in your response"; in an edit turn it
+  points at `edit_book`, otherwise it says the book cannot be changed in this
+  mode (`buildBookContext(book, { canEdit })`, `buildCompactBookContext` too).
+- Edit-mode prompt: call `edit_book` in the same turn (no "always confirm
+  first"), never claim a change without the call; paths of chapters / scenes /
+  units (`add /chapters/<i>/scenes/-`, unit fields `text`, `audio`, `image`,
+  `video.action`).
+- One reply pipeline for both chat routes (`processChatReply`) with
+  `edit_outcome`: `applied` | `rejected` | `claimed_not_applied` | `none` —
+  new additive field of the `/ai/chat` response and of the SSE `done` frame.
+  A rejected or unsaved edit replaces the model's text with
+  "⚠️ The book was NOT changed: <reason>"; a claim without the tool call
+  (`looksLikeChangeClaim`: "Done", "I've added", "Готово", "добавил…", a
+  pasted book JSON) gets ONE corrective retry on cloud providers, then
+  "⚠️ The book was NOT changed …".
+- Several `edit_book` calls in one turn apply cumulatively and are saved once.
+- `edit_book` outside an edit-capable turn (other mode, locked book) is
+  refused — a content-embedded call was applied in any mode before.
+- A scene / unit added without ids gets `sc-`/`iu-` + 8 hex
+  (`assignMissingIds`, inside `applyPatchesValidated`); `participants`
+  defaults to `[]`.
+- Empty reply with `finish_reason=length` says the budget ran out.
+- One diagnostic log line per turn (`turn session=… edit=… patches=…`, no
+  prompt/reply text) and the reason of a not-applied edit.
+
 ## 0.3.0 (2026-11-18, unpublished)
 
 VBook 4 step 4 (animastor-docs `architecture/VBOOK_FORMAT_V4.md` §8.2). **Breaking.**

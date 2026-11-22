@@ -386,7 +386,8 @@ module.exports = function(app, redis, deps) {
 
             }
 
-            const bookContext = chatEngine.buildBookContext(bookData);
+            const canEdit = tools.length > 0;
+            const bookContext = chatEngine.buildBookContext(bookData, { canEdit });
             if (bookContext) {
                 // Connector per-message cap is 32 KB (ai-connector
                 // lib/chat.cjs maxMessageChars, mirrored by the transport) —
@@ -396,7 +397,7 @@ module.exports = function(app, redis, deps) {
                 const withinConnectorBudget = bookContext.length <= CONNECTOR_BOOK_CONTEXT_BUDGET;
                 systemPrompt += '\n\n' + (ai.transport !== 'connector' || withinConnectorBudget
                     ? bookContext
-                    : chatEngine.buildCompactBookContext(bookData));
+                    : chatEngine.buildCompactBookContext(bookData, { canEdit }));
             }
 
             // Build API messages for AI call
@@ -421,6 +422,8 @@ module.exports = function(app, redis, deps) {
             }
 
             let aiResponse;
+            let processed = null;
+            let retried = false;
             if (ai.transport === 'connector') {
                 // Local AI Connector path (LAC §9): the completion rides the
                 // connector's authenticated WS session — no server-side URL,
@@ -481,141 +484,34 @@ module.exports = function(app, redis, deps) {
                 // or owner detail rides the API response.
                 aiSource = ai.source === 'shared' ? 'shared' : 'private-local';
             } else {
-                const controller = new AbortController();
-                const timeout = setTimeout(() => controller.abort(), AI_FETCH_TIMEOUT_MS);
-                const { response, errText } = await fetchChatCompletion(safeFetch, `${ai.baseUrl}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ai.apiKey}` },
-                    signal: controller.signal,
-                    validatePublic: ai.validatePublic,
-                }, {
-                    model: ai.model,
-                    messages: apiMessages,
-                    tools: tools.length > 0 ? tools : undefined,
-                    tool_choice: tools.length > 0 ? 'auto' : undefined,
-                    ...chatEngine.chatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }, ai),
+                // Cloud provider: the edit turn (with the one corrective
+                // retry when the model claimed a change without calling
+                // edit_book) — shared with the stream route.
+                const turn = await runCloudTurn(ai, apiMessages, tools, bookData, bookId, {
+                    canEdit, logTag: '[AI]', timeoutMs: AI_FETCH_TIMEOUT_MS,
                 });
-                clearTimeout(timeout);
-
-                if (!response.ok) {
-                    const upstreamError = describeUpstreamError(response.status, errText); // key-masked
+                if (turn.error) {
+                    const upstreamError = describeUpstreamError(turn.error.status, turn.error.errText); // key-masked
                     console.error('[AI]', upstreamError);
                     return res.status(502).json({ error: upstreamError, code: 'upstream_error' });
                 }
-
-                aiResponse = await response.json();
+                processed = turn.processed;
+                retried = turn.retried;
+                aiResponse = turn.aiResponse;
             }
-            const aiMessage = aiResponse.choices?.[0]?.message;
-            let replyText = aiMessage?.content || '';
-            // Strip AI chain-of-thought reasoning blocks — internal, not for the UI
-            replyText = replyText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-            // Strip tool_call & tool_call markers that some models leak into content
-            replyText = replyText.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
-            replyText = replyText.replace(/<\/?tool_call[^>]*>/gi, '').trim();
-            // Also strip partial tool_call remnants without the opening '<' (e.g. 'tool_call>')
-            replyText = replyText.replace(/tool_call[^>]*>/gi, '').trim();
-            replyText = replyText.replace(/\/?tool_call\b/gi, '').trim();
-            // Catch any remaining tool_call-like fragments where leading chars may be missing
-            // (e.g. 'ool_call>' — Qwen3 sometimes outputs partial tag remnants)
-            replyText = replyText.replace(/[a-z]*_call[^>]*>/gi, '').trim();
-            // Only extract tool calls from content if model didn't return structured tool_calls
-            // (avoids duplicates — Qwen3 sometimes puts tool_call JSON in both places)
-            const structuredToolCalls = aiMessage?.tool_calls || [];
-            let contentToolCalls = [];
-            if (structuredToolCalls.length === 0) {
-                const result = extractToolCallsFromContent(replyText);
-                contentToolCalls = result.toolCalls;
-                replyText = result.cleanedContent;
+            if (!processed) {
+                // Connector reply: no structured tool_calls (Phase-4 contract) —
+                // content-embedded tool calls are extracted by processChatReply.
+                const aiMessage = aiResponse.choices?.[0]?.message;
+                processed = processChatReply(aiMessage?.content || '', aiMessage?.tool_calls || [], bookData, bookId, {
+                    canEdit, logTag: '[AI]', finishReason: aiResponse.choices?.[0]?.finish_reason || null,
+                });
             }
-            // If after stripping, the reply is just garbage remnants (e.g. 'ool_call>', 'tool_call>'),
-            // treat as empty so the fallback message below kicks in.
-            // A remnant is considered garbage if:
-            //   - it has no real word of 3+ letters, OR
-            //   - it contains '_call' (a tool_call-like fragment)
-            if (replyText && replyText.length < 30 && (!/[\w\u0400-\u04FF]{3,}/.test(replyText) || /_call/i.test(replyText))) {
-                replyText = '';
-            }
-            const toolCalls = [...contentToolCalls, ...structuredToolCalls];
-
-            // Handle tool calls
-            let patches = [];
-            let toolResults = [];
-            let lastEditError = null;
-
-            if (toolCalls.length > 0) {
-                for (const tc of toolCalls) {
-                    if (tc.function.name === 'edit_book') {
-                        try {
-                            const args = JSON.parse(tc.function.arguments);
-                            // Validated application: patch → contract validation →
-                            // result. A structurally broken result (e.g. voices.json
-                            // becoming a string instead of an object) is rejected
-                            // here and never reaches the save block below.
-                            const patchResult = chatEngine.applyPatchesValidated(bookData, args.patches || []);
-                            if (patchResult.errors.length > 0) {
-                                const errMsg = patchResult.errors.join('; ');
-                                toolResults.push({ tool: 'edit_book', error: errMsg, validation_errors: patchResult.validation_errors });
-                                lastEditError = errMsg;
-                            } else {
-                                patches = args.patches || [];
-                                toolResults.push({ tool: 'edit_book', applied: patches.length, book_id: bookId });
-                            }
-                        } catch (parseErr) {
-                            toolResults.push({ tool: 'edit_book', error: parseErr.message });
-                            lastEditError = parseErr.message;
-                        }
-                    } else {
-                        toolResults.push({ tool: tc.function.name, result: 'Tool executed (no handler)' });
-                    }
-                }
-            }
-
-            // Save patches if any were applied
-            if (patches.length > 0 && bookData) {
-                try {
-                    // Re-apply with validation (defense in depth): the save block
-                    // is the last gate before disk — an invalid candidate state
-                    // must never be written and must not be reported as applied.
-                    const patchResult = chatEngine.applyPatchesValidated(bookData, patches);
-                    if (patchResult.errors.length > 0) {
-                        // Reject the whole mutation: keep previous canonical state,
-                        // report the failure to the assistant/user, apply nothing.
-                        if (!lastEditError) lastEditError = patchResult.errors.join('; ');
-                        patches = [];
-                        toolResults.push({ tool: 'edit_book', error: lastEditError, validation_errors: patchResult.validation_errors, rejected: true });
-                    } else if (patchResult.result) {
-                        // ONE save semantics through the AssistantPorts seam:
-                        // full bundle save when chapters are intact, targeted
-                        // file save (chapters skipped) on a corrupted load.
-                        persistBook(bookId, patchResult.result);
-                        log('[AI] Book updated (via persistBook):', patches.length, 'patches applied to', bookId);
-                    }
-                } catch (saveErr) {
-                    console.error('[AI] Failed to save updated book:', saveErr.message);
-                    if (!lastEditError) lastEditError = saveErr.message;
-                    // Nothing was persisted — do not report success.
-                    patches = [];
-                }
-            }
-
-            // Build a user-visible reply when the AI returned empty content but tool calls were processed
-            if (!replyText && toolCalls.length > 0) {
-                if (lastEditError) {
-                    replyText = `⚠️ Edit error: ${lastEditError}`;
-                } else if (patches.length > 0) {
-                    replyText = `✅ Changes applied: ${patches.length} patch(es) to the book.`;
-                } else {
-                    replyText = `🤖 Processed ${toolCalls.length} tool call(s).`;
-                }
-            }
-
-            // No content AND no tool calls — the model produced nothing usable
-            // (e.g. a reasoning model burned the whole max_tokens budget on
-            // reasoning). Report it honestly instead of returning an empty
-            // reply that UIs render as a fake "tool executed" message.
-            if (!replyText && toolCalls.length === 0) {
-                replyText = '⚠️ The assistant returned no result. Please try again.';
-            }
+            logTurn('[AI]', {
+                sessionId: activeSessionId, mode: sessionMode, ai, processed, retried,
+                finishReason: aiResponse?.choices?.[0]?.finish_reason || null,
+            });
+            const { replyText, toolCalls, toolResults, patches, validationErrors, editOutcome } = processed;
 
             // Update session messages: merge with stored history
             const updatedMessages = [
@@ -630,15 +526,13 @@ module.exports = function(app, redis, deps) {
             // file/resource that failed the bundle contract, so a corrective
             // patch ("почини voices.json") lands in the very next turn —
             // the error reply is stored in session history for that purpose.
-            const validationErrors = toolResults
-                .flatMap(tr => tr.validation_errors || []);
-
             res.json({
                 reply: replyText,
                 tool_calls: toolCalls,
                 tool_results: toolResults,
                 patches_applied: patches.length,
                 validation_errors: validationErrors,
+                edit_outcome: editOutcome,
                 session_id: activeSessionId,
                 ai_source: aiSource || (ai.source === 'workspace' ? 'cloud' : (ai.source === 'system' ? 'system' : ai.source)),
             });
@@ -869,14 +763,15 @@ module.exports = function(app, redis, deps) {
                 });
             }
 
-            const bookContext = chatEngine.buildBookContext(bookData);
+            const canEdit = tools.length > 0;
+            const bookContext = chatEngine.buildBookContext(bookData, { canEdit });
             if (bookContext) {
                 // Same connector per-message cap as the non-streaming route —
                 // oversized book JSON falls back to the compact summary.
                 const withinConnectorBudget = bookContext.length <= CONNECTOR_BOOK_CONTEXT_BUDGET;
                 systemPrompt += '\n\n' + (ai.transport !== 'connector' || withinConnectorBudget
                     ? bookContext
-                    : chatEngine.buildCompactBookContext(bookData));
+                    : chatEngine.buildCompactBookContext(bookData, { canEdit }));
             }
 
             let apiMessages;
@@ -997,7 +892,13 @@ module.exports = function(app, redis, deps) {
                     // canonical text replaces any streamed approximation
                     // client-side (converge-on-terminal semantics — the same
                     // contract as OpenAI SSE clients).
-                    const processed = processChatReply(cres.content || '', [], bookData, bookId);
+                    const processed = processChatReply(cres.content || '', [], bookData, bookId, {
+                        canEdit, logTag: '[AI STREAM]', finishReason: cres.finishReason || null,
+                    });
+                    logTurn('[AI STREAM]', {
+                        sessionId: activeSessionId, mode: sessionMode, ai, processed, retried: false,
+                        finishReason: cres.finishReason || null,
+                    });
                     finalReply = processed.replyText;
                     terminalPayload = {
                         reply: finalReply,
@@ -1005,6 +906,7 @@ module.exports = function(app, redis, deps) {
                         tool_results: processed.toolResults,
                         patches_applied: processed.patches.length,
                         validation_errors: processed.validationErrors,
+                        edit_outcome: processed.editOutcome,
                         session_id: activeSessionId,
                         ai_source: aiSource.value,
                         finish_reason: cres.finishReason || 'stop',
@@ -1014,41 +916,27 @@ module.exports = function(app, redis, deps) {
                 } else {
                     // Cloud provider branch: the existing non-streaming
                     // upstream call, re-emitted as ONE delta + terminal. No
-                    // second upstream protocol; cloud behavior unchanged.
-                    const controller = new AbortController();
-                    const onOuterAbort = () => controller.abort();
-                    abort.signal.addEventListener('abort', onOuterAbort, { once: true });
-                    const timeout = setTimeout(() => controller.abort(), clampStreamTimeoutMs(req.body?.timeout_ms));
-                    let response, errText;
-                    try {
-                        ({ response, errText } = await fetchChatCompletion(safeFetch, `${ai.baseUrl}/chat/completions`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ai.apiKey}` },
-                            signal: controller.signal,
-                            validatePublic: ai.validatePublic,
-                        }, {
-                            model: ai.model,
-                            messages: apiMessages,
-                            tools: tools.length > 0 ? tools : undefined,
-                            tool_choice: tools.length > 0 ? 'auto' : undefined,
-                            ...chatEngine.chatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }, ai),
-                        }));
-                    } finally {
-                        clearTimeout(timeout);
-                        abort.signal.removeEventListener('abort', onOuterAbort);
-                    }
-
-                    if (!response.ok) {
-                        const errorData = { error: describeUpstreamError(response.status, errText), code: 'upstream_error' }; // key-masked
+                    // second upstream protocol; cloud behavior unchanged —
+                    // except the one corrective retry of an edit turn whose
+                    // reply claimed a change without calling edit_book.
+                    const turn = await runCloudTurn(ai, apiMessages, tools, bookData, bookId, {
+                        canEdit, logTag: '[AI STREAM]',
+                        timeoutMs: clampStreamTimeoutMs(req.body?.timeout_ms),
+                        signal: abort.signal,
+                    });
+                    if (turn.error) {
+                        const errorData = { error: describeUpstreamError(turn.error.status, turn.error.errText), code: 'upstream_error' }; // key-masked
                         console.error('[AI STREAM]', errorData.error);
                         if (!clientGone) sendTerminal('error', errorData);
                         await persistFailedTurn(`⚠️ ${errorData.error}`);
                         return;
                     }
-                    const aiResponse = await response.json();
-                    const aiMessage = aiResponse.choices?.[0]?.message;
-                    let replyText = aiMessage?.content || '';
-                    const processed = processChatReply(replyText, aiMessage?.tool_calls || [], bookData, bookId);
+                    const aiResponse = turn.aiResponse;
+                    const processed = turn.processed;
+                    logTurn('[AI STREAM]', {
+                        sessionId: activeSessionId, mode: sessionMode, ai, processed, retried: turn.retried,
+                        finishReason: aiResponse.choices?.[0]?.finish_reason || null,
+                    });
                     finalReply = processed.replyText;
                     if (finalReply && !clientGone) writeEvent('delta', { delta: finalReply });
                     terminalPayload = {
@@ -1057,6 +945,7 @@ module.exports = function(app, redis, deps) {
                         tool_results: processed.toolResults,
                         patches_applied: processed.patches.length,
                         validation_errors: processed.validationErrors,
+                        edit_outcome: processed.editOutcome,
                         session_id: activeSessionId,
                         ai_source: aiSource.value,
                         finish_reason: aiResponse.choices?.[0]?.finish_reason || 'stop',
@@ -1125,11 +1014,29 @@ module.exports = function(app, redis, deps) {
         }
     });
 
-    // Reply post-processing shared by both branches of the stream route:
-    // the exact strip/extract/apply pipeline of the non-streaming chat route
-    // (think blocks, tool_call remnants, content-embedded tool calls, patch
-    // application with validation, and the honest no-result fallback).
-    function processChatReply(rawContent, structuredToolCalls, bookData, bookId) {
+    // Reply post-processing shared by BOTH chat routes (non-streaming and
+    // stream, every transport): think blocks, tool_call remnants,
+    // content-embedded tool calls, edit_book application with validation,
+    // ONE save through persistBook, and the honest reply.
+    //
+    // Honest edit outcome (0.3.1, reports/2026-11-22/assistant-edit-bug.md):
+    // the user-visible reply never says a change happened unless it was
+    // saved. editOutcome:
+    //   'applied'             — patches validated AND persisted;
+    //   'rejected'            — edit_book was called, nothing was saved
+    //                           (path guard, contract validation, save error);
+    //                           the model's own text (often "Done") is
+    //                           replaced by the error;
+    //   'claimed_not_applied' — edit_book was offered, NOT called, and the
+    //                           reply claims a change / pastes a changed JSON;
+    //                           the reply is replaced by "NOT changed";
+    //   'none'                — no edit involved.
+    // edit_book outside an edit-capable turn (other mode, locked book) is
+    // refused — before 0.3.1 a content-embedded call was applied in any mode.
+    function processChatReply(rawContent, structuredToolCalls, bookData, bookId, opts = {}) {
+        const canEdit = opts.canEdit === true;
+        const logTag = opts.logTag || '[AI]';
+        const finishReason = opts.finishReason || null;
         let replyText = rawContent || '';
         replyText = replyText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
         replyText = replyText.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
@@ -1138,81 +1045,200 @@ module.exports = function(app, redis, deps) {
         replyText = replyText.replace(/\/?tool_call\b/gi, '').trim();
         replyText = replyText.replace(/[a-z]*_call[^>]*>/gi, '').trim();
 
+        // Only extract tool calls from content if the model didn't return
+        // structured tool_calls (Qwen3 sometimes puts them in both places).
         let contentToolCalls = [];
         if ((structuredToolCalls || []).length === 0) {
             const result = extractToolCallsFromContent(replyText);
             contentToolCalls = result.toolCalls;
             replyText = result.cleanedContent;
         }
-        if (replyText && replyText.length < 30 && (!/[\w\u0400-\u04FF]{3,}/.test(replyText) || /_call/i.test(replyText))) {
+        // Garbage remnants ('ool_call>' …) count as an empty reply.
+        if (replyText && replyText.length < 30 && (!/[\wЀ-ӿ]{3,}/.test(replyText) || /_call/i.test(replyText))) {
             replyText = '';
         }
         const toolCalls = [...contentToolCalls, ...(structuredToolCalls || [])];
 
-        let patches = [];
         const toolResults = [];
-        let lastEditError = null;
+        const editErrors = [];
+        const appliedPatches = [];
+        let editCalled = false;
+        // Every edit_book call of the turn applies on top of the previous
+        // one (cumulative), validated each time; the book is saved ONCE.
+        let workingBook = bookData;
 
-        if (toolCalls.length > 0) {
-            for (const tc of toolCalls) {
-                if (tc.function.name === 'edit_book') {
-                    try {
-                        const args = JSON.parse(tc.function.arguments);
-                        const patchResult = chatEngine.applyPatchesValidated(bookData, args.patches || []);
-                        if (patchResult.errors.length > 0) {
-                            const errMsg = patchResult.errors.join('; ');
-                            toolResults.push({ tool: 'edit_book', error: errMsg, validation_errors: patchResult.validation_errors });
-                            lastEditError = errMsg;
-                        } else {
-                            patches = args.patches || [];
-                            toolResults.push({ tool: 'edit_book', applied: patches.length, book_id: bookId });
-                        }
-                    } catch (parseErr) {
-                        toolResults.push({ tool: 'edit_book', error: parseErr.message });
-                        lastEditError = parseErr.message;
-                    }
-                } else {
-                    toolResults.push({ tool: tc.function.name, result: 'Tool executed (no handler)' });
-                }
+        for (const tc of toolCalls) {
+            const name = tc && tc.function && tc.function.name;
+            if (name !== 'edit_book') {
+                toolResults.push({ tool: name, result: 'Tool executed (no handler)' });
+                continue;
             }
-        }
-
-        if (patches.length > 0 && bookData) {
-            try {
-                const patchResult = chatEngine.applyPatchesValidated(bookData, patches);
-                if (patchResult.errors.length > 0) {
-                    if (!lastEditError) lastEditError = patchResult.errors.join('; ');
-                    patches = [];
-                    toolResults.push({ tool: 'edit_book', error: lastEditError, validation_errors: patchResult.validation_errors, rejected: true });
-                } else if (patchResult.result) {
-                    // ONE save semantics through the AssistantPorts seam (the
-                    // same persistBook as the non-streaming route — no
-                    // duplicated targeted-save fallback).
-                    persistBook(bookId, patchResult.result);
-                    log('[AI STREAM] Book updated (via persistBook):', patches.length, 'patches applied to', bookId);
-                }
-            } catch (saveErr) {
-                console.error('[AI STREAM] Failed to save updated book:', saveErr.message);
-                if (!lastEditError) lastEditError = saveErr.message;
-                patches = [];
-            }
-        }
-
-        if (!replyText && toolCalls.length > 0) {
-            if (lastEditError) {
-                replyText = `⚠️ Edit error: ${lastEditError}`;
-            } else if (patches.length > 0) {
-                replyText = `✅ Changes applied: ${patches.length} patch(es) to the book.`;
+            editCalled = true;
+            let err = null;
+            let validationErrors = [];
+            if (!canEdit) {
+                err = 'the book cannot be changed in this mode (switch to the Edit mode; a locked book cannot be edited)';
+            } else if (!bookData) {
+                err = 'the book could not be loaded';
             } else {
-                replyText = `🤖 Processed ${toolCalls.length} tool call(s).`;
+                try {
+                    const rawArgs = tc.function.arguments;
+                    const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs || '{}') : (rawArgs || {});
+                    const list = Array.isArray(args.patches) ? args.patches : [];
+                    if (list.length === 0) {
+                        err = 'edit_book was called without patches';
+                    } else {
+                        const patchResult = chatEngine.applyPatchesValidated(workingBook, list);
+                        if (patchResult.errors.length > 0 || !patchResult.result) {
+                            err = patchResult.errors.join('; ') || 'the patches were rejected';
+                            validationErrors = patchResult.validation_errors || [];
+                        } else {
+                            workingBook = patchResult.result;
+                            appliedPatches.push(...list);
+                            toolResults.push({ tool: 'edit_book', applied: list.length, book_id: bookId });
+                        }
+                    }
+                } catch (parseErr) {
+                    err = `invalid edit_book arguments: ${parseErr.message}`;
+                }
+            }
+            if (err) {
+                editErrors.push(err);
+                toolResults.push({ tool: 'edit_book', error: err, validation_errors: validationErrors });
             }
         }
-        if (!replyText && toolCalls.length === 0) {
-            replyText = '⚠️ The assistant returned no result. Please try again.';
+
+        // ONE save through the AssistantPorts seam (full bundle save when the
+        // chapters are intact, targeted file save on a corrupted load).
+        let patches = [];
+        if (appliedPatches.length > 0) {
+            try {
+                persistBook(bookId, workingBook);
+                patches = appliedPatches;
+                log(`${logTag} Book updated (via persistBook):`, patches.length, 'patches applied to', bookId);
+            } catch (saveErr) {
+                console.error(`${logTag} Failed to save updated book:`, saveErr.message);
+                const err = `the book could not be saved: ${saveErr.message}`;
+                editErrors.push(err);
+                toolResults.push({ tool: 'edit_book', error: err, rejected: true });
+            }
+        }
+
+        let editOutcome = 'none';
+        if (patches.length > 0) editOutcome = 'applied';
+        else if (editCalled) editOutcome = 'rejected';
+        else if (canEdit && chatEngine.looksLikeChangeClaim(replyText)) editOutcome = 'claimed_not_applied';
+
+        if (editOutcome === 'applied') {
+            if (!replyText) replyText = `✅ Changes applied: ${patches.length} change(s) to the book.`;
+            if (editErrors.length > 0) replyText += `\n\n⚠️ Some changes were NOT applied: ${editErrors.join('; ')}`;
+        } else if (editOutcome === 'rejected') {
+            replyText = `⚠️ The book was NOT changed: ${editErrors.join('; ')}`;
+        } else if (editOutcome === 'claimed_not_applied') {
+            replyText = '⚠️ The book was NOT changed: the assistant described the edit but did not apply it. Please repeat the request.';
+        } else if (!replyText && toolCalls.length > 0) {
+            replyText = `🤖 Processed ${toolCalls.length} tool call(s).`;
+        } else if (!replyText) {
+            // No content AND no tool calls. finish_reason=length: a reasoning
+            // model spent the whole budget before answering.
+            replyText = finishReason === 'length'
+                ? '⚠️ The assistant ran out of its answer budget before replying — nothing was changed. Please try again or shorten the request.'
+                : '⚠️ The assistant returned no result. Please try again.';
         }
 
         const validationErrors = toolResults.flatMap(tr => tr.validation_errors || []);
-        return { replyText, toolCalls, toolResults, patches, validationErrors };
+        return { replyText, toolCalls, toolResults, patches, validationErrors, editOutcome, editErrors };
+    }
+
+    // One cloud /chat/completions call (SSRF-guarded fetch, the provider's
+    // body extras, the one-shot "Unsupported parameter" retry). Returns
+    // { ok:true, aiResponse } or { ok:false, status, errText }; aborts
+    // (timeout / outer signal) throw AbortError as before.
+    async function cloudChatCompletion(ai, messages, tools, { timeoutMs, signal } = {}) {
+        const controller = new AbortController();
+        const onOuterAbort = () => controller.abort();
+        if (signal) {
+            if (signal.aborted) controller.abort();
+            else signal.addEventListener('abort', onOuterAbort, { once: true });
+        }
+        const timeout = setTimeout(() => controller.abort(), timeoutMs || AI_FETCH_TIMEOUT_MS);
+        try {
+            const { response, errText } = await fetchChatCompletion(safeFetch, `${ai.baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ai.apiKey}` },
+                signal: controller.signal,
+                validatePublic: ai.validatePublic,
+            }, {
+                model: ai.model,
+                messages,
+                tools: tools.length > 0 ? tools : undefined,
+                tool_choice: tools.length > 0 ? 'auto' : undefined,
+                ...chatEngine.chatRequestExtras({ model: ai.model, baseUrl: ai.baseUrl, tools }, ai),
+            });
+            if (!response.ok) return { ok: false, status: response.status, errText };
+            return { ok: true, aiResponse: await response.json() };
+        } finally {
+            clearTimeout(timeout);
+            if (signal) signal.removeEventListener('abort', onOuterAbort);
+        }
+    }
+
+    // Minimum time left in the request window for the corrective retry.
+    const EDIT_RETRY_MIN_MS = 5_000;
+
+    // A cloud chat turn: the call, the post-processing and — when edit_book
+    // was offered, NOT called, and the reply claims a change — ONE corrective
+    // call ("you did not call edit_book…") inside the same time window. If
+    // the retry still applies nothing, the honest "NOT changed" reply of the
+    // first pass stays.
+    async function runCloudTurn(ai, apiMessages, tools, bookData, bookId, { canEdit, logTag, timeoutMs, signal }) {
+        const deadline = Date.now() + timeoutMs;
+        const first = await cloudChatCompletion(ai, apiMessages, tools, { timeoutMs, signal });
+        if (!first.ok) return { error: first };
+        const msg1 = first.aiResponse.choices?.[0]?.message;
+        const processed = processChatReply(msg1?.content || '', msg1?.tool_calls || [], bookData, bookId, {
+            canEdit, logTag, finishReason: first.aiResponse.choices?.[0]?.finish_reason || null,
+        });
+        if (processed.editOutcome !== 'claimed_not_applied') {
+            return { processed, aiResponse: first.aiResponse, retried: false };
+        }
+        const left = deadline - Date.now();
+        if (left < EDIT_RETRY_MIN_MS) {
+            log(`${logTag} edit retry skipped for ${bookId}: ${left} ms left in the request window`);
+            return { processed, aiResponse: first.aiResponse, retried: false };
+        }
+        const retryMessages = [
+            ...apiMessages,
+            { role: 'assistant', content: msg1?.content || '' },
+            { role: 'user', content: chatEngine.EDIT_RETRY_PROMPT },
+        ];
+        const second = await cloudChatCompletion(ai, retryMessages, tools, { timeoutMs: left, signal });
+        if (!second.ok) {
+            console.error(`${logTag} edit retry failed upstream: ${second.status}`);
+            return { processed, aiResponse: first.aiResponse, retried: true };
+        }
+        const msg2 = second.aiResponse.choices?.[0]?.message;
+        const again = processChatReply(msg2?.content || '', msg2?.tool_calls || [], bookData, bookId, {
+            canEdit, logTag, finishReason: second.aiResponse.choices?.[0]?.finish_reason || null,
+        });
+        if (again.editOutcome === 'applied' || again.editOutcome === 'rejected') {
+            return { processed: again, aiResponse: second.aiResponse, retried: true };
+        }
+        return { processed, aiResponse: first.aiResponse, retried: true };
+    }
+
+    // One diagnostic line per chat turn — no prompt or reply text, only the
+    // shape of the answer (the 19.11 investigation had nothing to go on).
+    function logTurn(logTag, { sessionId, mode, ai, processed, retried, finishReason }) {
+        try {
+            log(`${logTag} turn session=${sessionId} mode=${mode} source=${chatAiSourceToken(ai)} model=${ai.model || '-'}`
+                + ` finish=${finishReason || '-'} reply_chars=${(processed.replyText || '').length}`
+                + ` tool_calls=${processed.toolCalls.length} edit=${processed.editOutcome}`
+                + ` patches=${processed.patches.length}${retried ? ' retry=1' : ''}`);
+            if (processed.editErrors && processed.editErrors.length > 0) {
+                log(`${logTag} edit_book not applied (session=${sessionId}): ${processed.editErrors.join('; ').slice(0, 500)}`);
+            }
+        } catch (_) { /* diagnostics never break a turn */ }
     }
 
     log('[ROUTES] AI routes loaded');

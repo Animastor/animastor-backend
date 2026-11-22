@@ -41,6 +41,10 @@ module.exports = function(app, redis, deps) {
         cleanupService, bookDiff, taskHandler, windowGenerator,
         iuRepo, cleanBookRedisKeys,
         agentSessionControl,
+        // helpers/book-text.cjs — { nothingToGenerate, BOOK_HAS_NO_TEXT };
+        // injected by the composition root (contour require sets are frozen).
+        // Absent (narrow unit-test deps) → the guard is off.
+        generationMaterial = null,
     } = deps;
     const { log } = utils;
 
@@ -481,6 +485,27 @@ module.exports = function(app, redis, deps) {
     // SELECTIVE REGENERATION
     // ======================================================
     app.post('/api/v1/book/:bookId/regenerate', async (req, res) => {
+        // Nothing to generate: the book has scenes but none carries material
+        // for the requested layers (helpers/book-text.cjs) → refuse BEFORE
+        // any task / dirty mark / dispatch (both orchestrations), instead of
+        // a silent no_jobs_generated → failed. A missing book keeps its 404
+        // below; a book with zero scenes keeps the historic empty 200.
+        // The book is loaded ONCE here; the legacy leg below reuses this
+        // object (the pinned loader-call count of this route stays as is).
+        let loadedBookOnce;
+        try {
+            loadedBookOnce = book.loadBook(req.params.bookId);
+        } catch (loadErr) {
+            console.error('[REGENERATE] book load failed:', loadErr.message);
+            return res.status(500).json({ error: loadErr.message });
+        }
+        if (generationMaterial && loadedBookOnce) {
+            const wanted = Array.isArray(req.body && req.body.worker_types) ? req.body.worker_types : null;
+            if (generationMaterial.nothingToGenerate(loadedBookOnce, wanted)) {
+                log(`[REGENERATE] ${req.params.bookId}: refused — book_has_no_text (worker_types=${(wanted || ['all']).join(',')})`);
+                return res.status(422).json({ ...generationMaterial.BOOK_HAS_NO_TEXT });
+            }
+        }
         try {
             if (await isV2(req.params.bookId)) return orchV2.regenerate(req, res);
         } catch (v2Err) {
@@ -517,7 +542,7 @@ module.exports = function(app, redis, deps) {
                 rebuild_all,
             } = req.body || {};
 
-            const loadedBook = book.loadBook(bookId);
+            const loadedBook = loadedBookOnce;
             if (!loadedBook) return res.status(404).json({ error: 'book not found' });
 
             const buildId = loadedBook.manifest?.build_id || 'default';

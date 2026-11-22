@@ -49,7 +49,19 @@ module.exports = function(config, deps = {}) {
         import: 'You are an Import specialist. Convert arbitrary text into Animastor book structure. Analyze the text and automatically determine chapters, scenes, and units. If a book is already open, decide whether the text is a new chapter, continuation of current chapter, or extension of current scene. If no book is open, create a new book with manifest, metadata, chapters, scenes, and units. The user must NOT manually mark chapters/scenes/units — determine the structure from content. Always produce a valid Animastor book JSON.',
         edit: [
             'You are an Editor. You can modify scenes, heroes, locations, behaviour, and book structure.',
-            'Use the `edit_book` tool to apply changes. Always confirm changes with the user before applying.',
+            'The ONLY way to change the book is a call of the `edit_book` tool with JSON Patch operations.',
+            'When the user asks for a change, call `edit_book` in this same turn. Ask a question instead only when the request is genuinely ambiguous.',
+            'Text or JSON written in your reply changes NOTHING: never paste a modified book, chapter, scene or unit as JSON instead of calling the tool.',
+            'Never say that a change is done ("Done", "I have added…", "Готово", "Добавил…") unless you called `edit_book` in this turn — the server reports the real result to the user.',
+            '',
+            '## Chapters, scenes and units',
+            '`chapters` is an array addressed by index: `/chapters/<chapter_index>/scenes/<scene_index>/units/<unit_index>/<field>` (indexes start at 0).',
+            'A new scene: `add /chapters/<chapter_index>/scenes/-` with the whole scene object, for example',
+            '`{"scene_id": "sc-1a2b3c4d", "scene_title": "Title", "type": "narration", "participants": [], "units": [{"id": "iu-5e6f7a8b", "type": "narration", "text": "Unit text."}]}`.',
+            'Ids: `sc-` / `iu-` followed by 8 lowercase hex characters, unique in the book (the server assigns them when they are missing).',
+            'Unit fields: `text`, `audio` {speaker, text}, `image` {shot, prompt, negative}, `video` {action}.',
+            'Use `add` to set a field that may not exist yet (`add /chapters/0/scenes/1/units/0/video/action` creates `video`); `replace` works only on an existing field.',
+            'Several changes — several operations in ONE `edit_book` call.',
             '',
             '## Heroes (VBook 4)',
             'Every character of the book — including the narrator — is a hero: one object in `heroes` (one file `characters/<id>.json`).',
@@ -250,13 +262,25 @@ module.exports = function(config, deps = {}) {
     }
 
     // ── Book context builder ──────────────────────────
-    function buildBookContext(bookData) {
+    // The book JSON is a READ-ONLY snapshot for the model. Until 0.3.1 the
+    // header said "modify it as needed, and return the full changed version
+    // in your response" — models did exactly that (a ```json block with the
+    // changed scene + "Done") instead of calling edit_book, and nothing was
+    // saved (reports/2026-11-22/assistant-edit-bug.md).
+    // opts.canEdit — edit_book is offered in this turn (edit mode, unlocked).
+    function bookContextHeader(canEdit) {
+        return canEdit
+            ? 'Below is the current book JSON — a READ-ONLY snapshot. To change the book call the `edit_book` tool; a JSON or text in your reply changes nothing.'
+            : 'Below is the current book JSON for reference. In this mode you cannot change the book — if the user asks for a change, tell them to switch to the Edit mode.';
+    }
+
+    function buildBookContext(bookData, opts = {}) {
         if (!bookData) return '';
         const isLocked = bookData.manifest?.locked === true;
         const lines = [];
         lines.push(`Locked: ${isLocked}`);
         lines.push('');
-        lines.push('Below is the full book JSON data. Read it, modify it as needed, and return the full changed version in your response.');
+        lines.push(bookContextHeader(opts.canEdit === true));
         lines.push('');
         lines.push('```json');
         lines.push(JSON.stringify(bookData, null, 2));
@@ -272,12 +296,13 @@ module.exports = function(config, deps = {}) {
      * @param {object|null} bookData
      * @returns {string} '' when no book data
      */
-    function buildCompactBookContext(bookData) {
+    function buildCompactBookContext(bookData, opts = {}) {
         if (!bookData) return '';
         const MAX_CHAPTERS = 40;
         const MAX_SCENES_PER_CHAPTER = 40;
         const lines = [];
         lines.push('Full book JSON is too large for this transport — use this structural summary instead.');
+        lines.push(bookContextHeader(opts.canEdit === true));
         lines.push(`Book: ${bookData.book?.title || bookData.manifest?.title || 'Untitled'}`);
         lines.push(`Locked: ${bookData.manifest?.locked === true}`);
         const heroes = Array.isArray(bookData.heroes) ? bookData.heroes : [];
@@ -655,11 +680,94 @@ module.exports = function(config, deps = {}) {
         return { patches: out, errors };
     }
 
+    // ── Server-assigned ids for scenes / units added by a patch ──
+    // A model adding a scene often omits scene_id / unit ids (or the whole
+    // `units`/`participants` arrays). Such a scene passed the contract but
+    // was unaddressable afterwards (no scene_id → no chunk, no generation,
+    // no editor route). Missing ids get `sc-`/`iu-` + 8 hex, unique in the
+    // book; existing ids are never touched.
+    function randomHex8() {
+        let s = '';
+        for (let i = 0; i < 8; i++) s += Math.floor(Math.random() * 16).toString(16);
+        return s;
+    }
+
+    function assignMissingIds(book) {
+        if (!book || !Array.isArray(book.chapters)) return book;
+        const used = new Set();
+        const scenesOf = (ch) => (ch && Array.isArray(ch.scenes) ? ch.scenes : []);
+        for (const ch of book.chapters) {
+            for (const sc of scenesOf(ch)) {
+                if (!sc || typeof sc !== 'object') continue;
+                if (typeof sc.scene_id === 'string' && sc.scene_id) used.add(sc.scene_id);
+                for (const u of Array.isArray(sc.units) ? sc.units : []) {
+                    if (u && typeof u.id === 'string' && u.id) used.add(u.id);
+                }
+            }
+        }
+        const fresh = (prefix) => {
+            let id;
+            do { id = `${prefix}-${randomHex8()}`; } while (used.has(id));
+            used.add(id);
+            return id;
+        };
+        for (const ch of book.chapters) {
+            for (const sc of scenesOf(ch)) {
+                if (!sc || typeof sc !== 'object' || Array.isArray(sc)) continue;
+                if (typeof sc.scene_id !== 'string' || !sc.scene_id) sc.scene_id = fresh('sc');
+                if (sc.participants === undefined) sc.participants = [];
+                if (!Array.isArray(sc.units)) continue;
+                for (const u of sc.units) {
+                    if (u && typeof u === 'object' && !Array.isArray(u) && (typeof u.id !== 'string' || !u.id)) {
+                        u.id = fresh('iu');
+                    }
+                }
+            }
+        }
+        return book;
+    }
+
+    // ── Honest edit outcome (0.3.1) ────────────────────
+    // A turn in which edit_book was offered but NOT called, while the reply
+    // claims a finished change ("Done. I've added…", "Готово, добавил…") or
+    // pastes a changed book/scene JSON, changed nothing — the user must not
+    // be told otherwise. Heuristic on purpose: it only decides whether the
+    // route asks the model once more and, failing that, replaces the reply
+    // with an honest "the book was NOT changed".
+    const CLAIM_VERBS_EN = '(?:added|updated|changed|filled(?:\\s+in)?|created|replaced|removed|deleted|set|written|applied|inserted|renamed|modified|edited|fixed|appended)';
+    const CHANGE_CLAIM_PATTERNS = [
+        /^\s*(?:\*\*)?(?:done|all set|changes applied)\b/i,
+        new RegExp(`\\bI(?:'|’)?ve\\s+(?:now\\s+|also\\s+)?${CLAIM_VERBS_EN}\\b`, 'i'),
+        new RegExp(`\\bI\\s+have\\s+(?:now\\s+|also\\s+)?${CLAIM_VERBS_EN}\\b`, 'i'),
+        new RegExp(`\\b(?:has|have)\\s+(?:now\\s+)?been\\s+${CLAIM_VERBS_EN}\\b`, 'i'),
+        /(?:^|[^\p{L}])(?:готово|сделано|добавил[аи]?|обновил[аи]?|изменил[аи]?|заполнил[аи]?|вн[её]с(?:ла|ли)?|создал[аи]?|заменил[аи]?|удалил[аи]?|применил[аи]?|переименовал[аи]?|исправил[аи]?|дописал[аи]?)(?!\p{L})/iu,
+    ];
+    // A fenced JSON block that looks like book content (a changed scene /
+    // unit / hero / patch list) rather than an illustrative snippet.
+    const BOOK_JSON_BLOCK = /```(?:json)?\s*[[{][\s\S]*?"(?:scene_id|scenes|units|chapters|heroes|chapter_id|op)"\s*:[\s\S]*?```/i;
+
+    function looksLikeChangeClaim(text) {
+        const t = String(text || '');
+        if (!t.trim()) return false;
+        if (BOOK_JSON_BLOCK.test(t)) return true;
+        // A reply that ends by asking the user ("…чтобы я добавил сцену?",
+        // "Shall I add it?") is a question, not a report of a change.
+        if (/[?？]\s*$/.test(t.replace(/[\s*_`)]+$/, ''))) return false;
+        return CHANGE_CLAIM_PATTERNS.some((re) => re.test(t));
+    }
+
+    // The corrective turn the route sends once when the model claimed a
+    // change without calling the tool.
+    const EDIT_RETRY_PROMPT = 'You have NOT called the `edit_book` tool, so the book is unchanged — nothing you wrote was saved. '
+        + 'Call `edit_book` now with the JSON Patch operations that implement the change you described. '
+        + 'If you cannot express it as patches, say plainly that the book was not changed.';
+
     function applyPatchesValidated(obj, patches) {
         const { result, errors } = applyPatches(obj, patches);
         if (errors.length > 0) {
             return { result: null, errors, validation_errors: [] };
         }
+        assignMissingIds(result);
         // Deterministic guard: unwrap {"item": x}, map names → character_id,
         // dedupe — across ALL scenes, not just the ones the model patched.
         normalizeBookParticipants(result);
@@ -690,6 +798,9 @@ module.exports = function(config, deps = {}) {
         applyPatchesValidated,
         normalizeHeroPatches,
         normalizeBookParticipants,
+        assignMissingIds,
+        looksLikeChangeClaim,
+        EDIT_RETRY_PROMPT,
         chatRequestExtras,
         validateBundleObject,
         toolDefinitions: {
