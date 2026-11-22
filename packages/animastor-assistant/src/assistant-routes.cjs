@@ -1082,9 +1082,7 @@ module.exports = function(app, redis, deps) {
                 err = 'the book could not be loaded';
             } else {
                 try {
-                    const rawArgs = tc.function.arguments;
-                    const args = typeof rawArgs === 'string' ? JSON.parse(rawArgs || '{}') : (rawArgs || {});
-                    const list = Array.isArray(args.patches) ? args.patches : [];
+                    const list = chatEngine.editBookPatches(tc.function.arguments);
                     if (list.length === 0) {
                         err = 'edit_book was called without patches';
                     } else {

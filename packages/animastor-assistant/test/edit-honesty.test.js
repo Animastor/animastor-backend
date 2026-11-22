@@ -84,3 +84,24 @@ describe('EH3: assignMissingIds', () => {
         expect(book.chapters[0].scenes).to.have.length(1); // input untouched
     });
 });
+
+describe('EH4: editBookPatches — edit_book argument shapes (0.3.2)', () => {
+    const ops = [{ op: 'add', path: '/chapters/0/scenes/-', value: { scene_title: 'X' } }];
+    it('the prod shape of 22.11: patches double-encoded as a JSON string', () => {
+        expect(engine.editBookPatches(JSON.stringify({ patches: JSON.stringify(ops) }))).to.deep.equal(ops);
+    });
+    it('the regular shape, an object argument, a bare array, one operation', () => {
+        expect(engine.editBookPatches(JSON.stringify({ patches: ops }))).to.deep.equal(ops);
+        expect(engine.editBookPatches({ patches: ops })).to.deep.equal(ops);
+        expect(engine.editBookPatches(JSON.stringify(ops))).to.deep.equal(ops);
+        expect(engine.editBookPatches({ patches: ops[0] })).to.deep.equal(ops);
+        expect(engine.editBookPatches(JSON.stringify(ops[0]))).to.deep.equal(ops);
+        expect(engine.editBookPatches({ patches: JSON.stringify({ patches: ops }) })).to.deep.equal(ops);
+    });
+    it('nothing usable → []; broken JSON throws', () => {
+        expect(engine.editBookPatches('{}')).to.deep.equal([]);
+        expect(engine.editBookPatches('')).to.deep.equal([]);
+        expect(engine.editBookPatches({ patches: 'null' })).to.deep.equal([]);
+        expect(() => engine.editBookPatches('{"patches": "[{\\"op\\": "}')).to.throw();
+    });
+});

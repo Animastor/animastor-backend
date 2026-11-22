@@ -41,8 +41,9 @@ const { createAssistantPorts } = require('../src/services/assistant-ports.cjs');
 const { emptyBehaviourGlobals } = require('@animastor/vbook-runtime/character-validator.cjs');
 const { defaultNarrator } = require('@animastor/vbook-runtime/lazy-book/draft');
 const { safeFetch } = require('@animastor/url-safety');
-// The published package the backend ships with (^0.3.1 — the fix).
-const assistant = require('@animastor/assistant');
+// The package SOURCE (0.3.2, not yet in the registry); after publication the
+// backend dependency is bumped and this switches back to '@animastor/assistant'.
+const assistant = require('../../packages/animastor-assistant/src/index.cjs');
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
@@ -261,6 +262,26 @@ describe('Assistant edit turns on a VBook 4 book — honest outcome (0.3.1)', fu
         // the chapter file on disk carries the new scene
         const chapterFile = JSON.parse(fs.readFileSync(path.join(tmpDir, bookId, 'chapters', 'ch-9927d41b.json'), 'utf8'));
         expect(chapterFile.scenes).to.have.length(2);
+    });
+
+    it('3b. prod 22.11: patches double-encoded as a JSON string are applied', async () => {
+        const patches = [
+            { op: 'add', path: '/chapters/0/scenes/-', value: NEW_SCENE },
+            { op: 'add', path: '/chapters/0/scenes/0/units/0/video/action', value: 'Slow push-in.' },
+        ];
+        script.push(answer({
+            content: '',
+            toolCalls: [{ id: 'call_s', type: 'function', function: { name: 'edit_book', arguments: JSON.stringify({ patches: JSON.stringify(patches) }) } }],
+            finish: 'tool_calls',
+        }));
+        const sid = await createSession();
+        const done = await streamTurn(sid, 'add a scene and the action');
+        expect(done.data.edit_outcome).to.equal('applied');
+        expect(done.data.patches_applied).to.equal(2);
+        const sc = scenes();
+        expect(sc).to.have.length(2);
+        expect(sc[0].units[0].video).to.deep.equal({ action: 'Slow push-in.' });
+        expect(sc[1].units.map((u) => u.video.action)).to.deep.equal(['The door slowly swings open.', 'Camera tracks the stranger.']);
     });
 
     it('4. edit_book rejected (a 3.1 path) + model text "Done" → the error, never "Done"', async () => {

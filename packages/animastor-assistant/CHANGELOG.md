@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 (2026-11-22, unpublished)
+
+- `edit_book` arguments: the patch list is read through `editBookPatches` —
+  accepts `patches` double-encoded as a JSON string (the shape the prod system
+  model sent on 22.11: `{"patches": "<json array>"}`; 0.3.1 refused it as
+  "called without patches"), a single operation, a bare array, or a nested
+  `{patches: {patches: [...]}}`. Broken JSON is still reported as invalid
+  arguments.
+
 ## 0.3.1 (2026-11-22, unpublished)
 
 Honest edit turns (animastor-docs `CHANGELOG.md` 2026-11-22;
