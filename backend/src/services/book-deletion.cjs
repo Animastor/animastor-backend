@@ -18,7 +18,10 @@
 //      chunk keys, so this runs before the Redis purge below).
 //   4. Runtime (Redis)     — scene-window cancel flag, active audio/image/
 //      video keys, all book-keyed key families (cleanBookRedisKeys).
-//   5. Derived/PG cleanup  — per-table deletes (… books LAST for FK order).
+//      + the per-unit IU registry keys animastor:iu:<unit_id> (keyed by
+//        unit, not by book — found through PG/bundle, see purgeIuRegistry).
+//   5. Derived/PG cleanup  — per-table deletes (… books LAST for FK order),
+//      child rows first: agent_messages/conversations/steps, gen_command_skips.
 //   6. GPU-hub queue clear (best-effort, external runtime).
 //   7. Final result.
 //
@@ -85,6 +88,71 @@ function createBookDeletion(deps) {
         if (typeof hooks.purgeGenV2 === 'function') v2.purgeGenV2 = hooks.purgeGenV2;
     }
 
+    // ── IU registry keys (animastor:iu:<unit_id>) ──
+    // The registry is keyed by UNIT id only (helpers/redis-helpers
+    // saveIURegistry — no TTL; image/registry — 24 h), so no book-keyed
+    // pattern of cleanBookRedisKeys can reach it; until 2026-11-22 every
+    // deleted book left them (reports/2026-11-22/books-cleanup.md: 15 keys).
+    // The unit ids of the book come from the bundle (read BEFORE resetBook)
+    // and from PG (image_units / iu_image_pointers /
+    // iu_image_fence_reservations, read BEFORE the PG purge). A key is
+    // removed only when its build_id is one of THIS book's builds and no
+    // other book's image_units row names the same unit (two imports of one
+    // .vbook share unit ids).
+    function unitIdsOfBundle(bundle) {
+        const ids = new Set();
+        for (const ch of (bundle && Array.isArray(bundle.chapters) ? bundle.chapters : [])) {
+            for (const sc of (ch && Array.isArray(ch.scenes) ? ch.scenes : [])) {
+                const units = [...(Array.isArray(sc && sc.units) ? sc.units : [])];
+                for (const db of (Array.isArray(sc && sc.dialogue_blocks) ? sc.dialogue_blocks : [])) {
+                    if (db && Array.isArray(db.units)) units.push(...db.units);
+                }
+                for (const u of units) if (u && typeof u.id === 'string' && u.id) ids.add(u.id);
+            }
+        }
+        return ids;
+    }
+
+    async function pgRows(sql, params) {
+        try {
+            const r = await storage.postgres.query(sql, params);
+            return (r && Array.isArray(r.rows)) ? r.rows : [];
+        } catch (err) {
+            console.warn(`[DELETE-BOOK] DB read: ${err.message}`);
+            return [];
+        }
+    }
+
+    async function purgeIuRegistry(bookId, unitIds, buildIds) {
+        const out = { checked: 0, removed: 0, kept_foreign: 0 };
+        const rows = [
+            ...await pgRows('SELECT unit_id AS iu, build_id FROM image_units WHERE book_id = $1', [bookId]),
+            ...await pgRows('SELECT iu_id AS iu, build_id FROM iu_image_pointers WHERE book_id = $1', [bookId]),
+            ...await pgRows('SELECT iu_id AS iu, build_id FROM iu_image_fence_reservations WHERE book_id = $1', [bookId]),
+        ];
+        const ids = new Set(unitIds);
+        for (const r of rows) {
+            if (r && typeof r.iu === 'string' && r.iu) ids.add(r.iu);
+            if (r && typeof r.build_id === 'string' && r.build_id) buildIds.add(r.build_id);
+        }
+        for (const iu of ids) {
+            out.checked++;
+            const key = `animastor:iu:${iu}`;
+            let raw = null;
+            try { raw = await redis.get(key); } catch (_) { raw = null; }
+            if (raw == null) continue;
+            let buildId = null;
+            try { buildId = JSON.parse(raw).build_id || null; } catch (_) { buildId = null; }
+            if (!buildId || !buildIds.has(buildId)) { out.kept_foreign++; continue; }
+            const shared = await pgRows('SELECT 1 FROM image_units WHERE unit_id = $1 AND book_id <> $2 LIMIT 1', [iu, bookId]);
+            if (shared.length > 0) { out.kept_foreign++; continue; }
+            try { out.removed += Number(await redis.del(key)) || 0; } catch (err) {
+                console.warn(`[DELETE-BOOK] IU registry key ${key}: ${err.message}`);
+            }
+        }
+        return out;
+    }
+
     async function deleteBook(bookId, options = {}) {
         const onEvent = typeof options.onEvent === 'function' ? options.onEvent : null;
         // Orchestration v2: decided BEFORE the books row goes (the flag lives there).
@@ -123,6 +191,18 @@ function createBookDeletion(deps) {
             await agentSessionControl.cancelSessions(bookId);
         } catch (pgErr) {
             console.warn(`[DELETE-BOOK] Failed to cancel agent sessions: ${pgErr.message}`);
+        }
+
+        // Unit ids + build id of the bundle — read BEFORE the bundle goes
+        // (the IU registry purge in step 4 needs them).
+        let bundleUnitIds = new Set();
+        let bundleBuildId = null;
+        if (typeof book.loadBook === 'function') {
+            try {
+                const bundle = book.loadBook(bookId);
+                bundleUnitIds = unitIdsOfBundle(bundle);
+                bundleBuildId = (bundle && bundle.manifest && bundle.manifest.build_id) || null;
+            } catch (_) { /* a broken bundle still gets deleted */ }
         }
 
         // ── 2. Canonical: remove the disk bundle + snapshot file ──
@@ -172,6 +252,15 @@ function createBookDeletion(deps) {
         // marker; see helpers/redis-helpers.cjs). The cache-clear route keeps
         // the default and releases after the hub lane clear instead.
         const cleanResult = await cleanBookRedisKeys(redis, bookId, { releaseClaims: true });
+        try {
+            const bookBuildIds = new Set([...buildIds, `build_${bookId}`, ...(bundleBuildId ? [bundleBuildId] : [])]);
+            const iu = await purgeIuRegistry(bookId, bundleUnitIds, bookBuildIds);
+            if (iu.removed || iu.kept_foreign) {
+                log(`[DELETE-BOOK] ${bookId}: IU registry keys removed=${iu.removed} kept(other build/book)=${iu.kept_foreign} of ${iu.checked} unit(s)`);
+            }
+        } catch (iuErr) {
+            console.warn(`[DELETE-BOOK] IU registry cleanup failed for ${bookId}: ${iuErr.message}`);
+        }
         // Re-arm the cancellation signal the purge has just removed: a running
         // VBook agent must still observe it on its next checkCancelled() (the
         // cascade can take seconds), and the key then expires on its own.
@@ -203,7 +292,18 @@ function createBookDeletion(deps) {
             'output_manifests',
             'cache_entries',
             'book_source',
+            // agent_sessions children first (FK ON DELETE CASCADE on the
+            // current schema — explicit so an older schema without the
+            // cascade cannot leave them behind)
+            { table: 'agent_messages', sql: `DELETE FROM agent_messages WHERE conversation_id IN (
+                SELECT c.conversation_id FROM agent_conversations c
+                JOIN agent_sessions s ON s.session_id = c.session_id WHERE s.book_id = $1)` },
+            { table: 'agent_conversations', sql: 'DELETE FROM agent_conversations WHERE session_id IN (SELECT session_id FROM agent_sessions WHERE book_id = $1)' },
+            { table: 'agent_steps', sql: 'DELETE FROM agent_steps WHERE session_id IN (SELECT session_id FROM agent_sessions WHERE book_id = $1)' },
             'agent_sessions',
+            // IU image publication state (fenced pointers + reservations)
+            'iu_image_pointers',
+            'iu_image_fence_reservations',
             'book_generation_sessions',
             'generation_cancellations',
             'book_events',
@@ -221,6 +321,16 @@ function createBookDeletion(deps) {
             // books LAST (may have FK cascades)
             'books',
         ];
+        // gen_command_skips is keyed by command (no book_id): its rows go
+        // with gen_commands through ON DELETE CASCADE — deleted explicitly
+        // first so the cascade does not depend on the FK (or on purgeGenV2
+        // being wired).
+        try {
+            await storage.postgres.query(
+                'DELETE FROM gen_command_skips WHERE command_id IN (SELECT command_id FROM gen_commands WHERE book_id = $1)', [bookId]);
+        } catch (skipErr) {
+            console.warn(`[DELETE-BOOK] DB cleanup: gen_command_skips: ${skipErr.message}`);
+        }
         // Orchestration v2: gen_command_jobs / gen_jobs / gen_commands + this book's .incoming files
         if (typeof v2.purgeGenV2 === 'function') {
             try {
@@ -230,9 +340,11 @@ function createBookDeletion(deps) {
                 console.warn(`[DELETE-BOOK] orchestration v2 cleanup failed for ${bookId}: ${genErr.message}`);
             }
         }
-        for (const table of pgTables) {
+        for (const entry of pgTables) {
+            const table = typeof entry === 'string' ? entry : entry.table;
+            const sql = typeof entry === 'string' ? `DELETE FROM ${table} WHERE book_id = $1` : entry.sql;
             try {
-                await storage.postgres.query(`DELETE FROM ${table} WHERE book_id = $1`, [bookId]);
+                await storage.postgres.query(sql, [bookId]);
             } catch (tblErr) {
                 // Table may not exist in older schemas — non-fatal
                 console.warn(`[DELETE-BOOK] DB cleanup: ${table}: ${tblErr.message}`);
