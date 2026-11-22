@@ -115,6 +115,10 @@ function buildComposition({ sessionRepo, order }) {
             // (scene-scoped, fail-closed) injected into routeDeps.
             case './services/regenerate-hub-sweep.cjs':
                 return require('../../src/services/regenerate-hub-sweep.cjs');
+            // 2026-11-22: the /regenerate "nothing to generate" guard
+            // (422 book_has_no_text) injected into routeDeps.
+            case './helpers/book-text.cjs':
+                return require('../../src/helpers/book-text.cjs');
             // Scoped build-output cleanup port injected into the deletion cascade.
             case './services/book-artifacts.cjs':
                 return { removeBookArtifacts: () => { order.push('artifacts'); return { removedDirs: 0, removedEntries: 0, skipped: 0 }; } };

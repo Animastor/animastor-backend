@@ -642,6 +642,9 @@ const routeDeps = {
     // 2026-11-04: /regenerate post-release hub sweep plan (scene-scoped,
     // book-wide only for a full restart of the whole book — fail-closed).
     regenerateHubSweep: require('./services/regenerate-hub-sweep.cjs'),
+    // 2026-11-22: /regenerate refuses a book with nothing to generate
+    // (422 book_has_no_text) — injected, same discipline.
+    generationMaterial: require('./helpers/book-text.cjs'),
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
