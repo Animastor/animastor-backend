@@ -115,6 +115,8 @@ module.exports = function(app, redis, deps) {
         getAllChunks: deps.getAllChunks,
         getChunk: deps.getChunk,
         cleanBookRedisKeys: deps.cleanBookRedisKeys,
+        // manifest.build_id names the v2 build dir (Book Model facade, injected)
+        getBookManifest: deps.getBookManifest,
         // Assistant-data purge port (extraction preparation — the cache
         // teardown must not know the Assistant's table).
         purgeAssistantForBook: deps.assistantPorts

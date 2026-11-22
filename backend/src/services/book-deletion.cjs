@@ -15,7 +15,8 @@
 //      status cancel (agent observes it on its next checkCancelled()).
 //   2. Canonical cleanup   — disk bundle removal (book.resetBook) + snapshot.
 //   3. Build artifacts     — output-dir removal (build_ids come from Redis
-//      chunk keys, so this runs before the Redis purge below).
+//      chunk keys, so this runs before the Redis purge below, plus the
+//      manifest's build_id read before step 2 — the v2 build dir).
 //   4. Runtime (Redis)     — scene-window cancel flag, active audio/image/
 //      video keys, all book-keyed key families (cleanBookRedisKeys).
 //      + the per-unit IU registry keys animastor:iu:<unit_id> (keyed by
@@ -36,6 +37,12 @@ const path = require('path');
 // а затем исчезнуть — иначе ключ удалённой книги остаётся в Redis навсегда.
 // Совпадает с TTL, который ставит cancel-worker (generation-routes).
 const CANCELLED_WORKERS_TTL_SEC = 3600;
+// Every PG table that records a build_id next to a book_id (schema.js): a build
+// id named there by another book is shared — its directory is never removed whole.
+const BUILD_ID_TABLES = Object.freeze([
+    'scenes', 'output_manifests', 'image_units', 'scene_assets',
+    'iu_image_pointers', 'iu_image_fence_reservations',
+]);
 
 /**
  * @param {Object} deps - injected adapters:
@@ -153,6 +160,41 @@ function createBookDeletion(deps) {
         return out;
     }
 
+    /**
+     * Build ids among `candidates` that another book also names: PG rows of
+     * another book_id (every table with a build_id column) or another book's
+     * manifest on disk. A failed PG read counts as "shared" — the directory is
+     * then kept, never removed blindly.
+     * @returns {Promise<Set<string>>}
+     */
+    async function buildIdsOfOtherBooks(bookId, candidates) {
+        const shared = new Set();
+        const ids = [...new Set(candidates.filter((b) => typeof b === 'string' && b))];
+        if (ids.length === 0) return shared;
+        for (const table of BUILD_ID_TABLES) {
+            try {
+                const r = await storage.postgres.query(
+                    `SELECT DISTINCT build_id FROM ${table} WHERE build_id = ANY($1::text[]) AND book_id <> $2`, [ids, bookId]);
+                for (const row of (r && r.rows) || []) if (row && row.build_id) shared.add(row.build_id);
+            } catch (err) {
+                console.warn(`[DELETE-BOOK] shared build check (${table}): ${err.message} — build dirs kept`);
+                for (const b of ids) shared.add(b);
+                return shared;
+            }
+        }
+        let entries = [];
+        try { entries = fs.readdirSync(config.BOOKS_DIR); } catch (_) { entries = []; }
+        for (const e of entries) {
+            if (e === bookId || e === `${bookId}.json` || e === `${bookId}.snapshot.json`) continue;
+            const file = e.endsWith('.json') ? path.join(config.BOOKS_DIR, e) : path.join(config.BOOKS_DIR, e, 'manifest.json');
+            let m = null;
+            try { m = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { continue; }
+            const b = m && (typeof m.build_id === 'string' ? m.build_id : (m.manifest && m.manifest.build_id));
+            if (typeof b === 'string' && ids.includes(b)) shared.add(b);
+        }
+        return shared;
+    }
+
     async function deleteBook(bookId, options = {}) {
         const onEvent = typeof options.onEvent === 'function' ? options.onEvent : null;
         // Orchestration v2: decided BEFORE the books row goes (the flag lives there).
@@ -194,7 +236,8 @@ function createBookDeletion(deps) {
         }
 
         // Unit ids + build id of the bundle — read BEFORE the bundle goes
-        // (the IU registry purge in step 4 needs them).
+        // (the IU registry purge in step 4 needs them; the build id also names
+        // the VBook 4 / orchestration v2 build dir of step 3).
         let bundleUnitIds = new Set();
         let bundleBuildId = null;
         if (typeof book.loadBook === 'function') {
@@ -224,12 +267,23 @@ function createBookDeletion(deps) {
                 if (chunk?.build_id) buildIds.add(chunk.build_id);
             } catch (_) {}
         }
+        // VBook 4 / orchestration v2: artifacts live in OUTPUT_DIR/<manifest.build_id>/
+        // and a v2 book may have no Redis chunk naming that build («Мои книги»).
+        if (bundleBuildId) buildIds.add(bundleBuildId);
+        // A build id another book also names (a .vbook re-imported under another
+        // book_id, two blank books created in the same ms — manual_<ms>) is never
+        // removed as a whole directory: only this book's own entries go, the
+        // build-scoped voices/ and the other book's files stay.
+        const sharedBuildIds = await buildIdsOfOtherBooks(bookId, [...buildIds, `build_${bookId}`]);
+        if (sharedBuildIds.size > 0) {
+            log(`[DELETE-BOOK] ${bookId}: build dir(s) shared with another book, kept: ${[...sharedBuildIds].join(', ')}`);
+        }
         // Scoped removal: validated build ids, only this book's artifacts
         // (never another book's files in a shared or same-prefix location).
         try {
             if (typeof removeBookArtifacts !== 'function') throw new Error('removeBookArtifacts port not injected');
             removeBookArtifacts({
-                outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, log,
+                outputDir: OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId, buildIds, sharedBuildIds, log,
             });
         } catch (artErr) {
             console.warn(`[DELETE-BOOK] artifact cleanup failed for ${bookId}: ${artErr.message}`);

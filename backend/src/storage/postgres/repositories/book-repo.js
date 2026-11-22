@@ -133,8 +133,40 @@ async function listBookIdsByWorkspace(workspaceId) {
     return result.rows;
 }
 
+/**
+ * «Мои книги»: the book was opened by its owner — record the time (epoch ms).
+ * Touches last_opened_at ONLY (not updated_at, not the book files): opening a
+ * book is not a change of the book. No row → false.
+ * @returns {Promise<boolean>}
+ */
+async function markOpened(bookId, atMs = Date.now()) {
+    if (!bookId) return false;
+    const result = await query(
+        `UPDATE books SET last_opened_at = $2 WHERE book_id = $1`,
+        [bookId, Math.trunc(Number(atMs))]
+    );
+    return result.rowCount > 0;
+}
+
+/**
+ * «Мои книги»: last_opened_at of every book of a workspace that was opened.
+ * @returns {Promise<Map<string, number>>} book_id → epoch ms
+ */
+async function lastOpenedByWorkspace(workspaceId) {
+    const out = new Map();
+    if (!workspaceId) return out;
+    const result = await query(
+        `SELECT book_id, last_opened_at FROM books WHERE workspace_id = $1 AND last_opened_at IS NOT NULL`,
+        [workspaceId]
+    );
+    for (const row of result.rows) out.set(row.book_id, Number(row.last_opened_at));
+    return out;
+}
+
 module.exports = {
     ensureBook,
+    markOpened,
+    lastOpenedByWorkspace,
     getWorkspaceId,
     getOrchestration,
     attachWorkspaceIfMissing,
