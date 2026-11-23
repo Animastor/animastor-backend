@@ -41,9 +41,8 @@ const { createAssistantPorts } = require('../src/services/assistant-ports.cjs');
 const { emptyBehaviourGlobals } = require('@animastor/vbook-runtime/character-validator.cjs');
 const { defaultNarrator } = require('@animastor/vbook-runtime/lazy-book/draft');
 const { safeFetch } = require('@animastor/url-safety');
-// The package SOURCE (0.3.2, not yet in the registry); after publication the
-// backend dependency is bumped and this switches back to '@animastor/assistant'.
-const assistant = require('../../packages/animastor-assistant/src/index.cjs');
+// The published package the backend ships with (^0.3.2).
+const assistant = require('@animastor/assistant');
 
 const ORIG_BOOKS_DIR = config.BOOKS_DIR;
 
