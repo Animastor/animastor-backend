@@ -762,6 +762,36 @@ module.exports = function(config, deps = {}) {
         + 'Call `edit_book` now with the JSON Patch operations that implement the change you described. '
         + 'If you cannot express it as patches, say plainly that the book was not changed.';
 
+    // ── edit_book arguments → patch list (0.3.2) ───────
+    // On the prod system model (nemotron, 22.11) edit_book arrived as
+    // {"patches": "<JSON text of the array>"} — the array double-encoded as
+    // a string; 0.3.1 refused it ("called without patches") and nothing was
+    // saved. Accepted shapes (arguments may itself be a JSON string):
+    //   {patches: [...]} | {patches: "<json array | json object>"} |
+    //   {patches: {op,path,…}} | {patches: {patches: [...]}} | [...] |
+    //   {op, path, …} (one operation).
+    // Throws on unparseable JSON (the caller reports it); [] = no patches.
+    function editBookPatches(rawArgs) {
+        const decode = (v) => {
+            let x = v;
+            for (let i = 0; i < 3 && typeof x === 'string'; i++) {
+                const t = x.trim();
+                x = t === '' ? null : JSON.parse(t);
+            }
+            return x;
+        };
+        const isOp = (x) => !!x && typeof x === 'object' && !Array.isArray(x) && typeof x.op === 'string' && typeof x.path === 'string';
+        const args = decode(rawArgs);
+        if (Array.isArray(args)) return args;
+        if (!args || typeof args !== 'object') return [];
+        if (isOp(args)) return [args];
+        let p = decode(args.patches);
+        if (p && typeof p === 'object' && !Array.isArray(p) && p.patches !== undefined) p = decode(p.patches);
+        if (Array.isArray(p)) return p;
+        if (isOp(p)) return [p];
+        return [];
+    }
+
     function applyPatchesValidated(obj, patches) {
         const { result, errors } = applyPatches(obj, patches);
         if (errors.length > 0) {
@@ -799,6 +829,7 @@ module.exports = function(config, deps = {}) {
         normalizeHeroPatches,
         normalizeBookParticipants,
         assignMissingIds,
+        editBookPatches,
         looksLikeChangeClaim,
         EDIT_RETRY_PROMPT,
         chatRequestExtras,
