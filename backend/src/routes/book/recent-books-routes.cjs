@@ -63,6 +63,20 @@ function supportedVersionOf(lazyBook, bookId) {
     return SUPPORTED_VBOOK_VERSION;
 }
 
+/**
+ * manifest.created_at of a book (ISO) or null. A blank book (POST /book/blank)
+ * has no manifest.updated_at until its first change — its list date falls back
+ * to the creation time (post171).
+ */
+function createdAtOf(lazyBook, bookId) {
+    try {
+        const manifest = readJsonQuiet(lazyBook.getManifestPath(lazyBook.getBookDir(bookId)));
+        return manifest.created_at || null;
+    } catch (_) {
+        return null;
+    }
+}
+
 /** manifest.json / book.json of a book, read directly (no model load); {} when unreadable. */
 function readJsonQuiet(file) {
     try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return {}; }
@@ -124,8 +138,10 @@ function toEntry(lazyBook, bookId, { title, state, sourceType, fileHash, updated
         file_hash: fileHash || null,
         updated_at: updatedAt || 0,
         // The same moment normalized to epoch ms (updated_at keeps its source
-        // shape — ISO string or epoch seconds — for older clients).
-        updated_at_ms: toEpochMs(updatedAt),
+        // shape — ISO string or epoch seconds — for older clients). No update
+        // time (a blank book) → manifest.created_at; updated_at itself stays as
+        // it was (0), so older clients see no new shape.
+        updated_at_ms: toEpochMs(updatedAt) ?? toEpochMs(createdAtOf(lazyBook, bookId)),
         // When the owner last opened the book (POST /book/:id/opened), epoch ms.
         last_opened_at: null,
         parsed_chapters: parsedChapters || 0,

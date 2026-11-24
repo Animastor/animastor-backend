@@ -113,6 +113,26 @@ describe('«Мои книги»', () => {
             // no probe → unknown, never a guess
             expect(books[0].has_generated_content).to.equal(null);
         });
+
+        it('a blank book (manifest with created_at only) gets updated_at_ms from created_at', async () => {
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-blank-'));
+            try {
+                const created = '2026-11-24T14:38:10.619Z';
+                fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ vbook_version: 4, book_id: 'blank', build_id: 'manual_blank', created_at: created }));
+                const d = deps({
+                    owned: [{ book_id: 'blank', workspace_id: ws, last_opened_at: null }],
+                    statuses: { blank: { title: 'Blank', state: null, updatedAt: undefined } },
+                });
+                d.lazyBook.getManifestPath = () => path.join(dir, 'manifest.json');
+                const books = await collectRecentBooks(d);
+                expect(books).to.have.length(1);
+                expect(books[0].updated_at_ms).to.equal(Date.parse(created));
+                // updated_at keeps its old shape (0) — older clients parse it as before
+                expect(books[0].updated_at).to.equal(0);
+            } finally {
+                fs.rmSync(dir, { recursive: true, force: true });
+            }
+        });
     });
 
     describe('hasBookArtifacts', () => {
