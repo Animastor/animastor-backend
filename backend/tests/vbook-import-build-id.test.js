@@ -4,8 +4,9 @@
 // OUTPUT_DIR/<build_id>/ (voices/ included) is per build id. An archive whose
 // manifest.build_id another book already names — on disk (its manifest) or in
 // PG (any table with build_id) — gets a fresh build id written into the
-// imported manifest. A re-import of the same book (wasExisting) keeps its id;
-// an archive with a free build id keeps it.
+// imported manifest; so does an archive WITHOUT a build id (no shared
+// OUTPUT_DIR/default/). A re-import of the same book (wasExisting) keeps its
+// id; an archive with a free build id keeps it.
 // Real book module over a temp BOOKS_DIR, the production owner check
 // (services/build-id-owners.cjs) with a fake PG owner lookup.
 
@@ -97,12 +98,27 @@ describe('.vbook import — build id owned by another book (post171)', () => {
         expect(manifestBuildId('imp_same')).to.equal('manual_same');
     });
 
-    it('a free build id is kept; an archive without one is left as before (default)', async () => {
+    it('a free build id is kept', async () => {
         const free = await importer().importVbookArchive(req, archive('imp_free', 'manual_free'));
         expect(free.buildId).to.equal('manual_free');
+        expect(manifestBuildId('imp_free')).to.equal('manual_free');
+    });
+
+    it('an archive without a build id gets vbook_<uuid>, written into its manifest (not the shared default)', async () => {
         const none = await importer().importVbookArchive(req, archive('imp_none', null));
         expect(none.ok).to.equal(true);
-        expect(none.buildId).to.equal('default');
+        expect(none.buildId).to.match(/^vbook_[0-9a-f-]{36}$/);
+        expect(manifestBuildId('imp_none')).to.equal(none.buildId);
+    });
+
+    it('a re-import of a book that has no build id on disk keeps it as it is (wasExisting)', async () => {
+        // the book as an older import left it: a manifest without build_id
+        bookModule.saveBookBundle(bookModule.buildBookFromBundle(bookModule.extractBookBundle(archive('imp_old', null), { log: () => {} })));
+        expect(manifestBuildId('imp_old')).to.equal(undefined);
+        const again = await importer().importVbookArchive(req, archive('imp_old', null));
+        expect(again.wasExisting).to.equal(true);
+        expect(again.buildId).to.equal('default');
+        expect(manifestBuildId('imp_old')).to.equal(undefined);
     });
 });
 

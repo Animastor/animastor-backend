@@ -156,21 +156,26 @@ function createVbookImporter({ book, importBookAllowed, buildIdsOfOtherBooks, lo
             return { ok: true, bookId, buildId, bookData, loadedBook: existingBook, wasExisting: true };
         }
 
-        // post171: the archive's build id must not be one another book already
-        // names (an archive re-imported under another book_id, a copied bundle):
-        // OUTPUT_DIR/<build_id>/ — voices/ included — is per build id. Such an
-        // import gets a fresh build id, written into its manifest. A re-import
-        // of the same book returned above (wasExisting) and keeps its id; an
-        // archive without a build id is left as before ('default').
+        // post171: a NEW import gets a build id of its own. OUTPUT_DIR/<build_id>/
+        // — voices/ included — is per build id, so the archive's id is replaced
+        // by vbook_<uuid> (written into the imported manifest) when
+        //   - another book already names it (an archive re-imported under
+        //     another book_id, a copied bundle), or
+        //   - the archive has none (every consumer would fall back to the
+        //     shared OUTPUT_DIR/default/).
+        // A re-import of the same book returned above (wasExisting) and keeps
+        // its id.
         const archiveBuildId = typeof bookData.manifest.build_id === 'string' && bookData.manifest.build_id
             ? bookData.manifest.build_id : null;
+        let freshReason = archiveBuildId ? null : 'no build id in the archive';
         if (archiveBuildId) {
             const taken = await buildIdsOfOtherBooks(bookId, [archiveBuildId]);
-            if (taken.has(archiveBuildId)) {
-                buildId = `vbook_${crypto.randomUUID()}`;
-                bookData.manifest.build_id = buildId;
-                log(`[${tag}] Book ${bookId}: build id ${archiveBuildId} belongs to another book — new build id ${buildId}`);
-            }
+            if (taken.has(archiveBuildId)) freshReason = `build id ${archiveBuildId} belongs to another book`;
+        }
+        if (freshReason) {
+            buildId = `vbook_${crypto.randomUUID()}`;
+            bookData.manifest.build_id = buildId;
+            log(`[${tag}] Book ${bookId}: ${freshReason} — new build id ${buildId}`);
         }
 
         try {

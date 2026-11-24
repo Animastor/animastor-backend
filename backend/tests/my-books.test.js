@@ -349,6 +349,29 @@ describe('«Мои книги»', () => {
             expect(fs.existsSync(mine)).to.equal(false);
         });
 
+        it('a book with build id "default": the shared default dir and voices/ stay, the book\'s files go', async () => {
+            const A = 'mb_dflt_a';
+            const bundles = { [A]: writeBook(A, 'default') };
+            const mine = writeArtifact('default', `${A}_ch-1_sc-1.mp3`);
+            const voice = writeArtifact('default', 'voices/narrator.wav');
+            await runDelete(deletionWith({ booksDir, outputDir, bundles, storage: pgFake() }), A);
+            expect(fs.existsSync(path.join(outputDir, 'default'))).to.equal(true);
+            expect(fs.existsSync(voice)).to.equal(true);
+            expect(fs.existsSync(mine)).to.equal(false);
+        });
+
+        it('a book without a build id in its manifest: its files in default/ go, default/ and voices/ stay', async () => {
+            const A = 'mb_nobid_a';
+            fs.mkdirSync(path.join(booksDir, A), { recursive: true });
+            fs.writeFileSync(path.join(booksDir, A, 'manifest.json'), JSON.stringify({ vbook_version: 4, book_id: A }));
+            const bundles = { [A]: { manifest: { book_id: A }, chapters: [] } };
+            const mine = writeArtifact('default', `${A}_ch-1_sc-1.mp3`);
+            const voice = writeArtifact('default', 'voices/narrator.wav');
+            await runDelete(deletionWith({ booksDir, outputDir, bundles, storage: pgFake() }), A);
+            expect(fs.existsSync(voice)).to.equal(true);
+            expect(fs.existsSync(mine)).to.equal(false);
+        });
+
         it('a failed PG check keeps the build dir (never removed blindly)', async () => {
             const A = 'mb_pgerr_a';
             const bundles = { [A]: writeBook(A, 'manual_pgerr') };
