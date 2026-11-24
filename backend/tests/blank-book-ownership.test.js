@@ -135,6 +135,32 @@ describe('POST /api/v1/book/blank — ownership + language', () => {
         });
     });
 
+    describe('build id (post171)', () => {
+        it('two blank books created in the same millisecond get different, valid build ids', async () => {
+            const { isValidBuildId } = require('@animastor/vbook-runtime/safe-paths');
+            mount();
+            const realNow = Date.now;
+            Date.now = () => 1795531090623; // the same ms for both requests
+            let a;
+            let b;
+            try {
+                a = await post({ title: 'Twin A' });
+                b = await post({ title: 'Twin B' });
+            } finally {
+                Date.now = realNow;
+            }
+            expect(a.statusCode).to.equal(200);
+            expect(b.statusCode).to.equal(200);
+            const buildOf = (id) => JSON.parse(fs.readFileSync(path.join(tmpDir, id, 'manifest.json'), 'utf8')).build_id;
+            const ba = buildOf(a.body.book_id);
+            const bb = buildOf(b.body.book_id);
+            expect(ba).to.not.equal(bb);
+            expect(isValidBuildId(ba)).to.equal(true);
+            expect(isValidBuildId(bb)).to.equal(true);
+            expect(ba).to.match(/^manual_[0-9a-f-]{36}$/);
+        });
+    });
+
     describe('commit failure rolls the registry row back (PG)', () => {
         let user;
         let workspace;
