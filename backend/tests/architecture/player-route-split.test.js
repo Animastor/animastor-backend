@@ -50,6 +50,7 @@
 const { expect } = require('chai');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { builtinModules } = require('module');
 const {
     BACKEND_SRC, listSourceFiles, readSource, rel, requireSpecifiers, resolveSpecifier, REPO_ROOT,
@@ -131,10 +132,18 @@ function stubDeps(tmpDir) {
 describe('P1: player registrar registers exactly the frozen playback surface', () => {
     const MODULE_RESOLVED = require.resolve(PLAYER_REGISTRAR);
     const originalCacheEntry = require.cache[MODULE_RESOLVED];
+    // outputRoot stub: created under os.tmpdir() (never the cwd) and removed
+    // after the suite, so test runs leave no player-split-guard-* behind.
+    let tmpDir;
+
+    before(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'player-split-guard-'));
+    });
 
     after(() => {
         if (originalCacheEntry) require.cache[MODULE_RESOLVED] = originalCacheEntry;
         else delete require.cache[MODULE_RESOLVED];
+        if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
     function register() {
@@ -144,7 +153,7 @@ describe('P1: player registrar registers exactly the frozen playback surface', (
         for (const m of ['get', 'post', 'put', 'delete', 'patch', 'use']) {
             app[m] = (p, h) => registered.push({ method: m, path: p });
         }
-        require(PLAYER_REGISTRAR)(app, {}, stubDeps(fs.mkdtempSync('player-split-guard-')));
+        require(PLAYER_REGISTRAR)(app, {}, stubDeps(tmpDir));
         return registered;
     }
 
