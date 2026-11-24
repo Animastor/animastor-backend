@@ -283,14 +283,15 @@ describe('Recent Books route registration (production-shaped deps)', () => {
 
     it('registers /api/v1/books without throwing when log is in deps.utils', () => {
         const registered = [];
-        const app = { get: (p) => { registered.push(p); } };
+        const app = { get: (p) => { registered.push(p); }, post: (p) => { registered.push(`POST ${p}`); } };
         expect(() => registerRecentBooksRoutes(app, {}, makeRegistrationDeps())).not.to.throw();
         expect(registered).to.include('/api/v1/books');
+        expect(registered).to.include('POST /api/v1/book/:bookId/opened');
     });
 
     it('does not throw even when deps.utils is absent (defensive log fallback)', () => {
         const registered = [];
-        const app = { get: (p) => { registered.push(p); } };
+        const app = { get: (p) => { registered.push(p); }, post: (p) => { registered.push(`POST ${p}`); } };
         expect(() => registerRecentBooksRoutes(app, {}, makeRegistrationDeps({ withUtils: false })))
             .not.to.throw();
         expect(registered).to.include('/api/v1/books');

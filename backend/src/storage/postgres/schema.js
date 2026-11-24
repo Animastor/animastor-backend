@@ -1931,6 +1931,19 @@ async function runMigrations() {
         throw err;
     }
 
+    // ── MB-1: «Мои книги» — when the owner last opened the book ─────────
+    // books.last_opened_at, epoch ms, NULL = never opened since the column
+    // exists. Written only by POST /api/v1/book/:id/opened (book-repo
+    // markOpened); read by GET /api/v1/books for the "recently opened first"
+    // order. Additive, nullable, no backfill.
+    try {
+        await query(`ALTER TABLE books ADD COLUMN IF NOT EXISTS last_opened_at BIGINT`);
+        console.log('[PG] MB-1: books.last_opened_at ensured');
+    } catch (err) {
+        console.error('[PG] MB-1 books.last_opened_at migration failed:', err.message);
+        throw err;
+    }
+
     // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
     // DDL lives here (guardrail PG-5 — single DDL owner). The statements
     // are executed ONLY while the IU_IMAGE_VERSIONED kill-switch is on, so

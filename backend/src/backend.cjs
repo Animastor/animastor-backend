@@ -647,6 +647,8 @@ const routeDeps = {
     generationMaterial: require('./helpers/book-text.cjs'),
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
+    // Book Model manifest read (cache teardown: the v2 build dir = manifest.build_id)
+    getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
     detectAvailableMode, recoverChunksFromDisk, recoverAllBooksFromDisk,
     cleanBookRedisKeys,

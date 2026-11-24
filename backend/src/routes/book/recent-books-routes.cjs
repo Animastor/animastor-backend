@@ -22,11 +22,46 @@
 //   an optional `resolveBookWorkspace` callback before filtering.
 // - Pre-auth mode (no workspaceId) keeps today's behaviour: all books, with
 //   workspace_id exposed as metadata on every entry.
+//
+// «Мои книги» (2026-11-22): each entry also carries vbook_version (the format;
+// 3.1 = "устаревший формат"), last_opened_at (epoch ms, books.last_opened_at,
+// written by POST /api/v1/book/:id/opened — registered here too) and
+// has_generated_content (anything DELETE /book/:id/cache would remove).
+// The list is ordered recently-opened first.
 // ======================================================
 
 const fs = require('fs');
 
 const DEFAULT_LIMIT = 20;
+/** «Мои книги» asks for the whole workspace list; a hard cap keeps one call bounded. */
+const MAX_LIMIT = 500;
+const SUPPORTED_VBOOK_VERSION = 4;
+
+/**
+ * A timestamp of any shape the sources use → epoch ms, or null.
+ * manifest.updated_at is an ISO string; book_source.created_at and the books
+ * table use epoch SECONDS; last_opened_at is epoch ms.
+ */
+function toEpochMs(v) {
+    if (v == null || v === '') return null;
+    if (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return n < 1e12 ? n * 1000 : n; // seconds → ms
+    }
+    const t = Date.parse(String(v));
+    return Number.isFinite(t) ? t : null;
+}
+
+/** vbook_version of a supported book, from its manifest; 4 when unreadable. */
+function supportedVersionOf(lazyBook, bookId) {
+    try {
+        const manifest = readJsonQuiet(lazyBook.getManifestPath(lazyBook.getBookDir(bookId)));
+        const v = manifest.vbook_version;
+        if (typeof v === 'number' || (typeof v === 'string' && v)) return v;
+    } catch (_) { /* fall through */ }
+    return SUPPORTED_VBOOK_VERSION;
+}
 
 /** manifest.json / book.json of a book, read directly (no model load); {} when unreadable. */
 function readJsonQuiet(file) {
@@ -78,7 +113,9 @@ function buildIdOf(lazyBook, bookId) {
 function toEntry(lazyBook, bookId, { title, state, sourceType, fileHash, updatedAt, parsedChapters, totalScenes, workspaceId, status }) {
     const unsupported = !!(status && status.unsupported);
     return {
-        ...(unsupported ? { unsupported: true, vbook_version: status.vbookVersion } : {}),
+        ...(unsupported ? { unsupported: true } : {}),
+        // «Мои книги»: the format of the book (3.1 → "устаревший формат").
+        vbook_version: unsupported ? status.vbookVersion : supportedVersionOf(lazyBook, bookId),
         book_id: bookId,
         build_id: unsupported ? status.buildId : buildIdOf(lazyBook, bookId),
         title: title || bookId,
@@ -86,6 +123,11 @@ function toEntry(lazyBook, bookId, { title, state, sourceType, fileHash, updated
         source_type: sourceType || 'txt',
         file_hash: fileHash || null,
         updated_at: updatedAt || 0,
+        // The same moment normalized to epoch ms (updated_at keeps its source
+        // shape — ISO string or epoch seconds — for older clients).
+        updated_at_ms: toEpochMs(updatedAt),
+        // When the owner last opened the book (POST /book/:id/opened), epoch ms.
+        last_opened_at: null,
         parsed_chapters: parsedChapters || 0,
         total_scenes: totalScenes || 0,
         workspace_id: workspaceId || null,
@@ -106,9 +148,14 @@ function toEntry(lazyBook, bookId, { title, state, sourceType, fileHash, updated
  *   workspaceId|null. Self-heals books whose registry row lacks a workspace
  *   (e.g. created before ownership existed or while PG was down). When set,
  *   every entry's workspace_id is resolved before (optional) filtering.
- * @returns {Promise<Array>} sorted newest-first, capped at `limit`.
+ * @param {function} [deps.hasGeneratedContent] - (bookId, buildId) => boolean:
+ *   does the book have anything DELETE /book/:id/cache would remove. When
+ *   absent, `has_generated_content` is null (unknown).
+ * @returns {Promise<Array>} recently opened first (last_opened_at, else the
+ *   last update), capped at `limit`.
  */
-async function collectRecentBooks({ bookSourceRepo, lazyBook, limit = DEFAULT_LIMIT, workspaceId, resolveBookWorkspace, bookRepo }) {
+async function collectRecentBooks({ bookSourceRepo, lazyBook, limit = DEFAULT_LIMIT, workspaceId, resolveBookWorkspace, bookRepo, hasGeneratedContent }) {
+    const lastOpened = new Map(); // book_id -> epoch ms (books.last_opened_at)
     const entries = new Map(); // book_id -> entry
     const seen = new Set();
 
@@ -224,10 +271,31 @@ async function collectRecentBooks({ bookSourceRepo, lazyBook, limit = DEFAULT_LI
         result = result.filter(entry => !entry.workspace_id);
     }
 
-    const sortKey = (entry) => Number(entry.updated_at) || 0;
+    // «Мои книги»: when the owner last opened each book. A failure (PG down,
+    // the MB-1 column not yet migrated) only loses the order, never the list.
+    if (workspaceId && bookRepo && typeof bookRepo.lastOpenedByWorkspace === 'function') {
+        try {
+            const map = await bookRepo.lastOpenedByWorkspace(workspaceId);
+            for (const [id, at] of map || []) {
+                const ms = toEpochMs(at);
+                if (ms != null) lastOpened.set(id, ms);
+            }
+        } catch (_) { /* order by last update only */ }
+    }
+    for (const entry of result) {
+        entry.last_opened_at = lastOpened.has(entry.book_id) ? lastOpened.get(entry.book_id) : null;
+        let generated = null;
+        if (typeof hasGeneratedContent === 'function') {
+            try { generated = !!hasGeneratedContent(entry.book_id, entry.build_id); } catch (_) { generated = null; }
+        }
+        entry.has_generated_content = generated;
+    }
+
+    // Recently opened first; a book never opened ranks by its last update.
+    const sortKey = (entry) => entry.last_opened_at || entry.updated_at_ms || 0;
     return result
         .sort((a, b) => sortKey(b) - sortKey(a))
-        .slice(0, Math.max(1, Number(limit) || DEFAULT_LIMIT));
+        .slice(0, Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT)));
 }
 
 module.exports = function registerRecentBooksRoutes(app, _redis, deps) {
@@ -236,6 +304,38 @@ module.exports = function registerRecentBooksRoutes(app, _redis, deps) {
     const bookRepo = require('../../storage/postgres/repositories/book-repo');
     const workspaceOwnership = deps.workspaceOwnership
         || require('../../middleware/workspace-ownership');
+    const bookArtifacts = require('../../services/book-artifacts.cjs');
+    const { PRESERVED_ENTRIES } = require('../../utils/build-dir');
+    const config = deps.config || {};
+
+    /** One listing of the books dir per request (ownership of shared build dirs). */
+    function generatedContentProbe() {
+        if (!config.OUTPUT_DIR) return undefined;
+        const bookIds = bookArtifacts.listBookIds(config.BOOKS_DIR);
+        return (bookId, buildId) => bookArtifacts.hasBookArtifacts({
+            outputDir: config.OUTPUT_DIR, booksDir: config.BOOKS_DIR, bookId,
+            buildIds: buildId ? [buildId] : [], buildScoped: PRESERVED_ENTRIES,
+            preserve: PRESERVED_ENTRIES, bookIds,
+        });
+    }
+
+    // POST /api/v1/book/:bookId/opened — «Мои книги»: the owner opened the
+    // book. Records books.last_opened_at and NOTHING else: no generation, no
+    // analysis, no snapshot, no change of the book files or updated_at.
+    // Access: the /api/v1/book/:bookId guard of backend.cjs (requireBookAccess:
+    // anonymous 401, a stranger 403) and the VBook version gate (a 3.1 book
+    // answers 409 — nothing but deletion is allowed for it, §9).
+    app.post('/api/v1/book/:bookId/opened', async (req, res) => {
+        try {
+            const at = Date.now();
+            const ok = await bookRepo.markOpened(req.params.bookId, at);
+            if (!ok) return res.status(404).json({ error: 'book_not_found' });
+            res.json({ book_id: req.params.bookId, last_opened_at: at });
+        } catch (err) {
+            console.error('[RECENT-BOOKS] opened:', err.message);
+            res.status(500).json({ error: 'opened_failed' });
+        }
+    });
 
     app.get('/api/v1/books', async (req, res) => {
         // The recent-books list is identity-scoped (workspace-filtered) and must
@@ -253,6 +353,7 @@ module.exports = function registerRecentBooksRoutes(app, _redis, deps) {
                 limit: parseInt(req.query.limit, 10) || DEFAULT_LIMIT,
                 workspaceId,
                 bookRepo: workspaceId ? bookRepo : undefined,
+                hasGeneratedContent: generatedContentProbe(),
                 // Self-heal ownership rows under a workspace scope; pre-auth keeps
                 // listing everything so a brief PG outage never empties the page.
                 ...(workspaceId ? {
@@ -271,3 +372,4 @@ module.exports = function registerRecentBooksRoutes(app, _redis, deps) {
 };
 
 module.exports.collectRecentBooks = collectRecentBooks;
+module.exports.toEpochMs = toEpochMs;

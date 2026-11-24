@@ -4,7 +4,8 @@
 //
 // ctx fields used here:
 //   { redis, config, storage, path, fs, getAllChunks, getChunk,
-//     cleanBookRedisKeys, purgeAssistantForBook, orchV2, log }
+//     cleanBookRedisKeys, purgeAssistantForBook, orchV2, log,
+//     getBookManifest (injected: book-model.getBookManifest, backend.cjs) }
 //
 // Orchestration v2 (ADR §13 п.8, stage 1c): for a books.orchestration='v2'
 // book the teardown never calls the hub (no /queue/clear, no legacy claim
@@ -73,6 +74,15 @@ module.exports = function registerCacheRoutes(app, ctx) {
                     if (chunk?.build_id) buildIds.add(chunk.build_id);
                 } catch (_) {}
             }
+
+            // VBook 4 / orchestration v2 artifacts live in OUTPUT_DIR/<manifest.build_id>/
+            // (getOutputPath(job.build_id, …)); a v2 book may have no Redis chunk
+            // naming that build, so the manifest's build id is always included
+            // («Мои книги», 2026-11-22). Reading the manifest changes nothing.
+            try {
+                const manifest = typeof ctx.getBookManifest === 'function' ? ctx.getBookManifest(bookId) : null;
+                if (manifest && typeof manifest.build_id === 'string' && manifest.build_id) buildIds.add(manifest.build_id);
+            } catch (_) { /* no manifest — chunk build ids only */ }
 
             // Clean up build directories
             const OUTPUT_DIR = config.OUTPUT_DIR;
