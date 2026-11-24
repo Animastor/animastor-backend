@@ -25,6 +25,7 @@ const {
     isUnsupportedVersionError, unsupportedVersionBody,
 } = require('@animastor/vbook-runtime/vbook-version.cjs');
 const { validateBundleObject } = require('@animastor/vbook-runtime/bundle-validator.cjs');
+const crypto = require('crypto');
 
 function requestLanguage(req) {
     const header = req && req.headers ? req.headers['accept-language'] : '';
@@ -70,14 +71,17 @@ function importRefusal(err, req, unsupportedStatus = 422) {
  * @param {object} deps
  * @param {object} deps.book               @animastor/vbook-runtime
  * @param {function} deps.importBookAllowed async (req, bookId, {diskCopyExists}) → {allowed, status, error}
+ * @param {function} deps.buildIdsOfOtherBooks async (bookId, candidates) → Set of the candidates another
+ *        book also names (services/build-id-owners.cjs; a failed check counts as shared)
  * @param {function} [deps.log]
  */
-function createVbookImporter({ book, importBookAllowed, log = () => {} }) {
+function createVbookImporter({ book, importBookAllowed, buildIdsOfOtherBooks, log = () => {} }) {
     // Dependencies are checked when an archive actually arrives: routes are
     // registered in processes (and tests) that never import a book.
     function assertWired() {
         if (!book || typeof book.saveBookBundle !== 'function') throw new Error('vbook-import: book runtime is required');
         if (typeof importBookAllowed !== 'function') throw new Error('vbook-import: importBookAllowed is required');
+        if (typeof buildIdsOfOtherBooks !== 'function') throw new Error('vbook-import: buildIdsOfOtherBooks is required');
     }
 
     /**
@@ -110,7 +114,7 @@ function createVbookImporter({ book, importBookAllowed, log = () => {} }) {
         }
 
         const bookId = bookData.manifest.book_id;
-        const buildId = bookData.manifest.build_id || 'default';
+        let buildId = bookData.manifest.build_id || 'default';
 
         // The copy already on the server, if any. A book that exists but is
         // not VBook 4 cannot be kept (it does not open) and is not silently
@@ -150,6 +154,28 @@ function createVbookImporter({ book, importBookAllowed, log = () => {} }) {
         if (existingBook) {
             log(`[${tag}] Book ${bookId} already exists — keeping existing (edited) version`);
             return { ok: true, bookId, buildId, bookData, loadedBook: existingBook, wasExisting: true };
+        }
+
+        // post171: a NEW import gets a build id of its own. OUTPUT_DIR/<build_id>/
+        // — voices/ included — is per build id, so the archive's id is replaced
+        // by vbook_<uuid> (written into the imported manifest) when
+        //   - another book already names it (an archive re-imported under
+        //     another book_id, a copied bundle), or
+        //   - the archive has none (every consumer would fall back to the
+        //     shared OUTPUT_DIR/default/).
+        // A re-import of the same book returned above (wasExisting) and keeps
+        // its id.
+        const archiveBuildId = typeof bookData.manifest.build_id === 'string' && bookData.manifest.build_id
+            ? bookData.manifest.build_id : null;
+        let freshReason = archiveBuildId ? null : 'no build id in the archive';
+        if (archiveBuildId) {
+            const taken = await buildIdsOfOtherBooks(bookId, [archiveBuildId]);
+            if (taken.has(archiveBuildId)) freshReason = `build id ${archiveBuildId} belongs to another book`;
+        }
+        if (freshReason) {
+            buildId = `vbook_${crypto.randomUUID()}`;
+            bookData.manifest.build_id = buildId;
+            log(`[${tag}] Book ${bookId}: ${freshReason} — new build id ${buildId}`);
         }
 
         try {

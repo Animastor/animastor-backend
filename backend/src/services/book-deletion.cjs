@@ -37,6 +37,8 @@ const path = require('path');
 // а затем исчезнуть — иначе ключ удалённой книги остаётся в Redis навсегда.
 // Совпадает с TTL, который ставит cancel-worker (generation-routes).
 const CANCELLED_WORKERS_TTL_SEC = 3600;
+/** The build dir of books without manifest.build_id (`… || 'default'` everywhere). */
+const DEFAULT_BUILD_ID = 'default';
 // Every PG table that records a build_id next to a book_id (schema.js): a build
 // id named there by another book is shared — its directory is never removed whole.
 const BUILD_ID_TABLES = Object.freeze([
@@ -245,6 +247,9 @@ function createBookDeletion(deps) {
                 const bundle = book.loadBook(bookId);
                 bundleUnitIds = unitIdsOfBundle(bundle);
                 bundleBuildId = (bundle && bundle.manifest && bundle.manifest.build_id) || null;
+                // No build id in the manifest: every consumer worked in the
+                // shared OUTPUT_DIR/default/ (post171) — this book's files are there.
+                if (bundle && bundle.manifest && !bundleBuildId) bundleBuildId = DEFAULT_BUILD_ID;
             } catch (_) { /* a broken bundle still gets deleted */ }
         }
 
@@ -275,6 +280,9 @@ function createBookDeletion(deps) {
         // removed as a whole directory: only this book's own entries go, the
         // build-scoped voices/ and the other book's files stay.
         const sharedBuildIds = await buildIdsOfOtherBooks(bookId, [...buildIds, `build_${bookId}`]);
+        // OUTPUT_DIR/default/ is the fallback of every book without a build id:
+        // never removed as a whole — only this book's entries; voices/ stays.
+        if (buildIds.has(DEFAULT_BUILD_ID)) sharedBuildIds.add(DEFAULT_BUILD_ID);
         if (sharedBuildIds.size > 0) {
             log(`[DELETE-BOOK] ${bookId}: build dir(s) shared with another book, kept: ${[...sharedBuildIds].join(', ')}`);
         }

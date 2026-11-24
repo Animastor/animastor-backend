@@ -104,7 +104,12 @@ module.exports = function(app, redis, deps) {
     const { requireUser, singleUpload } = require('../../middleware/input-guard');
     const bookRepo = require('../../storage/postgres/repositories/book-repo');
     // The one .vbook importer (VBOOK_FORMAT_V4 §11.2 Н15).
-    const vbookImporter = require('../../services/vbook-import.cjs').createVbookImporter({ book, importBookAllowed, log });
+    const vbookImporter = require('../../services/vbook-import.cjs').createVbookImporter({
+        book, importBookAllowed, log,
+        // post171: an archive's build id another book already names → a fresh one
+        // (backend.cjs routeDeps; the route layer does not require the service).
+        buildIdsOfOtherBooks: deps.buildIdsOfOtherBooks,
+    });
 
     // ── Identity-scoped TXT dedup ─────────────────────────────────────────
     // Candidates come from two indexes:

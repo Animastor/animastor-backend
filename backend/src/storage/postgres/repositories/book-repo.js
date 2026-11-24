@@ -163,8 +163,40 @@ async function lastOpenedByWorkspace(workspaceId) {
     return out;
 }
 
+/**
+ * Every PG table that records a build_id next to a book_id (schema.js).
+ * book-deletion.cjs (stage171) keeps its own copy of this list (Book Model
+ * layer boundary) — change both together.
+ */
+const BUILD_ID_TABLES = Object.freeze([
+    'scenes', 'output_manifests', 'image_units', 'scene_assets',
+    'iu_image_pointers', 'iu_image_fence_reservations',
+]);
+
+/**
+ * Build ids among `buildIds` that a book OTHER than `bookId` names in PG
+ * (post171: an imported .vbook must not take another book's build id).
+ * Throws on a PG error — the caller decides (build-id-owners: "taken").
+ * @returns {Promise<Set<string>>}
+ */
+async function buildIdsNamedByOtherBooks(buildIds, bookId) {
+    const out = new Set();
+    const ids = [...new Set((buildIds || []).filter((b) => typeof b === 'string' && b))];
+    if (ids.length === 0) return out;
+    for (const table of BUILD_ID_TABLES) {
+        const r = await query(
+            `SELECT DISTINCT build_id FROM ${table} WHERE build_id = ANY($1::text[]) AND book_id <> $2`,
+            [ids, bookId]
+        );
+        for (const row of r.rows) if (row.build_id) out.add(row.build_id);
+    }
+    return out;
+}
+
 module.exports = {
     ensureBook,
+    buildIdsNamedByOtherBooks,
+    BUILD_ID_TABLES,
     markOpened,
     lastOpenedByWorkspace,
     getWorkspaceId,

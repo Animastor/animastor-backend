@@ -26,6 +26,7 @@
 // requires inside the package.
 // ======================================================
 
+const crypto = require('crypto');
 const { toEntityId, isCanonicalEntityId } = require('./entity-id.js');
 const { rebuildFullText } = require('./scene-patch-utils.cjs');
 // The project's single hex-id generator (lazy-book paths): ch-<hex8> / sc-<hex8>
@@ -501,7 +502,12 @@ module.exports = function (app, redis, deps) {
                 manifest: {
                     vbook_version: 4,
                     book_id: bookId,
-                    build_id: `manual_${Date.now()}`,
+                    // One build id per book (post171): `manual_<ms>` repeated
+                    // for two blank books created in the same millisecond, and
+                    // the build dir (voices/ included) is per build id. Not
+                    // manual_<bookId>: book ids may be Cyrillic, build ids are
+                    // ASCII (safe-paths BUILD_ID_RE). Nothing parses the suffix.
+                    build_id: `manual_${crypto.randomUUID()}`,
                     created_at: now,
                 },
                 book: {

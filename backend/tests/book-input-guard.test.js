@@ -190,6 +190,11 @@ describe('Book input guard (routes)', function () {
             recoverChunksFromDisk: async () => [], recoverAllBooksFromDisk: async () => {},
             cleanupService: null, bookDiff: null, taskHandler: null, windowGenerator: null,
             iuRepo: null, cleanBookRedisKeys: null,
+            // post171: as backend.cjs routeDeps — the .vbook importer requires it
+            buildIdsOfOtherBooks: (bookId, candidates) => require('../src/services/build-id-owners.cjs').buildIdsOfOtherBooks({
+                pgOwners: require('../src/storage/postgres/repositories/book-repo').buildIdsNamedByOtherBooks,
+                booksDir: config.BOOKS_DIR,
+            }, bookId, candidates),
         };
         const app = express();
         app.use(express.json());

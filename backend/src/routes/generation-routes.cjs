@@ -103,6 +103,9 @@ module.exports = function(app, redis, deps) {
     const { requireUser, singleUpload } = require('../middleware/input-guard');
     const vbookImporter = require('../services/vbook-import.cjs').createVbookImporter({
         book, importBookAllowed: authContextMiddleware.importBookAllowed, log,
+        // post171: an archive's build id another book already names → a fresh one
+        // (backend.cjs routeDeps — contour-route require sets are frozen).
+        buildIdsOfOtherBooks: deps.buildIdsOfOtherBooks,
     });
     app.post('/api/v1/generate', requireUser, singleUpload('file'), async (req, res) => {
         try {

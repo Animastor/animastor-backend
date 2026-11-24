@@ -649,6 +649,12 @@ const routeDeps = {
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     // Book Model manifest read (cache teardown: the v2 build dir = manifest.build_id)
     getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
+    // post171: does another book name a build id (PG via book-repo + other
+    // manifests)? The .vbook importer gives a taken archive build id a fresh one.
+    buildIdsOfOtherBooks: (bookId, candidates) => require('./services/build-id-owners.cjs').buildIdsOfOtherBooks({
+        pgOwners: require('./storage/postgres/repositories/book-repo').buildIdsNamedByOtherBooks,
+        booksDir: config.BOOKS_DIR,
+    }, bookId, candidates),
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
     detectAvailableMode, recoverChunksFromDisk, recoverAllBooksFromDisk,
     cleanBookRedisKeys,
