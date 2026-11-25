@@ -28,6 +28,21 @@ const STUB_CONFIG = {
 
 describe('@animastor/generation package', () => {
 
+    before(() => {
+        // Isolation: the port modules are process-wide singletons, and this
+        // suite asserts their documented UNWIRED state. A host that requires
+        // the package before mocha loads these files (backend
+        // tests/generation-test-bindings.cjs binds all four) leaves them
+        // wired, and the fail-fast assertions would then see an adapter.
+        // before() runs after every module-level require and before the first
+        // `it` — start the suite from a clean, unwired slate.
+        const { generationConfig, dispatchTransport, profileStore, bookData } = generation.ports;
+        generationConfig._resetGenerationConfig();
+        dispatchTransport._resetDispatchTransport();
+        profileStore._resetProfileStore();
+        bookData._resetBookData();
+    });
+
     after(() => {
         // hygiene: drop the stub wiring so a same-process consumer starts clean
         generation.ports.generationConfig._resetGenerationConfig();
