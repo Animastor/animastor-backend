@@ -20,6 +20,8 @@
 #
 # Prereqs (one-time):
 #   docker compose -f docker-compose.test.yml --env-file backend/.env.test up -d
+#   per-package deps for the package suites that run after the backend suite:
+#   for p in packages/*/; do [ -d "$p/test" ] && (cd "$p" && npm ci); done
 
 set -euo pipefail
 
@@ -77,3 +79,50 @@ log "PG_DB=$PG_DB  PG_PORT=$PG_PORT  REDIS_PORT=$REDIS_PORT  NODE_ENV=$NODE_ENV"
 cd "$BACKEND_DIR"
 # NB: we do not forward "$@" — the only accepted flag (--no-deps) is ours.
 npm test
+
+# --- 7. package suites ------------------------------------------------------
+# Every packages/<pkg> with a test/ directory runs its OWN `npm test` in a
+# separate process: the port modules are process-wide singletons, so a package
+# must never share a mocha process with the backend suite or with another
+# package (see reports/2026-11-25/post171-chores.md §3.2). The suites are
+# package-owned (ai-connector uses its own runner, orchestration its
+# --require test/test-bindings.js); NODE_PATH lets a package test harness
+# borrow host-only test dependencies (express) from backend/node_modules.
+log "package suites (one process per package)"
+PKG_TOTAL=0
+PKG_FAILED=0
+PKG_REPORT=()
+for PKG_DIR in "$REPO_ROOT"/packages/*/; do
+    [[ -d "$PKG_DIR/test" ]] || continue
+    PKG_NAME="$(basename "$PKG_DIR")"
+    PKG_TOTAL=$((PKG_TOTAL + 1))
+    if [[ ! -d "$PKG_DIR/node_modules" ]]; then
+        PKG_FAILED=$((PKG_FAILED + 1))
+        PKG_REPORT+=("$PKG_NAME: NOT RUN — node_modules отсутствует (cd packages/$PKG_NAME && npm ci)")
+        log "package $PKG_NAME: NOT RUN (node_modules отсутствует)"
+        continue
+    fi
+    log "package $PKG_NAME: npm test (отдельный процесс)"
+    PKG_LOG="$(mktemp)"
+    set +e
+    ( cd "$PKG_DIR" && NODE_PATH="$BACKEND_DIR/node_modules${NODE_PATH:+:$NODE_PATH}" npm test ) >"$PKG_LOG" 2>&1
+    PKG_STATUS=$?
+    set -e
+    cat "$PKG_LOG"
+    PKG_PASSING="$(sed -nE 's/.*LAC package tests: ([0-9]+) pass \/ ([0-9]+) fail.*/\1/p' "$PKG_LOG" | tail -1)"
+    PKG_FAILING="$(sed -nE 's/.*LAC package tests: ([0-9]+) pass \/ ([0-9]+) fail.*/\2/p' "$PKG_LOG" | tail -1)"
+    [[ -n "$PKG_PASSING" ]] || PKG_PASSING="$(sed -nE 's/^[[:space:]]+([0-9]+) passing.*/\1/p' "$PKG_LOG" | tail -1)"
+    [[ -n "$PKG_FAILING" ]] || PKG_FAILING="$(sed -nE 's/^[[:space:]]+([0-9]+) failing.*/\1/p' "$PKG_LOG" | tail -1)"
+    rm -f "$PKG_LOG"
+    if [[ "$PKG_STATUS" -eq 0 ]]; then
+        PKG_REPORT+=("$PKG_NAME: ${PKG_PASSING:-?} passing, ${PKG_FAILING:-0} failing")
+    else
+        PKG_FAILED=$((PKG_FAILED + 1))
+        PKG_REPORT+=("$PKG_NAME: FAILED (exit $PKG_STATUS; ${PKG_PASSING:-?} passing, ${PKG_FAILING:-?} failing)")
+    fi
+done
+
+log "package suites: $((PKG_TOTAL - PKG_FAILED))/$PKG_TOTAL passed"
+for PKG_LINE in "${PKG_REPORT[@]}"; do log "  $PKG_LINE"; done
+[[ "$PKG_FAILED" -eq 0 ]] || err "$PKG_FAILED package suite(s) failed (see the summary above)"
+log "all package suites passed"
