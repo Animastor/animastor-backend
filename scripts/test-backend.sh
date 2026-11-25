@@ -15,12 +15,14 @@
 # port 5432) are rejected by both. Do NOT weaken them.
 #
 # Usage:
-#   scripts/test-backend.sh              # full run
-#   scripts/test-backend.sh --no-deps   # skip the container health check
+#   scripts/test-backend.sh                    # full run
+#   scripts/test-backend.sh --no-deps          # skip the container health check
+#   scripts/test-backend.sh --install-packages # npm ci in every packages/<pkg>
+#                                              # with test/ (or INSTALL_PACKAGES=1)
 #
 # Prereqs (one-time):
 #   docker compose -f docker-compose.test.yml --env-file backend/.env.test up -d
-#   per-package deps for the package suites that run after the backend suite:
+#   per-package deps: --install-packages, or manually
 #   for p in packages/*/; do [ -d "$p/test" ] && (cd "$p" && npm ci); done
 
 set -euo pipefail
@@ -34,6 +36,16 @@ REDIS_CONTAINER="animastor-redis-test"
 
 err() { echo "[test-backend] ERROR: $*" >&2; exit 1; }
 log() { echo "[test-backend] $*"; }
+
+NO_DEPS=0
+INSTALL_PACKAGES="${INSTALL_PACKAGES:-0}"
+for arg in "$@"; do
+    case "$arg" in
+        --no-deps) NO_DEPS=1 ;;
+        --install-packages) INSTALL_PACKAGES=1 ;;
+        *) err "unknown argument: $arg (accepted: --no-deps, --install-packages)" ;;
+    esac
+done
 
 # --- 1. env file ------------------------------------------------------------
 [[ -f "$ENV_FILE" ]] || err "missing $ENV_FILE (generate it; see docker-compose.test.yml)"
@@ -51,7 +63,7 @@ export AI_API_BASE_URL="${AI_API_BASE_URL:-http://127.0.0.1:9}"
 [[ "${NODE_ENV:-}" == "test" ]] || err "NODE_ENV must be 'test' (refusing to run)"
 
 # --- 3. container health check (skippable) ---------------------------------
-if [[ "${1:-}" != "--no-deps" ]]; then
+if [[ "$NO_DEPS" -eq 0 ]]; then
     for c in "$PG_CONTAINER" "$REDIS_CONTAINER"; do
         running="$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)"
         [[ "$running" == "true" ]] || err "container '$c' is not running.
@@ -77,7 +89,6 @@ fi
 # --- 6. run the suite -------------------------------------------------------
 log "PG_DB=$PG_DB  PG_PORT=$PG_PORT  REDIS_PORT=$REDIS_PORT  NODE_ENV=$NODE_ENV"
 cd "$BACKEND_DIR"
-# NB: we do not forward "$@" — the only accepted flag (--no-deps) is ours.
 npm test
 
 # --- 7. package suites ------------------------------------------------------
@@ -86,9 +97,24 @@ npm test
 # must never share a mocha process with the backend suite or with another
 # package (see reports/2026-11-25/post171-chores.md §3.2). The suites are
 # package-owned (ai-connector uses its own runner, orchestration its
-# --require test/test-bindings.js); NODE_PATH lets a package test harness
-# borrow host-only test dependencies (express) from backend/node_modules.
+# --require test/test-bindings.js).
 log "package suites (one process per package)"
+
+if [[ "$INSTALL_PACKAGES" -eq 1 ]]; then
+    log "installing package deps (npm ci in every packages/<pkg> with test/)"
+    for PKG_DIR in "$REPO_ROOT"/packages/*/; do
+        [[ -d "$PKG_DIR/test" ]] || continue
+        log "npm ci $(basename "$PKG_DIR")"
+        PKG_CI_LOG="$(mktemp)"
+        if ! ( cd "$PKG_DIR" && npm ci --no-audit --no-fund ) >"$PKG_CI_LOG" 2>&1; then
+            cat "$PKG_CI_LOG"
+            rm -f "$PKG_CI_LOG"
+            err "npm ci failed in $PKG_DIR"
+        fi
+        rm -f "$PKG_CI_LOG"
+    done
+fi
+
 PKG_TOTAL=0
 PKG_FAILED=0
 PKG_REPORT=()
@@ -98,14 +124,14 @@ for PKG_DIR in "$REPO_ROOT"/packages/*/; do
     PKG_TOTAL=$((PKG_TOTAL + 1))
     if [[ ! -d "$PKG_DIR/node_modules" ]]; then
         PKG_FAILED=$((PKG_FAILED + 1))
-        PKG_REPORT+=("$PKG_NAME: NOT RUN — node_modules отсутствует (cd packages/$PKG_NAME && npm ci)")
-        log "package $PKG_NAME: NOT RUN (node_modules отсутствует)"
+        PKG_REPORT+=("$PKG_NAME: NOT RUN — node_modules отсутствует (запустите с --install-packages или cd packages/$PKG_NAME && npm ci)")
+        log "package $PKG_NAME: NOT RUN (node_modules отсутствует; используйте --install-packages)"
         continue
     fi
     log "package $PKG_NAME: npm test (отдельный процесс)"
     PKG_LOG="$(mktemp)"
     set +e
-    ( cd "$PKG_DIR" && NODE_PATH="$BACKEND_DIR/node_modules${NODE_PATH:+:$NODE_PATH}" npm test ) >"$PKG_LOG" 2>&1
+    ( cd "$PKG_DIR" && npm test ) >"$PKG_LOG" 2>&1
     PKG_STATUS=$?
     set -e
     cat "$PKG_LOG"
