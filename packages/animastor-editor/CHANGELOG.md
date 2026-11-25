@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 (2026-11-25)
+
+### Fixed
+
+- Blank book (`POST /book/blank`): `build_id` is `manual_<uuid>`
+  (`crypto.randomUUID()`), not `manual_<Date.now()>`. Two blank books created
+  in the same millisecond got the same build id, and the build directory
+  (`OUTPUT_DIR/<build_id>/`, `voices/` included) is per build id. Nothing
+  parses the suffix. No API change.
+
 ## 0.5.0 (2026-11-18, unpublished)
 
 VBook 4 step 4 — the hero API (animastor-docs `architecture/VBOOK_FORMAT_V4.md`
