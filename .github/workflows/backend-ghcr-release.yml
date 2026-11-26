@@ -53,7 +53,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: animastor/animastor-backend
-  APPROVED_COMMIT: ee1a3312985ea342e33cb1bdf4b12ff96713622f
+  APPROVED_COMMIT: 91f565370c01ca388c896dd871ef633121228ac2
 
 jobs:
   build-smoke-push:
