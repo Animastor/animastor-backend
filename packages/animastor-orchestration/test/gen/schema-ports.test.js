@@ -31,9 +31,10 @@ describe('gen v2 — schema (ADR §4)', function () {
         assert.match(def('gen_commands_client_action_uniq'), /UNIQUE INDEX .*\(book_id, client_action_id\)/);
     });
 
-    it('CHECKs reject bad status / kind / executor / lane; books.orchestration defaults to legacy', async () => {
+    it('CHECKs reject bad status / kind / executor / lane; books.orchestration defaults to v2', async () => {
         await ctx.q(`INSERT INTO books (book_id, workspace_id) VALUES ('b1', $1)`, [uuid()]);
-        assert.equal((await ctx.q(`SELECT orchestration FROM books WHERE book_id='b1'`)).rows[0].orchestration, 'legacy');
+        // 006-default-v2: v2 is the default orchestration (owner decision 26.11)
+        assert.equal((await ctx.q(`SELECT orchestration FROM books WHERE book_id='b1'`)).rows[0].orchestration, 'v2');
         await assert.rejects(ctx.q(`UPDATE books SET orchestration = 'v3' WHERE book_id = 'b1'`), /books_orchestration_check/);
         const c = (await ctx.q(
             `INSERT INTO gen_commands (workspace_id, user_id, book_id, kind, scope, layers) VALUES ($1, $1, 'b1', 'regenerate', '{"level":"book"}', '{audio}') RETURNING command_id`,
