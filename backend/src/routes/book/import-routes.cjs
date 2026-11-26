@@ -25,6 +25,7 @@ const artifactNaming = require('@animastor/generation').artifactNaming;
 // VBook agent-session store (host-side domain module): import/bootstrap flows
 // read session state through it, not through the raw storage barrel.
 const agentSessionDefault = require('../../services/agent-session');
+const bootstrapLock = require('../../services/bootstrap-lock');
 
 // ======================================================
 // FALLBACK DEDUP: scan books dir for lazy books matching file hash
@@ -476,7 +477,7 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
             }
 
             log(`[RESUME-BOOTSTRAP] ${bookId}: no active session, re-bootstrapping...`);
-            const result = await txtImporter.bootstrapImportedText(bookId);
+            const result = await txtImporter.bootstrapImportedText(bookId, null, null, redis);
             const resultReady = (result.state === lazyBook.BookState.BOOTSTRAPPED ||
                                  result.state === lazyBook.BookState.ACTIVE);
             return res.json({
@@ -486,6 +487,10 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
                 scenes: result.scenes,
             });
         } catch (err) {
+            if (bootstrapLock.isBootstrapInProgress(err)) {
+                log(`[RESUME-BOOTSTRAP] ${req.params.bookId}: another bootstrap run holds the lock → 409`);
+                return res.status(409).json(await bootstrapInProgressBody(req.params.bookId));
+            }
             console.error('[RESUME-BOOTSTRAP] Error:', err.message);
             return res.status(500).json({ error: err.message });
         }
@@ -565,15 +570,58 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
     // ======================================================
     // BOOTSTRAP
     // ======================================================
+    // Bootstrap idempotency (2026-11-26, animastor-docs
+    // architecture/BOOTSTRAP_IDEMPOTENCY.md): the run AND its post-processing
+    // (PG window row, chunks, placeholder audio) hold the per-book bootstrap
+    // lock. Busy → 409 { error: 'bootstrap_in_progress', session_id? };
+    // already bootstrapped → 200 with the current state (no-op).
+    const bootstrapInProgressBody = async (bookId) => {
+        let sessionId = null;
+        try {
+            const s = await agentSession.getActiveSessionForBook(bookId);
+            sessionId = s ? s.session_id : null;
+        } catch (_) { /* best-effort hint for the client */ }
+        return { error: 'bootstrap_in_progress', book_id: bookId, session_id: sessionId };
+    };
+
     app.post('/api/v1/book/:bookId/bootstrap', async (req, res) => {
         try {
             const { bookId } = req.params;
             const publishVBook = (bid, event) => { publishProgress(redis, bid, event); };
-            const result = await txtImporter.bootstrapImportedText(bookId, null, publishVBook, redis);
+            const draftOnEntry = lazyBook.loadDraftBook(bookId);
+            if (!draftOnEntry || !draftOnEntry.sourceText) throw new Error(`Book ${bookId} not found`);
+            const body = await bootstrapLock.withBootstrapLock(redis, bookId, () => runBootstrapUnderLock(bookId, publishVBook));
+            return res.json(body);
+        } catch (err) {
+            if (bootstrapLock.isBootstrapInProgress(err)) {
+                log(`[BOOTSTRAP] ${req.params.bookId}: another bootstrap run holds the lock → 409`);
+                return res.status(409).json(await bootstrapInProgressBody(req.params.bookId));
+            }
+            console.error('BOOTSTRAP ERROR:', err);
+            return res.status(400).json(analysisErrorBody(err));
+        }
+    });
+
+    async function runBootstrapUnderLock(bookId, publishVBook) {
+            const result = await txtImporter.bootstrapImportedTextUnderLock(bookId, null, publishVBook, redis);
+
+            if (result.already_bootstrapped) {
+                // No-op: no new run, no PG window row, no chunks — the book as it is.
+                log(`[BOOTSTRAP] ${bookId}: already ${result.state} — no-op`);
+                return {
+                    book_id: result.bookId, title: result.title, author: result.author,
+                    language: result.language, state: result.state,
+                    already_bootstrapped: true,
+                    characters: result.characters, locations: result.locations,
+                    scenes: result.scenes, session_id: null,
+                    total_scenes_found: null, remaining_scenes: null,
+                    chapters: (result.chapters_summary || []).map(ch => ({ chapter: ch.chapter_id, ...ch })),
+                };
+            }
 
             try {
                 const scenesCount = result.scenes || 0;
-                await genSessionRepo.markFirstWindowCompleted(bookId, scenesCount);
+                await genSessionRepo.markFirstWindowCompleted(bookId, scenesCount, firstWindowSourceRange(result));
                 log(`[BOOTSTRAP] Marked window 0 completed in PG for ${bookId}`);
             } catch (pgErr) {
                 console.warn(`[BOOTSTRAP] Failed to mark window 0 in PG: ${pgErr.message}`);
@@ -581,10 +629,12 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
 
             log(`[BOOTSTRAP] ${bookId}: ${result.characters} chars, ${result.locations} locs, ${result.scenes} scenes`);
 
-            if (result.chapter && result.chapter.scenes && result.chapter.scenes.length > 0) {
+            if (result.chapter && result.chapter.scenes && result.chapter.scenes.length > 0 && result.chapter.chapter_id) {
                 const draftBook = lazyBook.loadDraftBook(bookId);
                 const buildId = draftBook?.manifest?.build_id || 'default';
-                const chapterId = result.chapter.chapter;
+                // lazy-book chapters carry chapter_id; `.chapter` does not exist
+                // (gave "undefined" in chunk / audio names, ba_1795695606197).
+                const chapterId = result.chapter.chapter_id;
 
                 log(`[BOOTSTRAP] Creating ${result.chapter.scenes.length} chunks for ${bookId}...`);
                 for (let i = 0; i < result.chapter.scenes.length; i++) {
@@ -620,24 +670,41 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
                 }
             }
 
-            res.json({
+            return {
                 book_id: result.bookId, title: result.title, author: result.author,
                 language: result.language, state: result.state,
+                already_bootstrapped: false,
                 characters: result.characters, locations: result.locations,
                 scenes: result.scenes, session_id: result.session_id || null,
                 total_scenes_found: result.total_scenes_found || null,
                 remaining_scenes: result.remaining_scenes || null,
+                // `chapter` is kept for existing clients (now the real id);
+                // `chapter_id` is the canonical field.
                 chapters: result.chapter ? [{
-                    chapter: result.chapter.chapter, chapter_title: result.chapter.chapter_title,
+                    chapter: result.chapter.chapter_id, chapter_id: result.chapter.chapter_id,
+                    chapter_title: result.chapter.chapter_title,
                     chapter_index: result.chapter.chapter_index, status: result.chapter.status,
                     scene_count: result.chapter.scenes ? result.chapter.scenes.length : 0,
                 }] : [],
-            });
-        } catch (err) {
-            console.error('BOOTSTRAP ERROR:', err);
-            return res.status(400).json(analysisErrorBody(err));
+            };
+    }
+
+    // Source range of the first window (book_generation_sessions
+    // source_offset_start/end).
+    // Prefers the run's own window range (bootstrapWithAgent), falls back to
+    // the scene offsets.
+    function firstWindowSourceRange(result) {
+        const wr = result && result.window_source_range;
+        if (wr && Number.isFinite(wr.start) && Number.isFinite(wr.end)) return { start: wr.start, end: wr.end };
+        const chapter = result && result.chapter;
+        const scenes = (chapter && Array.isArray(chapter.scenes)) ? chapter.scenes : [];
+        let start = null, end = null;
+        for (const sc of scenes) {
+            if (Number.isFinite(sc.source_start)) start = start === null ? sc.source_start : Math.min(start, sc.source_start);
+            if (Number.isFinite(sc.source_end)) end = end === null ? sc.source_end : Math.max(end, sc.source_end);
         }
-    });
+        return (start === null || end === null) ? null : { start, end };
+    }
 
     // ======================================================
     // BOOTSTRAP NEXT WINDOW
@@ -650,6 +717,10 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
             log(`[BOOTSTRAP-NEXT] ${bookId}: added ${result.added_scenes} scenes, cached=${result.cached}, all_done=${result.all_done}`);
             return res.json(result);
         } catch (err) {
+            if (bootstrapLock.isBootstrapInProgress(err)) {
+                log(`[BOOTSTRAP-NEXT] ${req.params.bookId}: another bootstrap run holds the lock → 409`);
+                return res.status(409).json(await bootstrapInProgressBody(req.params.bookId));
+            }
             console.error('BOOTSTRAP-NEXT ERROR:', err);
             return res.status(400).json(analysisErrorBody(err));
         }
@@ -774,6 +845,17 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
                     console.warn(`[TRIGGER] Redis cancelled check failed: ${redisErr.message}`);
                 }
 
+                // Another bootstrap / next-window run holds the book's lock: do not
+                // start a background run that would only fail with bootstrap_in_progress.
+                try {
+                    if (await redis.exists(bootstrapLock.lockKey(bookId))) {
+                        log(`[TRIGGER] ⏳ TXT book ${bookId}: bootstrap lock busy, queuing`);
+                        return res.json({ triggered: false, queued: true, reason: 'bootstrap_in_progress', book_id: bookId, source: 'txt_import' });
+                    }
+                } catch (lockErr) {
+                    console.warn(`[TRIGGER] bootstrap lock check failed: ${lockErr.message}`);
+                }
+
                 if (inFlightTriggers.has(bookId)) {
                     log(`[TRIGGER] ⏳ TXT book ${bookId} already has an in-flight trigger, queuing`);
                     return res.json({ triggered: false, queued: true, book_id: bookId, source: 'txt_import' });
@@ -787,8 +869,8 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
                         const nextRes = await txtImporter.bootstrapNextWindow(bookId, null, publishVBook, redis);
                         log(`[TRIGGER] TXT window done: added=${nextRes.added_scenes || 0} all_done=${nextRes.all_done}`);
 
-                        if (nextRes.chapter) {
-                            const chapterId = nextRes.chapter.chapter;
+                        if (nextRes.chapter && nextRes.chapter.chapter_id) {
+                            const chapterId = nextRes.chapter.chapter_id;
                             const allScenes = nextRes.chapter.scenes || [];
                             const added = nextRes.added_scenes || 0;
                             const newScenes = allScenes.slice(-added);
@@ -824,6 +906,10 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
                             }
                         }
                     } catch (err) {
+                        if (bootstrapLock.isBootstrapInProgress(err)) {
+                            log(`[TRIGGER] ⏳ TXT book ${bookId}: bootstrap lock taken meanwhile — window skipped`);
+                            return;
+                        }
                         console.error(`[TRIGGER] ❌ TXT bootstrapNextWindow failed: ${err.message}`);
                     } finally {
                         inFlightTriggers.delete(bookId);

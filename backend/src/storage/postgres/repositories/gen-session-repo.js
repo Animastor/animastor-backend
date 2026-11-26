@@ -82,7 +82,10 @@ async function getHighestCompletedWindow(bookId) {
  * Initialize window 0 as completed after first bootstrap.
  * Called once after bootstrapWithAgent finishes successfully.
  */
-async function markFirstWindowCompleted(bookId, sceneCount) {
+async function markFirstWindowCompleted(bookId, sceneCount, sourceRange) {
+    // Source range of window 0 (bootstrap idempotency, 2026-11-26): before this
+    // the row always had source_offset_start = source_offset_end = 0.
+    const hasRange = !!sourceRange && Number.isFinite(sourceRange.start) && Number.isFinite(sourceRange.end);
     // Check if window 0 already exists
     const existing = await query(
         `SELECT * FROM book_generation_sessions WHERE book_id = $1 AND window_index = 0`,
@@ -90,15 +93,21 @@ async function markFirstWindowCompleted(bookId, sceneCount) {
     );
     if (existing.rows.length > 0) {
         // Already exists — just mark completed
-        const updated = await updateSession(existing.rows[0].id, { status: 'completed', progress_msg: `First window: ${sceneCount} scenes` });
+        const fields = { status: 'completed', progress_msg: `First window: ${sceneCount} scenes` };
+        if (hasRange) {
+            fields.source_offset_start = sourceRange.start;
+            fields.source_offset_end = sourceRange.end;
+        }
+        const updated = await updateSession(existing.rows[0].id, fields);
         // Set book status as in_progress on the first window only
         await setBookCompletionStatus(bookId, 'in_progress');
         return updated;
     }
     const result = await query(
-        `INSERT INTO book_generation_sessions (book_id, window_index, window_size, status, progress_msg, completion_status)
-         VALUES ($1, 0, $2, 'completed', $3, 'in_progress') RETURNING *`,
-        [bookId, 3, `First window: ${sceneCount} scenes`]
+        `INSERT INTO book_generation_sessions (book_id, window_index, window_size, status, progress_msg, completion_status,
+                                               source_offset_start, source_offset_end)
+         VALUES ($1, 0, $2, 'completed', $3, 'in_progress', $4, $5) RETURNING *`,
+        [bookId, 3, `First window: ${sceneCount} scenes`, hasRange ? sourceRange.start : 0, hasRange ? sourceRange.end : 0]
     );
     return result.rows[0];
 }

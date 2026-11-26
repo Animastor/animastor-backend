@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 (2026-11-26, unpublished)
+
+Bootstrap idempotency (animastor-docs `architecture/BOOTSTRAP_IDEMPOTENCY.md`;
+ba_1795695606197 — two «Пролог» files with `chapter_index` 0).
+
+- `createOrAppendScenes` (`createFromAnalysis` / `appendToBook`) finds the
+  existing chapter by `chapter_index` for the **first window too** and reuses
+  its `chapter_id`; the first window **replaces** the chapter's scenes (the
+  typography `chapter_intro` scene is kept), later windows still append.
+- Invariant: two chapter files with one `chapter_index` → `DuplicateChapterIndexError`
+  (`code: 'duplicate_chapter_index'`, message names both files) — checked before
+  any write of a window and when `structure.chapters_order` is built
+  (`create.js`, both builders of `parse.js`); never a silent duplicate.
+- `lazy-book/chapter-utils`: `readChapterFiles`, `assertUniqueChapterIndex`,
+  `findChapterByIndex`, `buildChaptersOrder`, `DuplicateChapterIndexError`.
+
 ## 0.5.0 (2026-11-14, unpublished)
 
 ### Step 4 additions (2026-11-18)

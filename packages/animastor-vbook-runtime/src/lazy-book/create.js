@@ -113,6 +113,8 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
 
     const { maxScenes, chapterTitle, chapterIndex, isFirstWindow, structure } = windowConfig;
     const bookDir = getBookDir(bookId);
+    // Invariant before ANY write: one chapter file per chapter_index.
+    chapterUtils.assertUniqueChapterIndex(chapterUtils.readChapterFiles(getChapterDir(bookDir)));
 
     if (structure && isFirstWindow) {
         metadata.updateBookMetadata(bookDir, {
@@ -490,18 +492,22 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     let chapterObj = null;
     let chFile = null;
 
-    if (!isFirstWindow) {
-        const existingChapters = fs.readdirSync(chDir).filter(f => f.endsWith('.json')).sort();
-        for (const cf of existingChapters) {
-            try {
-                const ch = JSON.parse(fs.readFileSync(path.join(chDir, cf), 'utf8'));
-                if (ch.chapter_index === chapterIndex) {
-                    chapterObj = ch;
-                    chFile = cf;
-                    break;
-                }
-            } catch (e) { /* skip */ }
+    // Reuse the chapter with this chapter_index — for the FIRST window too
+    // (bootstrap idempotency, 2026-11-26): a repeated or parallel first window
+    // must land in the same chapter_id, not mint a second chapter 0.
+    const existing = chapterUtils.findChapterByIndex(chDir, chapterIndex);
+    if (existing) {
+        chapterObj = existing.ch;
+        chFile = existing.file;
+        if (isFirstWindow) {
+            // The first window always starts chapter 0 from its beginning:
+            // its scenes REPLACE the ones of the previous run (no duplicates).
+            // The typography intro scene is kept — it is not window content.
+            const before = (chapterObj.scenes || []).length;
+            chapterObj.scenes = (chapterObj.scenes || []).filter(s => s.type === 'chapter_intro');
+            console.log(`[LAZY-BOOK] First window reuses ${chapterObj.chapter_id} (chIndex=${chapterIndex}): ${before - chapterObj.scenes.length} old scene(s) replaced`);
         }
+        if (!Array.isArray(chapterObj.scenes)) chapterObj.scenes = [];
     }
 
     if (!chapterObj) {
@@ -811,15 +817,8 @@ function createOrAppendScenes(bookId, analysis, windowConfig) {
     // chapters_order must reflect the READING order (cover, prologue index 0,
     // chapters 1..N), NOT the filename order — hex chapter IDs are random.
     // Sort by chapter_index: cover first (no index), then by index ascending.
-    const chapterSortKey = (f) => {
-        try {
-            const ch = JSON.parse(fs.readFileSync(path.join(chDir, f), 'utf8'));
-            if (ch.type === 'cover') return -1;
-            return ch.chapter_index ?? Number.MAX_SAFE_INTEGER;
-        } catch (_) { return Number.MAX_SAFE_INTEGER; }
-    };
-    const existingFiles = fs.readdirSync(chDir).filter(f => f.endsWith('.json'))
-        .sort((a, b) => chapterSortKey(a) - chapterSortKey(b));
+    // One file per chapter_index — a duplicate throws (chapter-utils).
+    const existingFiles = chapterUtils.buildChaptersOrder(chDir);
     bookMeta.structure.chapters_order = existingFiles;
     // Display-order hint (§3): the cast as it is on disk now, in registry order.
     const castOnDisk = characterStore.listCharacters(bookDir, {
