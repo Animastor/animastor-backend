@@ -209,6 +209,75 @@ function buildSegmentIntro(segInfo, language) {
 
 // extractSceneTitle and isGenericSceneTitle imported from shared utils/scene-title-utils.
 
+// ── Chapter files on disk ─────────────────────────────────────────────
+// One chapter_index = one chapter file (bootstrap idempotency, 2026-11-26).
+// Two files with the same chapter_index mean two runs minted the same chapter
+// twice (ba_1795695606197: two «Пролог» files in chapters_order). This is an
+// error, never a silent duplicate.
+
+class DuplicateChapterIndexError extends Error {
+    constructor(chapterIndex, files) {
+        super(`chapters: два файла главы с chapter_index=${chapterIndex} (${files.join(', ')}) — ` +
+            'одна глава создана дважды (параллельный bootstrap?); удалите лишний файл, ' +
+            'chapters_order не пересобран');
+        this.name = 'DuplicateChapterIndexError';
+        this.code = 'duplicate_chapter_index';
+        this.chapterIndex = chapterIndex;
+        this.files = files;
+    }
+}
+
+/**
+ * Read every chapter file of chDir. Broken JSON is kept with ch=null.
+ * @returns {Array<{file: string, ch: object|null}>}
+ */
+function readChapterFiles(chDir) {
+    if (!fs.existsSync(chDir)) return [];
+    return fs.readdirSync(chDir).filter(f => f.endsWith('.json')).sort().map((file) => {
+        try { return { file, ch: JSON.parse(fs.readFileSync(path.join(chDir, file), 'utf8')) }; }
+        catch (_) { return { file, ch: null }; }
+    });
+}
+
+/** Throws DuplicateChapterIndexError when two non-cover files share a chapter_index. */
+function assertUniqueChapterIndex(entries) {
+    const byIndex = new Map();
+    for (const { file, ch } of entries) {
+        if (!ch || ch.type === 'cover' || ch.chapter_index === undefined || ch.chapter_index === null) continue;
+        if (!byIndex.has(ch.chapter_index)) byIndex.set(ch.chapter_index, []);
+        byIndex.get(ch.chapter_index).push(file);
+    }
+    for (const [idx, files] of byIndex) {
+        if (files.length > 1) throw new DuplicateChapterIndexError(idx, files);
+    }
+}
+
+/**
+ * The chapter file with this chapter_index, or null. Throws on duplicates.
+ * @returns {{file: string, ch: object}|null}
+ */
+function findChapterByIndex(chDir, chapterIndex) {
+    const entries = readChapterFiles(chDir);
+    assertUniqueChapterIndex(entries);
+    return entries.find(e => e.ch && e.ch.type !== 'cover' && e.ch.chapter_index === chapterIndex) || null;
+}
+
+/**
+ * structure.chapters_order in READING order: cover first, then chapter_index
+ * ascending (hex chapter ids are random, filename order means nothing).
+ * Invariant: one file per chapter_index — duplicates throw.
+ */
+function buildChaptersOrder(chDir) {
+    const entries = readChapterFiles(chDir);
+    assertUniqueChapterIndex(entries);
+    const key = ({ ch }) => {
+        if (!ch) return Number.MAX_SAFE_INTEGER;
+        if (ch.type === 'cover') return -1;
+        return ch.chapter_index ?? Number.MAX_SAFE_INTEGER;
+    };
+    return entries.slice().sort((a, b) => key(a) - key(b)).map(e => e.file);
+}
+
 module.exports = {
     createChapterIntroScene,
     createCoverChapter,
@@ -219,4 +288,9 @@ module.exports = {
     TYPOGRAPHY_LAYOUT,
     extractSceneTitle,
     isGenericSceneTitle,
+    DuplicateChapterIndexError,
+    readChapterFiles,
+    assertUniqueChapterIndex,
+    findChapterByIndex,
+    buildChaptersOrder,
 };

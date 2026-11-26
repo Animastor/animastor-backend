@@ -198,7 +198,7 @@ describe('orchestration v2 — legacy isolation (one predicate, fail-closed)', f
             const placeholders = [];
             const wg = require('../src/services/window-generator.cjs')({
                 redis,
-                txtImporter: { bootstrapNextWindow: async () => ({ all_done: false, added_scenes: 2, chapter: { chapter: 'ch-9', scenes: [{ scene_id: 'sc-a', type: 'narration' }, { scene_id: 'sc-b', type: 'narration' }] } }) },
+                txtImporter: { bootstrapNextWindow: async () => ({ all_done: false, added_scenes: 2, chapter: { chapter_id: 'ch-9', scenes: [{ scene_id: 'sc-a', type: 'narration' }, { scene_id: 'sc-b', type: 'narration' }] } }) },
                 genSessionRepo: { updateSession: async () => {}, getSessionsByStatus: async () => [], setBookCompletionStatus: async () => {} },
                 state: {}, activeScenes: {},
                 placeholderAudio: { ensureAllPlaceholderAudio: async (_b, _book, scenes) => { placeholders.push(...scenes); return { created: scenes.length, skipped: 0 }; } },
@@ -216,6 +216,10 @@ describe('orchestration v2 — legacy isolation (one predicate, fail-closed)', f
 
         const leg = await runWindow(LEG);
         expect(leg.saved.map((x) => x.data.scene_id)).to.deep.equal(['sc-a', 'sc-b'], 'legacy book: chunk records written');
+        // bootstrap idempotency (2026-11-26): chapter_id, never "undefined", in chunk ids / placeholders
+        expect(leg.saved.map((x) => x.data.chapter_id)).to.deep.equal(['ch-9', 'ch-9']);
+        expect(leg.saved.every((x) => x.id.includes('_ch-9_') && !x.id.includes('undefined'))).to.equal(true, 'chunk ids carry the chapter_id');
+        expect(leg.placeholders.map((x) => x.chapter_id)).to.deep.equal(['ch-9', 'ch-9']);
         // 1d: `let chunkCount = 0;` no longer sits inside the comment line (bug since 779cc3e) —
         // the legacy window now gets its placeholders and scene counters again.
         expect(leg.placeholders.map((x) => x.scene_id)).to.deep.equal(['sc-a', 'sc-b'], 'legacy book: placeholders created');

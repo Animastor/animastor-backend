@@ -15,6 +15,7 @@ const config = require('../config/runtime-config');
 const lazyBook = require('../book/lazy-book');
 const aiService = require('./ai-service');
 const encodingDetect = require('@animastor/parser/encoding-detect');
+const bootstrapLock = require('./bootstrap-lock');
 
 // ======================================================
 // PROGRESS STAGES
@@ -148,36 +149,76 @@ async function importAiText(text, title, progressCallback) {
 // BOOTSTRAP INTERNAL — Two-stage pipeline
 // ======================================================
 
+// Bootstrap idempotency (2026-11-26, animastor-docs
+// architecture/BOOTSTRAP_IDEMPOTENCY.md): every run of the first window or of
+// a next window holds the per-book bootstrap lock (services/bootstrap-lock.js).
+// The state check, the partial-artifact cleanup and the run itself happen
+// UNDER the lock — a parallel run can no longer delete files of another run
+// or mint a second chapter 0.
+
+/**
+ * First window. Takes the book's bootstrap lock; busy → BootstrapInProgressError.
+ * Already BOOTSTRAPPED/ACTIVE with chapters → no-op (already_bootstrapped: true).
+ */
 async function bootstrapImportedText(bookId, progress, publishProgress, redis) {
-    const _progress = progress || function(){};
-    const fs = require('fs');
+    const draft = lazyBook.loadDraftBook(bookId);
+    if (!draft || !draft.sourceText) throw new Error(`Book ${bookId} not found`);
+    return bootstrapLock.withBootstrapLock(redis, bookId,
+        () => bootstrapImportedTextUnderLock(bookId, progress, publishProgress, redis));
+}
+
+function _chapterFiles(bookId) {
+    const chDir = lazyBook.getChapterDir(lazyBook.getBookDir(bookId));
+    return fs.existsSync(chDir) ? fs.readdirSync(chDir).filter(f => f.endsWith('.json')) : [];
+}
+
+/** The book as it is now — the no-op answer of a repeated bootstrap. */
+function _currentState(bookId, draft) {
+    const chapters = (draft.chapters || []).filter(ch => ch && ch.type !== 'cover');
+    const scenes = (draft.chapters || []).reduce((sum, ch) => sum + ((ch && ch.scenes) ? ch.scenes.length : 0), 0);
+    return {
+        bookId,
+        state: draft.manifest.state,
+        title: draft.book?.title || 'Unknown',
+        author: draft.book?.author || null,
+        language: draft.book?.language || null,
+        characters: null,
+        locations: null,
+        scenes,
+        already_bootstrapped: true,
+        chapters_summary: chapters.map(ch => ({
+            chapter_id: ch.chapter_id,
+            chapter_title: ch.chapter_title || null,
+            chapter_index: ch.chapter_index,
+            status: ch.status,
+            scene_count: ch.scenes ? ch.scenes.length : 0,
+        })),
+    };
+}
+
+/**
+ * First window, the caller already holds the bootstrap lock (routes that do
+ * post-processing — chunks, PG window row — under the same lock).
+ */
+async function bootstrapImportedTextUnderLock(bookId, progress, publishProgress, redis) {
     const path = require('path');
 
-    // Check current book state
+    // Re-read the book AFTER taking the lock: the state on entry may be stale
+    // (another run may have finished while this request waited).
     const draft = lazyBook.loadDraftBook(bookId);
     if (!draft || !draft.sourceText) throw new Error(`Book ${bookId} not found`);
 
-    // If already bootstrapped, verify and return
-    if (draft.manifest?.state === lazyBook.BookState.BOOTSTRAPPED) {
-        console.log(`[BOOTSTRAP] ${bookId} already BOOTSTRAPPED, checking consistency...`);
-        const bookDir = lazyBook.getBookDir(bookId);
-        const chDir = lazyBook.getChapterDir(bookDir);
-        if (fs.existsSync(chDir) && fs.readdirSync(chDir).length > 0) {
-            console.log(`[BOOTSTRAP] ${bookId} consistent, skipping`);
-            return {
-                bookId,
-                state: lazyBook.BookState.BOOTSTRAPPED,
-                title: draft.book?.title || 'Unknown',
-                author: draft.book?.author || null,
-                characters: null,
-                locations: null,
-                scenes: null,
-            };
+    const st = draft.manifest?.state;
+    if (st === lazyBook.BookState.BOOTSTRAPPED || st === lazyBook.BookState.ACTIVE) {
+        if (_chapterFiles(bookId).length > 0) {
+            console.log(`[BOOTSTRAP] ${bookId} already ${st} with chapters — no-op`);
+            return _currentState(bookId, draft);
         }
-        console.log(`[BOOTSTRAP] ${bookId} stuck in BOOTSTRAPPED with no chapters, re-bootstrapping...`);
+        console.log(`[BOOTSTRAP] ${bookId} stuck in ${st} with no chapters, re-bootstrapping...`);
     }
 
-    // Clean up partial bootstrap artifacts from previous failed attempts
+    // Clean up partial bootstrap artifacts from previous failed attempts.
+    // Safe only under the lock: no other run of this book is alive.
     const bookDir = lazyBook.getBookDir(bookId);
     const chDir = lazyBook.getChapterDir(bookDir);
     const biblePath = lazyBook.getBiblePath(bookDir);
@@ -217,7 +258,18 @@ async function bootstrapImportedText(bookId, progress, publishProgress, redis) {
 // BOOTSTRAP NEXT WINDOW — process subsequent scene windows
 // ======================================================
 
+/** Next window. Takes the book's bootstrap lock; busy → BootstrapInProgressError. */
 async function bootstrapNextWindow(bookId, progress, publishProgress, redis) {
+    const draft = lazyBook.loadDraftBook(bookId);
+    if (!draft || !draft.sourceText) {
+        throw new Error(`Book ${bookId} not found`);
+    }
+    return bootstrapLock.withBootstrapLock(redis, bookId,
+        () => bootstrapNextWindowUnderLock(bookId, progress, publishProgress, redis));
+}
+
+/** Next window, the caller already holds the bootstrap lock. */
+async function bootstrapNextWindowUnderLock(bookId, progress, publishProgress, redis) {
     const _progress = progress || (() => {});
 
     const draft = lazyBook.loadDraftBook(bookId);
@@ -294,7 +346,9 @@ module.exports = {
     importTxtFile,
     importAiText,
     bootstrapImportedText,
+    bootstrapImportedTextUnderLock,
     bootstrapNextWindow,
+    bootstrapNextWindowUnderLock,
     lazyParseNext,
     lazyParseToPosition,
     getParsedChaptersSummary,

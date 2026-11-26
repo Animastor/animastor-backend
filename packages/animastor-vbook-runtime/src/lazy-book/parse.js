@@ -130,15 +130,8 @@ function lazyParseNextWindow(bookId, windowSize) {
     const bookMeta = JSON.parse(fs.readFileSync(getBookMetaPath(bookDir), 'utf8'));
     // chapters_order in reading order (cover first, then chapter_index asc) —
     // NOT filename order: hex chapter IDs are random.
-    const chapterSortKey = (f) => {
-        try {
-            const ch = JSON.parse(fs.readFileSync(path.join(chDir, f), 'utf8'));
-            if (ch.type === 'cover') return -1;
-            return ch.chapter_index ?? Number.MAX_SAFE_INTEGER;
-        } catch (_) { return Number.MAX_SAFE_INTEGER; }
-    };
-    const existingFiles = fs.readdirSync(chDir).filter(f => f.endsWith('.json'))
-        .sort((a, b) => chapterSortKey(a) - chapterSortKey(b));
+    // One file per chapter_index — a duplicate throws (chapter-utils).
+    const existingFiles = chapterUtils.buildChaptersOrder(chDir);
     bookMeta.structure.chapters_order = existingFiles;
     fs.writeFileSync(getBookMetaPath(bookDir), JSON.stringify(bookMeta, null, 2));
 
@@ -228,15 +221,8 @@ function lazyParseChapter(bookId, chapterIndex) {
 
     const bookMeta = JSON.parse(fs.readFileSync(getBookMetaPath(bookDir), 'utf8'));
     // chapters_order in reading order (cover first, then chapter_index asc).
-    const chapterSortKey = (f) => {
-        try {
-            const ch = JSON.parse(fs.readFileSync(path.join(chDir, f), 'utf8'));
-            if (ch.type === 'cover') return -1;
-            return ch.chapter_index ?? Number.MAX_SAFE_INTEGER;
-        } catch (_) { return Number.MAX_SAFE_INTEGER; }
-    };
-    const existingFiles = fs.readdirSync(chDir).filter(f => f.endsWith('.json'))
-        .sort((a, b) => chapterSortKey(a) - chapterSortKey(b));
+    // One file per chapter_index — a duplicate throws (chapter-utils).
+    const existingFiles = chapterUtils.buildChaptersOrder(chDir);
     bookMeta.structure.chapters_order = existingFiles;
     fs.writeFileSync(getBookMetaPath(bookDir), JSON.stringify(bookMeta, null, 2));
 

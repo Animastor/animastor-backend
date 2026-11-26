@@ -1,6 +1,6 @@
 {
     "name": "@animastor/vbook-runtime",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "description": "VBook Runtime — canonical VBook 4 book model: one file per hero (characters/<id>.json), atomic hero store, bundle import/export by whitelist, draft/import lifecycle, lazy parse windows, validation, canonical id grammar and path layout. Owns bundle/book canonical state; the host owns the filesystem root (booksRoot), snapshots, deletion orchestration and Redis/PG/GPU Hub.",
     "main": "src/index.js",
     "exports": {

@@ -429,6 +429,14 @@ const REDIS_OWNERSHIP = [
         note: 'Scene lock (debug-routes re-dispatch tooling).',
     },
     {
+        pattern: 'animastor:bootstrap-lock:*',
+        owner: 'backend',
+        readers: ['backend'],
+        writers: ['backend'],
+        crossModule: false,
+        note: 'Per-book bootstrap lock (services/bootstrap-lock.js): one bootstrap / next-window run per book, NX EX 900 + heartbeat, owner-only release.',
+    },
+    {
         pattern: 'animastor:regenerate-lock',
         owner: 'backend',
         readers: ['backend'],

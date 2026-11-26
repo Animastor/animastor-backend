@@ -274,6 +274,8 @@ async function bootstrapWithAgentInner(bookId, draft, progress, publishProgress,
             total_scenes_found: result.allScenes.length,
             remaining_scenes: extraScenes.length,  // deprecated, use cached_scenes
             has_more: !allDone,
+            // book_generation_sessions window 0: source_offset_start/end
+            window_source_range: { start: windowInfo.windowStartOffset, end: sceneConsumedOffset },
         };
     } catch (err) {
         console.error(`[AGENT] Bootstrap failed: ${err.message}`);

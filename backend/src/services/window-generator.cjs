@@ -68,17 +68,23 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
 
                 // — 3. Create chunks for each new scene in Redis —
                 let chunkCount = 0;
-                if (result.chapter && result.chapter.scenes) {
+                if (result.chapter && result.chapter.scenes && !result.chapter.chapter_id) {
+                    console.warn(`[BG-GEN] window result for ${bookId} has no chapter.chapter_id — chunks skipped`);
+                } else if (result.chapter && result.chapter.scenes) {
                     const phScenes = [];
                     // Orchestration v2 (1b/E): a v2 book gets no legacy Redis chunk
                     // records / scene counters — only the placeholder (ADR §4.3).
                     const isV2 = await require('../orchestration-v2/book-flag').isV2BookFailClosed(bookId);
                     if (isV2) bgLog(`orchestration v2: legacy chunk records and scene counters skipped`);
-                    bgLog(`📦 Creating ${result.chapter.scenes.length} chunks for chapter ${result.chapter.chapter}...`);
+                    // The chapter object of lazy-book carries chapter_id (there is no
+                    // `chapter` field — `.chapter.chapter` gave "undefined" in chunk
+                    // and audio names, ba_1795695606197).
+                    const chapterId = result.chapter.chapter_id;
+                    bgLog(`📦 Creating ${result.chapter.scenes.length} chunks for chapter ${chapterId}...`);
                     for (const scene of result.chapter.scenes) {
-                        const chunkId = artifactNaming.sceneChunkAudioName(bookId, result.chapter.chapter, scene.scene_id, 1).replace(/\.mp3$/, '');
+                        const chunkId = artifactNaming.sceneChunkAudioName(bookId, chapterId, scene.scene_id, 1).replace(/\.mp3$/, '');
                         if (isV2) {
-                            phScenes.push({ chapter_id: result.chapter.chapter, scene_id: scene.scene_id });
+                            phScenes.push({ chapter_id: chapterId, scene_id: scene.scene_id });
                             continue;
                         }
                         try {
@@ -86,7 +92,7 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                                 build_id: buildId,
                                 book_id: bookId,
                                 scene_order: 0,
-                                chapter_id: result.chapter.chapter,
+                                chapter_id: chapterId,
                                 scene_id: scene.scene_id,
                                 chunk_index: '0001',
                                 expected_chunk_count: 1,
@@ -99,7 +105,7 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                                 padded_text: false,
                             });
                             chunkCount++;
-                            phScenes.push({ chapter_id: result.chapter.chapter, scene_id: scene.scene_id });
+                            phScenes.push({ chapter_id: chapterId, scene_id: scene.scene_id });
                             bgLog(`  ✅ Chunk created: ${chunkId}`);
                         } catch (chunkErr) {
                             console.warn(`[BG-GEN] Failed to create chunk ${chunkId}: ${chunkErr.message}`);
@@ -155,6 +161,16 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                 bgLog(`✅ No queued sessions — done`);
             }
         } catch (err) {
+            if (err && err.code === 'bootstrap_in_progress') {
+                // Another bootstrap / next-window run holds the book's lock: this
+                // window did not run — it goes back to the queue, not to failed.
+                bgLog(`⏳ bootstrap lock busy — session back to queued`);
+                await genSessionRepo.updateSession(sessionId, {
+                    status: 'queued',
+                    progress_msg: '⏳ Ждёт завершения текущего окна',
+                }).catch(() => {});
+                return;
+            }
             console.error(`[BG-GEN][${bookId}:${sessionId}] ❌ FAILED:`, err.message);
             // Don't overwrite 'cancelled' status — user requested cancellation
             const isCancelled = err.code === 'SESSION_CANCELLED' || (await isBookCancelled(bookId).catch(() => false));
