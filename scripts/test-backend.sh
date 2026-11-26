@@ -98,6 +98,11 @@ npm test
 # package (see reports/2026-11-25/post171-chores.md §3.2). The suites are
 # package-owned (ai-connector uses its own runner, orchestration its
 # --require test/test-bindings.js).
+#
+# A package that also declares `test:gen` runs it right after `npm test` in its
+# own process too — today that is animastor-orchestration's gen suite
+# (test/gen/*.test.js: the migration runner and the gen core against a real PG,
+# a fresh schema per case). Both must pass for the package to count as passed.
 log "package suites (one process per package)"
 
 if [[ "$INSTALL_PACKAGES" -eq 1 ]]; then
@@ -140,8 +145,31 @@ for PKG_DIR in "$REPO_ROOT"/packages/*/; do
     [[ -n "$PKG_PASSING" ]] || PKG_PASSING="$(sed -nE 's/^[[:space:]]+([0-9]+) passing.*/\1/p' "$PKG_LOG" | tail -1)"
     [[ -n "$PKG_FAILING" ]] || PKG_FAILING="$(sed -nE 's/^[[:space:]]+([0-9]+) failing.*/\1/p' "$PKG_LOG" | tail -1)"
     rm -f "$PKG_LOG"
+    # Второй сьют пакета (сейчас — только gen: миграции gen/sql на реальном PG).
+    # Отдельный процесс по той же причине (порт-синглтоны) и потому, что ему
+    # нужен PG из .env.test; без ffmpeg сьют не падает, а скипает медиа-кейсы.
+    PKG_GEN_NOTE=""
+    if node -e "process.exit((require(process.argv[1]).scripts || {})['test:gen'] ? 0 : 1)" "$PKG_DIR/package.json" 2>/dev/null; then
+        log "package $PKG_NAME: npm run test:gen (отдельный процесс)"
+        PKG_GEN_LOG="$(mktemp)"
+        set +e
+        ( cd "$PKG_DIR" && npm run test:gen ) >"$PKG_GEN_LOG" 2>&1
+        PKG_GEN_STATUS=$?
+        set -e
+        cat "$PKG_GEN_LOG"
+        PKG_GEN_PASSING="$(sed -nE 's/^[[:space:]]+([0-9]+) passing.*/\1/p' "$PKG_GEN_LOG" | tail -1)"
+        PKG_GEN_FAILING="$(sed -nE 's/^[[:space:]]+([0-9]+) failing.*/\1/p' "$PKG_GEN_LOG" | tail -1)"
+        rm -f "$PKG_GEN_LOG"
+        if [[ "$PKG_GEN_STATUS" -eq 0 ]]; then
+            PKG_GEN_NOTE=" · test:gen ${PKG_GEN_PASSING:-?} passing"
+        else
+            PKG_STATUS=$PKG_GEN_STATUS
+            PKG_FAILING="${PKG_GEN_FAILING:-?}"
+            PKG_GEN_NOTE=" · test:gen FAILED (exit $PKG_GEN_STATUS)"
+        fi
+    fi
     if [[ "$PKG_STATUS" -eq 0 ]]; then
-        PKG_REPORT+=("$PKG_NAME: ${PKG_PASSING:-?} passing, ${PKG_FAILING:-0} failing")
+        PKG_REPORT+=("$PKG_NAME: ${PKG_PASSING:-?} passing, ${PKG_FAILING:-0} failing${PKG_GEN_NOTE}")
     else
         PKG_FAILED=$((PKG_FAILED + 1))
         PKG_REPORT+=("$PKG_NAME: FAILED (exit $PKG_STATUS; ${PKG_PASSING:-?} passing, ${PKG_FAILING:-?} failing)")
