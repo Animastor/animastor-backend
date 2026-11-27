@@ -139,6 +139,7 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
             getPool, redis: redisClient, layerConfig, book: vbook, outputDir: config.OUTPUT_DIR,
             gpuDispatcher: require('../src/runtime/gpu-dispatcher'),
             timers: false, log: () => {},
+            listenDelaysMs: [50, 100],
             portOverrides: {
                 audioDeps,
                 ports: HAS_FFMPEG ? {} : { validateResult: gen.defaults.createDefaultValidateResult({ decodePcm: fixtureDecodePcm }) },
@@ -149,6 +150,7 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
     function wireApp(redisClient) {
         const app = express();
         app.use(express.json());
+        app.use('/api/v1', require('../src/middleware/no-store').noStoreForPolling);   // as backend.cjs
         app.use((req, _res, next) => { req.user = { user_id: userId }; next(); });
         routes = createV2Routes({
             host, config: { GPU_HUB_API_KEY: HUB_KEY, shareFeaturesEnabled: () => false },
@@ -173,7 +175,7 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
             body: body === undefined ? undefined : JSON.stringify(body),
         });
         let json = null; try { json = await r.json(); } catch (_) { /* empty */ }
-        return { status: r.status, body: json };
+        return { status: r.status, body: json, headers: Object.fromEntries(r.headers.entries()) };
     };
     // fake worker: the internal routes need the hub key header
     const claim = async () => {
@@ -424,6 +426,8 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
         const a = await gen_({ scope: scene('sc-1') });
         const p = await api('GET', `/api/v1/book/${bookId}/generate/progress`);
         expect(p.status).to.equal(200);
+        expect(p.headers['cache-control'], 'polling path: no-store (О1)').to.equal('no-store');
+        expect(p.headers.etag).to.equal(undefined);
         expect(p.body).to.include({ book_id: bookId, orchestration: 'v2', active: true });
         expect(p.body.commands).to.have.length(1);
         const c = p.body.commands[0];
@@ -515,6 +519,41 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
                 dead.disconnect();
             }
         });
+    });
+
+    // ── LISTEN survives a lost PG connection (@animastor/orchestration 1.4.3) ──
+    it('обрыв LISTEN (pg_terminate_backend) → процесс жив, строка в лог, переподключение, SSE получает свежий агрегат, NOTIFY снова доходит', async function () {
+        const listener = host.progressListener();
+        if (!listener || typeof listener.pid !== 'function') {
+            // the core in node_modules is < 1.4.3 (backend/package.json stays on the published version until 1.4.3 is published)
+            this.skip();
+        }
+        const lines = [];
+        const origWarn = console.warn; const origLog = console.log;
+        console.warn = (...a) => { lines.push(['warn', a.join(' ')]); };
+        console.log = (...a) => { if (String(a[0]).includes('[ORCH-V2]')) lines.push(['log', a.join(' ')]); else origLog(...a); };
+        const s = openSse(`${base}/api/v1/book/${bookId}/generate/stream`);
+        try {
+            await s.next((e) => e.type === 'gen_progress' && e.reason === 'connect');
+            const pid1 = listener.pid();
+            // a command created while the listener is down: its NOTIFY is lost, the resync must show it
+            expect((await query('SELECT pg_terminate_backend($1) AS ok', [pid1])).rows[0].ok).to.equal(true);
+            await new Promise((r) => setTimeout(r, 20));
+            const a = await gen_({ scope: scene('sc-1') });
+            const resync = await s.next((e) => e.reason === 'resync', 5000, 'resync aggregate');
+            expect(resync.progress.commands.map((c) => c.command_id)).to.include(a.body.command_id);
+            expect(listener.connected()).to.equal(true);
+            expect(listener.pid()).to.not.equal(pid1);
+            expect(lines.filter(([k, t]) => k === 'warn' && t.includes('[ORCH-V2] progress LISTEN lost'))).to.have.length(1);
+            expect(lines.filter(([k, t]) => k === 'log' && t.includes('[ORCH-V2] progress LISTEN restored'))).to.have.length(1);
+            // NOTIFY reaches the new connection
+            const after = s.after();
+            const b = await gen_({ scope: scene('sc-2') });
+            await after((e) => e.reason === 'notify' && e.progress.commands.some((c) => c.command_id === b.body.command_id), 5000, 'notify after reconnect');
+        } finally {
+            console.warn = origWarn; console.log = origLog;
+            s.close();
+        }
     });
 
     // ── old GET /progress-stream (until step 5) ─────────────────────────

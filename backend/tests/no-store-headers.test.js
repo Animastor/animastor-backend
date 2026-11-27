@@ -19,6 +19,10 @@ const POLL_PATHS = [
     '/worker/counts',
     '/generate/commands/abc',
     '/generate',
+    // generate API v2, book-scoped (2026-11-27)
+    '/book/X/generate/progress',
+    '/book/X/generate/stream',
+    '/book/X/generate',
 ];
 const CACHEABLE_PATHS = [
     '/book/ba_1',
@@ -27,6 +31,7 @@ const CACHEABLE_PATHS = [
     '/scene/ba_1/ch-1/sc-1/storyboard',
     '/worker/counts-history',
     '/generated/x',
+    '/book/X/generate-next',
 ];
 
 function buildApp() {
@@ -40,6 +45,7 @@ function buildApp() {
         res.setHeader('Cache-Control', 'no-cache');
         res.end('data: {}\n\n');
     });
+    app.get('/api/v1/book/:id/generate/progress', (req, res) => res.json({ book_id: req.params.id, active: false, commands: [] }));
     app.get('/api/v1/book/:id', (req, res) => res.json({ book_id: req.params.id }));
     app.post('/api/v1/book/:id/progress-panel', (req, res) => res.json({ ok: true }));
     return app;
@@ -90,6 +96,14 @@ describe('О1 no-store for polling endpoints', () => {
         // even with the ETag the server itself would have computed
         const r2 = await get('/api/v1/book/b1/progress-panel', { 'If-None-Match': '*' });
         expect(r2.status).to.equal(200);
+    });
+
+    it('generate API v2: GET /book/X/generate/progress → Cache-Control no-store, no ETag', async () => {
+        const r = await get('/api/v1/book/X/generate/progress');
+        expect(r.status).to.equal(200);
+        expect(r.headers['cache-control']).to.equal('no-store');
+        expect(r.headers.pragma).to.equal('no-cache');
+        expect(r.headers.etag).to.equal(undefined);
     });
 
     it('progress-stream: a route-level Cache-Control is tightened to no-store', async () => {

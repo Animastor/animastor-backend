@@ -61,6 +61,7 @@ function hasFfmpeg(bin = 'ffmpeg') {
  * @param {object} o.gpuDispatcher   runtime/gpu-dispatcher (lane lookups) — injected, never required here
  * @param {object} o.book            vbook-runtime facade (loadBook / collectScenes) — injected
  * @param {boolean} [o.listen]     false → no LISTEN gen_progress (tests drive hub.onNotify)
+ * @param {number[]} [o.listenDelaysMs] re-LISTEN pauses after a lost connection (tests; core default 1→2→5→10→30 s)
  * @param {string} o.outputDir
  * @param {Function} [o.log]
  * @param {object} [o.gen]           @animastor/orchestration .gen (test override)
@@ -167,7 +168,19 @@ function createOrchV2Host(o) {
                 ? Number(env.ORCH_V2_PROGRESS_COALESCE_MS) : undefined,
         });
         if (o.listen !== false) {
-            state.listener = await state.orch.listenProgress((evt) => state.hub.onNotify(evt));
+            // @animastor/orchestration >= 1.4.3: the listener survives a lost PG
+            // connection (re-LISTEN with 1→2→5→10→30 s pauses); one log line per
+            // drop and one per recovery; on recovery every subscriber gets the
+            // current state (NOTIFYs sent while it was down are not lost for the UI).
+            // An older core ignores the second argument (no reconnect).
+            state.listener = await state.orch.listenProgress((evt) => state.hub.onNotify(evt), {
+                onDisconnect: (err) => console.warn(`[ORCH-V2] progress LISTEN lost: ${(err && err.message) || 'connection ended'} — reconnecting`),
+                onReconnect: () => {
+                    const n = state.hub.resync();
+                    console.log(`[ORCH-V2] progress LISTEN restored — fresh progress sent for ${n} book(s)`);
+                },
+                ...(o.listenDelaysMs ? { delaysMs: o.listenDelaysMs } : {}),
+            });
         }
         if (o.timers !== false) {
             state.orch.startSweeper(Number(env.ORCH_V2_SWEEP_MS) > 0 ? Number(env.ORCH_V2_SWEEP_MS) : 10_000);
@@ -212,6 +225,8 @@ function createOrchV2Host(o) {
         voiceRefs: () => state.voiceRefs,
         progress: () => state.progress,
         progressHub: () => state.hub || null,
+        /** the LISTEN handle (connected(), pid() with core >= 1.4.3) — diagnostics / tests */
+        progressListener: () => state.listener || null,
         /** {book_id, force, status} of a command (null: unknown) — /generate/stop {command_id} never stops another book's command. */
         commandRow: async (commandId) => {
             const r = await o.getPool().query('SELECT book_id, force, status FROM gen_commands WHERE command_id = $1', [commandId]);

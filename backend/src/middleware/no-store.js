@@ -21,6 +21,9 @@ const NO_STORE_PATHS = [
     /^\/worker\/counts(?:\/|$)/,
     // v2 generation API (/generate/*), present and future
     /^\/generate(?:\/|$)/,
+    // book-scoped generate API v2 (ADR ORCHESTRATION_V2 §11.1): /book/:id/generate,
+    // /generate/progress, /generate/stream, … (not /generate-next)
+    /^\/book\/[^/]+\/generate(?:\/|$)/,
 ];
 
 /** `true` when `path` (relative to /api/v1, without query) is a polling path. */
