@@ -340,14 +340,9 @@ const REDIS_OWNERSHIP = [
         crossModule: false,
         note: 'Event journal feeds per scene (state/event-journal — canonical owner since O-1, retention-manager).',
     },
-    {
-        pattern: 'animastor:layer-config:*',
-        owner: 'backend',
-        readers: ['backend'],
-        writers: ['backend'],
-        crossModule: false,
-        note: 'Per-book layer config cache (services/layer-config; consumers runtime-scheduler, scene-window, reconciliation-engine).',
-    },
+    // animastor:layer-config:* — retired 2026-11-27: per-book layer config is
+    // PG-only (book_layer_config, ORCHESTRATION_V2 §11.1); nothing reads or
+    // writes the family any more.
     {
         pattern: 'animastor:gen-scope:*',
         owner: 'backend',

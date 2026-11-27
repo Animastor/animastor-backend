@@ -145,7 +145,7 @@ module.exports = function(app, redis, deps) {
                     image_enabled: req.body.image_enabled !== 'false',
                     video_enabled: req.body.video_enabled !== 'false',
                 };
-                await layerConfig.set(redis, bookId, layerCfgBody);
+                await layerConfig.set(bookId, layerCfgBody);
                 const scenes = book.collectScenes(existingBook);
                 const ids = await getAllChunks(bookId);
                 if (ids.length === 0) {
@@ -188,7 +188,7 @@ module.exports = function(app, redis, deps) {
                 image_enabled: req.body.image_enabled !== 'false',
                 video_enabled: req.body.video_enabled !== 'false',
             };
-            await layerConfig.set(redis, bookId, layerCfgBody);
+            await layerConfig.set(bookId, layerCfgBody);
             console.log(`[LAYER] book=${bookId} audio=${layerCfgBody.audio_enabled} image=${layerCfgBody.image_enabled} video=${layerCfgBody.video_enabled}`);
 
             const scenes = book.collectScenes(loadedBook);

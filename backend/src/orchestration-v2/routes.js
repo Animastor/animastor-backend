@@ -265,7 +265,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 userId = ws && ws.owner_user_id ? ws.owner_user_id : null;
             }
             if (!userId) return res.status(401).json({ code: 'unauthorized', error: 'no user for the command' });
-            const cfg = await layerConfig.get(redis, bookId);
+            const cfg = await layerConfig.get(bookId);
             const enabledLayers = ['audio', 'image', 'video'].filter((l) => cfg[`${l}_enabled`] !== false);
             const ca = body.client_action && typeof body.client_action === 'object' ? body.client_action : null;
             const clientActionId = ca && typeof ca.action_id === 'string' && ca.action_id ? ca.action_id.slice(0, 200) : null;
@@ -476,7 +476,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             }
             const owner = await ownerOf(req, bookId);
             if (owner.error) return res.status(owner.error.status).json(owner.error.body);
-            const cfg = await layerConfig.get(redis, bookId);
+            const cfg = await layerConfig.get(bookId);
             const enabledLayers = ALL_LAYERS.filter((l) => cfg[`${l}_enabled`] !== false);
             const r = await host.orch().createCommand({
                 workspaceId: owner.workspaceId, userId: owner.userId, bookId, kind: 'regenerate', scope, layers,

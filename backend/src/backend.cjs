@@ -112,12 +112,11 @@ require('@animastor/orchestration').ports.hubCancel.setHubCancelPort(
 // O-10: LAYER CONFIG PORT — runtime/orchestration per-book layer-config
 // composition. The two tiers read per-book layer config ONLY through
 // runtime/layer-config-port; the host adapter (storage/layer-config-
-// adapter) owns the layer-config host service (Redis key grammar,
-// normalize/clamp pipeline, durable book.json recovery scan —
-// services/layer-config) and is bound here, before any
-// runtime/orchestration module loads. Tier-local RAW Redis reads of the
-// same key (bespoke fallback semantics) and the routes/agent host
-// consumers keep calling the service directly — host-side by design.
+// adapter) owns the layer-config host service (PG book_layer_config,
+// normalize/clamp pipeline — services/layer-config) and is bound here,
+// before any runtime/orchestration module loads. Since 2026-11-27 the
+// former tier-local raw Redis reads go through this port as well (core
+// 1.4.4); routes/agent host consumers call the service directly.
 // Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.27
 require('@animastor/orchestration').ports.layerConfig.setLayerConfigPort(
     require('./storage/layer-config-adapter')

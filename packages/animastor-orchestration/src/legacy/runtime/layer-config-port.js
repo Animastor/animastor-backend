@@ -3,12 +3,11 @@
 // per-book layer-config contract
 // ======================================================
 // The runtime and orchestration tiers must not know the layer-config host
-// service. The Redis key grammar (`animastor:layer-config:*`), the
-// normalize/clamp pipeline, the durable book.json copy (Кирпич №2) and
-// the fs scanning the service performs stay HOST-side
-// (backend/src/services/layer-config.js); the tiers consume the
-// per-book layer-config operations they actually use ONLY through this
-// port, wired by the composition root (backend.cjs) at startup.
+// service. Storage (host PG table book_layer_config since 1.4.4, formerly a
+// Redis key + book.json copy), the normalize/clamp pipeline and the
+// book.json durable copy stay HOST-side (backend/src/services/layer-config.js);
+// the tiers consume per-book layer config ONLY through this port, wired by
+// the composition root (backend.cjs) at startup.
 //
 //   runtime/** + orchestration/**        (tier consumers)
 //       ↓ consume layer-config ops through
@@ -21,50 +20,39 @@
 // runtime/progress-events-port.js, runtime/audio-fsm-port.js,
 // runtime/video-fsm-port.js, runtime/hub-cancel-port.js): a zero-require
 // contract module, a fail-fast call-time resolver, one set/wired/reset
-// surface. No Redis key, no fs path, no BOOKS_DIR, no normalize/clamp
-// rules and no "future ops" cross the boundary — the contract below is
-// EXACTLY the set of operations the two tiers use today (measured at
-// O-10 reconnaissance, §32.27):
+// surface. The contract is EXACTLY one operation:
 //
-//   get               — read the normalized per-book layer config
-//                       (scene-orchestrator executeVideoDispatch
-//                       per-type timeout leg; reconciliation-engine
-//                       rebuildWorkList enabled-layers read)
-//   restoreFromBooks  — heal missing Redis keys from the durable book.json
-//                       copy (reconciliation-engine PHASE C6)
+//   get(redis, bookId) — the normalized per-book layer config (redis is
+//                        passed for call-shape compatibility; the host
+//                        ignores it). Consumers: scene-orchestrator
+//                        executeVideoDispatch per-type timeout leg;
+//                        reconciliation-engine rebuildWorkList enabled
+//                        layers and video-stall threshold; command-gate
+//                        getLayerConfig (runtime-scheduler re-export);
+//                        scene-window isWindowComplete / isSceneWindowDone /
+//                        startScene.
 //
-// The tier-local RAW Redis reads of `animastor:layer-config:*`
-// (reconciliation-engine video-stall threshold, scene-window
-// isWindowComplete/isSceneWindowDone, runtime-scheduler getLayerConfig)
-// are NOT part of this port: they read the key in place with their own
-// bespoke fallback semantics (partial-parse, per-field defaults) that a
-// normalize() call would change — moving them is its own measured
-// decision, not a rider on this seam. The raw Redis channel itself is
-// not a host-service edge (redis is an injected parameter).
+// 1.4.4 (layer-config → PG): `restoreFromBooks` (reconcile PHASE C6, heal
+// missing Redis keys from book.json) is removed together with the phase —
+// there is no Redis copy any more; the former tier-local RAW Redis reads of
+// the layer-config key now go through get().
 //
 // Deliberately NOT in the port: set/persistToBook (routes/import
 // workflow), getChunkSize (routes + services/agent consumers),
 // SCOPES/ANALYSIS_MODES/DEFAULTS vocabulary (routes/services constants),
-// key/KEY_PREFIX grammar, normalize (host-internal), and any CRUD "for
-// later". The host adapter owns every Redis read, the durable book.json
-// scan and every clamp rule.
-//
-// Optional-load/error semantics are the CALLER's concern, preserved
-// exactly through the port: the reconciliation PHASE C6 leg keeps its
-// pre-O-10 `try { … } catch (err) { warn; summary.errors }` wrapper with
-// the missing-module degrade (a require failure of the host service
-// previously left `layerConfig = null` and skipped the phase silently —
-// the adapter's lazy call-time resolver throws at the same point the
-// pre-O-10 require did, and the caller's catch handles it identically);
-// the scene-orchestrator timeout leg keeps its `try { … } catch (_) {}`
-// tolerance; the rebuildWorkList read stays a plain mandatory await.
+// normalize (host-internal), and any CRUD "for later".
+
+// Error semantics are the CALLER's concern: the scene-orchestrator timeout
+// leg and the reconcile video-stall threshold keep their `try { … } catch
+// (_) {}` tolerance; rebuildWorkList, command-gate and scene-window reads are
+// plain mandatory awaits (a failing store fails the caller, as a failing
+// Redis read did before 1.4.4).
 //
 // Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.27 (O-10)
 // ======================================================
 
 const OPS = [
     'get',
-    'restoreFromBooks',
 ];
 
 let impl = null;

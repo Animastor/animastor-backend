@@ -686,9 +686,9 @@ async function checkStalledVideoScenes(redis, deps) {
         // ни ошибку за весь интервал.
         let stallThreshold = VIDEO_CHUNK_STALL_MS;
         try {
-            const layerRaw = await redis.get(`animastor:layer-config:${bookId}`);
-            if (layerRaw) {
-                const lc = JSON.parse(layerRaw);
+            // 1.4.4: layer-config lives in host PG — read through the O-10 port.
+            const lc = await require('./layer-config-port').layerConfigOp('get')(redis, bookId);
+            if (lc) {
                 const perJobMs = (Number(lc.video_timeout_minutes) || 60) * 60 * 1000;
                 stallThreshold = Math.max(stallThreshold, perJobMs + 5 * 60 * 1000);
             }
@@ -1882,35 +1882,9 @@ async function reconcileCycle(redis, deps = {}, options = {}) {
             }
         }
 
-        // ══════════════════════════════════════════════
-        // PHASE C6: Restore durable layer-config from book.json (Кирпич №2)
-        // ══════════════════════════════════════════════
-        // Сервис layer-config владеет форматом: заполняет ТОЛЬКО отсутствующие
-        // Redis-ключи из durable-копии (нормализуя значения). В норме — no-op.
-        // Запускается каждый цикл (не только startup), чтобы heal удалений
-        // ключа cleanBookRedisKeys на cache-clear / import / recovery, пока
-        // книга существует — конфиг не пропадает из Redis до рестарта.
-
-        if (!scope) {
-            // O-10: through the LayerConfigPort (host adapter:
-            // storage/layer-config-adapter). The pre-O-10 optional-load
-            // semantics are preserved EXACTLY: when the host service
-            // cannot be loaded, this phase is skipped with a warn (a
-            // missing module ≠ failed recovery). The outer try/catch
-            // wraps the PORT call — the adapter's lazy call-time
-            // resolver throws at the same point the pre-O-10 inner
-            // require did, and the caller's catch handles it
-            // identically (the pre-O-10 inner try set layerConfig to
-            // null and skipped silently; the C6 error path below is
-            // reached only when the CALL fails, same as before).
-            try {
-                const c6Count = await require('./layer-config-port').layerConfigOp('restoreFromBooks')(redis);
-                if (c6Count > 0) phases.push(`layer_config_restore:${c6Count}`);
-            } catch (err) {
-                warn(`Phase C6 failed: ${err.message}`);
-                summary.errors.push(`layer_config_restore: ${err.message}`);
-            }
-        }
+        // PHASE C6 (layer-config restore from book.json) removed in 1.4.4:
+        // layer-config is stored in host PG (book_layer_config), there is no
+        // Redis copy to heal.
 
         // ══════════════════════════════════════════════
         // PHASE C7: Retry pending entity purges (deleted scenes/units)

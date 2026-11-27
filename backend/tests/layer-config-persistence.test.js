@@ -1,10 +1,11 @@
 // ======================================================
 // Кирпич №2 — Persistent Layer Configuration
 // ======================================================
-// Проверяет durability layer-config в book.json:
-//   1. set() дублирует конфиг в book.json (durable-копия)
-//   2. restoreFromBooks() восстанавливает Redis-ключи из book.json
-//      после полной потери Redis (только отсутствующие ключи)
+// Проверяет копию layer-config в book.json (хранилище — PG book_layer_config,
+// 2026-11-27; book.json — best-effort копия для экспорта/переносимости):
+//   1. set() дублирует конфиг в book.json
+//   2. get() без PG-строки один раз засевает её из book.json (в т.ч. из
+//      legacy single-file <bookId>.json); restoreFromBooks/C6 больше нет
 //   3. saveBookBundle() не затирает layer_config при перезаписи book.json
 //   4. legacy single-file формат (<bookId>.json) тоже поддерживается
 
@@ -17,30 +18,33 @@ const layerConfig = require('../src/services/layer-config');
 require('./vbook-test-bindings.cjs');
 const config = require('../src/config/runtime-config');
 const book = require('../src/book');
+const { query } = require('../src/storage/postgres/database');
+const { runMigrations } = require('../src/storage/postgres/schema');
+
+const RUN = `lcp${Date.now().toString(36)}`;
 
 describe('Layer Config Persistence (Кирпич №2)', () => {
     let tmpDir;
     let savedBooksDir;
 
-    const fakeRedis = {
-        _store: {},
-        async get(k) {
-            return Object.prototype.hasOwnProperty.call(this._store, k) ? this._store[k] : null;
-        },
-        // NX-семантика как у ioredis / createMockRedis: при существующем ключе
-        // возвращает null и не пишет (нужна restoreFromBooks для атомарного SETNX).
-        async set(k, v, ...args) {
-            if (args.includes('NX') && Object.prototype.hasOwnProperty.call(this._store, k)) return null;
-            this._store[k] = v;
-            return 'OK';
-        },
-    };
+    const registered = new Set();
+    // every test book gets a books row (book_layer_config → books FK)
+    async function register(bookId) {
+        await query(`INSERT INTO books (book_id, title) VALUES ($1, 'lcp') ON CONFLICT (book_id) DO NOTHING`, [bookId]);
+        registered.add(bookId);
+        return bookId;
+    }
+    const rowOf = async (bookId) => (await query('SELECT config FROM book_layer_config WHERE book_id = $1', [bookId])).rows[0];
+
+    before(async () => { await runMigrations(); });
+    after(async () => {
+        for (const b of registered) await query('DELETE FROM books WHERE book_id = $1', [b]);
+    });
 
     beforeEach(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'animastor-lc-'));
         savedBooksDir = config.BOOKS_DIR;
         config.BOOKS_DIR = tmpDir;
-        fakeRedis._store = {};
     });
 
     afterEach(() => {
@@ -57,10 +61,10 @@ describe('Layer Config Persistence (Кирпич №2)', () => {
 
     // ── 1. set() → durable copy in book.json ──
     it('set() persists the config into book.json', async () => {
-        const bookId = 'lc-book-1';
+        const bookId = await register(`${RUN}-lc-book-1`);
         writeBookDir(bookId, { structure: { chapters_order: [] } });
 
-        await layerConfig.set(fakeRedis, bookId, { image_enabled: false, chunk_size: 5 });
+        await layerConfig.set(bookId, { image_enabled: false, chunk_size: 5 });
 
         const meta = JSON.parse(fs.readFileSync(path.join(tmpDir, bookId, 'book.json'), 'utf8'));
         expect(meta.layer_config).to.be.an('object');
@@ -71,11 +75,11 @@ describe('Layer Config Persistence (Кирпич №2)', () => {
     });
 
     it('set() merges partial updates into the durable copy', async () => {
-        const bookId = 'lc-book-2';
+        const bookId = await register(`${RUN}-lc-book-2`);
         writeBookDir(bookId, { structure: { chapters_order: [] } });
 
-        await layerConfig.set(fakeRedis, bookId, { image_enabled: false });
-        await layerConfig.set(fakeRedis, bookId, { video_enabled: false });
+        await layerConfig.set(bookId, { image_enabled: false });
+        await layerConfig.set(bookId, { video_enabled: false });
 
         const meta = JSON.parse(fs.readFileSync(path.join(tmpDir, bookId, 'book.json'), 'utf8'));
         expect(meta.layer_config.image_enabled).to.be.false;
@@ -83,137 +87,81 @@ describe('Layer Config Persistence (Кирпич №2)', () => {
         expect(meta.layer_config.audio_enabled).to.be.true;
     });
 
-    it('set() skips persistence when the book is not on disk yet (no crash, Redis still set)', async () => {
-        const bookId = 'lc-ghost';
-        const cfg = await layerConfig.set(fakeRedis, bookId, { image_enabled: false });
+    it('set() skips persistence when the book is not on disk yet (no crash, PG row still written)', async () => {
+        const bookId = await register(`${RUN}-lc-ghost`);
+        const cfg = await layerConfig.set(bookId, { image_enabled: false });
 
         expect(cfg.image_enabled).to.be.false;
-        expect(JSON.parse(fakeRedis._store[layerConfig.key(bookId)]).image_enabled).to.be.false;
+        expect((await rowOf(bookId)).config.image_enabled).to.be.false;
         // No book.json on disk, no exception — best-effort skip
         expect(fs.existsSync(path.join(tmpDir, bookId))).to.be.false;
     });
 
-    it('set() merges against the durable book.json copy when the Redis key is missing (Redis-loss window)', async () => {
-        const bookId = 'lc-set-durable-1';
-        // Redis пуст (потерян), durable-копия есть: частичный PUT не должен
-        // молча сбросить ранее сохранённое image_enabled=false в defaults.
+    it('set() merges against the durable book.json copy when the book has no PG row yet', async () => {
+        const bookId = await register(`${RUN}-lc-set-durable-1`);
+        // PG-строки ещё нет (книга до переезда в PG), копия есть: частичный PUT
+        // не должен молча сбросить ранее сохранённое image_enabled=false в defaults.
         writeBookDir(bookId, {
             structure: { chapters_order: [] },
             layer_config: { image_enabled: false },
         });
 
-        const cfg = await layerConfig.set(fakeRedis, bookId, { chunk_size: 5 });
+        const cfg = await layerConfig.set(bookId, { chunk_size: 5 });
 
         expect(cfg.image_enabled).to.be.false; // сохранено из durable-копии
         expect(cfg.chunk_size).to.equal(5);
-        // Redis получил то же самое — последующие чтения согласованы
-        const fromRedis = JSON.parse(fakeRedis._store[layerConfig.key(bookId)]);
-        expect(fromRedis.image_enabled).to.be.false;
-        expect(fromRedis.chunk_size).to.equal(5);
+        // PG получил то же самое — последующие чтения согласованы
+        const stored = (await rowOf(bookId)).config;
+        expect(stored.image_enabled).to.be.false;
+        expect(stored.chunk_size).to.equal(5);
     });
 
-    it('set() falls back to defaults when neither Redis nor durable copy exists', async () => {
-        const bookId = 'lc-set-defaults-1'; // нет ни ключа, ни book.json
-        const cfg = await layerConfig.set(fakeRedis, bookId, { video_enabled: false });
+    it('set() falls back to defaults when neither a PG row nor a durable copy exists', async () => {
+        const bookId = await register(`${RUN}-lc-set-defaults-1`); // нет ни ключа, ни book.json
+        const cfg = await layerConfig.set(bookId, { video_enabled: false });
         expect(cfg.audio_enabled).to.be.true;
         expect(cfg.image_enabled).to.be.true;
         expect(cfg.video_enabled).to.be.false;
     });
 
-    // ── 2. restoreFromBooks() — cold Redis recovery ──
-    it('restoreFromBooks() fills missing Redis keys from book.json', async () => {
-        const bookId = 'lc-restore-1';
-        writeBookDir(bookId, {
-            structure: { chapters_order: [] },
-            layer_config: { image_enabled: false, video_enabled: false, chunk_size: 5 },
-        });
-
-        const count = await layerConfig.restoreFromBooks(fakeRedis);
-        expect(count).to.equal(1);
-
-        const restored = JSON.parse(fakeRedis._store[layerConfig.key(bookId)]);
-        expect(restored.image_enabled).to.be.false;
-        expect(restored.video_enabled).to.be.false;
-        expect(restored.audio_enabled).to.be.true; // default filled by normalize
-        expect(restored.chunk_size).to.equal(5);
+    // ── 2. get() seeds a missing PG row from book.json (once) ──
+    it('get() seeds the PG row from a multi-file book.json copy', async () => {
+        const bookId = await register(`${RUN}-lc-seed-1`);
+        writeBookDir(bookId, { structure: {}, layer_config: { video_enabled: false, chunk_size: 2 } });
+        const cfg = await layerConfig.get(bookId);
+        expect(cfg.video_enabled).to.be.false;
+        expect(cfg.chunk_size).to.equal(2);
+        expect((await rowOf(bookId)).config).to.deep.equal(cfg);
     });
 
-    it('restoreFromBooks() never overwrites live Redis state', async () => {
-        const bookId = 'lc-restore-2';
-        writeBookDir(bookId, {
-            structure: { chapters_order: [] },
-            layer_config: { image_enabled: false },
-        });
-        // Live Redis state (newer than durable copy)
-        fakeRedis._store[layerConfig.key(bookId)] = JSON.stringify({ image_enabled: true });
-
-        const count = await layerConfig.restoreFromBooks(fakeRedis);
-        expect(count).to.equal(0);
-        expect(JSON.parse(fakeRedis._store[layerConfig.key(bookId)]).image_enabled).to.be.true;
+    it('get() seeds from the legacy single-file format (<bookId>.json) too', async () => {
+        const bookId = await register(`${RUN}-lc-legacy-1`);
+        fs.writeFileSync(path.join(tmpDir, `${bookId}.json`), JSON.stringify({ structure: {}, layer_config: { image_enabled: false } }));
+        const cfg = await layerConfig.get(bookId);
+        expect(cfg.image_enabled).to.be.false;
+        expect((await rowOf(bookId)).config.image_enabled).to.be.false;
     });
 
-    it('restoreFromBooks() supports legacy single-file books (<bookId>.json)', async () => {
-        fs.writeFileSync(
-            path.join(tmpDir, 'lc-legacy-1.json'),
-            JSON.stringify({ structure: {}, layer_config: { audio_enabled: false } })
-        );
-
-        const count = await layerConfig.restoreFromBooks(fakeRedis);
-        expect(count).to.equal(1);
-
-        const restored = JSON.parse(fakeRedis._store[layerConfig.key('lc-legacy-1')]);
-        expect(restored.audio_enabled).to.be.false;
-        expect(restored.image_enabled).to.be.true;
+    it('get() writes nothing when book.json has no layer_config or is broken', async () => {
+        const a = await register(`${RUN}-lc-empty-1`);
+        writeBookDir(a, { structure: { chapters_order: [] } });
+        expect(await layerConfig.get(a)).to.deep.equal(layerConfig.DEFAULTS);
+        expect(await rowOf(a)).to.equal(undefined);
+        const b = await register(`${RUN}-lc-broken-1`);
+        fs.mkdirSync(path.join(tmpDir, b), { recursive: true });
+        fs.writeFileSync(path.join(tmpDir, b, 'book.json'), '{not json');
+        expect(await layerConfig.get(b)).to.deep.equal(layerConfig.DEFAULTS);
+        expect(await rowOf(b)).to.equal(undefined);
     });
 
-    it('restoreFromBooks() skips entries without a durable layer_config', async () => {
-        writeBookDir('no-config-book', { structure: { chapters_order: [] } });
-        fs.mkdirSync(path.join(tmpDir, 'not-a-book'), { recursive: true });
-        fs.writeFileSync(path.join(tmpDir, 'notes.txt'), 'hello');
-
-        const count = await layerConfig.restoreFromBooks(fakeRedis);
-        expect(count).to.equal(0);
-    });
-
-    it('restoreFromBooks() is atomic — one SETNX write, no read-then-write window', async () => {
-        const bookId = 'lc-atomic-1';
-        writeBookDir(bookId, {
-            structure: { chapters_order: [] },
-            layer_config: { image_enabled: false },
-        });
-
-        // Если бы restore читал Redis ДО записи, был бы TOCTOU-интервал, в
-        // котором concurrent set() мог бы быть затёрт. Спай: get вообще не
-        // должен вызываться — восстановление = один атомарный SET NX.
-        let getCalls = 0;
-        const spyRedis = {
-            ...fakeRedis,
-            get: async (k) => { getCalls++; return fakeRedis.get(k); },
-        };
-
-        const count = await layerConfig.restoreFromBooks(spyRedis);
-
-        expect(count).to.equal(1);
-        expect(getCalls).to.equal(0);
-        expect(JSON.parse(fakeRedis._store[layerConfig.key(bookId)]).image_enabled).to.be.false;
-    });
-
-    it('restoreFromBooks() SETNX fails (returns null) when a key appears concurrently — live state intact', async () => {
-        const bookId = 'lc-atomic-2';
-        writeBookDir(bookId, {
-            structure: { chapters_order: [] },
-            layer_config: { image_enabled: false },
-        });
-        // Имитация: между началом restore и записью concurrent set() уже
-        // положил живое значение — SETNX обязан его не затронуть.
-        fakeRedis._store[layerConfig.key(bookId)] = JSON.stringify({ image_enabled: true, chunk_size: 2 });
-
-        const count = await layerConfig.restoreFromBooks(fakeRedis);
-
-        expect(count).to.equal(0);
-        const live = JSON.parse(fakeRedis._store[layerConfig.key(bookId)]);
-        expect(live.image_enabled).to.be.true;
-        expect(live.chunk_size).to.equal(2);
+    it('an existing PG row wins over book.json (the copy is never re-read)', async () => {
+        const bookId = await register(`${RUN}-lc-pgwins-1`);
+        writeBookDir(bookId, { structure: {} });
+        await layerConfig.set(bookId, { image_enabled: false });
+        writeBookDir(bookId, { structure: {}, layer_config: { image_enabled: true, video_enabled: false } });
+        const cfg = await layerConfig.get(bookId);
+        expect(cfg.image_enabled).to.be.false;
+        expect(cfg.video_enabled).to.be.true;
     });
 
     // ── 3. persistToBook() legacy single-file ──

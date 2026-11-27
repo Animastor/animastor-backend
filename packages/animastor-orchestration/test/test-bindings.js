@@ -58,3 +58,13 @@ bindHostModules({
         throw new Error('[ORCH-TEST-BINDINGS] host journal not wired — wire it in the test that asserts journal behavior');
     },
 });
+
+// 3) O-10 LayerConfigPort default (1.4.4): the legacy tiers read per-book
+// layer config only through the port (host PG in production). Package tests
+// run without a host: the default adapter answers "no stored config" (null),
+// which every consumer maps to "all layers enabled" — the same as the former
+// raw Redis read of a missing key. A test that needs a disabled layer wires
+// its own adapter via setLayerConfigPort.
+require('../src/legacy/runtime/layer-config-port').setLayerConfigPort({
+    get: async () => null,
+});

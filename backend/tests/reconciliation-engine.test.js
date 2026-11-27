@@ -5,6 +5,7 @@
 const { expect } = require('chai');
 const path = require('path');
 const { createMockRedis } = require('./mocks/redis-mock');
+const layerConfigFixture = require('./helpers/layer-config-fixture');
 
 // Stage 143a fix 3: the module under test is the CANONICAL monorepo source
 // (packages/), not the published copy in node_modules — a clean clone then
@@ -632,7 +633,10 @@ describe('checkStalledAudioScenes', () => {
 
 describe('checkStalledVideoScenes', () => {
     let redis;
-    afterEach(() => { delete require.cache[RECONCILE_PATH]; });
+    afterEach(async () => {
+        delete require.cache[RECONCILE_PATH];
+        await layerConfigFixture.cleanupLayers();
+    });
 
     function setVideoOrch(redis, phase, extra = {}) {
         const key = `animastor:video-orch:${BOOK_ID}:${CHAPTER_ID}:${SCENE_ID}`;
@@ -665,7 +669,7 @@ describe('checkStalledVideoScenes', () => {
     it('fails scene stalled beyond base threshold (нет прогресса за весь порог)', async () => {
         redis = createMockRedis();
         // Базовый порог = STALL_FAILSAFE_MS * 2. При GPU_TIMEOUT_MS=600s это 60 мин.
-        // Застой 70 мин > 60 мин, layer-config не задан → база.
+        // Застой 70 мин > 65 мин (дефолт хоста video_timeout 60 + 5), layer-config не задан.
         await setVideoOrch(redis, 'WAITING_CHUNKS', { last_group_at: Date.now() - 70 * 60 * 1000 });
         const engine = mockDeps(redis);
         const count = await engine.checkStalledVideoScenes(redis, { orchestrator: { failStage: async () => {} } });
@@ -676,7 +680,7 @@ describe('checkStalledVideoScenes', () => {
         redis = createMockRedis();
         // per-book timeout 120 мин → порог = 120 + 5 = 125 мин. Генерация 50 мин
         // без прогресса — это ещё норма (первая группа LTX может идти долго).
-        await redis.set(`animastor:layer-config:${BOOK_ID}`, JSON.stringify({ video_timeout_minutes: 120 }));
+        await layerConfigFixture.setLayers(BOOK_ID, { video_timeout_minutes: 120 }); // PG book_layer_config
         await setVideoOrch(redis, 'WAITING_CHUNKS', { last_group_at: Date.now() - 50 * 60 * 1000 });
         const engine = mockDeps(redis);
         const count = await engine.checkStalledVideoScenes(redis, { orchestrator: { failStage: async () => {} } });

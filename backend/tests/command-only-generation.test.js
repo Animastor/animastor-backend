@@ -18,6 +18,7 @@
 
 const { expect } = require('chai');
 const { createMockRedis } = require('./mocks/redis-mock');
+const layerConfigFixture = require('./helpers/layer-config-fixture');
 const { wireProductionSeams, seams } = require('./helpers/wire-seams');
 
 const orchestration = require('@animastor/orchestration');
@@ -40,10 +41,11 @@ const S2 = 'sc-cmd-2';
 
 function book(tag) { return `cmdonly-${tag}-${RUN}`; }
 
-async function setLayers(redis, bookId, cfg) {
-    await redis.set(`animastor:layer-config:${bookId}`, JSON.stringify({
+// layer-config is PG-only (book_layer_config) — seeded through the real service.
+async function setLayers(_redis, bookId, cfg) {
+    await layerConfigFixture.setLayers(bookId, {
         audio_enabled: true, image_enabled: true, video_enabled: false, ...cfg,
-    }));
+    });
 }
 
 async function command(redis, bookId, type, scenes) {
@@ -95,6 +97,7 @@ describe('Command-only generation (owner rule 2026-10-31)', function () {
     });
 
     after(async () => {
+        await layerConfigFixture.cleanupLayers();
         for (const b of pgBooks) {
             try { await query('DELETE FROM scene_assets WHERE book_id = $1', [b]); } catch (_) {}
         }

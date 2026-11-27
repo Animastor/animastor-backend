@@ -24,6 +24,7 @@
 
 const { expect } = require('chai');
 const { createMockRedis } = require('./mocks/redis-mock');
+const layerConfigFixture = require('./helpers/layer-config-fixture');
 const { wireProductionSeams, seams } = require('./helpers/wire-seams');
 
 const orchestration = require('@animastor/orchestration');
@@ -44,10 +45,11 @@ const S1 = 'sc-retry-1';
 
 function book(tag) { return `gpuretry-${tag}-${RUN}`; }
 
-async function setLayers(redis, bookId, cfg) {
-    await redis.set(`animastor:layer-config:${bookId}`, JSON.stringify({
+// layer-config is PG-only (book_layer_config) — seeded through the real service.
+async function setLayers(_redis, bookId, cfg) {
+    await layerConfigFixture.setLayers(bookId, {
         audio_enabled: true, image_enabled: true, video_enabled: false, ...cfg,
-    }));
+    });
 }
 
 async function command(redis, bookId, type) {
@@ -96,6 +98,7 @@ describe('GPU retry policy after a worker error (owner decision 2026-11-02)', fu
     });
 
     after(async () => {
+        await layerConfigFixture.cleanupLayers();
         for (const b of pgBooks) {
             try { await query('DELETE FROM scene_assets WHERE book_id = $1', [b]); } catch (_) {}
             try { await query('DELETE FROM generation_tasks WHERE book_id = $1', [b]); } catch (_) {}

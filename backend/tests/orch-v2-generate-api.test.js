@@ -9,9 +9,10 @@
 //
 // Real: PG (animastor-test: books / workers / scene_assets / gen_*), the gen core,
 // the orchestration-v2 host (its own LISTEN gen_progress) + ports + routes, the
-// old book routes. Faked: the book on disk, layer-config (in memory — layer-config
-// in PG is step 2), the worker (HTTP client). «Redis stopped» = an ioredis client
-// on a closed port (connection refused, offline queue off): every Redis call fails.
+// old book routes, layer-config (services/layer-config → PG book_layer_config,
+// 2026-11-27). Faked: the book on disk, the worker (HTTP client). «Redis stopped» =
+// an ioredis client on a closed port (connection refused, offline queue off): every
+// Redis call fails.
 
 'use strict';
 
@@ -123,8 +124,8 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
         loadBook: (id) => books.get(id) || null,
         collectScenes: (b) => require('../src/book').collectScenes(b),
     };
-    const layerCfg = { audio_enabled: true, image_enabled: true, video_enabled: true };
-    const layerConfig = { get: async () => ({ ...layerCfg }), set: async () => ({ ...layerCfg }) };
+    // the real service: layer-config is PG-only (book_layer_config), no Redis
+    const layerConfig = require('../src/services/layer-config');
 
     function makeHost(redisClient) {
         const audioDeps = { book: vbook };
@@ -341,12 +342,91 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
         });
 
         it('все слои выключены в layer-config → 409 layer_disabled', async () => {
-            layerCfg.audio_enabled = false;
+            expect((await api('PUT', `/api/v1/book/${bookId}/layer-config`, { audio_enabled: false })).status).to.equal(200);
+            const r = await gen_({ scope: scene('sc-1') });
+            expect(r.status).to.equal(409);
+            expect(r.body.code).to.equal('layer_disabled');
+        });
+    });
+
+    // ── layer-config in PG (ADR §11.1, 2026-11-27) ─────────────────────
+    describe('layer-config в PG (book_layer_config)', () => {
+        const rowOf = async (b = bookId) => (await query('SELECT config FROM book_layer_config WHERE book_id = $1', [b])).rows[0];
+
+        it('PUT layer-config → FLUSHDB Redis → GET то же; /generate учитывает выключенный слой (409 layer_disabled)', async () => {
+            const put1 = await api('PUT', `/api/v1/book/${bookId}/layer-config`, { image_enabled: false, chunk_size: 2, video_timeout_minutes: 90 });
+            expect(put1.status).to.equal(200);
+            const put2 = await api('PUT', `/api/v1/book/${bookId}/layer-config`, { audio_enabled: false });
+            expect(put2.status).to.equal(200);
+            const before = (await api('GET', `/api/v1/book/${bookId}/layer-config`)).body;
+            expect(before).to.include({ audio_enabled: false, image_enabled: false, video_enabled: true, chunk_size: 2, video_timeout_minutes: 90 });
+            expect((await rowOf()).config).to.include({ audio_enabled: false, image_enabled: false });
+
+            // the dedicated test Redis (test-db-safety: never the prod port) and the suite's Redis
+            expect(Number(process.env.REDIS_PORT)).to.not.equal(6379);
+            const real = new Redis({ host: process.env.REDIS_HOST || '127.0.0.1', port: Number(process.env.REDIS_PORT), lazyConnect: true, maxRetriesPerRequest: 1 });
+            await real.connect();
             try {
-                const r = await gen_({ scope: scene('sc-1') });
-                expect(r.status).to.equal(409);
-                expect(r.body.code).to.equal('layer_disabled');
-            } finally { layerCfg.audio_enabled = true; }
+                expect(await real.flushdb()).to.equal('OK');
+                expect(await real.dbsize()).to.equal(0);
+            } finally { real.disconnect(); }
+            await redis.flushdb();
+
+            const after = (await api('GET', `/api/v1/book/${bookId}/layer-config`)).body;
+            expect(after).to.deep.equal(before);
+            const r = await gen_({ scope: scene('sc-1') });
+            expect(r.status).to.equal(409);
+            expect(r.body.code).to.equal('layer_disabled');
+            expect(await commandsOf()).to.equal(0);
+
+            // and with a Redis that refuses every call: same config, same 409
+            await host.stop();
+            const dead = new Redis({ host: '127.0.0.1', port: 9, lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0, retryStrategy: () => null });
+            dead.on('error', () => {});
+            await dead.connect().catch(() => {});
+            try {
+                host = makeHost(dead);
+                await host.start();
+                wireApp(dead);
+                expect((await api('GET', `/api/v1/book/${bookId}/layer-config`)).body).to.deep.equal(before);
+                const r2 = await gen_({ scope: scene('sc-1') });
+                expect(r2.status).to.equal(409);
+                expect(r2.body.code).to.equal('layer_disabled');
+                const put3 = await api('PUT', `/api/v1/book/${bookId}/layer-config`, { audio_enabled: true });
+                expect(put3.status).to.equal(200);
+                expect((await rowOf()).config.audio_enabled).to.equal(true);
+            } finally {
+                await host.stop();
+                dead.disconnect();
+                host = makeHost(redis);
+                await host.start();
+                wireApp(redis);
+            }
+        });
+
+        it('PUT layer-config audio_enabled=false во время работы: стоп работ слоя (§6.4), ответ cancelled_stages; включение — ничего не снимает', async () => {
+            const a = await gen_({ scope: { level: 'book' } });
+            expect(a.status).to.equal(200);
+            const t = await claim();
+            expect(t).to.be.an('object');
+            const active = () => count(`SELECT count(*)::int AS n FROM gen_jobs WHERE book_id = $1 AND status IN ('queued','running')`, [bookId]);
+            expect(await active()).to.be.greaterThan(0);
+            const off = await api('PUT', `/api/v1/book/${bookId}/layer-config`, { audio_enabled: false });
+            expect(off.status).to.equal(200);
+            expect(off.body.cancelled_stages).to.deep.equal(['audio']);
+            expect(await active()).to.equal(0);
+            expect((await put(t)).status).to.equal(409);                  // late result of a cancelled job
+            expect((await rowOf()).config.audio_enabled).to.equal(false);
+            const on = await api('PUT', `/api/v1/book/${bookId}/layer-config`, { audio_enabled: true });
+            expect(on.body.cancelled_stages).to.deep.equal([]);
+        });
+
+        it('PUT layer-config книги без строки books → 200 как раньше (API не меняется), строки PG нет', async () => {
+            const ghost = `${stamp}-ghost`;
+            const r = await api('PUT', `/api/v1/book/${ghost}/layer-config`, { audio_enabled: false });
+            expect(r.status).to.equal(200);
+            expect(r.body).to.include({ book_id: ghost, audio_enabled: false });
+            expect(await rowOf(ghost)).to.equal(undefined);
         });
     });
 

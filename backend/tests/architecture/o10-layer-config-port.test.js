@@ -6,27 +6,26 @@
 // per-book layer-config host service ONLY through
 // runtime/layer-config-port.js (tier-owned contract); the host adapter
 // (storage/layer-config-adapter.js) owns the service channel
-// (services/layer-config.js — the `animastor:layer-config:*` key grammar,
-// the normalize/clamp pipeline, the durable book.json recovery scan).
-// Composition root: backend.cjs.
+// (services/layer-config.js — PG book_layer_config since 2026-11-27, the
+// normalize/clamp pipeline, the book.json copy). Composition root: backend.cjs.
 //
-// The tier-local RAW Redis reads of `animastor:layer-config:*`
-// (reconciliation-engine video-stall threshold, scene-window
-// isWindowComplete/isSceneWindowDone, runtime-scheduler getLayerConfig)
-// are NOT part of the port — they are bespoke partial-parse reads of an
-// injected redis parameter, not host-service edges; O10-G3 pins their
-// count so the seam decision stays measurable.
+// 2026-11-27 (layer-config → PG, core 1.4.4): the former tier-local RAW Redis
+// reads of the layer-config key (reconciliation-engine video-stall threshold,
+// scene-window ×3, command-gate getLayerConfig) go through the port `get`;
+// O10-G6 pins that NO tier file knows the key any more. `restoreFromBooks`
+// (reconcile PHASE C6) is gone from the port; the adapter keeps a no-op stub
+// only for the published core <= 1.4.3 (O10-G4).
 //
 // This suite TIGHTENS the reconnaissance baseline:
 //   O10-G1 zero tier requires of services/layer-config (static scan);
 //   O10-G2 the port is a zero-require contract with no host-service
 //          knowledge (no Redis key, no BOOKS_DIR, no normalize/clamp);
-//   O10-G3 the port op set stays minimal: the exact measured set is TWO
-//          ops — get, restoreFromBooks; every declared op has a live
-//          tier consumer;
+//   O10-G3 the port op set stays minimal: exactly ONE op — get (1.4.4);
+//          every declared op has a live tier consumer;
 //   O10-G4 no layer-config implementation leakage through the port or
-//          adapter surface (frozen two-op adapter export set; the
-//          adapter delegates to services/layer-config only);
+//          adapter surface (adapter exports: get + the restoreFromBooks
+//          compat stub for core <= 1.4.3; it delegates to
+//          services/layer-config only);
 //   O10-G5 the composition root wires the adapter BEFORE the first
 //          top-level tier require (backend.cjs + test bindings mirror,
 //          order O-2 → … → O-9 → O-10);
@@ -124,13 +123,13 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         expect(code, 'the port must never hardcode the host module path in code').to.not.include("require('../services/layer-config')");
     });
 
-    it('O10-G3: the port op set stays minimal — two ops, declared and consumed live', () => {
+    it('O10-G3: the port op set stays minimal — one op, declared and consumed live', () => {
         const portSrc = readSource(PORT_FILE);
         const opBlock = portSrc.match(/const OPS = \[([\s\S]*?)\];/);
         expect(opBlock, 'OPS list must stay declarative').to.not.be.null;
         const declaredOps = (opBlock[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1));
-        // The measured O-10 operation set is exactly TWO ops (§32.27).
-        expect(declaredOps, 'the frozen O-10 contract').to.deep.equal(['get', 'restoreFromBooks']);
+        // 1.4.4: exactly ONE op (restoreFromBooks left with reconcile PHASE C6).
+        expect(declaredOps, 'the frozen O-10 contract').to.deep.equal(['get']);
         // Live consumption: every declared op resolves through the port
         // resolver at a real tier call site.
         const liveOps = new Set();
@@ -141,7 +140,7 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
                 liveOps.add(m.match(/layerConfigOp\(\s*'([^']+)'/)[1]);
             }
         }
-        expect([...liveOps].sort(), 'every declared op must be consumed live through the port').to.deep.equal(['get', 'restoreFromBooks']);
+        expect([...liveOps].sort(), 'every declared op must be consumed live through the port').to.deep.equal(['get']);
         // And no undeclared op may be resolved through the port.
         const offenders = [];
         for (const file of allTierFiles()) {
@@ -161,8 +160,9 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         for (const banned of ['animastor:layer-config', 'BOOKS_DIR', 'getChunkSize', 'persistToBook', 'SCOPES', 'ANALYSIS_MODES', 'DEFAULTS', 'layerConfigService']) {
             expect(portSrc, `the port must not know host internals (${banned})`).to.not.include(banned);
         }
-        // The adapter must NOT grow exports silently: only the two frozen
-        // ops may exist (no whole-service passthrough).
+        // The adapter must NOT grow exports silently: get + the no-op
+        // restoreFromBooks compat stub (published core <= 1.4.3 still demands
+        // it in setLayerConfigPort; drop with the bump to ^1.4.4).
         const adapterSrc = readSource(ADAPTER_FILE);
         const exportBlock = adapterSrc.match(/module\.exports = \{([\s\S]*?)\};/);
         expect(exportBlock, 'adapter exports must stay declarative').to.not.be.null;
@@ -184,9 +184,11 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         // tier require edges only — routes/agent/test consumers keep working;
         // the export is pinned so a silent rename fails).
         const serviceSrc = readSource(SERVICE_FILE);
-        for (const op of ['module.exports', 'get', 'set', 'restoreFromBooks', 'getChunkSize', 'SCOPES']) {
+        for (const op of ['module.exports', 'get', 'set', 'getChunkSize', 'SCOPES']) {
             expect(serviceSrc, `services/layer-config must keep exporting ${op}`).to.include(op);
         }
+        expect(codeOnly(serviceSrc), 'restoreFromBooks is gone from the service (no Redis copy to heal)').to.not.include('restoreFromBooks');
+        expect(codeOnly(adapterSrc), 'the compat stub must not reach the service').to.not.include('layerConfigService().restoreFromBooks');
     });
 
     it('O10-G5: the composition root wires the adapter before the first top-level tier require', () => {
@@ -256,24 +258,17 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         }
         expect(offenders, 'no smuggled require(identifier) may re-introduce a direct layer-config service edge').to.deep.equal([]);
 
-        // The tier-local RAW Redis reads of `animastor:layer-config:*` stay
-        // pinned at the measured O-10 inventory (bespoke partial-parse
-        // reads of an injected redis parameter — not host-service edges;
-        // they must not grow silently, the seam decision stays measurable).
+        // 1.4.4 (layer-config → PG): no tier file knows the Redis
+        // layer-config key any more — the former raw reads (command-gate,
+        // reconcile video-stall threshold, scene-window ×3) go through the
+        // port `get`.
         const rawReads = [];
         for (const file of allTierFiles()) {
             const src = codeOnly(readSource(file));
             const count = (src.match(/animastor:layer-config:/g) || []).length;
             if (count > 0) rawReads.push(`${rel(file)} x${count}`);
         }
-        expect(rawReads, 'the pinned raw-Redis layer-config read set (§32.27: deliberately NOT in the port)').to.deep.equal([
-            // Command-only generation (2026-10-31): the scheduler's single
-            // raw read MOVED into the command gate (same read, same count) —
-            // runtime-scheduler.getLayerConfig now delegates to it.
-            'packages/animastor-orchestration/src/legacy/runtime/command-gate.js x1',
-            'packages/animastor-orchestration/src/legacy/runtime/reconciliation-engine.js x1',
-            'packages/animastor-orchestration/src/legacy/runtime/scene-window.js x3',
-        ]);
+        expect(rawReads, 'no raw-Redis layer-config read is left in the tiers').to.deep.equal([]);
 
         // The adapter resolves the host channel via a lazy call-time
         // resolver (the single channel — require.cache stubbing discipline);
@@ -377,7 +372,6 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         const opBlock = portSrc.match(/const OPS = \[([\s\S]*?)\];/);
         const declaredOps = (opBlock[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1));
         for (const banned of ['set', 'getChunkSize', 'persistToBook', 'normalize', 'key', 'restoreFromBooks']) {
-            if (banned === 'restoreFromBooks') continue;
             expect(declaredOps, `the port must not grow host CRUD (${banned})`).to.not.include(banned);
         }
     });

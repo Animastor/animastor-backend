@@ -161,6 +161,18 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     UNIQUE(book_id, version)
 );
 
+-- Per-book layer config (ORCHESTRATION_V2 §11.1, 2026-11-27): the ONLY
+-- store of services/layer-config (replaces the Redis layer-config key family).
+-- config = normalized object (audio/image/video_enabled, chunk_size,
+-- analysis_*, *_timeout_minutes). book.json layer_config is a best-effort
+-- export copy, read once to seed a missing row. Host table, not gen/sql:
+-- only the host service reads or writes it (the core gets isLayerEnabled).
+CREATE TABLE IF NOT EXISTS book_layer_config (
+    book_id         TEXT PRIMARY KEY REFERENCES books(book_id) ON DELETE CASCADE,
+    config          JSONB NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Scene metadata
 CREATE TABLE IF NOT EXISTS scenes (
     scene_id        TEXT NOT NULL,

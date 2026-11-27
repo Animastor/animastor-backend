@@ -6,23 +6,29 @@
 //   - image_enabled:  storyboard / IU images
 //   - video_enabled:  full video composition (requires image_enabled to be true)
 //
-// Storage:
-//   Redis key: animastor:layer-config:<bookId>
-//   Value:     JSON { audio_enabled, image_enabled, video_enabled, updated_at }
+// Storage (ORCHESTRATION_V2 §11.1, 2026-11-27) — PG ONLY:
+//   table book_layer_config (book_id PK → books ON DELETE CASCADE,
+//   config jsonb = the normalized object below, updated_at timestamptz).
+//   Redis is not used: the former per-book Redis key (layer-config family) is
+//   neither read nor written, a FLUSHDB does not touch the config.
+//
+//   book.json `layer_config` stays a best-effort copy (export / portability):
+//     - set() writes it after the PG upsert (an fs failure never fails set);
+//     - get() reads it ONCE when the book has no PG row yet and seeds the row
+//       from it (lazy migration of books created before the table); with no
+//       row and no copy get() returns DEFAULTS and writes nothing.
+//
+// Signatures: get(bookId), set(bookId, partial), getChunkSize(bookId). The
+// former (redis, bookId[, partial]) form is still accepted — the redis
+// argument is ignored — so not-yet-migrated callers keep working.
 //
 // Used by:
 //   - POST /api/v1/generate                  (multipart, on book import)
-//   - POST /api/v1/book/:bookId/regenerate   (in-place regeneration)
 //   - GET  /api/v1/book/:bookId/layer-config (read)
 //   - PUT  /api/v1/book/:bookId/layer-config (write)
-//   - GET  /api/v1/book/:bookId/assets-state (derived: which layers have content)
-//
-// Cathedral Кирпич №2 — Persistent Layer Configuration:
-//   set() дублирует конфиг в book.json (поле layer_config), а startup-фаза
-//   C6 reconciliation-engine восстанавливает Redis-ключ из book.json после
-//   полной потери Redis. Redis остаётся источником истины во время работы;
-//   book.json — durable копия для recovery. Запись в файл — best-effort:
-//   сбой fs не должен ломать живой set().
+//   - orchestration-v2 isLayerEnabled / POST /generate, /regenerate
+//   - VBook agent (chunk_size, analysis_*), player playback queue
+//   - legacy runtime through the O-10 LayerConfigPort (storage/layer-config-adapter)
 
 const fs = require('fs');
 const path = require('path');
@@ -40,8 +46,13 @@ const ANALYSIS_MODES = Object.freeze({
     PARALLEL:   'parallel',
 });
 
-const KEY_PREFIX = 'animastor:layer-config:';
-const key = (bookId) => `${KEY_PREFIX}${bookId}`;
+// Lazy: require.cache stubs of the repository keep working in tests.
+const repo = () => require('../storage/postgres/repositories/layer-config-repo');
+
+// (bookId) | (redis, bookId): the legacy redis argument is accepted, ignored.
+function _bookIdArg(a, b) {
+    return typeof a === 'string' && b === undefined ? a : b;
+}
 
 const DEFAULTS = Object.freeze({
     audio_enabled: true,
@@ -103,16 +114,35 @@ function _clampInt(value, min, max, fallback) {
     return Math.max(min, Math.min(max, n));
 }
 
-async function get(redis, bookId) {
-    if (!redis || !bookId) return { ...DEFAULTS };
-    const raw = await redis.get(key(bookId));
-    return normalize(raw);
+/**
+ * Per-book layer config. PG row → normalize; no row → the durable book.json
+ * copy, inserted into PG (ON CONFLICT DO NOTHING — a concurrent writer wins
+ * and its row is returned); no copy either → DEFAULTS, nothing written.
+ * A book without a books row (not registered in PG) gets its durable copy
+ * or DEFAULTS and no row. PG errors propagate (fail loud, as Redis did).
+ */
+async function get(a, b) {
+    const bookId = _bookIdArg(a, b);
+    if (!bookId) return { ...DEFAULTS };
+    const stored = await repo().getConfig(bookId);
+    if (stored) return normalize(stored);
+
+    const durable = _readDurable(bookId);
+    if (!durable) return { ...DEFAULTS };
+    try {
+        const seeded = await repo().insertIfMissing(bookId, durable);
+        if (seeded) return normalize(seeded);
+    } catch (err) {
+        if (err.code !== repo().FOREIGN_KEY_VIOLATION) throw err;
+    }
+    return durable;
 }
 
 /**
  * Внутренний helper: нормализованная durable layer_config из book.json или null.
  * Форматы: multi-file <BOOKS_DIR>/<bookId>/book.json и legacy <BOOKS_DIR>/<bookId>.json.
- * Используется set() (база для merge при пустом Redis) и restoreFromBooks().
+ * Используется get() (засев отсутствующей PG-строки) и set() (база для merge,
+ * когда строки ещё нет).
  * Best-effort: сбой чтения/парсинга → null.
  */
 function _readDurable(bookId) {
@@ -133,12 +163,12 @@ function _readDurable(bookId) {
 }
 
 /**
- * Кирпич №2: durable-копия конфига в book.json (best-effort).
+ * Durable-копия конфига в book.json (best-effort; экспорт / переносимость).
  *
  * Читает book.json на диске (multi-file: <BOOKS_DIR>/<bookId>/book.json,
  * legacy: <BOOKS_DIR>/<bookId>.json), кладёт туда layer_config и перезаписывает.
- * Если книга ещё не записана на диск — просто пропускает (Redis остаётся
- * единственным источником до первой saveBookBundle).
+ * Если книга ещё не записана на диск — просто пропускает (PG остаётся
+ * единственным источником; копия появится при следующем set()).
  *
  * @returns {boolean} true если durable-копия записана
  */
@@ -169,15 +199,8 @@ function persistToBook(bookId, cfg) {
     }
 }
 
-async function set(redis, bookId, partial) {
-    if (!redis || !bookId) return { ...DEFAULTS };
-    // База для merge: живое Redis-состояние. Если ключа нет (окно после потери
-    // Redis, до того как C6 восстановит) — база из durable-копии book.json,
-    // иначе defaults. Иначе частичный PUT в этом окне молча сбросил бы ранее
-    // сохранённые значения (например, image_enabled=false) обратно в defaults.
-    const raw = await redis.get(key(bookId));
-    const current = raw ? normalize(raw) : (_readDurable(bookId) || { ...DEFAULTS });
-    const next = {
+function _merge(current, partial) {
+    return {
         audio_enabled: partial.audio_enabled !== undefined ? !!partial.audio_enabled : current.audio_enabled,
         image_enabled: partial.image_enabled !== undefined ? !!partial.image_enabled : current.image_enabled,
         video_enabled: partial.video_enabled !== undefined ? !!partial.video_enabled : current.video_enabled,
@@ -205,10 +228,38 @@ async function set(redis, bookId, partial) {
             ? _clampInt(partial.video_timeout_minutes, 10, 180, current.video_timeout_minutes)
             : current.video_timeout_minutes,
     };
-    await redis.set(key(bookId), JSON.stringify(next));
-    // Кирпич №2: durable-копия в book.json (не блокирует set при сбое)
-    persistToBook(bookId, next);
-    return next;
+}
+
+/**
+ * Atomic partial update: one transaction, serialized per book by an advisory
+ * lock (two concurrent set() on different fields both survive). Base for the
+ * merge = the PG row, else the durable book.json copy, else DEFAULTS. The
+ * book.json copy is written while the lock is held, so copies land in the
+ * same order as the PG writes (best-effort: an fs failure is ignored).
+ * A book without a books row (not registered in PG — e.g. an import whose
+ * workspace could not be resolved): no PG row can exist, so the merged config
+ * goes to the book.json copy only (best-effort, not serialized) and is
+ * returned as before; get() seeds the PG row from it once the book is
+ * registered. The API answer does not change.
+ */
+async function set(a, b, c) {
+    const [bookId, partial] = typeof a === 'string' ? [a, b] : [b, c];
+    if (!bookId) return { ...DEFAULTS };
+    try {
+        return await repo().update(
+            bookId,
+            (stored) => _merge(
+                stored ? normalize(stored) : (_readDurable(bookId) || { ...DEFAULTS }),
+                partial || {}),
+            (next) => { persistToBook(bookId, next); }
+        );
+    } catch (err) {
+        if (err.code !== repo().FOREIGN_KEY_VIOLATION) throw err;
+        const next = _merge(_readDurable(bookId) || { ...DEFAULTS }, partial || {});
+        persistToBook(bookId, next);
+        console.warn(`[LAYER-CONFIG] ${bookId}: no books row — config kept in book.json only until the book is registered`);
+        return next;
+    }
 }
 
 function isValidScope(value) {
@@ -223,11 +274,12 @@ function isValidScope(value) {
  * /agent-status route (what the frontend progress counter displays) so the two
  * can never drift apart.
  */
-async function getChunkSize(redis, bookId) {
+async function getChunkSize(a, b) {
     const { MAX_SCENES_PER_CHUNK } = require('./agent-prompts');
+    const bookId = _bookIdArg(a, b);
     try {
-        if (redis && bookId) {
-            const cfg = await get(redis, bookId);
+        if (bookId) {
+            const cfg = await get(bookId);
             if (cfg && cfg.chunk_size >= 1 && cfg.chunk_size <= 5) {
                 return cfg.chunk_size;
             }
@@ -236,63 +288,14 @@ async function getChunkSize(redis, bookId) {
     return MAX_SCENES_PER_CHUNK;
 }
 
-/**
- * Кирпич №2: восстановление Redis-ключей layer-config из durable-копий в
- * book.json. Вызывается из startup-фазы C6 reconcileCycle после потери Redis.
- *
- * Только заполняет ОТСУТСТВУЮЩИЕ ключи — живое состояние Redis никогда не
- * перетирается (Redis остаётся источником истины во время работы). Значения
- * прогоняются через normalize(), как это делает get(). Best-effort: сбой
- * одной книги не роняет весь проход.
- *
- * @param {Object} redis
- * @returns {Promise<number>} сколько книг восстановлено
- */
-async function restoreFromBooks(redis) {
-    if (!redis) return 0;
-    let entries;
-    try {
-        entries = fs.readdirSync(config.BOOKS_DIR);
-    } catch (_) {
-        return 0;
-    }
-
-    let restored = 0;
-    for (const entry of entries) {
-        let bookId = entry;
-        // Multi-file: <BOOKS_DIR>/<bookId>/book.json; legacy: <BOOKS_DIR>/<bookId>.json
-        if (!fs.existsSync(path.join(config.BOOKS_DIR, entry, 'book.json'))) {
-            if (entry.endsWith('.json')) bookId = entry.slice(0, -5);
-            else continue;
-        }
-        if (!bookId) continue;
-
-        try {
-            const durable = _readDurable(bookId);
-            if (!durable) continue;
-            // Атомарный SET NX — заполняем ТОЛЬКО отсутствующие ключи. Один
-            // атомарный write вместо get-then-set: TOCTOU-окно (concurrent
-            // layerConfig.set() между проверкой и записью) структурно исключено —
-            // если ключ уже появился, NX вернёт null и живое состояние цело.
-            const written = await redis.set(key(bookId), JSON.stringify(durable), 'NX');
-            if (written) restored++;
-        } catch (_) {
-            // Best-effort: пропускаем книгу
-        }
-    }
-    return restored;
-}
-
 module.exports = {
     SCOPES,
     ANALYSIS_MODES,
     DEFAULTS,
-    key,
     get,
     set,
     normalize,
     isValidScope,
     getChunkSize,
     persistToBook,
-    restoreFromBooks,
 };

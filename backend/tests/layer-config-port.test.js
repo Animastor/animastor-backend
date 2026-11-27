@@ -6,20 +6,19 @@
 //   1. the port fails fast when unwired and resolves both ops when
 //      wired (fail-fast contract, `_resetLayerConfigPort` test
 //      hygiene);
-//   2. the adapter delegates 1:1 to services/layer-config
-//      get/restoreFromBooks through the lazy call-time channel — a
-//      require.cache stub of ../src/services/layer-config is honored
-//      (the worklist-rebuild purge-list stubbing channel);
-//   3. the real service still answers with the frozen normalize
-//      semantics (defaults on missing key, clamp on out-of-range
-//      value — no network: FakeRedis in-memory);
-//   4. the consumer legs keep their exact pre-O-10 semantics —
-//      scene-orchestrator timeout tolerance (a throwing read leaves
-//      videoTimeoutMs undefined — the try/catch swallows), and the
-//      reconciliation PHASE C6 leg surfaces a call failure as a
-//      warned non-fatal phase error (a missing service previously
-//      skipped the phase silently; a FAILING service reported the
-//      phase error — both behaviors preserved through the port).
+//   2. the adapter delegates get 1:1 to services/layer-config.get
+//      through the lazy call-time channel — a require.cache stub of
+//      ../src/services/layer-config is honored (the worklist-rebuild
+//      purge-list stubbing channel); the redis argument is dropped
+//      (layer-config is PG-only since 2026-11-27, core 1.4.4);
+//   3. the real service answers with the frozen normalize semantics
+//      (defaults for a book without a row, clamp on an out-of-range
+//      stored value — real PG of the test stack);
+//   4. the scene-orchestrator timeout leg keeps its try/catch
+//      tolerance (a throwing read leaves videoTimeoutMs undefined).
+//   5. restoreFromBooks / reconcile PHASE C6 are gone from the port;
+//      the adapter keeps a no-op stub only for the published core
+//      <= 1.4.3 (its setLayerConfigPort still demands the op).
 // The composition-root wiring is exercised through the mocharc test
 // bindings (generation-test-bindings.cjs mirrors backend.cjs).
 // ======================================================
@@ -28,6 +27,8 @@ const { expect } = require('chai');
 
 const port = require('../node_modules/@animastor/orchestration/src/legacy/runtime/layer-config-port');
 const adapter = require('../src/storage/layer-config-adapter');
+const { query } = require('../src/storage/postgres/database');
+const { runMigrations } = require('../src/storage/postgres/schema');
 
 const SERVICE_PATH = require.resolve('../src/services/layer-config');
 
@@ -61,40 +62,46 @@ describe('O-10 LayerConfigPort — contract, delegation and consumer-leg semanti
             expect(() => port.layerConfigOp('get')).to.throw(/layer-config-port: op 'get' is not wired/);
         });
 
-        it('the wiring gate rejects a missing adapter and a half-wired adapter', () => {
+        it('the wiring gate rejects a missing adapter and an adapter without get; get alone is enough (1.4.4)', () => {
             expect(() => port.setLayerConfigPort(null)).to.throw(/adapter is required/);
-            expect(() => port.setLayerConfigPort({ get: async () => {} })).to.throw(/adapter must implement restoreFromBooks\(\)/);
-            expect(() => port.setLayerConfigPort({ restoreFromBooks: async () => {} })).to.throw(/adapter must implement get\(\)/);
+            expect(() => port.setLayerConfigPort({ restoreFromBooks: async () => 0 })).to.throw(/adapter must implement get\(\)/);
+            expect(() => port.setLayerConfigPort({ get: async () => ({}) })).to.not.throw();
         });
 
-        it('isLayerConfigPortWired tracks the wiring state; the OPS set is frozen at two ops', () => {
+        it('isLayerConfigPortWired tracks the wiring state; the OPS set is frozen at one op', () => {
             expect(port.isLayerConfigPortWired()).to.equal(true);
-            expect(port.OPS).to.deep.equal(['get', 'restoreFromBooks']);
+            expect(port.OPS).to.deep.equal(['get']);
             port._resetLayerConfigPort();
             expect(port.isLayerConfigPortWired()).to.equal(false);
         });
     });
 
     describe('adapter delegation (1:1, lazy channel)', () => {
-        it('get delegates to the real service through the call-time channel (normalize semantics intact)', async () => {
+        it('get delegates to the real service through the call-time channel (PG, normalize semantics intact, redis ignored)', async () => {
+            await runMigrations();
             const redis = new FakeRedis();
-            // Missing key → normalized defaults (pre-O-10 behavior).
-            const cfg = await adapter.get(redis, 'book-none');
+            const bookId = `lcport-${Date.now().toString(36)}`;
+            // No row → normalized defaults.
+            const cfg = await adapter.get(redis, bookId);
             expect(cfg.audio_enabled).to.equal(true);
             expect(cfg.chunk_size).to.be.a('number');
-            // Present key → clamped values.
-            await redis.set('animastor:layer-config:book-1', JSON.stringify({ chunk_size: 99, video_timeout_minutes: 500 }));
-            const clamped = await adapter.get(redis, 'book-1');
-            expect(clamped.chunk_size).to.equal(5);      // clamp 1..5
-            expect(clamped.video_timeout_minutes).to.equal(180); // clamp 10..180
+            // Stored out-of-range values → clamped.
+            await query(`INSERT INTO books (book_id, title) VALUES ($1, 'port')`, [bookId]);
+            try {
+                await query(`INSERT INTO book_layer_config (book_id, config) VALUES ($1, '{"chunk_size": 99, "video_timeout_minutes": 500}'::jsonb)`, [bookId]);
+                const clamped = await adapter.get(redis, bookId);
+                expect(clamped.chunk_size).to.equal(5);      // clamp 1..5
+                expect(clamped.video_timeout_minutes).to.equal(180); // clamp 10..180
+                expect(redis.store.size).to.equal(0);        // Redis never written
+            } finally {
+                await query('DELETE FROM books WHERE book_id = $1', [bookId]);
+            }
         });
 
-        it('restoreFromBooks delegates 1:1 (counting contract intact)', async () => {
+        it('restoreFromBooks survives only as a no-op compat stub for core <= 1.4.3 (resolves 0, touches nothing)', async () => {
             const redis = new FakeRedis();
-            // No books dir entries to restore → 0 (the service's best-effort
-            // read of the configured BOOKS_DIR; identical pre-O-10).
-            const count = await adapter.restoreFromBooks(redis);
-            expect(count).to.be.a('number');
+            expect(await adapter.restoreFromBooks(redis)).to.equal(0);
+            expect(redis.store.size).to.equal(0);
         });
 
         it('a require.cache stub of the service is honored through the adapter (stubbing parity)', async () => {
@@ -133,62 +140,16 @@ describe('O-10 LayerConfigPort — contract, delegation and consumer-leg semanti
                 adapter.get = savedImpl;
             }
         });
-
-        it('the reconciliation C6 leg surfaces a call failure as a warned non-fatal phase error', async () => {
-            // Pre-O-10: a FAILING restoreFromBooks call hit the outer
-            // catch → warn + summary.errors.push — the cycle stayed ok.
-            // Through the port the same failure must reach the same
-            // outer catch (the port propagates the adapter's rejection).
-            const stubErr = new Error('restore failed');
-            const savedImpl = adapter.restoreFromBooks;
-            adapter.restoreFromBooks = async () => { throw stubErr; };
-            try {
-                const summary = { errors: [] };
-                const phases = [];
-                const warnings = [];
-                const warn = (m) => warnings.push(m);
-                try {
-                    const c6Count = await port.layerConfigOp('restoreFromBooks')(new FakeRedis());
-                    if (c6Count > 0) phases.push(`layer_config_restore:${c6Count}`);
-                } catch (err) {
-                    warn(`Phase C6 failed: ${err.message}`);
-                    summary.errors.push(`layer_config_restore: ${err.message}`);
-                }
-                expect(phases).to.deep.equal([]);
-                expect(warnings).to.have.lengthOf(1);
-                expect(warnings[0]).to.include('Phase C6 failed: restore failed');
-                expect(summary.errors).to.deep.equal(['layer_config_restore: restore failed']);
-            } finally {
-                adapter.restoreFromBooks = savedImpl;
-            }
-        });
-
-        it('the missing-service degrade of the C6 inner require maps to the same silent skip (optional-load parity)', () => {
-            // Pre-O-10 the C6 leg's INNER try set layerConfig = null on a
-            // require failure and the phase was skipped WITHOUT the
-            // outer warn (restoreFromBooks was simply never called).
-            // Post-O-10 the adapter's lazy resolver throws inside the
-            // port call — the O10 arch guard pins that the tier code
-            // keeps the outer try/catch, and this test pins the PORT
-            // contract: an unwired port throws the fail-fast error that
-            // the caller's catch handles.
-            const savedImpl = adapter.restoreFromBooks;
-            adapter.restoreFromBooks = undefined;
-            try {
-                // A half-unwired port op fails fast (never silently
-                // skips) — the caller's catch decides what it means.
-                expect(() => port.layerConfigOp('restoreFromBooks')).to.throw(/not wired/);
-            } finally {
-                adapter.restoreFromBooks = savedImpl;
-            }
-        });
     });
 
     describe('host channel unchanged', () => {
-        it('services/layer-config keeps its frozen public surface (routes/agent/test consumers)', () => {
+        it('services/layer-config keeps its public surface (routes/agent/test consumers); the Redis grammar is gone', () => {
             const svc = require(SERVICE_PATH);
-            for (const op of ['get', 'set', 'restoreFromBooks', 'getChunkSize', 'normalize', 'SCOPES', 'ANALYSIS_MODES', 'DEFAULTS', 'key']) {
+            for (const op of ['get', 'set', 'getChunkSize', 'normalize', 'isValidScope', 'persistToBook', 'SCOPES', 'ANALYSIS_MODES', 'DEFAULTS']) {
                 expect(svc[op], `services/layer-config must keep exporting ${op}`).to.not.be.undefined;
+            }
+            for (const gone of ['key', 'restoreFromBooks']) {
+                expect(svc[gone], `services/layer-config must not export ${gone}`).to.equal(undefined);
             }
         });
     });

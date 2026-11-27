@@ -3,14 +3,13 @@
 // ======================================================
 // Host-side implementation of the O-10 LayerConfigPort
 // (runtime/layer-config-port.js). Owns the only layer-config service
-// channel the runtime/orchestration tiers may use: the per-book Redis
-// read + normalize/clamp pipeline and the durable book.json recovery
-// scan (services/layer-config get / restoreFromBooks).
+// channel the runtime/orchestration tiers may use: the per-book PG read
+// (book_layer_config) + normalize/clamp pipeline (services/layer-config get).
 //
 //   runtime/layer-config-port         (tier-owned contract)
 //       ↑ wired by backend.cjs (composition root)
 //   storage/layer-config-adapter      ← THIS FILE (host impl)
-//       → services/layer-config.get / restoreFromBooks
+//       → services/layer-config.get
 //
 // Lazy call-time resolver — never captures the module instance at load
 // time. This keeps require.cache-based test stubbing working exactly as
@@ -21,11 +20,9 @@
 // purge empties require.cache so the next call-time resolution reloads
 // the real service, identical to the pre-O-10 lazy requires).
 //
-// Behavior contract: every method is a 1:1 delegation to the pre-O-10
-// call — identical module, identical arguments, identical return values
-// (including the normalized config shape and the restore count) and
-// identical error semantics. No layer-config behavior changed; the
-// service's public API is not extended.
+// Behavior contract: get is a 1:1 delegation to services/layer-config.get
+// (normalized config shape, error semantics); since 2026-11-27 the service
+// reads PG book_layer_config and the redis argument is dropped here.
 //
 // Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.27 (O-10)
 // ======================================================
@@ -34,12 +31,19 @@
 // harness stubs (`require.resolve('../src/services/layer-config')`).
 const layerConfigService = () => require('../services/layer-config');
 
+// The port keeps its (redis, bookId) call shape; redis is ignored (PG only).
 function get(redis, bookId) {
-    return layerConfigService().get(redis, bookId);
+    return layerConfigService().get(bookId);
 }
 
-function restoreFromBooks(redis) {
-    return layerConfigService().restoreFromBooks(redis);
+// COMPAT (2026-11-27, layer-config → PG): services/layer-config.restoreFromBooks
+// is gone (no Redis copy to heal). @animastor/orchestration <= 1.4.3 still
+// lists 'restoreFromBooks' in the port OPS (setLayerConfigPort rejects an
+// adapter without it) and calls it from reconcile PHASE C6, so the adapter
+// answers "nothing restored". 1.4.4 drops both the op and the C6 call —
+// delete this stub with the bump of backend/package.json to ^1.4.4.
+function restoreFromBooks() {
+    return Promise.resolve(0);
 }
 
 module.exports = {

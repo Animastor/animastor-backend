@@ -98,7 +98,7 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         collectScenes: (b) => require('../src/book').collectScenes(b),
     };
     const layerCfg = { audio_enabled: true, image_enabled: true, video_enabled: true };
-    const layerConfig = { get: async () => ({ ...layerCfg }), set: async (_r, _b, v) => { for (const [k, x] of Object.entries(v)) if (x !== undefined) layerCfg[k] = x; return { ...layerCfg }; } };
+    const layerConfig = { get: async () => ({ ...layerCfg }), set: async (_b, v) => { for (const [k, x] of Object.entries(v)) if (x !== undefined) layerCfg[k] = x; return { ...layerCfg }; } };
 
     function makeHost() {
         return createOrchV2Host({
