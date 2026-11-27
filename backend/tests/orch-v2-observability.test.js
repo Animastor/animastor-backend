@@ -7,9 +7,14 @@ const path = require('path');
 describe('О3 — orchestration v2 host observability', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'orchestration-v2', 'index.js'), 'utf8');
 
+    // 2026-11-27 (generate API v2): NOTIFY → SSE is the in-process hub (progress-hub.js)
+    const hubSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'orchestration-v2', 'progress-hub.js'), 'utf8');
+
     it('NOTIFY→SSE errors are warned, not swallowed by an empty catch', () => {
         expect(src).to.not.match(/onNotify\([^;]*\.catch\(\(\) => \{\}\)/s);
-        expect(src).to.include('[ORCH-V2] progress NOTIFY→SSE failed');
+        expect(hubSrc).to.not.match(/\.catch\(\(\) => \{\}\)/s);
+        expect(src).to.include('createProgressHub');
+        expect(hubSrc).to.include('[ORCH-V2] progress NOTIFY→SSE failed');
     });
 
     it('the core gets the host logger port (its [gen-v2] info lines reach docker logs)', () => {

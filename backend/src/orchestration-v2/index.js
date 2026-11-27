@@ -44,6 +44,7 @@ function unknownKind(kind) {
     return Object.assign(new Error(`orchestration v2: unknown job kind ${JSON.stringify(kind)}`), { error_class: 'deterministic' });
 }
 const { createProgressAdapter } = require('./progress-adapter');
+const { createProgressHub } = require('./progress-hub');
 
 function flagOn(v) { return v === '1' || v === 'true' || v === 'yes'; }
 
@@ -59,7 +60,7 @@ function hasFfmpeg(bin = 'ffmpeg') {
  * @param {object} o.layerConfig     services/layer-config (get(redis, bookId))
  * @param {object} o.gpuDispatcher   runtime/gpu-dispatcher (lane lookups) — injected, never required here
  * @param {object} o.book            vbook-runtime facade (loadBook / collectScenes) — injected
- * @param {object} o.publishProgress services/progress-pubsub.publishProgress
+ * @param {boolean} [o.listen]     false → no LISTEN gen_progress (tests drive hub.onNotify)
  * @param {string} o.outputDir
  * @param {Function} [o.log]
  * @param {object} [o.gen]           @animastor/orchestration .gen (test override)
@@ -155,13 +156,18 @@ function createOrchV2Host(o) {
             maxUploadBytes, logger: console,
         });
         state.progress = createProgressAdapter({ orch: state.orch, book: o.book });
-        if (o.publishProgress && o.redis) {
-            state.listener = await state.orch.listenProgress((evt) => {
-                // О3: a failed NOTIFY→SSE hop is visible (was a silent .catch(() => {}))
-                state.progress.onNotify(evt, (bookId, payload) => o.publishProgress(o.redis, bookId, payload)).catch((err) => {
-                    console.warn(`[ORCH-V2] progress NOTIFY→SSE failed book=${evt && evt.book_id} command=${evt && evt.command_id}: ${err && err.message}`);
-                });
-            });
+        // ADR §4.3 / §9 (2026-11-27): progress goes ONLY through PG NOTIFY. One
+        // LISTEN gen_progress per process; the hub fans events out to the SSE
+        // clients of the book in process (/generate/stream, /progress-stream).
+        // No Redis pub/sub on this path.
+        state.hub = createProgressHub({
+            aggregate: (bookId) => state.progress.aggregate(bookId),
+            legacyEvents: (evt, publish) => state.progress.onNotify(evt, publish),
+            coalesceMs: Number(env.ORCH_V2_PROGRESS_COALESCE_MS) >= 0 && env.ORCH_V2_PROGRESS_COALESCE_MS !== undefined && env.ORCH_V2_PROGRESS_COALESCE_MS !== ''
+                ? Number(env.ORCH_V2_PROGRESS_COALESCE_MS) : undefined,
+        });
+        if (o.listen !== false) {
+            state.listener = await state.orch.listenProgress((evt) => state.hub.onNotify(evt));
         }
         if (o.timers !== false) {
             state.orch.startSweeper(Number(env.ORCH_V2_SWEEP_MS) > 0 ? Number(env.ORCH_V2_SWEEP_MS) : 10_000);
@@ -191,6 +197,7 @@ function createOrchV2Host(o) {
 
     async function stop() {
         if (state.orch) state.orch.stop();
+        if (state.hub) state.hub.stop();
         if (state.listener) { try { await state.listener.close(); } catch (_) { /* pool closing */ } state.listener = null; }
     }
 
@@ -204,6 +211,12 @@ function createOrchV2Host(o) {
         orch: () => state.orch,
         voiceRefs: () => state.voiceRefs,
         progress: () => state.progress,
+        progressHub: () => state.hub || null,
+        /** {book_id, force, status} of a command (null: unknown) — /generate/stop {command_id} never stops another book's command. */
+        commandRow: async (commandId) => {
+            const r = await o.getPool().query('SELECT book_id, force, status FROM gen_commands WHERE command_id = $1', [commandId]);
+            return r.rows[0] || null;
+        },
         uploadUrl: (jobId, attempt) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/result?attempt=${attempt}`,
         errorUrl: (jobId, attempt) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/error?attempt=${attempt}`,
         inputUrl: (jobId, attempt, name) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/input/${encodeURIComponent(name)}?attempt=${attempt}`,
