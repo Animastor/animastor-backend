@@ -390,7 +390,247 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         return host.orch().cancel({ bookId }, { cancelledBy: cancelledBy || 'cache-clear' });
     }
 
-    return { mountInternal, regenerate, cancelGeneration, cancelWorker, onLayersDisabled, progressPanel, purgeBook, cancelBook, isV2Book: host.isV2Book };
+    // ── generate API v2 (ADR §11.1, этап 2; 2026-11-27) ──────────────────
+    // Thin wrappers over the same core calls as the legacy names above:
+    //   POST /generate          ≈ /regenerate      (createCommand; mode all = force)
+    //   POST /generate/stop     ≈ cancel-worker / cancel-generation (cancel by command / layer / book)
+    //   GET  /generate/progress ≈ progress-panel   (ADR §9 aggregate, new format)
+    //   GET  /generate/stream   ≈ progress-stream  (SSE from LISTEN gen_progress, no Redis)
+    // Access: the /api/v1/book/:bookId guard of the composition root (as /regenerate).
+    // Errors: {code, error} (sendGenError), as the v2 leg of /regenerate.
+    // A legacy book → 409 book_not_v2 (as voice-routes); the legacy names keep working unchanged.
+
+    let material = null;   // helpers/book-text.cjs, set by mountGenerateRoutes
+    const notV2 = (res, bookId) => res.status(409).json({ code: 'book_not_v2', error: `book ${bookId} is not on orchestration v2 (books.orchestration = v2)` });
+    const bad = (res, error, code = 'bad_request') => res.status(400).json({ code, error });
+    const GENERATE_MODES = Object.freeze(['missing', 'all']);
+    const SCOPE_KEYS = Object.freeze(['level', 'chapter_id', 'scene_id', 'scene_ids', 'unit_id', 'unit_key']);
+
+    /** /generate body.scope → the core scope (or {status, error}). */
+    function generateScope(bookId, raw) {
+        if (raw === undefined) return { scope: { level: 'book' } };
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { status: 400, error: { code: 'bad_request', error: 'scope must be an object {level, …}' } };
+        const level = raw.level;
+        if (level === FROM_CURRENT_SCENE) return expandFromCurrentScene(bookId, raw);
+        if (!['book', 'chapter', 'scenes', 'scene', 'unit'].includes(level)) {
+            return { status: 400, error: { code: 'bad_request', error: 'scope.level must be book|chapter|scenes|scene|unit|from_current_scene' } };
+        }
+        const scope = { level };
+        for (const k of SCOPE_KEYS) if (k !== 'level' && raw[k] !== undefined && raw[k] !== null) scope[k] = raw[k];
+        // ADR §11.1 names the unit `unit_key`; the core field is unit_id
+        if (scope.unit_key !== undefined) { if (scope.unit_id === undefined) scope.unit_id = scope.unit_key; delete scope.unit_key; }
+        return { scope };   // the core (normaliseScope) validates the rest → 400 bad_request
+    }
+
+    async function ownerOf(req, bookId) {
+        const workspaceId = await bookRepo.getWorkspaceId(bookId);
+        if (!workspaceId) return { error: { status: 409, body: { code: 'book_without_workspace', error: 'book has no workspace' } } };
+        let userId = userIdOf(req);
+        if (!userId) {
+            const ws = await require('../storage/postgres/repositories/workspace-repo').findById(workspaceId).catch(() => null);
+            userId = ws && ws.owner_user_id ? ws.owner_user_id : null;
+        }
+        if (!userId) return { error: { status: 401, body: { code: 'unauthorized', error: 'no user for the command' } } };
+        return { workspaceId, userId };
+    }
+
+    async function generate(req, res) {
+        const { bookId } = req.params;
+        try {
+            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
+            if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
+            const body = req.body || {};
+            const mode = body.mode === undefined || body.mode === null ? 'missing' : body.mode;
+            if (!GENERATE_MODES.includes(mode)) return bad(res, 'mode must be "missing" or "all"');
+            const clientActionId = typeof body.client_action_id === 'string' ? body.client_action_id.trim() : '';
+            if (!clientActionId) return bad(res, 'client_action_id (one per click) is required', 'client_action_id_required');
+            if (clientActionId.length > 200) return bad(res, 'client_action_id: at most 200 characters');
+            const types = body.layers;
+            if (!Array.isArray(types) || types.length === 0 || types.some((t) => !ALL_LAYERS.includes(t))) {
+                return bad(res, 'layers must be a non-empty array of audio, image, video');
+            }
+            // the /regenerate «nothing to generate» guard (helpers/book-text.cjs)
+            if (material) {
+                const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
+                if (loaded && material.nothingToGenerate(loaded, types)) {
+                    log(`[GENERATE] ${bookId}: refused — book_has_no_text (layers=${types.join(',')})`);
+                    return res.status(422).json({ ...material.BOOK_HAS_NO_TEXT });
+                }
+            }
+            const sc = generateScope(bookId, body.scope);
+            if (sc.error) return res.status(sc.status).json(sc.error);
+            const scope = sc.scope;
+
+            // layer availability — the same rules as the v2 leg of /regenerate
+            const requested = [...new Set(types)];
+            const videoWhy = host.videoUnsupportedReason ? host.videoUnsupportedReason() : 'host without video support';
+            const supported = videoWhy ? BASE_V2_LAYERS : [...BASE_V2_LAYERS, 'video'];
+            const unsupported = requested.filter((t) => !supported.includes(t));
+            const layers = requested.filter((t) => supported.includes(t));
+            if (!layers.length) {
+                return res.status(409).json({ code: 'v2_video_unavailable', error: `video layer is unavailable on orchestration v2: ${videoWhy}`, layers: unsupported });
+            }
+            if (layers.includes('image')) {
+                const why = host.imageUnsupportedReason ? host.imageUnsupportedReason() : 'host without image support';
+                if (why) return res.status(409).json({ code: 'v2_image_unavailable', error: `image layer is unavailable on orchestration v2: ${why}`, layers: ['image'] });
+            }
+            const owner = await ownerOf(req, bookId);
+            if (owner.error) return res.status(owner.error.status).json(owner.error.body);
+            const cfg = await layerConfig.get(redis, bookId);
+            const enabledLayers = ALL_LAYERS.filter((l) => cfg[`${l}_enabled`] !== false);
+            const r = await host.orch().createCommand({
+                workspaceId: owner.workspaceId, userId: owner.userId, bookId, kind: 'regenerate', scope, layers,
+                force: mode === 'all', clientActionId, enabledLayers,
+            });
+            // a repeated click answers the FIRST command (its mode, layers, summary)
+            let cmdMode = mode;
+            if (r.existing) {
+                const row = await host.commandRow(r.command_id).catch(() => null);
+                if (row) cmdMode = row.force ? 'all' : 'missing';
+            }
+            const summary = unsupported.length ? { ...r.summary, skipped_unsupported: unsupported } : r.summary;
+            const scopeLog = scope.level === 'scenes' ? `scenes[${scope.scene_ids.length}] from ${scope.scene_ids[0]}` : scope.level;
+            log(`[GENERATE] ${bookId}: command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} mode=${cmdMode} layers=${r.layers.join(',')} scope=${scopeLog} summary=${JSON.stringify(summary)} client_action_id=${clientActionId}`);
+            return res.json({
+                book_id: bookId,
+                orchestration: 'v2',
+                command_id: r.command_id,
+                existing: r.existing === true,
+                status: r.status,
+                mode: cmdMode,
+                layers: r.layers,
+                scope,
+                summary,
+                // requested but not run: unsupported by the host (video) + disabled in layer-config
+                skipped_layers: requested.filter((t) => !r.layers.includes(t)),
+            });
+        } catch (err) {
+            if (err && err.code === 'layer_disabled') {
+                return res.status(409).json({ code: 'layer_disabled', error: 'all requested layers are disabled in layer-config', disabled_layers: Array.isArray(req.body && req.body.layers) ? req.body.layers : [] });
+            }
+            return sendGenError(res, err, 'generate');
+        }
+    }
+
+    async function generateStop(req, res) {
+        const { bookId } = req.params;
+        try {
+            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
+            const body = req.body && typeof req.body === 'object' ? req.body : {};
+            const hasCommand = body.command_id !== undefined && body.command_id !== null;
+            const hasLayer = body.layer !== undefined && body.layer !== null;
+            if (hasCommand && hasLayer) return bad(res, 'stop takes {command_id} or {layer} or {} (whole book), not both');
+            const by = userIdOf(req) || 'generate-stop';
+            if (hasCommand) {
+                const commandId = String(body.command_id);
+                if (!UUID_RE.test(commandId)) return bad(res, 'command_id must be a UUID');
+                if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
+                const row = await host.commandRow(commandId);
+                if (!row || row.book_id !== bookId) return res.status(404).json({ code: 'command_not_found', error: `command ${commandId} is not a command of book ${bookId}` });
+                const r = await host.orch().cancel({ commandId }, { cancelledBy: by });
+                log(`[GENERATE-STOP] ${bookId}: command ${commandId} — ${r.commands_cancelled} command(s), ${r.jobs_cancelled} job(s) cancelled, ${r.kept_shared} kept (shared)`);
+                return res.json({
+                    ok: true, book_id: bookId, target: 'command', command_id: commandId,
+                    commands_cancelled: r.commands_cancelled, jobs_cancelled: r.jobs_cancelled, kept_shared: r.kept_shared, layers: r.layers || [],
+                });
+            }
+            if (hasLayer) {
+                if (!ALL_LAYERS.includes(body.layer)) return bad(res, 'layer must be audio, image or video');
+                let n = 0;
+                if (host.isEnabled()) n = (await host.orch().cancel({ bookId, layer: body.layer }, { cancelledBy: by })).jobs_cancelled;
+                log(`[GENERATE-STOP] ${bookId}: layer ${body.layer} — ${n} job(s) cancelled`);
+                return res.json({ ok: true, book_id: bookId, target: 'layer', layer: body.layer, commands_cancelled: 0, jobs_cancelled: n });
+            }
+            let r = { commands_cancelled: 0, jobs_cancelled: 0 };
+            if (host.isEnabled()) r = await host.orch().cancel({ bookId }, { cancelledBy: by });
+            // VBook (LLM) is not orchestration work — the book stop stops it as cancel-generation does
+            let vbookCancelled = false;
+            if (sessionControl) {
+                try { await sessionControl.cancelSessions(bookId); vbookCancelled = true; } catch (e) { console.warn(`[GENERATE-STOP] VBook cancel failed: ${e.message}`); }
+            }
+            log(`[GENERATE-STOP] ${bookId}: book — ${r.commands_cancelled} command(s), ${r.jobs_cancelled} job(s) cancelled`);
+            return res.json({ ok: true, book_id: bookId, target: 'book', commands_cancelled: r.commands_cancelled, jobs_cancelled: r.jobs_cancelled, vbook_cancelled: vbookCancelled });
+        } catch (err) { return sendGenError(res, err, 'generate-stop'); }
+    }
+
+    const emptyAggregate = (bookId) => ({
+        book_id: bookId, orchestration: 'v2', generated_at: new Date().toISOString(), active: false,
+        totals: { queued: 0, running: 0, done: 0, failed: 0, cancelled: 0, retrying: 0, joined_queued: 0, joined_running: 0 },
+        commands: [], disabled: true,
+    });
+
+    async function generateProgress(req, res) {
+        const { bookId } = req.params;
+        try {
+            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
+            if (!host.isEnabled() || !host.progress()) return res.json(emptyAggregate(bookId));
+            return res.json(await host.progress().aggregate(bookId));
+        } catch (err) { return sendGenError(res, err, 'generate-progress'); }
+    }
+
+    const SSE_HEARTBEAT_MS = 15_000;
+    async function generateStream(req, res) {
+        const { bookId } = req.params;
+        try {
+            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
+        } catch (err) { return sendGenError(res, err, 'generate-stream'); }
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');   // nginx: no buffering
+        res.flushHeaders?.();
+        let closed = false;
+        const send = (payload) => { if (!closed) { try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch (_) { /* gone */ } } };
+        res.write('retry: 3000\n\n');
+        let off = null;
+        const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) { /* gone */ } }, SSE_HEARTBEAT_MS);
+        const cleanup = () => {
+            if (closed) return;
+            closed = true;
+            clearInterval(heartbeat);
+            if (off) { off(); off = null; }
+        };
+        req.on('close', cleanup);
+        res.on('error', cleanup);
+        const hub = host.isEnabled() ? host.progressHub() : null;
+        if (!hub) { send({ type: 'gen_progress', reason: 'connect', command_ids: [], progress: emptyAggregate(bookId) }); return undefined; }
+        try {
+            // connect AND reconnect: the fresh §9 aggregate first, then one per NOTIFY
+            const unsubscribe = await hub.subscribeAggregate(bookId, send);
+            if (closed) unsubscribe(); else off = unsubscribe;
+        } catch (err) {
+            console.warn(`[GENERATE-STREAM] ${bookId}: initial aggregate failed: ${err && err.message}`);
+            send({ type: 'error', code: 'progress_unavailable', error: (err && err.message) || 'error' });
+            cleanup();
+            try { res.end(); } catch (_) { /* gone */ }
+        }
+        return undefined;
+    }
+
+    /**
+     * Mount the four /generate endpoints (composition root, AFTER the
+     * /api/v1/book/:bookId access guard — the same guard as /regenerate).
+     * generationMaterial: the /regenerate «nothing to generate» guard (helpers/book-text.cjs).
+     */
+    function mountGenerateRoutes(app, { generationMaterial = null } = {}) {
+        material = generationMaterial;
+        app.post('/api/v1/book/:bookId/generate', generate);
+        app.post('/api/v1/book/:bookId/generate/stop', generateStop);
+        app.get('/api/v1/book/:bookId/generate/progress', generateProgress);
+        app.get('/api/v1/book/:bookId/generate/stream', generateStream);
+        log('[ROUTES] orchestration v2 generate API loaded (/api/v1/book/:bookId/generate, /stop, /progress, /stream)');
+    }
+
+    /** Old GET /progress-stream of a v2 book (until step 5): the old event shapes, from the in-process hub. */
+    function subscribeLegacyProgress(bookId, fn) {
+        const hub = host.isEnabled() && host.progressHub ? host.progressHub() : null;
+        return hub ? hub.subscribeLegacy(bookId, fn) : null;
+    }
+
+    return {
+        mountInternal, mountGenerateRoutes, regenerate, cancelGeneration, cancelWorker, onLayersDisabled, progressPanel, purgeBook, cancelBook,
+        generate, generateStop, generateProgress, generateStream, subscribeLegacyProgress, isV2Book: host.isV2Book,
+    };
 }
 
 module.exports = { createV2Routes, LEGACY_TO_SCOPE, sendGenError };

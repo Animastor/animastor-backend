@@ -576,7 +576,7 @@ const orchV2Host = createOrchV2Host({
     redis,
     layerConfig,
     book,
-    publishProgress: require('./services/progress-pubsub.cjs').publishProgress,
+    // progress: PG LISTEN gen_progress → in-process SSE hub (no Redis pub/sub, ADR §9)
     outputDir: config.OUTPUT_DIR,
     log: utils.log,
 });
@@ -787,6 +787,11 @@ routeDeps.bookDeletion.configureOrchV2({
 });
 
 require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, bookDiff, windowGenerator });
+// Generate API v2 (ADR ORCHESTRATION_V2 §11.1): /generate, /generate/stop,
+// /generate/progress, /generate/stream — v2 books only (legacy → 409
+// book_not_v2); the book guard of /api/v1/book/:bookId applies (registered
+// above), the same as for /regenerate.
+orchV2.mountGenerateRoutes(app, { generationMaterial: require('./helpers/book-text.cjs') });
 // Voice references (VOICE_REFERENCES.md) — orchestration v2 only; the book
 // guard of /api/v1/book/:bookId applies (registered above).
 require('./orchestration-v2/voice-routes').mountVoiceRoutes(app, {

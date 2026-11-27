@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased — generate API v2 (ADR ORCHESTRATION_V2 §11.1, этап 2 API; ветка `feat/generate-api-v2`)
+
+Основание: `animastor-docs architecture/ORCHESTRATION_V2.md` §11.1–11.2, `reports/2026-11-26/legacy-removal-recon.md`
+§2, §6.1, §8 шаг 1. Legacy-код и старые роуты не удалялись (шаг 5); пакет `@animastor/orchestration` не менялся (1.4.2).
+
+- **Новые эндпоинты** (тонкие обёртки над теми же вызовами ядра, что и v2-ветка старых имён;
+  `orchestration-v2/routes.js` `mountGenerateRoutes`, монтируются в `backend.cjs` после гарда
+  `/api/v1/book/:bookId` — те же права, что у `/regenerate`; ошибки `{code, error}`):
+  - `POST /api/v1/book/:bookId/generate` `{scope, layers, mode: "missing"|"all", client_action_id}` →
+    `{command_id, existing, status, mode, layers, scope, summary, skipped_layers}`. `mode` по умолчанию
+    `missing`, `all` = `force`; `client_action_id` обязателен (400 `client_action_id_required`), повтор → тот же
+    `command_id`, `existing:true`, без новых работ. `scope.level`: `book|chapter|scenes|scene|unit` + хостовый
+    `from_current_scene` (разворачивается в `scenes`, как у `/regenerate`); `unit_key` — синоним `unit_id`.
+    Те же отказы, что у `/regenerate` v2: 422 `book_has_no_text`, 409 `layer_disabled`, `v2_image_unavailable`,
+    `v2_video_unavailable`, `orch_v2_disabled`. `build_id` в ответе нет.
+  - `POST /api/v1/book/:bookId/generate/stop` `{command_id}` | `{layer}` | `{}` — стоп команды (только своей книги:
+    чужая → 404 `command_not_found`), слоя, всей книги (+ VBook-сессии, как `cancel-generation`).
+  - `GET /api/v1/book/:bookId/generate/progress` — агрегат ADR §9: команды (активные + завершённые за 10 мин) ×
+    слои (`queued/running/done/failed/cancelled/retrying`, `ready/total/percent`) × сцены, `mode`, `summary`,
+    `skipped`, метки главы/сцены.
+  - `GET /api/v1/book/:bookId/generate/stream` — SSE: `{type:"gen_progress", reason:"connect"|"notify",
+    command_ids, progress}`; при подключении и переподключении — сразу свежий агрегат.
+  - Legacy-книга → **409 `book_not_v2`** на всех четырёх.
+- **Прогресс только через PG NOTIFY** (ADR §4.3/§9): `orchestration-v2/progress-hub.js` — один
+  `LISTEN gen_progress` на процесс, раздача клиентам книги внутри процесса (агрегат для `/generate/stream`,
+  прежние события для `/progress-stream`), склейка NOTIFY одной книги за `ORCH_V2_PROGRESS_COALESCE_MS`
+  (150 мс). Redis pub/sub `animastor:progress:*` для v2 больше не публикуется (`publishProgress` из v2-хоста убран).
+- **Старый `GET /progress-stream`** v2-книги берёт генерационные события из того же слушателя; Redis-подписка
+  осталась для VBook/импорта (pipeline-runner, bootstrap) и legacy-книг и для v2-книги больше не закрывает поток
+  при недоступном Redis. `/regenerate`, `cancel-worker`, `cancel-generation`, `progress-panel` — без изменений.
+- **Тесты:** `tests/orch-v2-generate-api.test.js` (16: успех, повтор `client_action_id` (последовательный и
+  параллельный), `missing`/`all`, `from_current_scene`, 400, `layer_disabled`, стоп ×3 + чужая команда, 409
+  `book_not_v2` ×4, агрегат, SSE «работа завершена → событие», SSE при недоступном Redis (оба стрима),
+  SSE-переподключение, старый стрим без Redis pub/sub, старые имена); `orch-v2-observability` — строка
+  предупреждения в `progress-hub.js`. Прогон `scripts/test-backend.sh --install-packages`: 4374 passing / 29 pending /
+  0 failing, пакеты 10/10.
+
 ## Unreleased — stage166: worker logs always reach the owner (WLOG-2) + workflow model names follow the manifests
 
 Owner decision 2026-11-07; ADR `animastor-docs architecture/ORCHESTRATION_V2.md` §8.5.

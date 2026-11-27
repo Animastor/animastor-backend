@@ -377,27 +377,19 @@ module.exports = function(app, redis, deps) {
         // Tell the client we're connected (also primes proxies).
         res.write(`event: open\ndata: ${JSON.stringify({ book_id: bookId })}\n\n`);
 
-        // Dedicated subscriber connection — a SUBSCRIBE-mode client cannot run
-        // normal commands, so we duplicate rather than reuse the shared client.
-        const sub = redis.duplicate();
-        const ch = progressChannel(bookId);
-
-        const onMessage = (chan, message) => {
-            if (chan !== ch) return;
-            try { res.write(`data: ${message}\n\n`); } catch (_) {}
-        };
-
-        sub.on('message', onMessage);
-        sub.on('error', (err) => {
-            console.warn('[PROGRESS-STREAM] subscriber error:', err.message);
-        });
+        // Orchestration v2 book (ADR §9, 2026-11-27): generation progress comes
+        // from the in-process hub fed by PG LISTEN gen_progress — the old event
+        // shapes, no Redis. Until step 5 of the legacy removal this route keeps
+        // working for the fronts that still read it.
+        let offV2 = null;
         try {
-            await sub.subscribe(ch);
+            if (deps.orchV2 && typeof deps.orchV2.subscribeLegacyProgress === 'function' && await deps.orchV2.isV2Book(bookId)) {
+                offV2 = deps.orchV2.subscribeLegacyProgress(bookId, (payload) => {
+                    try { res.write(`data: ${JSON.stringify({ type: 'progress', ...payload })}\n\n`); } catch (_) {}
+                });
+            }
         } catch (err) {
-            console.warn('[PROGRESS-STREAM] subscribe failed:', err.message);
-            try { res.end(); } catch (_) {}
-            try { sub.disconnect(); } catch (_) {}
-            return;
+            console.warn('[PROGRESS-STREAM] v2 subscribe failed:', err.message);
         }
 
         // Heartbeat comment keeps the connection alive through idle periods and
@@ -407,14 +399,55 @@ module.exports = function(app, redis, deps) {
             try { res.write(`: ping\n\n`); } catch (_) {}
         }, 15_000);
 
+        // Redis pub/sub stays for what is NOT orchestration v2: VBook / import
+        // events (pipeline-runner, bootstrap) and legacy books. Best effort: for a
+        // v2 book a Redis outage never closes the stream (subscribe is not awaited
+        // before the heartbeat, a failure only drops the Redis leg).
+        let sub = null;
+        const ch = progressChannel(bookId);
+        const onMessage = (chan, message) => {
+            if (chan !== ch) return;
+            try { res.write(`data: ${message}\n\n`); } catch (_) {}
+        };
+        let closed = false;
         const cleanup = () => {
+            if (closed) return;
+            closed = true;
             clearInterval(heartbeat);
-            try { sub.removeListener('message', onMessage); } catch (_) {}
-            try { sub.unsubscribe(ch).catch(() => {}); } catch (_) {}
-            try { sub.disconnect(); } catch (_) {}
+            if (offV2) { try { offV2(); } catch (_) {} offV2 = null; }
+            if (sub) {
+                try { sub.removeListener('message', onMessage); } catch (_) {}
+                try { sub.unsubscribe(ch).catch(() => {}); } catch (_) {}
+                try { sub.disconnect(); } catch (_) {}
+            }
         };
         req.on('close', cleanup);
         res.on('error', cleanup);
+
+        // Dedicated subscriber connection — a SUBSCRIBE-mode client cannot run
+        // normal commands, so we duplicate rather than reuse the shared client.
+        let subscribed;
+        try {
+            sub = redis.duplicate();
+            sub.on('message', onMessage);
+            sub.on('error', (err) => {
+                console.warn('[PROGRESS-STREAM] subscriber error:', err.message);
+            });
+            subscribed = Promise.resolve().then(() => sub.subscribe(ch));
+        } catch (err) {
+            subscribed = Promise.reject(err);
+        }
+        if (offV2) {
+            subscribed.catch((err) => console.warn('[PROGRESS-STREAM] Redis subscribe failed (v2 events continue):', err.message));
+        } else {
+            try {
+                await subscribed;
+            } catch (err) {
+                console.warn('[PROGRESS-STREAM] subscribe failed:', err.message);
+                cleanup();
+                try { res.end(); } catch (_) {}
+            }
+        }
     });
 
     // ======================================================
