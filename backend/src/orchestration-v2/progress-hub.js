@@ -15,6 +15,11 @@
 //     ({type:'progress', layer, command_id, ready, total} / generation_complete).
 // No subscribers of a book → no PG read for it.
 //
+// Reconnect (2026-11-27, @animastor/orchestration 1.4.3): after the LISTEN
+// connection was lost and re-established, resync() sends every subscribed book
+// a fresh aggregate (reason 'resync') and the old stream its current events —
+// NOTIFYs sent while the connection was down are not lost for the UI.
+//
 // Coalescing: NOTIFYs of one book within `coalesceMs` give one aggregate read
 // (a whole-book command accepts many results per second); the event always
 // carries the state read AFTER the last NOTIFY of the burst.
@@ -50,17 +55,18 @@ function createProgressHub({ aggregate, legacyEvents, coalesceMs = DEFAULT_COALE
         pending.delete(bookId);
         if (!p || !aggSubs.has(bookId)) return;
         const progress = await aggregate(bookId);
-        deliver(aggSubs.get(bookId), { type: 'gen_progress', reason: 'notify', command_ids: [...p.commandIds], progress });
+        deliver(aggSubs.get(bookId), { type: 'gen_progress', reason: p.reason || 'notify', command_ids: [...p.commandIds], progress });
     }
 
     /** One NOTIFY gen_progress payload ({book_id, command_id}). */
-    function onNotify(evt) {
+    function onNotify(evt, reason = 'notify') {
         const bookId = evt && typeof evt.book_id === 'string' ? evt.book_id : null;
         if (!bookId) return;
         if (aggSubs.has(bookId)) {
             let p = pending.get(bookId);
+            if (p && reason === 'resync') p.reason = 'resync';
             if (!p) {
-                p = { commandIds: new Set(), timer: null };
+                p = { commandIds: new Set(), timer: null, reason };
                 pending.set(bookId, p);
                 p.timer = setTimeout(() => {
                     flush(bookId).catch((err) => warn(`[ORCH-V2] progress NOTIFY→SSE failed book=${bookId}: ${err && err.message}`));
@@ -98,6 +104,17 @@ function createProgressHub({ aggregate, legacyEvents, coalesceMs = DEFAULT_COALE
         return add(legacySubs, bookId, fn);
     }
 
+    /**
+     * The LISTEN connection came back: every subscribed book gets the state as it
+     * is now (aggregate subscribers: reason 'resync'; the old stream: its events).
+     * @returns {number} books resynced
+     */
+    function resync() {
+        const books = new Set([...aggSubs.keys(), ...legacySubs.keys()]);
+        for (const bookId of books) onNotify({ book_id: bookId, command_id: null }, 'resync');
+        return books.size;
+    }
+
     function stop() {
         for (const p of pending.values()) clearTimeout(p.timer);
         pending.clear();
@@ -110,7 +127,7 @@ function createProgressHub({ aggregate, legacyEvents, coalesceMs = DEFAULT_COALE
         legacy_clients: [...legacySubs.values()].reduce((n, s) => n + s.size, 0),
     });
 
-    return { onNotify, subscribeAggregate, subscribeLegacy, stop, stats };
+    return { onNotify, subscribeAggregate, subscribeLegacy, resync, stop, stats };
 }
 
 module.exports = { createProgressHub, DEFAULT_COALESCE_MS };

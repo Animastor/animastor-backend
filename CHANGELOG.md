@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-27 — LISTEN `gen_progress` переживает обрыв PG; no-store для `/book/:id/generate/*` (ветка `fix/gen-listen-nostore`)
+
+- **`@animastor/orchestration` 1.4.3** (`packages/`, **опубликован**; `backend/package.json` → `^1.4.3` + lock,
+  установлен из реестра — без ручной синхронизации `node_modules`): `listenProgress(onEvent, {onReconnect, onDisconnect, delaysMs})` —
+  обработчик `'error'` на выделенном клиенте, `release(err)` + повторный `LISTEN` с паузой 1→2→5→10→30 с,
+  `close()` останавливает переподключения; состояние — на получение клиента, а не на клиенте пула. Тест пакета
+  `test/gen/listen-reconnect.test.js` (7).
+- **Хост:** `orchestration-v2/index.js` передаёт колбэки — одна строка `[ORCH-V2] progress LISTEN lost: … —
+  reconnecting` (warn) на обрыв, одна `[ORCH-V2] progress LISTEN restored — fresh progress sent for N book(s)` на
+  восстановление; `progress-hub.resync()` рассылает подписчикам свежий агрегат (`reason:"resync"`) и текущие события
+  старого `/progress-stream`. `host.progressListener()` — ручка слушателя (диагностика). Со старым ядром 1.4.2 второй
+  аргумент игнорируется.
+- **no-store:** `middleware/no-store.js` — `/book/:id/generate(/…)` (не `/generate-next`); `GET /book/:id/generate/progress`
+  теперь `Cache-Control: no-store` без ETag (О1).
+- **Тесты:** `orch-v2-generate-api` +1 (обрыв LISTEN через `pg_terminate_backend` → строка в лог, переподключение,
+  SSE `resync` с командой, созданной во время обрыва, NOTIFY снова доходит; пропускается, если ядро в `node_modules` < 1.4.3)
+  и заголовок `no-store` на реальном роуте; `no-store-headers` +5. Прогон `test-backend.sh --install-packages` на
+  реестровом 1.4.3: 4380 passing / 29 pending / 0 failing, пакеты 10/10 (`test:gen` 94), страж `packages-published`
+  зелёный (`@animastor/orchestration@1.4.3 (lock)`).
+
 ## Unreleased — generate API v2 (ADR ORCHESTRATION_V2 §11.1, этап 2 API; ветка `feat/generate-api-v2`)
 
 Основание: `animastor-docs architecture/ORCHESTRATION_V2.md` §11.1–11.2, `reports/2026-11-26/legacy-removal-recon.md`
