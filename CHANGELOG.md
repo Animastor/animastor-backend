@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased — LISTEN `gen_progress` переживает обрыв PG; no-store для `/book/:id/generate/*` (ветка `fix/gen-listen-nostore`)
+## 2026-11-27 — LISTEN `gen_progress` переживает обрыв PG; no-store для `/book/:id/generate/*` (ветка `fix/gen-listen-nostore`)
 
-- **`@animastor/orchestration` 1.4.3** (`packages/`, **не опубликован, готов к публикации**; `backend/package.json`
-  остаётся `^1.4.2` до публикации, как в 006): `listenProgress(onEvent, {onReconnect, onDisconnect, delaysMs})` —
+- **`@animastor/orchestration` 1.4.3** (`packages/`, **опубликован**; `backend/package.json` → `^1.4.3` + lock,
+  установлен из реестра — без ручной синхронизации `node_modules`): `listenProgress(onEvent, {onReconnect, onDisconnect, delaysMs})` —
   обработчик `'error'` на выделенном клиенте, `release(err)` + повторный `LISTEN` с паузой 1→2→5→10→30 с,
   `close()` останавливает переподключения; состояние — на получение клиента, а не на клиенте пула. Тест пакета
   `test/gen/listen-reconnect.test.js` (7).
@@ -16,9 +16,9 @@
   теперь `Cache-Control: no-store` без ETag (О1).
 - **Тесты:** `orch-v2-generate-api` +1 (обрыв LISTEN через `pg_terminate_backend` → строка в лог, переподключение,
   SSE `resync` с командой, созданной во время обрыва, NOTIFY снова доходит; пропускается, если ядро в `node_modules` < 1.4.3)
-  и заголовок `no-store` на реальном роуте; `no-store-headers` +5. Прогон `test-backend.sh --install-packages` с
-  синхронизированным для прогона `node_modules/@animastor/orchestration/src`: 4379 passing / 30 pending / 0 failing,
-  пакеты 10/10 (`test:gen` 94).
+  и заголовок `no-store` на реальном роуте; `no-store-headers` +5. Прогон `test-backend.sh --install-packages` на
+  реестровом 1.4.3: 4380 passing / 29 pending / 0 failing, пакеты 10/10 (`test:gen` 94), страж `packages-published`
+  зелёный (`@animastor/orchestration@1.4.3 (lock)`).
 
 ## Unreleased — generate API v2 (ADR ORCHESTRATION_V2 §11.1, этап 2 API; ветка `feat/generate-api-v2`)
 
