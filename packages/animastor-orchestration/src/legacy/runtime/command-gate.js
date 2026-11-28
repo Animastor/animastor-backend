@@ -50,14 +50,13 @@ function warn(msg) {
 // ======================================================
 
 /**
- * Read the book layer config (Redis `animastor:layer-config:<book>`).
- * Missing/broken config → every registered layer enabled (registry default).
+ * Read the book layer config through the O-10 LayerConfigPort (host PG
+ * book_layer_config since 1.4.4; the host normalizes, a book without a row
+ * gets the host defaults). No config → every registered layer enabled.
  */
 async function getLayerConfig(redis, bookId) {
-    const layerRaw = await redis.get(`animastor:layer-config:${bookId}`);
-    if (layerRaw) {
-        try { return JSON.parse(layerRaw); } catch (_) { /* fall through to defaults */ }
-    }
+    const cfg = await require('./layer-config-port').layerConfigOp('get')(redis, bookId);
+    if (cfg && typeof cfg === 'object') return cfg;
     const defaults = {};
     for (const t of mediaRegistry.listMediaTypes()) { defaults[`${t}_enabled`] = true; }
     return defaults;

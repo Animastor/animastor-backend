@@ -69,7 +69,7 @@ module.exports = function(app, redis, deps) {
             // the frontend scene counter shows the real window size (e.g.
             // "3/3") instead of the hardcoded MAX_SCENES_PER_CHUNK (2) while
             // window_data isn't saved yet during the pipeline.
-            let configuredWindowSize = await layerConfig.getChunkSize(redis, bookId);
+            let configuredWindowSize = await layerConfig.getChunkSize(bookId);
 
             const agentRow = await agentSession.getLatestSessionForBook(bookId);
 

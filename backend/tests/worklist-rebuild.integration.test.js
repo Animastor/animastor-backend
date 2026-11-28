@@ -20,6 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createMockRedis } = require('./mocks/redis-mock');
+const layerConfigFixture = require('./helpers/layer-config-fixture');
 // NOTE: these are `let` and re-required inside before() AFTER purgeMockedModules().
 // Earlier test files (happy-path.test.js replaces the config module in
 // require.cache with a stub; scope-slide.test.js deletes it entirely) leave
@@ -156,6 +157,7 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
     });
 
     afterEach(async () => {
+        await layerConfigFixture.cleanupLayers();
         for (const bookId of TEST_BOOKS) {
             await postgres.query('DELETE FROM generation_cancellations WHERE book_id = $1', [bookId]);
             await postgres.query('DELETE FROM scene_assets WHERE book_id = $1', [bookId]);
@@ -300,9 +302,9 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
     it('disabled layer untouched; without a command the scheduler dispatches nothing; with an audio command — audio only', async () => {
         writeBook('wl-disabled'); // no artifacts at all
         await insertScene('wl-disabled');
-        await redis.set('animastor:layer-config:wl-disabled', JSON.stringify({
+        await layerConfigFixture.setLayers('wl-disabled', {
             audio_enabled: true, image_enabled: false, video_enabled: true,
-        }));
+        });
 
         await reconciliation.reconcileCycle(redis, {}, { startup: true });
 
@@ -461,9 +463,9 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
     it('absent Redis state for a disabled layer is never dispatched, even under a command', async () => {
         writeBook('wl-disabled');
         await insertScene('wl-disabled');
-        await redis.set('animastor:layer-config:wl-disabled', JSON.stringify({
+        await layerConfigFixture.setLayers('wl-disabled', {
             audio_enabled: true, image_enabled: false, video_enabled: true,
-        }));
+        });
         await require('../src/services/generation-progress').createTasks(redis, 'wl-disabled', ['audio', 'image'],
             { scope: 'current_scene', chapterId: CHAPTER, sceneId: SCENE }, [{ chapter_id: CHAPTER, scene_id: SCENE }]);
         const plan = await runtimeScheduler.shouldScheduleAssets(redis, 'wl-disabled', CHAPTER, SCENE);
@@ -474,9 +476,9 @@ describe('Option E — asset-state rebuild through real reconcileCycle (real PG 
     it('disabled layer with PENDING state is NOT dispatched (isInFlight override removed)', async () => {
         writeBook('wl-disabled');
         await insertScene('wl-disabled');
-        await redis.set('animastor:layer-config:wl-disabled', JSON.stringify({
+        await layerConfigFixture.setLayers('wl-disabled', {
             audio_enabled: true, image_enabled: false, video_enabled: true,
-        }));
+        });
         await require('../src/services/generation-progress').createTasks(redis, 'wl-disabled', ['image'],
             { scope: 'current_scene', chapterId: CHAPTER, sceneId: SCENE }, [{ chapter_id: CHAPTER, scene_id: SCENE }]);
         await redis.hset('animastor:asset-state:wl-disabled:ch-000001:sc-000001', 'image', 'pending');

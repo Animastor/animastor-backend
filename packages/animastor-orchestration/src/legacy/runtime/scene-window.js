@@ -50,6 +50,9 @@ const placeholderAudioOp = require('./placeholder-audio-port').placeholderAudioO
 const audioFsmOp = require('./audio-fsm-port').audioFsmOp;
 const fs = require('fs');
 const path = require('path');
+// 1.4.4: per-book layer config through the O-10 LayerConfigPort (host PG
+// book_layer_config, normalized). Resolved at call time (fail-fast unwired).
+const readLayerConfig = (redis, bookId) => require('./layer-config-port').layerConfigOp('get')(redis, bookId);
 
 const { WINDOW_SIZE, OUTPUT_DIR } = config;
 
@@ -227,20 +230,11 @@ async function checkSceneContentCache(redis, buildId, bookId, chapterId, sceneId
 
     if (!fs.existsSync(buildDir)) return result;
 
-    // Read layer config
-    const layerKey = `animastor:layer-config:${bookId}`;
-    const layerRaw = await redis.get(layerKey);
-    let audioEnabled = true;
-    let imageEnabled = true;
-    let videoEnabled = true;
-    if (layerRaw) {
-        try {
-            const lc = JSON.parse(layerRaw);
-            audioEnabled = lc.audio_enabled !== false;
-            imageEnabled = lc.image_enabled !== false;
-            videoEnabled = lc.video_enabled !== false;
-        } catch (_) {}
-    }
+    // Read layer config (O-10 port → host PG book_layer_config, 1.4.4)
+    const lc = await readLayerConfig(redis, bookId);
+    const audioEnabled = !lc || lc.audio_enabled !== false;
+    const imageEnabled = !lc || lc.image_enabled !== false;
+    const videoEnabled = !lc || lc.video_enabled !== false;
 
     // Use unified file status
     const fileStatus = await getSceneFilesStatus(buildDir, bookId, chapterId, sceneId);
@@ -442,17 +436,9 @@ async function isWindowComplete(redis, bookId) {
 
     // Read layer config so we know which layers are actually enabled.
     // If a layer is disabled, we don't require it to be 'ready'.
-    const layerKey = `animastor:layer-config:${bookId}`;
-    const layerRaw = await redis.get(layerKey);
-    let imageEnabled = true;
-    let videoEnabled = true;
-    if (layerRaw) {
-        try {
-            const lc = JSON.parse(layerRaw);
-            imageEnabled = lc.image_enabled !== false;
-            videoEnabled = lc.video_enabled !== false;
-        } catch (_) {}
-    }
+    const lc = await readLayerConfig(redis, bookId);
+    const imageEnabled = !lc || lc.image_enabled !== false;
+    const videoEnabled = !lc || lc.video_enabled !== false;
 
     for (let i = windowStart; i < nextIdx && i < scenes.length; i++) {
         const s = scenes[i];
@@ -734,17 +720,8 @@ async function startScene(redis, s, buildId, bookId) {
     }
 
     // Check layer config: if audio is disabled, skip to IMAGE_PENDING
-    const layerKey = `animastor:layer-config:${bookId}`;
-    const layerRaw = await redis.get(layerKey);
-    let audioDisabled = false;
-    if (layerRaw) {
-        try {
-            const layerCfg = JSON.parse(layerRaw);
-            audioDisabled = layerCfg.audio_enabled === false;
-        } catch (e) {
-            warn(`Failed to parse layer config for ${bookId}: ${e.message}`);
-        }
-    }
+    const layerCfg = await readLayerConfig(redis, bookId);
+    const audioDisabled = !!layerCfg && layerCfg.audio_enabled === false;
 
     // T8: setScenePending через фасад — always succeeds (per-asset state write)
     // S-5: via the injected orchestration seam

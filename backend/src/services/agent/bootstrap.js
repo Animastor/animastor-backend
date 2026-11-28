@@ -29,23 +29,23 @@ function errorProgressFields(err) {
 }
 
 /**
- * Read chunk_size from Redis layer-config for the given book (default 3).
+ * Read chunk_size from the book layer-config (PG) for the given book (default 3).
  * Shared with /agent-status (layerConfig.getChunkSize) so the actual window
  * size the pipeline processes always matches the one the frontend displays.
  */
 async function _readChunkSize(redis, bookId) {
-    return layerConfig.getChunkSize(redis, bookId);
+    return layerConfig.getChunkSize(bookId);
 }
 
 /**
  * Read AI-analysis settings from layer-config for the given book.
- * Falls back to legacy defaults (sequential, parallelism=3) when Redis / layer-config is unavailable.
+ * Falls back to legacy defaults (sequential, parallelism=3) when layer-config is unavailable.
  * Used by the pipeline runner to decide between the sequential and parallel
  * extraction paths (Reconnaissance plan, Milestone #1).
  */
 async function _readAnalysisConfig(redis, bookId) {
     try {
-        const cfg = await layerConfig.get(redis, bookId);
+        const cfg = await layerConfig.get(bookId);
         return {
             analysis_mode: cfg?.analysis_mode || layerConfig.ANALYSIS_MODES.SEQUENTIAL,
             analysis_parallelism: cfg?.analysis_parallelism || layerConfig.DEFAULTS.analysis_parallelism,

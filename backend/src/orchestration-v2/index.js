@@ -57,7 +57,7 @@ function hasFfmpeg(bin = 'ffmpeg') {
  * @param {object} o.env             process.env
  * @param {Function} o.getPool       () => pg Pool (storage/postgres/database.getPool)
  * @param {object} o.redis
- * @param {object} o.layerConfig     services/layer-config (get(redis, bookId))
+ * @param {object} o.layerConfig     services/layer-config (get(bookId), PG)
  * @param {object} o.gpuDispatcher   runtime/gpu-dispatcher (lane lookups) — injected, never required here
  * @param {object} o.book            vbook-runtime facade (loadBook / collectScenes) — injected
  * @param {boolean} [o.listen]     false → no LISTEN gen_progress (tests drive hub.onNotify)
@@ -146,7 +146,7 @@ function createOrchV2Host(o) {
             timeoutFor: gen.defaults.timeoutFor,
             retryPolicy: gen.defaults.retryPolicy,
             isLayerEnabled: async (bookId, layer) => {
-                const cfg = await o.layerConfig.get(o.redis, bookId);
+                const cfg = await o.layerConfig.get(bookId);
                 return cfg[`${layer}_enabled`] !== false;
             },
             ...((o.portOverrides && o.portOverrides.ports) || {}),

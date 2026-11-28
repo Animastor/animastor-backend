@@ -112,7 +112,7 @@ module.exports = function(app, redis, deps) {
     app.get('/api/v1/book/:bookId/layer-config', async (req, res) => {
         try {
             const { bookId } = req.params;
-            const cfg = await layerConfig.get(redis, bookId);
+            const cfg = await layerConfig.get(bookId);
             res.json({
                 book_id: bookId,
                 audio_enabled: cfg.audio_enabled,
@@ -142,7 +142,7 @@ module.exports = function(app, redis, deps) {
         try {
             const { bookId } = req.params;
             const { audio_enabled, image_enabled, video_enabled, chunk_size, audio_timeout_minutes, image_timeout_minutes, video_timeout_minutes, analysis_mode, analysis_parallelism } = req.body || {};
-            const cfg = await layerConfig.set(redis, bookId, {
+            const cfg = await layerConfig.set(bookId, {
                 audio_enabled, image_enabled, video_enabled,
                 chunk_size, audio_timeout_minutes, image_timeout_minutes, video_timeout_minutes,
                 analysis_mode, analysis_parallelism,
@@ -550,7 +550,7 @@ module.exports = function(app, redis, deps) {
             // force-dispatch is owned by orchestrator.resetScenes().
 
             const effectiveScope = scope || 'whole_book';
-            const persistedLayerCfg = await layerConfig.get(redis, bookId);
+            const persistedLayerCfg = await layerConfig.get(bookId);
             // S-2: validWorkerTypes derived from media registry (with fallback
             // for test isolation where registry may not be initialized)
             const _registryTypes = mediaRegistry.resolveValidWorkerTypes();

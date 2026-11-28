@@ -80,6 +80,7 @@ function createMockRedis() {
             return 'OK';
         },
         del: async (...keys) => { let n = 0; for (const k of keys) { expiries.delete(k); if (store.delete(k)) { n++; bump(k); } } return n; },
+        flushdb: async () => { for (const k of store.keys()) bump(k); store.clear(); expiries.clear(); return 'OK'; },
         expire: async (key, ttl) => {
             if (!store.has(key)) return 0;
             expiries.set(key, Number(ttl));

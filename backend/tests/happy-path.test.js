@@ -1857,11 +1857,7 @@ describe('Happy Path: Д.2 — shouldScheduleAssets is a pure decision', () => {
     });
 
     it('task-managed scene schedules only worker types requested for that scene', async () => {
-        await redis.set(`animastor:layer-config:${BOOK_ID}`, JSON.stringify({
-            audio_enabled: true,
-            image_enabled: true,
-            video_enabled: true,
-        }));
+        // layer-config: no PG row → host defaults (all three layers enabled).
         const generationProgress = require('../src/services/generation-progress');
         await redis.hset(generationProgress.key(BOOK_ID), 'task-audio', JSON.stringify({
             task_id: 'task-audio',

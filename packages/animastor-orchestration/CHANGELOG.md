@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.4 (2026-11-27, не опубликован — готов к публикации)
+
+Patch: layer-config книги хранится в PG хоста (`book_layer_config`, animastor-docs `ORCHESTRATION_V2.md` §11.1);
+legacy-рантайм больше не знает Redis-ключ layer-config. Код `gen/*` (v2) не менялся: v2 получает
+`isLayerEnabled` от хоста, как и раньше.
+
+- **O-10 `LayerConfigPort`:** контракт сокращён до одной операции `get(redis, bookId)` (`redis` хост игнорирует).
+  `restoreFromBooks` убран из `OPS` — `setLayerConfigPort` больше его не требует.
+- **reconcile PHASE C6** (восстановление Redis-ключей layer-config из `book.json`) удалена: Redis-копии нет.
+- **Сырые чтения Redis-ключа layer-config** переведены на порт: `command-gate.getLayerConfig`
+  (и реэкспорт `runtime-scheduler`), `scene-window` (`isWindowComplete`, `isSceneWindowDone`, `startScene`),
+  порог застоя видео в reconcile. Флаги слоёв читаются так же (`*_enabled !== false`); порог застоя видео
+  теперь учитывает `video_timeout_minutes` и для книги без сохранённого конфига (дефолт 60 мин хоста).
+- Таблица `book_layer_config` — в хост-миграциях backend (`schema.js`), не в `gen/sql`: пакет её не читает
+  и не пишет; миграции `007` в пакете нет.
+- Совместимость: хост, собранный под этот релиз, работает и с 1.4.3 (адаптер хоста пока отдаёт заглушку
+  `restoreFromBooks → 0` для порта 1.4.3; убрать при подъёме backend до `^1.4.4`).
+
 ## 1.4.3 (2026-11-27, опубликован)
 
 Patch: `listenProgress` переживает обрыв соединения PG (animastor-docs `ORCHESTRATION_V2.md` §9 «Доставка»).
