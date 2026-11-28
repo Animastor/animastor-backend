@@ -743,7 +743,6 @@
       "worker-env.cjs",
       "worker-cleanup.cjs",
       "worker-cleanup-journal.cjs",
-      "job-protocol-v2.cjs",
       "worker-logs.cjs",
       "package.json",
       "package-lock.json",
