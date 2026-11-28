@@ -23,7 +23,6 @@
 // argument is ignored — so not-yet-migrated callers keep working.
 //
 // Used by:
-//   - POST /api/v1/generate                  (multipart, on book import)
 //   - GET  /api/v1/book/:bookId/layer-config (read)
 //   - PUT  /api/v1/book/:bookId/layer-config (write)
 //   - orchestration-v2 isLayerEnabled / POST /book/:id/generate
