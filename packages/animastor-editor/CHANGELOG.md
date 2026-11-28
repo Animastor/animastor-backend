@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 (2026-11-28, не опубликован — готов к публикации)
+
+### Removed
+
+- Read-time repair of `GET /book/:bookId` (ORCHESTRATION_V2 §12 stage 4): the
+  route no longer calls `placeholderAudio.recoverMissingPlaceholders` and no
+  longer re-creates Redis chunks / scene counters (`read-recovery.cjs` is
+  deleted). Both were legacy-orchestration legs; on an orchestration-v2 book
+  the placeholder leg was already a no-op. `GET /book` is read-only.
+- `editorPorts`: `placeholderAudio` and `recoveryCtx` are no longer part of the
+  port shape and no longer required (a host that still passes them is not
+  rejected — they are ignored).
+
 ## 0.5.1 (2026-11-25)
 
 ### Fixed

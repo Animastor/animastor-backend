@@ -15,7 +15,6 @@
 // PATCH characters/voices/behaviors — heroes: ./hero-routes.cjs).
 
 const { setDeep, findUnitInScene, normalizeFieldValue, rebuildFullText } = require('./scene-patch-utils.cjs');
-const { recoverMissingRedisChunks } = require('./read-recovery.cjs');
 // VBook 4 (VBOOK_FORMAT_V4): the model is { manifest, book, bible, locations,
 // behaviour, heroes, hero_issues, chapters }. Heroes are edited through the
 // hero routes (./hero-routes.cjs); the 3.1 routes /characters, /voices,
@@ -46,7 +45,6 @@ module.exports = function(app, redis, deps) {
         editorPorts, utils,
     } = deps;
     const { log } = utils;
-    const placeholderAudio = editorPorts.placeholderAudio;
 
     // Host legs via the port object (composition root wires the same
     // function references the pre-split code required directly).
@@ -202,33 +200,9 @@ module.exports = function(app, redis, deps) {
             // first entry with type "cover" — detection is centralized here too.
             bookData.scene_list = book.collectSceneList ? book.collectSceneList(bookData) : [];
 
-            const buildId = bookData?.manifest?.build_id || 'default';
-            // Registration gate: both read-time recovery legs (placeholder
-            // audio + Redis chunks) must only run for a book still in the
-            // registry. A deleted book whose disk book.json remains would
-            // otherwise be resurrected here on every client poll. The book
-            // read itself still succeeds; only the recovery writes are
-            // suppressed. (recoverMissingRedisChunks re-checks internally.)
-            const isReg = editorPorts.recoveryCtx && editorPorts.recoveryCtx.isBookRegistered;
-            const bookRegistered = typeof isReg !== 'function' ? true : await isReg(bookId);
-            if (bookRegistered) {
-                try {
-                    const phResult = await placeholderAudio.recoverMissingPlaceholders(buildId, bookId);
-                    if (phResult.created > 0 || phResult.errors.length > 0) {
-                        log(`[BOOK-RECOVER] ${bookId}: ${phResult.created} placeholders created, ${phResult.errors.length} errors`);
-                    }
-                } catch (recErr) {
-                    console.warn(`[BOOK-RECOVER] ${bookId}: placeholder recovery failed: ${recErr.message}`);
-                }
-            } else {
-                log(`[BOOK-RECOVER] ${bookId}: skipped recovery — book not registered`);
-            }
-
-            try {
-                await recoverMissingRedisChunks(editorPorts.recoveryCtx, buildId, bookId);
-            } catch (chunkErr) {
-                console.warn(`[BOOK-RECOVER] ${bookId}: chunk recovery failed: ${chunkErr.message}`);
-            }
+            // 0.6.0 (ORCHESTRATION_V2 этап 4): GET /book is read-only — the
+            // read-time repair (placeholder audio + Redis chunks, read-recovery)
+            // was a legacy-orchestration leg and is removed.
 
             // VBook 4: the model — { manifest, book, bible, locations,
             // behaviour, heroes, hero_issues, chapters, scene_list }. There is

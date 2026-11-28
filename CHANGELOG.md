@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-11-28 — удалена legacy-оркестрация (ветка `chore/remove-legacy-orchestration`)
+
+Нормативно — `animastor-docs` `architecture/ORCHESTRATION_V2.md` §4.3, §11.3, §12 этап 4. Все книги — v2.
+
+**Шаг 4 — развязка.** `workerHealth` перенесён в хост (`src/runtime/worker-health.js`), `GET /worker/counts`
+работает без пакета (`active_scenes` в ответе — всегда 0). `isV2Book` / `book-flag` убраны: v2-ветки работают без
+условия, legacy-ветки удалены (PUT layer-config, cancel-worker — vbook остаётся до задачи H, `DELETE /book/:id/cache`,
+каскад удаления книги без хаба, progress-stream, window-generator, read-repair заглушек, generate API и голосовые
+референсы без `409 book_not_v2`). Колонка `books.orchestration` (DEFAULT `'v2'`, CHECK) оставлена как след миграции.
+
+**Шаг 7 — удаление.**
+- `@animastor/orchestration` **2.0.0** (не опубликован — готов к публикации): удалён `src/legacy/`, корень экспортирует
+  только `gen`, зависимостей нет, тесты — только `test/gen`. `gen.createCommand` больше не отвечает `book_not_v2`.
+- `@animastor/editor` **0.6.0** (готов к публикации): `GET /book` без read-repair (заглушки + Redis-чанки),
+  `read-recovery.cjs` удалён, `editorPorts` без `placeholderAudio` / `recoveryCtx`.
+- `@animastor/player` **0.1.6** (готов к публикации): `GET /chunk/:id` без legacy-передиспетчеризации и без чтения
+  `asset-state:*`; `state` / `activeScenes` из deps не читаются.
+- `@animastor/installer` **0.2.12** (готов к публикации): `job-protocol-v2.cjs` убран из `WORKER_CONFIG_FILES`.
+- Хост: удалены 8 адаптеров портов, `task-handler`, `audio-orchestrator`, `video-orchestrator`, `gpu-retry-policy`,
+  `audio-recovery`, `stage-cancellation`, `cancel-scene-state`, `generation-progress`, `gpu-error-classifier`,
+  `result-publication`, `publication-lock`, `scene-asset-registry`, `runtime-loop`, `gpu-dispatcher`,
+  `orchestration-seams`, `queue-idempotency`, `redis-helpers`, `state/*`, `image/iu-processor`, `startup-resume`,
+  `orchestration-v2/book-flag`, `contracts/runtime-result`, `storage/asset-registry`, репозитории `task-repo`,
+  `generation-cancel-repo`, `iu-image-pointer-repo`.
+- Вынесено живое: `runtime/worker-lanes.js` (поиск полос для v2), `helpers/chunk-store.cjs` (записи чанков для
+  импорта и плеера), `services/book-snapshot.cjs`, `services/window-sessions-startup.js` (VBook-сессии на старте),
+  `image/iu-workflow.js` (`buildIUWorkflow` для v2, `getSceneDuration` для плеера). Retry pending-purge и зеркало
+  liveness воркеров в PG — на таймере composition root (60 с).
+- Роуты: удалены `POST /gpu/task/result`, `POST /gpu/task/error`, `POST /debug/audio/recover`, вся
+  `/debug/runtime/*`, `/debug/scene-states`, `/debug/asset-states`, `/debug/scene-events`, `/debug/asset-registry/*`.
+  Хаб `DELETE /queue/clear` больше не вызывается. `/health` — без `loop`, поле `orch_v2`, 200 по Redis PING.
+  `/metrics` — только метрики процесса.
+- Слой IU `IU_IMAGE_VERSIONED` (pointer-таблицы) удалён: читатели `image/registry` отвечают как при выключенном флаге.
+- PG: миграция `dropLegacyOrchestrationTables()` (`schema.js`) удаляет `generation_tasks`, `asset_states`,
+  `generation_cancellations`, `reconciliation_events`, `cache_entries`, `asset_dependencies`, `output_manifests`,
+  `iu_image_fence_reservations`, `iu_image_pointers`; живая строка → ошибка `legacy_tables_not_empty`, ничего не
+  удаляется. Книги и `book_generation_sessions` не трогаются.
+- Redis: `scripts/purge-legacy-redis.cjs` (dry-run по умолчанию, `--apply --confirm=<host:port/db>`,
+  `--include-hub-v2`). Реестр `tests/architecture/redis-registry.js` сокращён до остатка (94 → 39 семейств).
+- Тесты: удалены тесты удалённого кода; стражи переписаны; новый страж
+  `tests/architecture/legacy-orchestration-removed.test.js`.
+
 ## 2026-11-28 — удалены legacy-эндпоинты генерации и импорта (ветка `chore/remove-legacy-endpoints`)
 
 Нормативно — `animastor-docs` `architecture/ORCHESTRATION_V2.md` §11.3. Решение владельца 27.11: APK ≤ 0.3.4 не

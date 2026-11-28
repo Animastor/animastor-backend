@@ -169,6 +169,8 @@ describe('installer 0.2.10 — whole worker bundle, stale files, start guard', (
 
     it('manifests and WORKER_CONFIG_FILES list worker-logs.cjs; the image profile has a minimum VRAM', () => {
         assert.ok(workerMod.WORKER_CONFIG_FILES.includes('worker-logs.cjs'));
+        // 0.2.12: worker 3.0.0 has no job-protocol-v2.cjs
+        assert.ok(!workerMod.WORKER_CONFIG_FILES.includes('job-protocol-v2.cjs'));
         const dir = path.join(__dirname, '..', 'ai', 'install-manifests');
         for (const [t, f] of [['audio', 'qwen-tts'], ['image', 'qwen-image'], ['video', 'ltx-2.3']]) {
             const m = JSON.parse(fs.readFileSync(path.join(dir, t, `${f}.json`), 'utf8'));

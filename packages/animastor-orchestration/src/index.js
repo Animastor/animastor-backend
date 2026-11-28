@@ -1,21 +1,18 @@
 // ======================================================
-// @animastor/orchestration 1.0.0 — package root
+// @animastor/orchestration 2.0.0 — package root
 // ======================================================
-// 1.0.0 = orchestration v2 (ADR animastor-docs architecture/ORCHESTRATION_V2.md).
+// 2.0.0 = orchestration v2 only (ADR animastor-docs architecture/ORCHESTRATION_V2.md,
+// §12 этап 4). The 0.3.x legacy orchestration that lived in src/legacy/
+// (dispatch / reconcile / lease / FSM, O-2..O-10 ports, host bindings,
+// runtime namespace, orchestrator facade) is removed — a breaking change of
+// the public API, hence the major version.
 //
-//   • Every export of 0.3.x is unchanged: the old orchestration lives verbatim
-//     in src/legacy/ during the migration (removed at ADR stage 4). Its root
-//     uses lazy getters (FSM writers resolve host bindings on access), so the
-//     property DESCRIPTORS are copied, never the values — nothing fires at
-//     require time, exactly as before.
-//   • `gen` — the new v2 core (src/gen/): PG-only, no legacy / Redis /
-//     Express / ComfyUI. Lazy too: requiring the package does not load it.
+//   • `gen` — the v2 core (src/gen/): PG-only, no Redis / Express / ComfyUI.
+//     Lazy: requiring the package does not load it.
 
 'use strict';
 
-const legacy = require('./legacy');
-
-const api = Object.defineProperties({}, Object.getOwnPropertyDescriptors(legacy));
+const api = {};
 Object.defineProperty(api, 'gen', {
     enumerable: true,
     get() { return require('./gen'); },

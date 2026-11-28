@@ -14,7 +14,7 @@ const path = require('path');
 const naming = require('./artifact-naming.cjs');
 
 module.exports = function(app, ctx, deps) {
-    const { image, state, activeScenes, placeholderAudio } = deps;
+    const { image, placeholderAudio } = deps;
 
     // ── Stage 143a (phase 2a) — published-pointer proof ─────────────────
     // The legacy scans in this file run FIRST; this helper is only consulted
@@ -72,12 +72,9 @@ module.exports = function(app, ctx, deps) {
                         ctx.log(`Placeholder audio generation returned ${JSON.stringify(phResult)} for ${req.params.id} — keeping chunk as-is`);
                     }
                 } catch (phErr) {
+                    // 0.1.6: no legacy re-dispatch (hub dedup key + active index) —
+                    // generation starts only by an explicit command (orchestration v2).
                     ctx.log(`Placeholder audio check failed for ${req.params.id}: ${phErr.message} — keeping chunk as-is`);
-                    if (c.chapter_id && c.scene_id) {
-                        const jobKey = `animastor:job:${c.book_id}_${c.chapter_id}_${c.scene_id}_0001:audio`;
-                        await ctx.redis.del(jobKey);
-                        await activeScenes.addActiveScene(ctx.redis, c.book_id, c.chapter_id, c.scene_id);
-                    }
                 }
             }
 
@@ -111,30 +108,19 @@ module.exports = function(app, ctx, deps) {
                     else if (proof.status === 'error') pointerBlocksRepair = true;
                 }
                 if (!hasIuFiles && !pointerBlocksRepair) {
-                    ctx.log(`Missing image file for ${req.params.id} — resetting state for redispatch`);
+                    // 0.1.6: the chunk flag is reset; no legacy re-dispatch (generation
+                    // starts only by an explicit command — orchestration v2).
+                    ctx.log(`Missing image file for ${req.params.id} — image flag reset`);
                     c.image = false;
                     await ctx.redis.set(`animastor:chunk:${req.params.id}`, JSON.stringify(c));
-                    if (c.chapter_id && c.scene_id) {
-                        const jobKey = `animastor:job:${c.book_id}_${c.chapter_id}_${c.scene_id}_0002:image`;
-                        await ctx.redis.del(jobKey);
-                        await activeScenes.addActiveScene(ctx.redis, c.book_id, c.chapter_id, c.scene_id);
-                    }
                 }
             }
 
             const audioReady = !!(c.audio || fs.existsSync(audioPath));
             let imageReady = !!c.image;
             if (!imageReady && c.chapter_id && c.scene_id) {
-                // Check per-asset state for image readiness
-                try {
-                    const assetStates = await state.getAssetStates(ctx.redis, c.book_id, c.chapter_id, c.scene_id);
-                    if (assetStates.image === state.AssetState.READY || assetStates.image === state.AssetState.PLACEHOLDER) {
-                        imageReady = true;
-                        c.image = true;
-                        await ctx.redis.set(`animastor:chunk:${req.params.id}`, JSON.stringify(c));
-                    }
-                } catch (_) {}
-                if (!imageReady) {
+                // (0.1.6: the legacy per-asset Redis state is gone — disk only.)
+                {
                     imageReady = fs.existsSync(imagePath);
                     if (!imageReady) {
                         const iuPrefix = naming.iuImagePrefix(c.book_id, c.chapter_id, c.scene_id);

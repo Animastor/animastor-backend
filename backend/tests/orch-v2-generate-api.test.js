@@ -137,7 +137,7 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
             env: { ORCH_V2_ENABLED: '1', ORCH_V2_UPLOAD_SECRET: SECRET, ORCH_V2_PUBLIC_URL: base, ORCH_V2_PROGRESS_COALESCE_MS: '20' },
             hasFfmpeg: () => true,
             getPool, redis: redisClient, layerConfig, book: vbook, outputDir: config.OUTPUT_DIR,
-            gpuDispatcher: require('../src/runtime/gpu-dispatcher'),
+            gpuDispatcher: require('../src/runtime/worker-lanes'),
             timers: false, log: () => {},
             listenDelaysMs: [50, 100],
             portOverrides: {

@@ -1,10 +1,12 @@
 # @animastor/orchestration
 
-## 1.x — orchestration v2 (`gen`)
+## 2.0.0 — orchestration v2 (`gen`) only
 
-ADR: animastor-docs `architecture/ORCHESTRATION_V2.md`. The new core lives in
-`src/gen/` and is exported as `gen`. The 0.3.x contour described below ships
-unchanged in `src/legacy/` (same root exports) until migration stage 4.
+ADR: animastor-docs `architecture/ORCHESTRATION_V2.md`. The core lives in
+`src/gen/` and is exported as `gen` — the only export of the package root.
+The 0.3.x legacy contour (`src/legacy/`: dispatch / reconcile / lease / FSM,
+O-2..O-10 ports, host bindings, `runtime` namespace, orchestrator facade) is
+removed in 2.0.0 (ADR §12 stage 4). No runtime dependencies.
 
 ```js
 const { gen } = require('@animastor/orchestration');
@@ -50,82 +52,10 @@ video_merge` by `input.merge_parts`; all parts done, no merge → the merge alon
 optional port `inputFiles(job)` → `task.input_files` + `orch.openInput(…)` for
 `GET /internal/gen/jobs/:id/input/:name` (ADR §8.1).
 
-`gen` requires only node builtins and its own files: no `src/legacy`, Redis,
-Express or ComfyUI. Tests: `npm run test:gen` (env `PG_*` of the animastor-test
-stack; refuses a DB not ending in `_test` or port 5432).
+**2.0.0 (stage 4).** `createCommand` no longer reads `books.orchestration`
+(no `409 book_not_v2`): every book is v2 since `006-default-v2`; the column
+stays as a migration trace.
 
-## 0.3.x contour (`src/legacy/`)
-
-Generation orchestration and runtime contour of the Animastor backend,
-physically extracted from the host (`backend/src/orchestration/**` +
-`backend/src/runtime/**` — §32.30; recon:
-`docs/architecture/generation-module-extraction-reconnaissance.md` §32.29).
-
-The package owns:
-
-- the orchestration facade (stage executor + FSM-safe scene writers)
-- the dispatch engine and its lease/quota/retry managers
-- the reconciliation engine and counter reconciliation
-- scene window/scheduler/worker-health
-- the runtime-result emitter/consumer
-- the eight O-2…O-10 port contracts (Persistence, SceneData,
-  PlaceholderAudio, ProgressEvents, AudioFsm, VideoFsm, HubCancel,
-  LayerConfig)
-
-## Dependency direction
-
-```
-backend host → @animastor/orchestration → ports / host-bindings / contracts
-```
-
-The package reaches the host (runtime config, Redis-domain state, media
-facades, S-5 seam registry, artifact root, PW-2 workspace resolver)
-**only** through the composition-root host-bindings seam — no
-`backend/src` require, no storage/book/routes/services, no Redis, no PG,
-no Express inside.
-
-Runtime dependencies: `@animastor/contracts`, `@animastor/generation`,
-`music-metadata`.
-
-## Public API
-
-```js
-const orchestration = require('@animastor/orchestration');
-```
-
-| Export | Kind | Description |
-|---|---|---|
-| orchestration facade | lazy | stage executor + FSM scene writers (begin/plan/dispatch/complete/fail/rollback) |
-| `createRuntimeResultConsumer` | eager | Phase-5 result-reporting consumer |
-| `ports` | eager | `{ persistence, sceneData, placeholderAudio, progressEvents, audioFsm, videoFsm, hubCancel, layerConfig }` |
-| `bindHostModules` | eager | composition-root binding surface |
-| `hostBinding` | eager | host-binding accessor |
-| `runtime` | lazy namespace | `{ scheduler, activeScenes, reconciliation, dispatch, leaseManager, counterReconciliation, metrics, workerHealth, sceneWindow, failureTaxonomy, runtimeResultEmitter }` |
-
-Facade exports are **lazy getters** — the FSM-writer re-exports resolve
-the `stateOps` host binding on access. `Object.defineProperties` on the
-root prevents eager evaluation at `require()` time.
-
-Deep imports (`@animastor/orchestration/runtime/…` etc.) are NOT part of
-the public surface — the exports map exposes only `'.'`.
-
-## Host responsibilities (composition root)
-
-1. Call `bindHostModules(…)` to wire config/state/media/seams/artifact
-   root/PW-2 resolver before accessing any lazy export.
-2. Register `createRuntimeResultConsumer` via
-   `runtimeResultEmitter.setConsumer(…)`.
-
-Without host binding, lazy getters throw on first access. This is
-intentional — the package is a pure domain contour until the composition
-root wires it.
-
-## Tests
-
-```bash
-npm test            # package-own suite (standalone, no backend required)
-```
-
-Backend-side guards: `backend/tests/architecture/physical-move-gate.test.js`
-(PM-G suite) ensures the moved files are gone from `backend/src/runtime`
-and the barrel is not consumed.
+`gen` requires only node builtins and its own files: no Redis, Express or
+ComfyUI. Tests: `npm test` (`test/gen/*.test.js`; env `PG_*` of the
+animastor-test stack; refuses a DB not ending in `_test` or port 5432).

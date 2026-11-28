@@ -50,9 +50,10 @@ injected `editorModel` (VBook boundary — the facade over
 `@animastor/vbook-runtime`'s Book Model). Every host dependency arrives as
 an injected port (`editorPorts`) at registration time, wired at the
 composition root. The `editorPorts` shape is frozen (Phase 2, guard E5):
-`sceneAssetsRepo`, `placeholderAudio`, `auditCoverage`, `promptLimit`,
-`purge`, `resolveOwnership`, `recoveryCtx` — identity pass-through,
-mandatory ports fail-closed.
+`sceneAssetsRepo`, `auditCoverage`, `promptLimit`, `purge`,
+`resolveOwnership`, `rollbackOwnership`, `outputRoot` — identity
+pass-through, mandatory ports fail-closed. (0.6.0: `placeholderAudio` and
+`recoveryCtx` are gone with the read-time repair of `GET /book`.)
 
 ## Standalone use (repository checkout)
 
@@ -71,13 +72,11 @@ const editorModel = createEditorModel({ bookModel, persistBook: book.saveBookBun
 const editorPorts = createEditorPorts({
     deps: {
         sceneAssetsRepo,          // PG scene-assets (bumpSceneVersions/setDirtyUnitIds)
-        placeholderAudio,         // read-time placeholder recovery
         auditCoverage,            // source-coverage audit service
         promptLimit,              // IMAGE_PROMPT_MAX_CHARS
         purge,                    // entity-cleanup purgeScene/purgeUnit
         resolveOwnership,         // workspace-ownership attach (POST /book/blank)
         rollbackOwnership,        // registry-row rollback on failed blank commit
-        recoveryCtx,              // read-recovery ctx (redis chunk repair)
         outputRoot,               // artifact root (read only): state of hero reference files
     },
 });

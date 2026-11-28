@@ -69,8 +69,9 @@ describe('О2 — placeholder read-repair is a no-op (every book is v2)', functi
         expect((await query(`SELECT 1 FROM scene_assets WHERE book_id = $1`, [V2])).rows).to.have.length(0);
     });
 
-    it('the editor GET /book leg still calls the same function (published editor <= 0.5.x)', () => {
+    it('the editor of this repo (0.6.0) no longer calls it from GET /book (read-repair removed)', () => {
         const src = fs.readFileSync(path.join(__dirname, '..', '..', 'packages', 'animastor-editor', 'src', 'editor-routes.cjs'), 'utf8');
-        expect(src).to.include('placeholderAudio.recoverMissingPlaceholders(buildId, bookId)');
+        expect(src).to.not.include('recoverMissingPlaceholders');
+        expect(src).to.not.include('recoverMissingRedisChunks');
     });
 });

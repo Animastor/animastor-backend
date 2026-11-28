@@ -229,7 +229,8 @@ describe('S6: Generation host boundary (ports)', () => {
             expect(() => bookPort.tokensToString(['x'])).to.throw(/not wired/);
             expect(() => bookPort.setBookData({ collectSceneUnits: () => [] })).to.throw(/must implement tokensToString/);
         } finally {
-            if (wired.dispatch) dispatchPort.setDispatchTransport({ dispatch: (spec) => require('../../src/runtime/gpu-dispatcher').sendUnified(spec) });
+            // (DispatchTransport is not wired by the host since 2026-11-28 — its
+            // adapter, the protocol-2 gpu-dispatcher, is gone; nothing to restore.)
             if (wired.config) require('../../src/config/generation-config-adapter').bindGenerationConfig();
             if (wired.profile) profilePort.setProfileStore({ getAssemblyProfile: require('../../src/services/ai-loader').getAssemblyProfile });
             if (wired.book) bookPort.setBookData({
@@ -268,15 +269,17 @@ describe('S6: Generation host boundary (ports)', () => {
             }
         }
         expect(offenders, 'port wiring leaked outside the composition root').to.deep.equal([]);
-        // the mocha fixture mirrors the production wiring (vbook-test-bindings pattern)
+        // the mocha fixture mirrors the production wiring (vbook-test-bindings pattern);
+        // 2026-11-28: DispatchTransport is wired by neither (no host adapter left)
         const fixture = readSource(path.join(BACKEND_SRC, '..', 'tests', 'generation-test-bindings.cjs'));
-        for (const re of setters) expect(fixture, 'test bindings must mirror the production port wiring').to.match(re);
+        const backendSrc = readSource(path.join(BACKEND_SRC, 'backend.cjs'));
+        for (const re of setters.slice(1)) expect(fixture, 'test bindings must mirror the production port wiring').to.match(re);
+        expect(fixture).to.not.match(setters[0]);
+        expect(backendSrc).to.not.match(setters[0]);
     });
 
     it('S6-C: the host adapters implement the port contracts (shape compatibility, live)', () => {
-        // DispatchTransport ← gpu-dispatcher.sendUnified
-        const gpuDispatcher = require('../../src/runtime/gpu-dispatcher');
-        expect(gpuDispatcher.sendUnified).to.be.a('function');
+        // (DispatchTransport ← gpu-dispatcher.sendUnified — the adapter is gone, 2026-11-28)
         // ProfileStore ← ai-loader.getAssemblyProfile
         const aiLoader = require('../../src/services/ai-loader');
         expect(aiLoader.getAssemblyProfile).to.be.a('function');
@@ -365,7 +368,7 @@ describe('S6: Generation host boundary (ports)', () => {
             'dispatch-transport': [
                 'packages/animastor-generation/src/providers/comfyui-provider.js', // domain owner (S-3 provider seam)
                 'packages/animastor-generation/src/index.js',                      // package entrypoint (materializes the ports namespace)
-                'backend/src/backend.cjs',                                         // wiring
+                // (backend.cjs no longer wires it — 2026-11-28, этап 4)
             ],
             'generation-config': [
                 'packages/animastor-generation/src/core/default-registrations.js', // domain owner (S-2 registration)
@@ -436,10 +439,10 @@ describe('S6: Generation host boundary (ports)', () => {
         expect(offenders, 'ports are consumed by Generation Core only (host adapters wire, they do not consume)').to.deep.equal([]);
     });
 
-    it('S6-G: production wiring exists in backend.cjs for all four ports (composition root, S5-C convention)', () => {
+    it('S6-G: production wiring exists in backend.cjs for three ports (DispatchTransport is gone with protocol 2)', () => {
         const backend = readSource(path.join(BACKEND_SRC, 'backend.cjs'));
         expect(backend).to.include('bindGenerationConfig()');
-        expect(backend).to.include("require('@animastor/generation').ports.dispatchTransport");
+        expect(backend).to.not.include("require('@animastor/generation').ports.dispatchTransport");
         expect(backend).to.include("require('@animastor/generation').ports.profileStore");
         expect(backend).to.include("require('@animastor/generation').ports.bookData");
         // wired BEFORE the first generation module load (default-registrations

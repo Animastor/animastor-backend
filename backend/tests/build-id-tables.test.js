@@ -63,7 +63,7 @@ describe('PG tables with build_id — book-repo and book-deletion agree with sch
         const cols = schemaColumns(read('storage/postgres/schema.js'));
         const withBoth = [...cols].filter(([, c]) => c.has('build_id') && c.has('book_id')).map(([t]) => t).sort();
         // the parser must see the tables it is meant to see (a broken parser must not pass silently)
-        expect(withBoth).to.include.members(['scenes', 'image_units', 'iu_image_pointers']);
+        expect(withBoth).to.include.members(['scenes', 'image_units', 'scene_assets']);
         expect(withBoth.filter((t) => !repo.includes(t)), 'tables missing from BUILD_ID_TABLES').to.deep.equal([]);
     });
 });

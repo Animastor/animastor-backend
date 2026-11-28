@@ -10,9 +10,11 @@
 //                chat messages, event log)
 //                Survives restarts. System recovers from Postgres after crash.
 //
-//   Redis     → Runtime transport (queues, heartbeats, leases, realtime coordination)
+//   Redis     → Runtime transport (heartbeats, chunk records, pub/sub, locks)
 //               Ephemeral by design (now persisted via volume for faster restart).
-//               NOT the source of truth — runtime state only.
+//               NOT the source of truth — runtime state only. (The Redis asset
+//               registry animastor:assets:* went with the legacy orchestration,
+//               2026-11-28.)
 //
 //   Filesystem → Asset storage (audio MP3, image PNG, video MP4)
 //                Immutable output files keyed by build/scene/asset IDs.
@@ -20,7 +22,6 @@
 const postgres = require('./postgres');
 module.exports = {
     filesystem: require('./filesystem-store'),
-    registry: require('./asset-registry'),
     bookEventLog: require('../services/book-event-log'),
     bookSource: require('../services/book-source'),
     bookSync: require('../services/book-sync'),

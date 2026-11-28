@@ -46,7 +46,7 @@ module.exports = function registerCacheRoutes(app, ctx) {
         }
     });
 
-    // DELETE /api/v1/book/:bookId/cache — wipe build dirs, Redis keys, PG cache rows, hub queue.
+    // DELETE /api/v1/book/:bookId/cache — stop the book's v2 work, wipe build dirs, Redis chunk keys, PG derived rows.
     app.delete('/api/v1/book/:bookId/cache', async (req, res) => {
         try {
             const { bookId } = req.params;
@@ -109,12 +109,6 @@ module.exports = function registerCacheRoutes(app, ctx) {
             const pgTables = [
                 'image_units',
                 'scenes',
-                'asset_states',
-                'asset_dependencies',
-                'generation_tasks',
-                'reconciliation_events',
-                'output_manifests',
-                'cache_entries',
                 'agent_sessions',
                 'book_generation_sessions',
                 'scene_assets',
@@ -128,17 +122,6 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 // NOTE: 'books', 'book_source', 'book_snapshots', 'book_events'
                 // are NOT deleted on cache clear — they are book identity data.
             ];
-            // Stage 143a — versioned iu_image contour (GC of the pointers and
-            // the durable fence reservations when a book's cache is wiped, so
-            // no pointer survives its files). Flag-gated: a flag-OFF process
-            // never queries tables that do not exist (condition 2).
-            try {
-                if (require('../../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled()) {
-                    pgTables.push('iu_image_fence_reservations', 'iu_image_pointers');
-                }
-            } catch (flagErr) {
-                console.warn(`[CACHE] versioned iu_image flag check failed: ${flagErr.message}`);
-            }
             for (const table of pgTables) {
                 try {
                     await storage.postgres.query(`DELETE FROM ${table} WHERE book_id = $1`, [bookId]);

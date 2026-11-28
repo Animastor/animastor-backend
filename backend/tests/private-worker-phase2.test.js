@@ -33,13 +33,8 @@
 //     actively claimed entry untouched                                   ok
 //
 //   Backend hardening
-//     dispatch_id is crypto.randomBytes-backed (128-bit hex)             ok
-//     dispatcher resolves workspace server-side; client value overwritten
-//     routing: private worker exists → workspace queue, else system pool
-//     /gpu/task/result|error re-verify job→book→workspace (403 mismatch)
-//     callback hop key-gated when GPU_HUB_API_KEY configured             401
-//     generation_tasks.workspace_id migration + backfill (PW-2)          ok
-//     generation_tasks claimer persistence (worker_id/workspace_id)      ok
+//     (2026-11-28: the backend dispatch / callback / generation_tasks rows of
+//      this matrix went with the legacy orchestration and protocol 2)
 //     Redis mirror loss → hub fails closed; mirror rebuild heals         401/ok
 //     workspace-scoped /queue/clear leaves other workspaces intact       ok
 
@@ -51,12 +46,9 @@ const path = require('path');
 
 const { query } = require('../src/storage/postgres/database');
 const { runMigrations } = require('../src/storage/postgres/schema');
-const dispatchEngine = require('../node_modules/@animastor/orchestration/src/legacy/runtime/dispatch-engine');
 const workerAuth = require('../src/services/worker-auth');
 const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
-const taskRepo = require('../src/storage/postgres/repositories/task-repo');
 const { createMockRedis } = require('./mocks/redis-mock');
-const qidem = require('../src/helpers/queue-idempotency.cjs');
 
 // B7/R-2 (pre-split decoupling, 2026-10): hub via npm devDependency.
 const hub = require('@animastor/gpu-hub/gpu-hub.js');
@@ -587,143 +579,12 @@ describe('Private worker Phase 2 — GPU hub ownership boundary', () => {
 // BACKEND: dispatch hardening, routing, callback re-verification, migration
 // ══════════════════════════════════════════════════════════════════════════
 
-describe('Private worker Phase 2 — backend dispatch & callback hardening', () => {
+describe('Private worker Phase 2 — worker bundle contract', () => {
 
-    describe('dispatch_id entropy (crypto hardening)', () => {
-        it('generates 128-bit hex randomness and never collides', () => {
-            const seen = new Set();
-            for (let i = 0; i < 1000; i++) {
-                const token = dispatchEngine.generateDispatchToken();
-                expect(token).to.match(/^dispatch-\d+-[0-9a-f]{32}$/);
-                seen.add(token);
-            }
-            expect(seen.size).to.equal(1000);
-        });
-    });
-
-    describe('server-derived workspace routing (gpu-dispatcher)', () => {
-        const WS_A = '11111111-1111-4111-8111-111111111111';
-        const WS_B = '22222222-2222-4222-8222-222222222222';
-        const repoPaths = [
-            '../src/storage/postgres/repositories/book-repo',
-            '../src/storage/postgres/repositories/worker-repo',
-        ];
-        const savedCache = new Map();
-        let gpuDispatcher;
-        let sentBodies;
-        let originalFetch;
-
-        function stub(request, exports) {
-            const resolved = require.resolve(request);
-            require.cache[resolved] = { exports, id: resolved, filename: resolved, loaded: true };
-        }
-
-        beforeEach(() => {
-            savedCache.clear();
-            for (const request of repoPaths) {
-                const resolved = require.resolve(request);
-                savedCache.set(resolved, require.cache[resolved]);
-                delete require.cache[resolved];
-            }
-            const dispatcherPath = require.resolve('../src/runtime/gpu-dispatcher');
-            savedCache.set(dispatcherPath, require.cache[dispatcherPath]);
-            delete require.cache[dispatcherPath];
-            gpuDispatcher = require('../src/runtime/gpu-dispatcher');
-            gpuDispatcher.clearRoutingCaches();
-
-            sentBodies = [];
-            originalFetch = global.fetch;
-            global.fetch = async (url, options) => {
-                sentBodies.push(JSON.parse(options.body));
-                return { ok: true, status: 200 };
-            };
-        });
-
-        afterEach(() => {
-            global.fetch = originalFetch;
-            for (const [resolved, saved] of savedCache) {
-                if (saved) require.cache[resolved] = saved;
-                else delete require.cache[resolved];
-            }
-        });
-
-        function stubRepos({ bookWorkspace, hasPrivateWorker }) {
-            stub('../src/storage/postgres/repositories/book-repo', {
-                getWorkspaceId: async () => bookWorkspace,
-            });
-            stub('../src/storage/postgres/repositories/worker-repo', {
-                hasActivePrivateWorkerOfType: async () => hasPrivateWorker,
-            });
-        }
-
-        it('routes to the workspace queue when the workspace has an active private worker', async () => {
-            stubRepos({ bookWorkspace: WS_A, hasPrivateWorker: true });
-            const result = await gpuDispatcher.sendUnified({
-                job_id: 'bookA_ch1_sc1_0001:audio',
-                params: {},
-                job_type: 'audio',
-                build_id: 'b1',
-                dispatch_id: 'dispatch-x',
-            });
-            expect(result.sent).to.equal(true);
-            expect(sentBodies[0].workspace_id).to.equal(WS_A);
-        });
-
-        it('keeps the system pool when the workspace has NO private worker of the type', async () => {
-            stubRepos({ bookWorkspace: WS_A, hasPrivateWorker: false });
-            await gpuDispatcher.sendUnified({
-                job_id: 'bookA_ch1_sc1_0001:audio',
-                params: {},
-                job_type: 'audio',
-                build_id: 'b1',
-                dispatch_id: 'dispatch-x',
-            });
-            expect(sentBodies[0].workspace_id).to.equal(null);
-        });
-
-        it('keeps the system pool for unattached books', async () => {
-            stubRepos({ bookWorkspace: null, hasPrivateWorker: true });
-            await gpuDispatcher.sendUnified({
-                job_id: 'bookA_ch1_sc1_0001:audio',
-                params: {},
-                job_type: 'audio',
-                build_id: 'b1',
-                dispatch_id: 'dispatch-x',
-            });
-            expect(sentBodies[0].workspace_id).to.equal(null);
-        });
-
-        it('OVERWRITES any client-supplied workspace_id — it is never trusted', async () => {
-            stubRepos({ bookWorkspace: WS_A, hasPrivateWorker: true });
-            await gpuDispatcher.sendUnified({
-                job_id: 'bookA_ch1_sc1_0001:audio',
-                params: {},
-                job_type: 'audio',
-                build_id: 'b1',
-                dispatch_id: 'dispatch-x',
-                workspace_id: WS_B,
-            });
-            expect(sentBodies[0].workspace_id).to.equal(WS_A);
-        });
-
-        it('degrades to the system pool when workspace resolution throws', async () => {
-            stub('../src/storage/postgres/repositories/book-repo', {
-                getWorkspaceId: async () => { throw new Error('pg down'); },
-            });
-            stub('../src/storage/postgres/repositories/worker-repo', {
-                hasActivePrivateWorkerOfType: async () => true,
-            });
-            const result = await gpuDispatcher.sendUnified({
-                job_id: 'bookA_ch1_sc1_0001:audio',
-                params: {},
-                job_type: 'audio',
-                build_id: 'b1',
-                dispatch_id: 'dispatch-x',
-            });
-            expect(result.sent).to.equal(true);
-            expect(sentBodies[0].workspace_id).to.equal(null);
-        });
-    });
+    // (2026-11-28, ORCHESTRATION_V2 этап 4: «dispatch_id entropy» and
+    // «server-derived workspace routing (gpu-dispatcher)» tested the legacy
+    // dispatch engine / protocol-2 dispatcher — removed with them. The lane
+    // lookups live on in runtime/worker-lanes.js — worker-share-grants.test.js.)
 
     describe('worker.cjs Bearer support (source contract)', function () {
         // B7: conditional — the worker bundle moves to its own repo at the
@@ -742,215 +603,8 @@ describe('Private worker Phase 2 — backend dispatch & callback hardening', () 
     });
 });
 
-describe('Private worker Phase 2 — PG persistence & callback re-verification', () => {
-    const WS_NAME_A = `pwphase2_ws_a_${stamp}`;
-    const WS_NAME_B = `pwphase2_ws_b_${stamp}`;
-    const BOOK_A = `pwphase2_book_a_${stamp}`;
-    let wsA, wsB;
-    let redis;
-    let server, base;
-
-    async function cleanup() {
-        await query(`DELETE FROM generation_tasks WHERE book_id = $1`, [BOOK_A]);
-        await query(`DELETE FROM books WHERE book_id = $1`, [BOOK_A]);
-        await query(`DELETE FROM workspaces WHERE name IN ($1, $2)`, [WS_NAME_A, WS_NAME_B]);
-    }
-
-    before(async function () {
-        this.timeout(60000);
-        await runMigrations();
-        await cleanup();
-
-        const wsRows = await query(
-            `INSERT INTO workspaces (name) VALUES ($1), ($2) RETURNING id, name`,
-            [WS_NAME_A, WS_NAME_B]
-        );
-        for (const row of wsRows.rows) {
-            if (row.name === WS_NAME_A) wsA = row.id;
-            else wsB = row.id;
-        }
-        await query(
-            `INSERT INTO books (book_id, workspace_id, title) VALUES ($1, $2, 'pw2 test book')`,
-            [BOOK_A, wsA]
-        );
-
-        redis = createMockRedis();
-        const app = express();
-        app.use(express.json({ limit: '50mb' }));
-        const registerGenerationRoutes = require('../src/routes/generation-routes.cjs');
-        registerGenerationRoutes(app, redis, {
-            config: {
-                GPU_HUB_API_KEY: 'cb-key',
-                OUTPUT_DIR: '/tmp/pw2-test-output',
-                HUB_URL: 'http://gpu-hub.invalid',
-            },
-            utils: { log: () => {} },
-            orchestrator: { failStage: async () => ({ failed: true }) },
-            // GPU retry policy (2026-11-02): /gpu/task/error reaches failStage
-            // through the injected policy (composition root wires the real one).
-            gpuRetryPolicy: { handleStageFailure: async () => ({ failed: true }) },
-            taskHandler: { handleTaskResult: async () => {} },
-            book: { loadBook: () => null },
-            playerModel: { loadBook: () => null },
-            // Stage 133: the callback route resolves the fence from the
-            // immutable dispatch receipt, so the port must be wired here as it
-            // is in the composition root (backend.cjs).
-            queueIdempotency: qidem,
-        });
-        await new Promise((resolve) => {
-            server = app.listen(0, () => {
-                app.__port = server.address().port;
-                base = `http://127.0.0.1:${app.__port}`;
-                resolve();
-            });
-        });
-    });
-
-    after(async function () {
-        this.timeout(30000);
-        if (server) server.close();
-        await cleanup();
-    });
-
-    function callbackBody(overrides = {}) {
-        return {
-            job_id: `${BOOK_A}_ch1_sc1_0001:audio`,
-            build_id: 'build-1',
-            dispatch_id: 'dispatch-cb-1',
-            protocol_version: 2,
-            result_base64: 'data:audio/mp3;base64,QUJD',
-            ...overrides,
-        };
-    }
-
-    async function seedDispatchMeta() {
-        await dispatchEngine.setDispatchMetadata(redis, BOOK_A, 'ch1', 'sc1', 'audio', {
-            dispatch_id: 'dispatch-cb-1',
-            stage: 'audio',
-            started_at: Date.now(),
-            worker: 'scheduler',
-            retry_attempt: 0,
-            status: 'dispatched',
-        });
-        // Stage 133: the same dispatch owns an immutable receipt (the proof the
-        // callback route requires before it may publish anything).
-        await redis.set(
-            qidem.dispatchReceiptKey('dispatch-cb-1', `${BOOK_A}_ch1_sc1_0001:audio`),
-            'a1b2c3d4'.repeat(8),
-            'EX', qidem.IDEM_RECEIPT_TTL_S,
-        );
-    }
-
-    it('PW-2 migration: generation_tasks.workspace_id exists and backfills from books', async () => {
-        const { rows } = await query(`
-            SELECT data_type FROM information_schema.columns
-            WHERE table_name = 'generation_tasks' AND column_name = 'workspace_id'
-        `);
-        expect(rows).to.have.length(1);
-        expect(rows[0].data_type).to.equal('uuid');
-
-        const taskId = `pw2-backfill-${stamp}`;
-        await query(`
-            INSERT INTO generation_tasks (task_id, book_id, task_type)
-            VALUES ($1, $2, 'audio')
-        `, [taskId, BOOK_A]);
-        await runMigrations();
-        const { rows: taskRows } = await query(
-            `SELECT workspace_id FROM generation_tasks WHERE task_id = $1`, [taskId]
-        );
-        expect(taskRows[0].workspace_id).to.equal(wsA);
-        await query(`DELETE FROM generation_tasks WHERE task_id = $1`, [taskId]);
-    });
-
-    it('createTask persists the server-derived workspace_id; recordTaskClaim records the claimer', async () => {
-        const taskId = `pw2-claim-${stamp}`;
-        await taskRepo.createTask(taskId, BOOK_A, 'ch1', 'sc1', 'audio', null, wsA);
-        await taskRepo.updateTaskStatus(taskId, 'running');
-
-        const updated = await taskRepo.recordTaskClaim(BOOK_A, 'ch1', 'sc1', 'audio', 'worker-xyz', wsA);
-        expect(updated).to.equal(1);
-
-        const { rows } = await query(
-            `SELECT worker_id, workspace_id FROM generation_tasks WHERE task_id = $1`, [taskId]
-        );
-        expect(rows[0].worker_id).to.equal('worker-xyz');
-        expect(rows[0].workspace_id).to.equal(wsA);
-        await query(`DELETE FROM generation_tasks WHERE task_id = $1`, [taskId]);
-    });
-
-    it('callback hop is key-gated when GPU_HUB_API_KEY is configured', async () => {
-        const res = await fetch(`${base}/gpu/task/result`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(callbackBody()),
-        });
-        expect(res.status).to.equal(401);
-    });
-
-    it('/gpu/task/result rejects a forwarded workspace that does not own the book (403)', async () => {
-        const res = await fetch(`${base}/gpu/task/result`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': 'cb-key' },
-            body: JSON.stringify(callbackBody({ workspace_id: wsB, worker_id: 'attacker' })),
-        });
-        expect(res.status).to.equal(403);
-        expect((await res.json()).error).to.equal('workspace_mismatch');
-    });
-
-    it('/gpu/task/error rejects a workspace mismatch too (403)', async () => {
-        const res = await fetch(`${base}/gpu/task/error`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': 'cb-key' },
-            body: JSON.stringify({
-                job_id: `${BOOK_A}_ch1_sc1_0001:audio`,
-                build_id: 'build-1',
-                dispatch_id: 'dispatch-cb-1',
-                protocol_version: 2,
-                reason: 'worker_error',
-                workspace_id: wsB,
-            }),
-        });
-        expect(res.status).to.equal(403);
-    });
-
-    it('/gpu/task/result accepts the owning workspace and persists the claimer', async () => {
-        const taskId = `pw2-cb-${stamp}`;
-        await taskRepo.createTask(taskId, BOOK_A, 'ch1', 'sc1', 'audio', null, wsA);
-        await taskRepo.updateTaskStatus(taskId, 'running');
-        await seedDispatchMeta();
-
-        const res = await fetch(`${base}/gpu/task/result`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': 'cb-key' },
-            body: JSON.stringify(callbackBody({ workspace_id: wsA, worker_id: 'worker-claim-1' })),
-        });
-        expect(res.status).to.equal(200);
-        expect((await res.json()).ok).to.equal(true);
-
-        const { rows } = await query(
-            `SELECT worker_id FROM generation_tasks WHERE task_id = $1`, [taskId]
-        );
-        expect(rows[0].worker_id).to.equal('worker-claim-1');
-        await query(`DELETE FROM generation_tasks WHERE task_id = $1`, [taskId]);
-    });
-
-    it('system-lane callback (no workspace forwarded) stays accepted for attached books', async () => {
-        await seedDispatchMeta();
-        const res = await fetch(`${base}/gpu/task/error`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': 'cb-key' },
-            body: JSON.stringify({
-                job_id: `${BOOK_A}_ch1_sc1_0001:audio`,
-                build_id: 'build-1',
-                dispatch_id: 'dispatch-cb-1',
-                protocol_version: 2,
-                reason: 'worker_error',
-            }),
-        });
-        expect(res.status).to.equal(200);
-        expect((await res.json()).ok).to.equal(true);
-    });
-});
+// (2026-11-28, этап 4: «PG persistence & callback re-verification» tested the
+// protocol-2 callbacks /gpu/task/result|error and generation_tasks — removed.)
 
 describe('Private worker Phase 2 — mirror loss fails closed and heals', () => {
     const stamp2 = `pwphase2mirror${Date.now()}`;

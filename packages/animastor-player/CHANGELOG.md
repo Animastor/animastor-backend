@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.6 (2026-11-28, не опубликован — готов к публикации)
+
+Removed with the legacy orchestration (animastor-docs `ORCHESTRATION_V2.md` §12 stage 4):
+
+- `GET /api/v1/chunk/:id` no longer re-dispatches through the legacy runtime (it deleted the
+  hub dedup key `animastor:job:*` and re-added the scene to the active index) and no longer reads
+  the legacy per-asset Redis state (`asset-state:*`) for image readiness — files on disk only.
+  Generation starts only by an explicit command (orchestration v2).
+- The player deps `state` and `activeScenes` are no longer read (a host that still passes them
+  is not rejected).
+
 ## 0.1.5 (2026-11-18, unpublished)
 
 `@animastor/vbook-runtime` ^0.5.0 (VBook 4). The reader paths are unchanged; the

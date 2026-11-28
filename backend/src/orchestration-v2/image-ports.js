@@ -4,8 +4,8 @@
 // Every port CALLS existing category-B code; no prompt / workflow / naming
 // logic is copied here:
 //   planUnits     ← vbook-runtime collectScenes + image/registry.collectSceneUnits
-//                   + image/iu-processor.buildIUWorkflow (the same function the
-//                   legacy dispatch uses → byte-for-byte the same workflow)
+//                   + image/iu-workflow.buildIUWorkflow (the workflow the legacy
+//                   dispatch sent, moved out of iu-processor on 2026-11-28)
 //   buildPayload  ← the workflow snapshot taken by planUnits (input.workflow_json)
 //   artifactPath  ← @animastor/generation artifactNaming.sceneImageName + getOutputPath
 //                   ({OUTPUT_DIR}/{build}/{book}_{chapter}_{scene}_{unit_id}.png — the
@@ -37,7 +37,7 @@ const SAFE_UNIT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 function deps(overrides = {}) {
     return {
         book: overrides.book || (() => { throw new Error('image-ports: deps.book (loadBook/collectScenes) is required'); })(),
-        iuProcessor: overrides.iuProcessor || require('../image/iu-processor'),
+        iuProcessor: overrides.iuProcessor || require('../image/iu-workflow'),
         registry: overrides.registry || require('../image/registry'),
         helpers: overrides.helpers || require('../image/helpers'),
         artifactNaming: overrides.artifactNaming || require('@animastor/generation').artifactNaming,

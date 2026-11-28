@@ -12,31 +12,29 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const BACKEND_SRC = path.join(REPO_ROOT, 'backend', 'src');
 
 // ── Orchestration package relocation (§32.30 — physical move LANDED) ─────
-// The runtime/orchestration contour now lives in
-// packages/animastor-orchestration (host-stays gpu-dispatcher/runtime-loop/
-// orchestration-seams/job-schema remain in backend/src/runtime). Guards that
-// scan "the two tiers" must scan the PACKAGE dirs; rel()-style allowlist
-// strings use the ORCH_PKG_REL prefix. Resolve the CURRENT physical
-// location — canonical package path once landed, legacy backend paths
-// before — so suites stay green through both states.
+// The runtime/orchestration contour lived in packages/animastor-orchestration/
+// src/legacy until 2026-11-28 (ORCHESTRATION_V2 §12 этап 4, шаг 7): it is
+// deleted. ORCH_PKG_SRC is now the whole package source (src/index.js + the v2
+// core src/gen/); there are no "two tiers" any more — tierDirs() is empty, so
+// suites that scanned the tiers scan nothing (and assert the absence).
 const ORCH_PKG_DIR = fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-orchestration'))
     ? path.join(REPO_ROOT, 'packages', 'animastor-orchestration')
     : null;
 const ORCH_PKG_SRC = ORCH_PKG_DIR
-    ? path.join(ORCH_PKG_DIR, 'src', 'legacy')
+    ? path.join(ORCH_PKG_DIR, 'src')
     : path.join(BACKEND_SRC, 'orchestration');
-const ORCH_PKG_RUNTIME_DIR = path.join(ORCH_PKG_SRC, 'runtime');
-const ORCH_PKG_ORCH_DIR = path.join(ORCH_PKG_SRC, 'orchestration');
-const ORCH_PKG_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src/legacy' : 'backend/src/orchestration';
+const ORCH_PKG_LEGACY_DIR = ORCH_PKG_DIR ? path.join(ORCH_PKG_DIR, 'src', 'legacy') : null;
+const ORCH_PKG_RUNTIME_DIR = path.join(ORCH_PKG_SRC, 'legacy', 'runtime');
+const ORCH_PKG_ORCH_DIR = path.join(ORCH_PKG_SRC, 'legacy', 'orchestration');
+const ORCH_PKG_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src' : 'backend/src/orchestration';
 const ORCH_PKG_RUNTIME_REL = ORCH_PKG_DIR ? 'packages/animastor-orchestration/src/legacy/runtime' : 'backend/src/runtime';
 
-/** The two tier dirs at their CURRENT physical location (package first). */
+/** The legacy tier dirs that still exist (none after этап 4). */
 function tierDirs() {
-    if (ORCH_PKG_DIR) return [ORCH_PKG_RUNTIME_DIR, ORCH_PKG_ORCH_DIR];
-    return [path.join(BACKEND_SRC, 'runtime'), path.join(BACKEND_SRC, 'orchestration')];
+    return [ORCH_PKG_RUNTIME_DIR, ORCH_PKG_ORCH_DIR].filter((d) => fs.existsSync(d));
 }
 
-/** All tier source files (the moved contour, wherever it physically lives). */
+/** All tier source files (empty after этап 4). */
 function tierFiles() {
     return tierDirs().flatMap((d) => listSourceFiles(d));
 }
@@ -157,6 +155,7 @@ module.exports = {
     BACKEND_SRC,
     ORCH_PKG_DIR,
     ORCH_PKG_SRC,
+    ORCH_PKG_LEGACY_DIR,
     ORCH_PKG_RUNTIME_DIR,
     ORCH_PKG_ORCH_DIR,
     ORCH_PKG_REL,

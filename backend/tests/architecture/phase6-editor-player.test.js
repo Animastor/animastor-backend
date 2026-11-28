@@ -276,7 +276,6 @@ describe('T6: contour routes do not gain new implementation-detail deps', () => 
             // own pure helpers. The dead scene-restoration edge was deleted
             // with the split (audit F3).
             './scene-patch-utils.cjs',
-            './read-recovery.cjs',
             // VBook 4 step 4: pure hero helpers of the package (computed hero
             // fields of GET /book, legacy body keys of PUT /book).
             './hero-api.cjs',

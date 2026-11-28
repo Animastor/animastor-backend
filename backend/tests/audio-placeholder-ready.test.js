@@ -86,8 +86,6 @@ function harness(root, opts = {}) {
         '../storage/postgres/repositories/scene-assets-repo': {
             getAsset: async () => (opts.asset === undefined ? { status: 'ready', path: paths(root).canonical } : opts.asset),
         },
-        '../state': { getAssetStates: async () => ({ audio: opts.assetState || 'generating' }) },
-        '../helpers/queue-idempotency.cjs': { releaseTaskDoneIfOrphan: async () => false },
     });
     return { validation, chunks, generation };
 }

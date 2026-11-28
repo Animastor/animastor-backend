@@ -3,12 +3,12 @@
 // Split out of book-routes.cjs (Architectural Debt #3, sub-registrar pattern).
 //
 // ctx fields used here:
-//   { config, txtImporter, lazyBook, placeholderAudio, taskHandler, log }
+//   { config, txtImporter, lazyBook, placeholderAudio, bookSnapshot, log }
 //
 // Multipart upload ingestion is POST /book/import (import-routes.cjs).
 
 module.exports = function registerParseRoutes(app, ctx) {
-    const { config, txtImporter, lazyBook, placeholderAudio, taskHandler, log } = ctx;
+    const { config, txtImporter, lazyBook, placeholderAudio, bookSnapshot, log } = ctx;
 
     // POST /api/v1/book/:bookId/lazy-parse — parse next window of chapters.
     app.post('/api/v1/book/:bookId/lazy-parse', async (req, res) => {
@@ -87,7 +87,7 @@ module.exports = function registerParseRoutes(app, ctx) {
     app.post('/api/v1/book/:bookId/snapshot', async (req, res) => {
         try {
             const { bookId } = req.params;
-            const result = await taskHandler.saveBookSnapshot(bookId);
+            const result = await bookSnapshot.saveBookSnapshot(bookId);
             if (!result) return res.status(404).json({ error: 'Book not found' });
             return res.json({ saved: true, path: result });
         } catch (err) {

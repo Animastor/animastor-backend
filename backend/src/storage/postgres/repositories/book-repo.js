@@ -169,8 +169,7 @@ async function lastOpenedByWorkspace(workspaceId) {
  * layer boundary) — change both together.
  */
 const BUILD_ID_TABLES = Object.freeze([
-    'scenes', 'output_manifests', 'image_units', 'scene_assets',
-    'iu_image_pointers', 'iu_image_fence_reservations',
+    'scenes', 'image_units', 'scene_assets',
 ]);
 
 /**

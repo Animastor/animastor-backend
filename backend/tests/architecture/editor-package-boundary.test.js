@@ -23,7 +23,7 @@
 //         exposes EXACTLY the four public factories — createEditorModel,
 //         createEditorRoutes, createEntityCrudRoutes, createEditorPorts —
 //         nothing more. The frozen 8-port seam factory is public; internal
-//         helpers (scene-patch-utils, read-recovery, entity-id,
+//         helpers (scene-patch-utils, entity-id,
 //         cyr-latin-map) are NOT.
 //   PB4 — No reverse imports: no package source file requires the host
 //         backend or any other @animastor package; the require closure of
@@ -142,7 +142,8 @@ describe('PB3: the package root exposes exactly the public API', () => {
         }
     });
 
-    it('the ports factory is the frozen 9-port seam (no expansion)', () => {
+    it('the ports factory is the frozen 7-port seam (no expansion)', () => {
+        // 0.6.0 (2026-11-28): placeholderAudio / recoveryCtx (GET /book read-repair) are gone
         const ports = api.createEditorPorts({
             deps: {
                 sceneAssetsRepo: {}, placeholderAudio: {}, auditCoverage: {},
@@ -150,8 +151,8 @@ describe('PB3: the package root exposes exactly the public API', () => {
             },
         });
         expect(Object.keys(ports).sort()).to.deep.equal([
-            'sceneAssetsRepo', 'placeholderAudio', 'auditCoverage', 'promptLimit',
-            'purge', 'resolveOwnership', 'rollbackOwnership', 'recoveryCtx',
+            'sceneAssetsRepo', 'auditCoverage', 'promptLimit',
+            'purge', 'resolveOwnership', 'rollbackOwnership',
             'outputRoot', // VBook 4 step 4 (read-only artifact root)
         ].sort());
     });

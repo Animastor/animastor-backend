@@ -82,12 +82,11 @@ describe('ENTITY CRUD ROUTES — manual add/delete', () => {
             // suite below mounts the REAL factory through the same seam.
             editorPorts: {
                 sceneAssetsRepo: { bumpSceneVersions: async () => 0, setDirtyUnitIds: async () => 0 },
-                placeholderAudio: { recoverMissingPlaceholders: async () => ({ created: 0, errors: [] }) },
+
                 auditCoverage: { auditBookCoverage: () => ({}) },
                 promptLimit: 2000,
                 purge: { purgeScene: async () => ({ complete: true, steps: [] }), purgeUnit: async () => ({ complete: true, steps: [] }) },
                 resolveOwnership: async () => ({}),
-                recoveryCtx: {},
             },
             utils: { log: () => {} },
         };
@@ -470,12 +469,11 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         });
         deps.editorPorts = {
             sceneAssetsRepo: deps.sceneAssetsRepo,
-            placeholderAudio: { recoverMissingPlaceholders: async () => ({ created: 0, errors: [] }) },
+
             auditCoverage: { auditBookCoverage: () => ({}) },
             promptLimit: 2000,
             purge: realPurge,
             resolveOwnership: async () => ({}),
-            recoveryCtx: {},
         };
         require('../src/entity-crud-routes.cjs')(app, redisMock, deps);
     }
@@ -548,7 +546,7 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
     });
 
-    it('DELETE scene purges PG/Redis/FS and cancels in-flight dispatch', async () => {
+    it('DELETE scene purges PG/Redis chunk records/FS (no legacy runtime legs since 2026-11-28)', async () => {
         // Seed derived state for the deleted scene.
         const store = redisMock._store;
         store[`animastor:chunk:${PREFIX}_0000`] = '{}';
@@ -574,19 +572,17 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         expect(calls.purgeScenes).to.have.length(1);
         expect(calls.purgeScenes[0]).to.deep.equal([`${CHAPTER_ID}::${SCENE_ID}`]);
 
-        // In-flight cancellation + active-index removal ran.
-        expect(calls.cancellations).to.have.length(1);
-        expect(calls.activeRemoved).to.have.length(1);
+        // (ORCHESTRATION_V2 этап 4, 2026-11-28: no legacy lease cancellation, no
+        // active index, no per-asset / FSM / registry Redis families — they are
+        // gone with the legacy orchestration; purge-legacy-redis removes leftovers.)
+        expect(calls.cancellations).to.have.length(0);
+        expect(calls.activeRemoved).to.have.length(0);
 
-        // Redis: chunk key gone, chunk set updated, asset-state/registry gone,
-        // active-scenes member removed.
+        // Redis: chunk key gone, chunk set updated; legacy keys are not touched.
         expect(store[`animastor:chunk:${PREFIX}_0000`]).to.be.undefined;
         expect(store[`animastor:chunks:${bookId}`]).to.not.include(`${PREFIX}_0000`);
         expect(store[`animastor:chunks:${bookId}`]).to.include('other_chunk');
-        expect(store[`animastor:asset-state:${bookId}:${CHAPTER_ID}:${SCENE_ID}`]).to.be.undefined;
-        expect(store[`animastor:assets:${bookId}:${CHAPTER_ID}:${SCENE_ID}`]).to.be.undefined;
-        expect(store[`animastor:audio-orch:${bookId}:${CHAPTER_ID}:${SCENE_ID}`]).to.be.undefined;
-        expect(store['animastor:active-scenes']).to.not.include(`${bookId}:${CHAPTER_ID}:${SCENE_ID}`);
+        expect(store[`animastor:asset-state:${bookId}:${CHAPTER_ID}:${SCENE_ID}`]).to.equal('{}');
         expect(store['animastor:active-scenes']).to.include('bk9:x:y');
 
         // Filesystem: scene files removed, sibling build files untouched.
@@ -600,7 +596,7 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         expect(scenes.map(s => s.scene_id)).to.include('sc-keep');
     });
 
-    it('DELETE unit purges image_units row + iu registry/in-flight/GPU keys + IU files and invalidates the scene', async () => {
+    it('DELETE unit purges image_units row + IU files and invalidates the scene (no legacy Redis / dispatch legs)', async () => {
         const store = redisMock._store;
         const iuPrefix = `${PREFIX}_${UNIT_ID}`;
         store[`animastor:iu-registry:${iuPrefix}`] = '{}';
@@ -632,17 +628,10 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         expect(scrub).to.not.be.undefined;
         expect(scrub.params).to.deep.equal([bookId, CHAPTER_ID, SCENE_ID, UNIT_ID]);
 
-        // Redis iu keys removed (registry, in-flight, job, result, error).
-        expect(store[`animastor:iu-registry:${iuPrefix}`]).to.be.undefined;
-        expect(store[`animastor:iu-in-flight:${iuPrefix}`]).to.be.undefined;
-        expect(store[`animastor:job:${iuPrefix}:image`]).to.be.undefined;
-        expect(store[`animastor:result-processed:${iuPrefix}:iu_image:build-test`]).to.be.undefined;
-        expect(store[`animastor:result:${iuPrefix}:iu_image:build-test`]).to.be.undefined;
-        expect(store[`animastor:error-processed:disp1:${iuPrefix}:iu_image:build-test`]).to.be.undefined;
-
-        // In-flight dispatch cancelled for the scene (all layers).
-        expect(calls.cancellations).to.have.length(1);
-        expect(calls.cancellations[0][0].stages).to.deep.equal(['audio', 'image', 'video']);
+        // (2026-11-28: the legacy IU Redis families — registry, in-flight, hub
+        // job / result / error — and the lease cancellation are gone with the
+        // legacy orchestration; the purge no longer touches them.)
+        expect(calls.cancellations).to.have.length(0);
 
         // Parent scene invalidated through the canonical path (changed + 3 layers).
         expect(calls.reconcile).to.have.length(1);
@@ -740,8 +729,8 @@ describe('ENTITY CRUD ROUTES — scene/unit delete deep cleanup', () => {
         expect(purgedKeys).to.include(`${CHAPTER2_ID}::${SCENE2_ID}`);
         expect(purgedKeys).to.include(`${CHAPTER2_ID}::${SCENE3_ID}`);
 
-        // Dispatch cancelled for each scene.
-        expect(calls.cancellations).to.have.length(2);
+        // (no legacy lease cancellation since 2026-11-28)
+        expect(calls.cancellations).to.have.length(0);
 
         // Redis: chunk keys for both scenes removed.
         expect(store[`animastor:chunk:${pfx2}_0000`]).to.be.undefined;

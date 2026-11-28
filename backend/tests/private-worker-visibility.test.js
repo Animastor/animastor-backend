@@ -47,7 +47,7 @@ const { query } = require('../src/storage/postgres/database');
 const { runMigrations } = require('../src/storage/postgres/schema');
 const { authContext } = require('../src/middleware/auth-context');
 const config = require('../src/config/runtime-config');
-const workerHealth = require('../node_modules/@animastor/orchestration/src/legacy/runtime/worker-health');
+const workerHealth = require('../src/runtime/worker-health');
 const workerAuth = require('../src/services/worker-auth');
 const workerRepo = require('../src/storage/postgres/repositories/worker-repo');
 const { createMockRedis } = require('./mocks/redis-mock');
@@ -569,53 +569,6 @@ describe('Worker visibility — /worker/counts acceptance (A vs B)', () => {
 // Workspace-aware availability gating (detectAvailableMode)
 // ══════════════════════════════════════════════════════════════════════════
 
-describe('Worker visibility — workspace-aware mode detection', () => {
-    const stamp = `pwvismode${Date.now()}`;
-    const BOOK_A = `pwvis_book_a_${stamp}`;
-    const BOOK_B = `pwvis_book_b_${stamp}`;
-    let redis, wsA, wsB, detectAvailableMode;
-
-    before(async function () {
-        this.timeout(60000);
-        await runMigrations();
-        const wsRows = await query(
-            `INSERT INTO workspaces (name) VALUES ($1), ($2) RETURNING id, name`,
-            [`pwvis_mode_a_${stamp}`, `pwvis_mode_b_${stamp}`]
-        );
-        for (const row of wsRows.rows) {
-            if (row.name === `pwvis_mode_a_${stamp}`) wsA = row.id;
-            else wsB = row.id;
-        }
-        await query(
-            `INSERT INTO books (book_id, workspace_id, title) VALUES ($1, $2, 'a'), ($3, $4, 'b')`,
-            [BOOK_A, wsA, BOOK_B, wsB]
-        );
-        redis = createMockRedis();
-        detectAvailableMode = require('../src/helpers/redis-helpers.cjs')(redis).detectAvailableMode;
-    });
-
-    after(async function () {
-        this.timeout(30000);
-        await query(`DELETE FROM books WHERE book_id IN ($1, $2)`, [BOOK_A, BOOK_B]);
-        await query(`DELETE FROM workspaces WHERE id IN ($1, $2)`, [wsA, wsB]);
-    });
-
-    it('owner private workers serve the owner book; foreign books see nothing', async () => {
-        // Only workspace A's private image+video workers are online — NO
-        // system workers at all.
-        await writeHeartbeat(redis, 'image', 'priv-img-a', { workspaceId: wsA, mode: 'private' });
-        await writeHeartbeat(redis, 'video', 'priv-vid-a', { workspaceId: wsA, mode: 'private' });
-
-        // A's book: full mode (its own private workers count).
-        expect(await detectAvailableMode(redis, BOOK_A)).to.equal('full');
-        // B's book: foreign private workers must NOT look available.
-        expect(await detectAvailableMode(redis, BOOK_B)).to.equal('need_audio_worker');
-    });
-
-    it('a system worker serves every book regardless of workspace', async () => {
-        await writeHeartbeat(redis, 'image', 'sys-img', { mode: 'system' });
-        await writeHeartbeat(redis, 'video', 'sys-vid', { mode: 'system' });
-        expect(await detectAvailableMode(redis, BOOK_A)).to.equal('full');
-        expect(await detectAvailableMode(redis, BOOK_B)).to.equal('full');
-    });
-});
+// (2026-11-28, ORCHESTRATION_V2 этап 4: detectAvailableMode — the legacy
+// availability mode animastor:mode:* — is removed; the workspace-aware
+// liveness ∧ scope rule is covered above through worker-health.)

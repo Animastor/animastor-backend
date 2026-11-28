@@ -47,9 +47,9 @@ const { createPlayerShared } = require('./player-shared.cjs');
 
 module.exports = function(app, redis, deps) {
     const {
-        state, image, utils,
+        image, utils,
         getChunk, getAllChunks, getBookWindowStatus,
-        activeScenes, placeholderAudio, layerConfig, iuRepo,
+        placeholderAudio, layerConfig, iuRepo,
         sceneAssetsRepo, playerModel,
         // Book-registry gate (read-time self-heal must not persist for a
         // deleted/unregistered book):
@@ -88,7 +88,7 @@ module.exports = function(app, redis, deps) {
         bookProjections,
     });
     require('./iu-media.cjs')(app, ctx, {
-        image, state, activeScenes, placeholderAudio,
+        image, placeholderAudio,
     });
     require('./playback-queue.cjs')(app, ctx, {
         getAllChunks, getBookWindowStatus, layerConfig, sceneAssetsRepo, computeIuReady, image,

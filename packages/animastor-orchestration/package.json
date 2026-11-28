@@ -1,16 +1,13 @@
 {
     "name": "@animastor/orchestration",
-    "version": "1.4.4",
-    "description": "Animastor Orchestration 1.2.0 — generation orchestration v2 (ADR ORCHESTRATION_V2): `gen` namespace — PG is the single source of truth (gen_commands, gen_jobs), commands / claim (FOR UPDATE SKIP LOCKED) / one-transaction acceptance / sweeper / progress over a host-supplied pg pool and host ports; no Redis, no Express, no ComfyUI. The 0.3.x orchestration (dispatch/reconcile/lease/FSM, O-2..O-10 ports, host bindings) ships unchanged under src/legacy/ with the same root exports until migration stage 4.",
+    "version": "2.0.0",
+    "description": "Animastor Orchestration 2.0.0 — generation orchestration v2 (ADR ORCHESTRATION_V2): the `gen` namespace — PG is the single source of truth (gen_commands, gen_jobs), commands / claim (FOR UPDATE SKIP LOCKED) / one-transaction acceptance / sweeper / progress over a host-supplied pg pool and host ports; no Redis, no Express, no ComfyUI. The 0.3.x legacy orchestration (src/legacy/) is removed (ADR §12 stage 4).",
     "keywords": [
         "animastor",
-        "dispatch",
         "generation",
         "job-queue",
         "orchestration",
-        "postgres",
-        "reconciliation",
-        "runtime"
+        "postgres"
     ],
     "main": "src/index.js",
     "exports": {
@@ -23,8 +20,7 @@
         "CHANGELOG.md"
     ],
     "scripts": {
-        "test": "mocha --exit --require test/test-bindings.js test/*.test.js",
-        "test:gen": "mocha --exit 'test/gen/*.test.js'"
+        "test": "mocha --exit 'test/gen/*.test.js'"
     },
     "engines": {
         "node": ">=18"
@@ -42,11 +38,7 @@
     "bugs": {
         "url": "https://github.com/Animastor/animastor-backend/issues"
     },
-    "dependencies": {
-        "@animastor/contracts": "^0.1.0",
-        "@animastor/generation": "^0.3.0",
-        "music-metadata": "^11.12.3"
-    },
+    "dependencies": {},
     "devDependencies": {
         "chai": "^6.2.2",
         "mocha": "^11.7.5",

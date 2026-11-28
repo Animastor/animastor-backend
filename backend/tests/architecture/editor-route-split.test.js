@@ -143,12 +143,10 @@ function stubDeps() {
         editorModel: { read: () => null, commit: noop },
         editorPorts: {
             sceneAssetsRepo: { bumpSceneVersions: async () => 0, setDirtyUnitIds: async () => 0 },
-            placeholderAudio: { recoverMissingPlaceholders: async () => ({ created: 0, errors: [] }) },
             auditCoverage: { auditBookCoverage: () => ({}) },
             promptLimit: 2000,
             purge: { purgeScene: async () => ({}), purgeUnit: async () => ({}) },
             resolveOwnership: async () => ({}),
-            recoveryCtx: {},
         },
         utils: { log: noop },
     };
@@ -259,7 +257,7 @@ describe('E3: no host module requires the editor package implementation by path'
             for (const file of listSourceFiles(dir)) {
                 if (rel(file).startsWith('backend/src/routes/editor/') || rel(file) === 'backend/src/editor/index.cjs') continue;
                 for (const spec of requireSpecifiers(codeOf(readSource(file)))) {
-                    if (/routes\/editor\/|editor-routes\.cjs|entity-crud-routes\.cjs|editor-ports\.cjs|read-recovery\.cjs/.test(spec)) {
+                    if (/routes\/editor\/|editor-routes\.cjs|entity-crud-routes\.cjs|editor-ports\.cjs/.test(spec)) {
                         seen.push(`${rel(file)}: ${spec}`);
                     }
                 }

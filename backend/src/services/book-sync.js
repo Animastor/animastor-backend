@@ -87,8 +87,8 @@ async function reconcileFromDiff(bookId, dirtyScenes, loadedBook) {
         // Mark scene_assets as stale for changed scenes
         assetsStale = await markSceneAssetsStale(bookId, changedKeys);
 
-        // Cancel only task types invalidated by the content diff.
-        tasksCancelled = await markGenerationTasksStale(bookId, changed);
+        // (2026-11-28, этап 4: the legacy generation_tasks registry is gone —
+        // nothing to cancel here; orchestration v2 compares hashes at claim time.)
 
         // The player reads unit text PG-first (image_units) — keep it in step
         // with edited unit text so it does not wait for the next generation.
@@ -146,6 +146,7 @@ async function reconcileFromDiff(bookId, dirtyScenes, loadedBook) {
         reconciled: changedKeys.length + removedKeys.length,
         scene_hashes_updated: scenesUpdated,
         assets_marked_stale: assetsStale,
+        // contract field kept: the legacy task registry is gone — always 0
         generation_tasks_cancelled: tasksCancelled,
         image_unit_texts_synced: unitTextsSynced,
         purged,
@@ -257,34 +258,6 @@ async function markSceneAssetsStale(bookId, chapterSceneKeys) {
     return total;
 }
 
-async function markGenerationTasksStale(bookId, dirtyScenes) {
-    let total = 0;
-    for (const entry of dirtyScenes) {
-        const isLegacyKey = typeof entry === 'string';
-        const [chapterId, sceneId] = isLegacyKey
-            ? splitKey(entry)
-            : [entry.chapter_id, entry.scene_id];
-        const dirtyLayers = isLegacyKey
-            ? _mediaTypes()
-            : (Array.isArray(entry.dirty_layers)
-                ? entry.dirty_layers
-                : _mediaTypes()).filter(layer => _isMediaType(layer));
-        if (!chapterId || !sceneId || dirtyLayers.length === 0) continue;
-
-        const r = await query(`
-            UPDATE generation_tasks
-            SET status = 'cancelled',
-                completed_at = EXTRACT(EPOCH FROM NOW())::bigint,
-                error = COALESCE(error, '') || ' (cancelled by book-sync)'
-            WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3
-              AND task_type = ANY($4::text[])
-              AND status IN ('queued', 'running')
-        `, [bookId, chapterId, sceneId, dirtyLayers]);
-        total += r.rowCount || 0;
-    }
-    return total;
-}
-
 /**
  * Update image_units.text/text_length for diff-changed units whose text
  * differs from PG. Existing rows only — no inserts, build_id untouched.
@@ -314,12 +287,11 @@ async function purgeRemovedSceneRows(bookId, removedKeys) {
 
     for (const key of removedKeys) {
         const [chapterId, sceneId] = splitKey(key);
-        // Per-scene tables referenced by (book_id, chapter_id, scene_id). asset_states
-        // and cache_entries were missing before — scenes referenced them via plain TEXT
-        // columns (no FK/cascade), so orphan rows survived scene deletion.
-        for (const table of ['scene_assets', 'generation_tasks', 'image_units',
-                              'storyboard_elements', 'audio_layers',
-                              'asset_states', 'cache_entries']) {
+        // Per-scene tables referenced by (book_id, chapter_id, scene_id) — plain
+        // TEXT columns (no FK/cascade). The legacy generation_tasks /
+        // asset_states / cache_entries are dropped (2026-11-28, этап 4).
+        for (const table of ['scene_assets', 'image_units',
+                              'storyboard_elements', 'audio_layers']) {
             const r = await query(`
                 DELETE FROM ${table}
                 WHERE book_id = $1 AND chapter_id = $2 AND scene_id = $3
@@ -359,7 +331,6 @@ async function syncBook(bookId, { dryRun = false, purgeRemoved = true } = {}) {
     if (changedKeys.length > 0) {
         await updateSceneHashes(bookId, [...diff.added, ...diff.changed]);
         assetsStale = await markSceneAssetsStale(bookId, changedKeys);
-        tasksStale = await markGenerationTasksStale(bookId, changedKeys);
     }
 
     let purged = {};
@@ -390,6 +361,5 @@ module.exports = {
     reconcileFromDiff,
     updateSceneHashes,
     markSceneAssetsStale,
-    markGenerationTasksStale,
     purgeRemovedSceneRows,
 };

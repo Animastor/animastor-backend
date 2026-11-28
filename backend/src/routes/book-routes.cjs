@@ -96,7 +96,7 @@ module.exports = function(app, redis, deps) {
         txtImporter: deps.txtImporter,
         lazyBook: deps.lazyBook,
         placeholderAudio: deps.placeholderAudio,
-        taskHandler: deps.taskHandler,
+        bookSnapshot: deps.bookSnapshot,
         log,
     });
 
@@ -117,14 +117,8 @@ module.exports = function(app, redis, deps) {
         purgeAssistantForBook: deps.assistantPorts
             ? (bookId) => deps.assistantPorts.purgeForBook(bookId)
             : undefined,
-        // Stage 116 (D4): queue-idempotency port (injected, not required —
-        // the Book Model layer must not depend on backend/src/helpers).
-        queueIdempotency: deps.queueIdempotency,
-        // Stage 118 (B4/M2): capacity-deferral port (injected — the deferral
-        // key is owned by the orchestration package).
-        clearDeferrals: deps.clearDeferrals,
-        // Orchestration v2 (stage 1c): a v2 book's cache teardown never calls
-        // the hub — its work is stopped through the gen core instead.
+        // Orchestration v2: the cache teardown never calls the hub — the
+        // book's work is stopped through the gen core instead.
         orchV2: deps.orchV2,
         log,
     });

@@ -1,8 +1,4 @@
 const { query } = require('./database');
-// Stage 143a — flag accessor of the versioned iu_image contour (see
-// repositories/iu-image-pointer-repo; the DDL itself stays in this file,
-// guardrail PG-5).
-const iuImagePointerRepo = require('./repositories/iu-image-pointer-repo');
 
 const SCHEMA_SQL = `
 -- ======================================================
@@ -190,82 +186,9 @@ CREATE TABLE IF NOT EXISTS scenes (
     PRIMARY KEY (book_id, chapter_id, scene_id)
 );
 
--- Per-layer asset state
-CREATE TABLE IF NOT EXISTS asset_states (
-    book_id         TEXT NOT NULL,
-    chapter_id      TEXT NOT NULL,
-    scene_id        TEXT NOT NULL,
-    layer           TEXT NOT NULL CHECK(layer IN ('audio','image','video','filesystem')),
-    status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('clean','dirty','queued','generating','ready','failed')),
-    hash            TEXT,
-    version         INTEGER DEFAULT 1,
-    updated_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-    error           TEXT,
-    PRIMARY KEY (book_id, chapter_id, scene_id, layer)
-);
-
--- Cache manifest (deterministic asset tracking)
-CREATE TABLE IF NOT EXISTS cache_entries (
-    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    asset_key       TEXT NOT NULL UNIQUE,
-    book_id         TEXT NOT NULL,
-    chapter_id      TEXT,
-    scene_id        TEXT,
-    asset_type      TEXT NOT NULL CHECK(asset_type IN ('audio','image','video','manifest','preview')),
-    file_path       TEXT,
-    file_size       BIGINT,
-    content_hash    TEXT,
-    version         INTEGER DEFAULT 1,
-    status          TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','ready','stale','failed')),
-    created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-    updated_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-    metadata        JSONB
-);
-
-CREATE INDEX IF NOT EXISTS idx_cache_book ON cache_entries(book_id);
-CREATE INDEX IF NOT EXISTS idx_cache_scene ON cache_entries(book_id, chapter_id, scene_id);
-CREATE INDEX IF NOT EXISTS idx_cache_status ON cache_entries(status);
-CREATE INDEX IF NOT EXISTS idx_cache_hash ON cache_entries(content_hash);
-
--- Asset dependency graph
-CREATE TABLE IF NOT EXISTS asset_dependencies (
-    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    book_id         TEXT NOT NULL,
-    source_layer    TEXT NOT NULL,
-    target_layer    TEXT NOT NULL,
-    description     TEXT,
-    UNIQUE(book_id, source_layer, target_layer)
-);
-
--- Generation task history
--- workspace_id (PW-2): server-derived ownership anchor for workspace-aware
--- job ownership. Resolved at dispatch from book → books.workspace_id and
--- never client-supplied. Nullable: legacy rows and system-pool tasks may
--- lack it.
-CREATE TABLE IF NOT EXISTS generation_tasks (
-    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    task_id         TEXT NOT NULL,
-    book_id         TEXT NOT NULL,
-    chapter_id      TEXT,
-    scene_id        TEXT,
-    task_type       TEXT NOT NULL CHECK(task_type IN ('audio','image','video')),
-    status          TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed','cancelled','blocked','interrupted')),
-    worker_id       TEXT,
-    workspace_id    UUID REFERENCES workspaces(id),
-    retry_count     INTEGER DEFAULT 0,
-    max_retries     INTEGER DEFAULT 3,
-    error           TEXT,
-    created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-    started_at      BIGINT,
-    completed_at    BIGINT,
-    metadata        JSONB
-);
-
-CREATE INDEX IF NOT EXISTS idx_tasks_book ON generation_tasks(book_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON generation_tasks(status);
--- NOTE: idx_tasks_workspace is created by migration PW-2 below — it must run
--- AFTER the workspace_id column exists (on existing databases the CREATE
--- TABLE IF NOT EXISTS above does not add the column).
+-- (2026-11-28, ORCHESTRATION_V2 этап 4: asset_states, cache_entries,
+-- asset_dependencies and generation_tasks — tables of the legacy orchestration —
+-- are no longer created, dropLegacyOrchestrationTables() removes them.)
 
 -- Private Worker registry (Experimental Beta — Private Worker Phase 1)
 -- Durable source of truth for private worker identity and credentials.
@@ -500,28 +423,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_endpoint_share_policies_one
 CREATE INDEX IF NOT EXISTS idx_ai_endpoint_share_policies_ws
     ON ai_endpoint_share_policies(workspace_id);
 
--- Reconciliation & recovery log
-CREATE TABLE IF NOT EXISTS reconciliation_events (
-    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    book_id         TEXT NOT NULL,
-    event_type      TEXT NOT NULL,
-    details         TEXT,
-    created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
-);
-
--- Build manifests (per-build output tracking)
-CREATE TABLE IF NOT EXISTS output_manifests (
-    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    build_id        TEXT NOT NULL,
-    book_id         TEXT NOT NULL,
-    asset_type      TEXT NOT NULL,
-    scene_count     INTEGER DEFAULT 0,
-    total_size      BIGINT DEFAULT 0,
-    status          TEXT NOT NULL DEFAULT 'building' CHECK(status IN ('building','ready','failed')),
-    created_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-    completed_at    BIGINT,
-    UNIQUE(build_id, book_id, asset_type)
-);
+-- (2026-11-28, этап 4: reconciliation_events and output_manifests are no longer
+-- created — see dropLegacyOrchestrationTables().)
 
 -- Per-IU metadata (storyboard items)
 CREATE TABLE IF NOT EXISTS image_units (
@@ -782,7 +685,7 @@ async function runMigrations() {
 
     // Drop FK constraints if they were created by an earlier version of this
     // migration. We removed the FKs to match other book-keyed tables
-    // (asset_states, cache_entries, scene_assets) that allow orphan references
+    // (scene_assets, image_units) that allow orphan references
     // for flexibility — the application layer guarantees book existence.
     const fkDrops = [
         { table: 'scenes', constraint: 'scenes_book_id_fkey' },
@@ -858,24 +761,6 @@ async function runMigrations() {
     } catch (err) {
         if (!err.message.includes('already exists')) {
             console.error('[PG] Failed to add scene_assets.scene_audio_config_version:', err.message);
-        }
-    }
-
-    // Command-only generation (2026-10-31): a cancelled/blocked/interrupted
-    // command leaves terminal rows, never a `queued`/`running` task or a
-    // `pending` asset another path could resurrect.
-    //   generation_tasks.status += 'blocked' (no live worker of the type),
-    //                              'interrupted' (backend restart; resumed
-    //                              only by a button)
-    //   scene_assets.status     += 'cancelled' (above)
-    try {
-        await query(`ALTER TABLE generation_tasks DROP CONSTRAINT IF EXISTS generation_tasks_status_check`);
-        await query(`ALTER TABLE generation_tasks ADD CONSTRAINT generation_tasks_status_check
-            CHECK (status IN ('queued','running','completed','failed','cancelled','blocked','interrupted'))`);
-        console.log('[PG] Updated generation_tasks status check constraint (blocked, interrupted)');
-    } catch (err) {
-        if (!err.message.includes('does not exist')) {
-            console.error('[PG] Failed to update generation_tasks status constraint:', err.message);
         }
     }
 
@@ -1187,28 +1072,6 @@ async function runMigrations() {
     } catch (err) {
         if (!err.message.includes('already exists')) {
             console.error('[PG] Failed to create book_generation_sessions:', err.message);
-        }
-    }
-
-    // ======================================================
-    // Generation cancellation tombstones (Cathedral Recon #3 §5.4)
-    // ======================================================
-    // Persistent marker that the user explicitly cancelled generation for a
-    // book. Written by cancel-worker type=vbook, cleared by an explicit new run (bootstrap).
-    // Survives Redis loss so automatic resumption (startup-resume / future
-    // work-list rebuild) can never resurrect an explicitly cancelled run.
-    try {
-        await query(`CREATE TABLE IF NOT EXISTS generation_cancellations (
-            book_id         TEXT PRIMARY KEY,
-            cancelled_at    BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-            reason          TEXT,
-            created_by      TEXT,
-            updated_at      BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
-        )`);
-        console.log('[PG] Created generation_cancellations table');
-    } catch (err) {
-        if (!err.message.includes('already exists')) {
-            console.error('[PG] Failed to create generation_cancellations:', err.message);
         }
     }
 
@@ -1736,41 +1599,7 @@ async function runMigrations() {
         throw err;
     }
 
-    // ======================================================
-    // PW-2: Workspace-aware job ownership (Experimental Beta — Phase 2)
-    // ======================================================
-    // Add the server-derived workspace ownership anchor to generation_tasks.
-    // Idempotent: column add + backfill from books + index. The backfill only
-    // touches rows whose workspace_id IS NULL, so re-runs are safe and rows
-    // written by the new dispatch path are never overwritten.
-    try {
-        const { rows: taskCols } = await query(`
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'generation_tasks' AND column_name = 'workspace_id'
-        `);
-        if (taskCols.length === 0) {
-            await query(`ALTER TABLE generation_tasks
-                ADD COLUMN workspace_id UUID REFERENCES workspaces(id)`);
-            console.log('[PG] PW-2: added generation_tasks.workspace_id');
-        }
-        const backfill = await query(`
-            UPDATE generation_tasks t
-            SET workspace_id = b.workspace_id
-            FROM books b
-            WHERE t.book_id = b.book_id
-              AND t.workspace_id IS NULL
-              AND b.workspace_id IS NOT NULL
-        `);
-        if (backfill.rowCount > 0) {
-            console.log(`[PG] PW-2: backfilled workspace_id on ${backfill.rowCount} generation_tasks row(s)`);
-        }
-        await query(`CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON generation_tasks(workspace_id)`);
-    } catch (err) {
-        console.error('[PG] PW-2 generation_tasks migration failed:', err.message);
-        throw err;
-    }
-
-    console.log('[PG] Workspace-aware generation task ownership initialized');
+    // (PW-2 generation_tasks.workspace_id — removed with the table, 2026-11-28.)
 
     // ======================================================
     // PAP-1: Personal AI Provider schema extension (Phase 4)
@@ -1956,46 +1785,81 @@ async function runMigrations() {
         throw err;
     }
 
-    // ── Stage 143a — versioned iu_image contour (B1/B2) ────────────────
-    // DDL lives here (guardrail PG-5 — single DDL owner). The statements
-    // are executed ONLY while the IU_IMAGE_VERSIONED kill-switch is on, so
-    // a flag-OFF process issues zero new PG calls (Stage 143a condition 2).
-    // Enable → restart: the tables must exist before the first reservation.
-    if (iuImagePointerRepo.versionedEnabled()) {
-        for (const stmt of IU_IMAGE_VERSIONED_SQL) {
-            await query(stmt);
-        }
-        console.log('[PG] Stage 143a: iu_image fence reservations + pointers initialized');
+    // ── ORCHESTRATION_V2 этап 4: the legacy orchestration tables go ───────
+    await dropLegacyOrchestrationTables();
+}
+
+// ======================================================
+// ORCHESTRATION_V2 §12 этап 4, шаг 7 (2026-11-28): drop the legacy tables
+// ======================================================
+// The tables of the legacy orchestration (no reader, no writer remains):
+// generation_tasks, asset_states, generation_cancellations,
+// reconciliation_events, cache_entries, asset_dependencies, output_manifests,
+// iu_image_fence_reservations, iu_image_pointers (+ iu_image_fence_seq).
+// Books and VBook sessions (book_generation_sessions) are NOT touched.
+//
+// Safety: before any DROP every table is checked — it must be empty or hold
+// only HISTORICAL rows. A LIVE row (work in flight / a published versioned
+// image) stops the migration with an explicit error; nothing is dropped.
+//   generation_tasks            live = status IN ('queued','running')
+//   asset_states                live = status IN ('queued','generating')
+//   output_manifests            live = status = 'building'
+//   iu_image_fence_reservations live = any row (an open dispatch fence)
+//   iu_image_pointers           live = any row (a published versioned image)
+//   generation_cancellations, reconciliation_events, cache_entries,
+//   asset_dependencies          — every row is historical
+// Idempotent: a missing table is skipped (IF EXISTS); the next start is a no-op.
+const LEGACY_ORCHESTRATION_TABLES = Object.freeze([
+    { table: 'generation_tasks', live: "status IN ('queued','running')" },
+    { table: 'asset_states', live: "status IN ('queued','generating')" },
+    { table: 'generation_cancellations', live: null },
+    { table: 'reconciliation_events', live: null },
+    { table: 'cache_entries', live: null },
+    { table: 'asset_dependencies', live: null },
+    { table: 'output_manifests', live: "status = 'building'" },
+    { table: 'iu_image_fence_reservations', live: 'TRUE' },
+    { table: 'iu_image_pointers', live: 'TRUE' },
+]);
+
+class LegacyTablesNotEmptyError extends Error {
+    constructor(found) {
+        super('[PG] legacy orchestration tables still hold live rows — nothing dropped: '
+            + found.map((f) => `${f.table}=${f.live} live row(s) of ${f.total}`).join(', ')
+            + '. Finish or cancel that work (or remove the rows after a backup), then restart.');
+        this.name = 'LegacyTablesNotEmptyError';
+        this.code = 'legacy_tables_not_empty';
+        this.found = found;
     }
 }
 
-// Stage 143a — durable dispatch fence (checkpoint B1) + published pointer
-// (B2). Kept as a statement ARRAY (runMigrations does not split SCHEMA_SQL
-// for these) so nothing here depends on the naive ';' split above.
-const IU_IMAGE_VERSIONED_SQL = [
-    `CREATE SEQUENCE IF NOT EXISTS iu_image_fence_seq`,
-    `CREATE TABLE IF NOT EXISTS iu_image_fence_reservations (
-        idem_key    TEXT PRIMARY KEY,
-        book_id     TEXT NOT NULL,
-        chapter_id  TEXT NOT NULL,
-        scene_id    TEXT NOT NULL,
-        iu_id       TEXT NOT NULL,
-        build_id    TEXT NOT NULL,
-        fence       BIGINT NOT NULL,
-        created_at  BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
-    )`,
-    `CREATE TABLE IF NOT EXISTS iu_image_pointers (
-        book_id       TEXT NOT NULL,
-        chapter_id    TEXT NOT NULL,
-        scene_id      TEXT NOT NULL,
-        iu_id         TEXT NOT NULL,
-        build_id      TEXT NOT NULL,
-        path          TEXT NOT NULL,
-        publish_fence BIGINT NOT NULL,
-        created_at    BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-        updated_at    BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-        PRIMARY KEY (book_id, chapter_id, scene_id, iu_id, build_id)
-    )`,
-];
+/**
+ * @param {Function} [q=query]  pg query (tests inject a client)
+ * @returns {Promise<{dropped: string[], historical: Object<string, number>}>}
+ */
+async function dropLegacyOrchestrationTables(q = query) {
+    const present = [];
+    const live = [];
+    const historical = {};
+    for (const { table, live: liveWhere } of LEGACY_ORCHESTRATION_TABLES) {
+        const exists = (await q('SELECT to_regclass($1) AS t', [`public.${table}`])).rows[0].t;
+        if (!exists) continue;
+        present.push(table);
+        const total = Number((await q(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n);
+        const liveN = liveWhere ? Number((await q(`SELECT count(*)::int AS n FROM ${table} WHERE ${liveWhere}`)).rows[0].n) : 0;
+        if (liveN > 0) live.push({ table, live: liveN, total });
+        else if (total > 0) historical[table] = total;
+    }
+    if (live.length > 0) throw new LegacyTablesNotEmptyError(live);
+    for (const table of present) await q(`DROP TABLE IF EXISTS ${table}`);
+    await q('DROP SEQUENCE IF EXISTS iu_image_fence_seq');
+    if (present.length > 0) {
+        const hist = Object.entries(historical).map(([t, n]) => `${t}=${n}`).join(', ');
+        console.log(`[PG] этап 4: legacy orchestration tables dropped: ${present.join(', ')}${hist ? ` (historical rows: ${hist})` : ''}`);
+    }
+    return { dropped: present, historical };
+}
 
-module.exports = { runMigrations, SCHEMA_SQL, IU_IMAGE_VERSIONED_SQL };
+module.exports = {
+    runMigrations, SCHEMA_SQL,
+    dropLegacyOrchestrationTables, LEGACY_ORCHESTRATION_TABLES, LegacyTablesNotEmptyError,
+};

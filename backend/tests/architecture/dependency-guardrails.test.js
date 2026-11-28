@@ -222,28 +222,16 @@ describe('architecture: orchestration ↔ runtime cycle freeze (S-5 reduced)', (
         expect(set, 'A runtime→orchestration POLICY edge appeared (orchestrator/index/scene-*) — runtime must reach orchestration behavior ONLY via runtime/orchestration-seams.js (S-5).').to.deep.equal(allowed);
     });
 
-    it('event-journal is a zero-require sink, single-owned by state/event-journal.js (O-1 shim deleted)', () => {
-        // The journal is an append-only observability ledger with ZERO
-        // requires of its own (a graph sink — it cannot close a cycle).
-        // O-1 deleted the orchestration/event-journal.js relocation shim —
-        // pin its absence so the re-export surface cannot return.
-        // §32.30: the package dir must never re-host it either.
-        expect(fs.existsSync(path.join(BACKEND_SRC, 'orchestration', 'event-journal.js')),
-            'orchestration/event-journal.js was deleted at O-1 — canonical owner is state/event-journal.js')
-            .to.equal(false);
-        expect(fs.existsSync(path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy', 'orchestration', 'event-journal.js')),
-            'the deleted O-1 shim must not reappear inside the package')
-            .to.equal(false);
-        const journal = readSource(path.join(BACKEND_SRC, 'state', 'event-journal.js'));
-        expect(requireSpecifiers(journal), 'the journal itself must stay a zero-require sink').to.deep.equal([]);
-        // §32.30: the moved tier files consume the journal through the
-        // composition-root host-binding (lazyHostBinding('journal')) — never
-        // through a direct require of the canonical owner or a re-export.
-        const pkgRuntime = path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy', 'runtime');
-        for (const f of ['dispatch-engine.js', 'reconciliation-engine.js']) {
-            const src = readSource(path.join(pkgRuntime, f));
-            expect(requireSpecifiers(src).filter((s) => /event-journal$/.test(s)), `${f} must not require the journal directly (use the host-binding seam)`).to.deep.equal([]);
-            expect(src.includes("lazyHostBinding('journal')"), `${f} must consume the journal via the host-binding seam`).to.equal(true);
+    it('the legacy event journal is gone everywhere (state/event-journal.js deleted, 2026-11-28)', () => {
+        // The append-only legacy ledger (Redis event-journal:*) went with the
+        // legacy orchestration (ORCHESTRATION_V2 этап 4). Pin its absence in
+        // every former location so no re-export surface can return.
+        for (const p of [
+            path.join(BACKEND_SRC, 'state', 'event-journal.js'),
+            path.join(BACKEND_SRC, 'orchestration', 'event-journal.js'),
+            path.join(REPO_ROOT, 'packages', 'animastor-orchestration', 'src', 'legacy'),
+        ]) {
+            expect(fs.existsSync(p), `${path.relative(REPO_ROOT, p)} must not exist`).to.equal(false);
         }
     });
 });

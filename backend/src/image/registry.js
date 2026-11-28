@@ -83,91 +83,26 @@ function resolveCanonicalSceneImage(OUTPUT_DIR, buildId, bookId, chapterId, scen
     return null;
 }
 
-/**
- * Stage 143a — resolve the PUBLISHED versioned image of one IU.
- *
- * Three-way verdict (Phase 2a) instead of a single `null`, so a caller can
- * tell "nothing was ever published here" apart from "the publication is
- * broken" — the second one must NEVER silently fall back to legacy bytes:
- *
- *   null                          flag OFF → legacy callers keep today's
- *                                 contract and NO PostgreSQL call is made
- *   {status:'ok', ...}             pointer row + a safely resolved file that
- *                                 exists on disk (path, fence, relativePath)
- *   {status:'absent'}              no pointer row for this key → the caller
- *                                 may fall back to the legacy canonical file
- *   {status:'missing', ...}        pointer row exists but the target is
- *                                 unsafe (traversal/symlink) or absent → the
- *                                 caller must NOT fall back to legacy: the
- *                                 pointer is the authority and it is broken
- *
- * A PG ERROR (as opposed to "no row") THROWS: an outage must never look
- * like "no publication" and silently serve stale canonical bytes.
- *
- * Path resolution still rejects traversal/absolute/symlink escapes
- * (condition 3).
- *
- * @returns {Promise<null
- *                 |{status:'ok', path:string, fence:number, relativePath:string}
- *                 |{status:'absent'}
- *                 |{status:'missing', relativePath:string, reason:string}>}
- */
-async function resolveIuImagePath(OUTPUT_DIR, buildId, bookId, chapterId, sceneId, iuId) {
-    const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
-    if (!pointerRepo.versionedEnabled()) return null;
+// ── Stage 143a versioned IU images (IU_IMAGE_VERSIONED) — removed ──────────
+// 2026-11-28 (ORCHESTRATION_V2 §12 этап 4, шаг 7): the fenced pointer layer
+// (PG iu_image_pointers / iu_image_fence_reservations, publisher in the legacy
+// task handler) is gone with the legacy orchestration — the flag was never on
+// in production and orchestration v2 publishes the canonical IU file only
+// (ADR §13 п.9). The three readers keep their flag-OFF contract (no PG call):
+// the player (@animastor/player iu-media) and image/preview still call them.
 
-    const row = await pointerRepo.getIuImagePointer({ bookId, chapterId, sceneId, iuId, buildId });
-    if (!row) return { status: 'absent' };
-
-    const resolved = pointerRepo.resolveOutputPath(OUTPUT_DIR, row.path);
-    if (!resolved.ok) {
-        helpers.error(`resolveIuImagePath: rejected pointer path (${resolved.reason}): ${row.path}`);
-        return { status: 'missing', relativePath: row.path, reason: resolved.reason };
-    }
-    if (!fs.existsSync(resolved.path)) {
-        helpers.warn(`resolveIuImagePath: pointer target missing on disk: ${row.path}`);
-        return { status: 'missing', relativePath: row.path, reason: 'target_missing' };
-    }
-    return {
-        status: 'ok',
-        path: resolved.path,
-        fence: row.publishFence,
-        relativePath: row.path,
-    };
+/** @returns {Promise<null>} always null (the flag-OFF contract) */
+async function resolveIuImagePath(_OUTPUT_DIR, _buildId, _bookId, _chapterId, _sceneId, _iuId) {
+    return null;
 }
 
-/**
- * Stage 143a (Phase 2a) — published IU ids of one scene build, for readers
- * that COUNT ready units (the iu-progress counter reset in scene-callbacks).
- * Flag OFF ⇒ [] with zero PG calls; a PG error THROWS (the caller decides
- * whether the count is display-only).
- *
- * @returns {Promise<string[]>}
- */
-async function listPublishedIuIdsForScene(buildId, bookId, chapterId, sceneId) {
-    const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
-    if (!pointerRepo.versionedEnabled()) return [];
-    return pointerRepo.listPublishedIuIds({ bookId, chapterId, sceneId, buildId });
+/** @returns {Promise<string[]>} always [] (the flag-OFF contract) */
+async function listPublishedIuIdsForScene(_buildId, _bookId, _chapterId, _sceneId) {
+    return [];
 }
 
-/**
- * Stage 143a — versioned fallback proof for a scene's image stage.
- *
- * Called by the caller ONLY after the legacy canonical scan came back empty:
- * returns the safely resolved path of a published pointer for the scene
- * build (flag OFF ⇒ null immediately, zero PG calls), or null when no
- * pointer/file exists. Path resolution rejects traversal and anything
- * outside OUTPUT_DIR (condition 3).
- */
-async function resolveVersionedSceneProof(OUTPUT_DIR, buildId, bookId, chapterId, sceneId) {
-    const pointerRepo = require('../storage/postgres/repositories/iu-image-pointer-repo');
-    if (!pointerRepo.versionedEnabled()) return null;
-
-    const rows = await pointerRepo.listScenePointerPaths({ bookId, chapterId, sceneId, buildId });
-    for (const row of rows) {
-        const resolved = pointerRepo.resolveOutputPath(OUTPUT_DIR, row.path);
-        if (resolved.ok && fs.existsSync(resolved.path)) return resolved.path;
-    }
+/** @returns {Promise<null>} always null (the flag-OFF contract) */
+async function resolveVersionedSceneProof(_OUTPUT_DIR, _buildId, _bookId, _chapterId, _sceneId) {
     return null;
 }
 

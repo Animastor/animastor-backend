@@ -24,13 +24,13 @@
 // stays in place:
 //   agent      → services/ai-service.js + services/agent/ai-caller.js
 //   chat       → @animastor/assistant contour transport (via chatTransport port)
-//   generation → runtime/gpu-dispatcher.js + generation/comfyui-provider.js
+//   generation → generation/comfyui-provider.js (the protocol-2 hub dispatch
+//                runtime/gpu-dispatcher.js is gone — 2026-11-28, этап 4)
 // Docs: docs/architecture/PHASE_3_PROVIDER_GATEWAY.md
 
 const aiService = require('./ai-service');
 const aiCaller = require('./agent/ai-caller');
 const workspaceAi = require('./workspace-ai-provider');
-const gpuDispatcher = require('../runtime/gpu-dispatcher');
 const comfyuiProvider = require('@animastor/generation').comfyuiProvider;
 
 // ── provider resolution (transport-independent seam) ────────────────────
@@ -148,18 +148,15 @@ const chat = {
 };
 
 // ── GENERATION provider contract ────────────────────────────────────────
-// generate(request, context) → job/result, expressed with the CURRENT
-// protocol shape: a ComfyUI workflow job spec dispatched to the GPU Hub
-// (Job Protocol v2). Provider-specific workflow knowledge (workflow JSON,
-// node mapping) stays inside the generation domain — the gateway only
-// exposes the dispatch boundary and the ComfyUIProvider seam.
+// Provider-specific workflow knowledge (workflow JSON, node mapping) stays
+// inside the generation domain — the gateway exposes the ComfyUIProvider seam.
+// (sendJob — the protocol-2 dispatch to GPU Hub POST /task — is removed with
+// the legacy orchestration, 2026-11-28; orchestration v2 dispatches through
+// gen_jobs / POST /internal/gen/claim.)
 // S-2: generation job types resolved from the media registry.
 const GENERATION_JOB_TYPES = () => require('@animastor/generation').mediaRegistry.listMediaTypes();
 
 const generation = {
-    // dispatch boundary — backend → GPU Hub POST /task (sendUnified owns
-    // routing, timeouts and the server-derived workspace lane).
-    sendJob: (taskSpec) => gpuDispatcher.sendUnified(taskSpec),
     // S-2: resolved lazily so registry init order never matters
     get JOB_TYPES() { return GENERATION_JOB_TYPES(); },
     // Provider-specific seam: ComfyUI workflows/connectors. The workflow

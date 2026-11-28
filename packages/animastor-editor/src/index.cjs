@@ -11,7 +11,7 @@
 // read-time enrichment + post-commit derived-state fan-out), entity CRUD
 // (locations), the VBook 4 hero API (heroes, rules, looks, behaviour), structure CRUD
 // (chapters/scenes/units), blank-book scaffolding (POST /book/blank), the
-// read-time chunk repair (read-recovery), the pure scene-patch helpers and
+// pure scene-patch helpers and
 // the entity-id grammar (transliteration → snake_case, over the pure
 // cyr-latin map).
 //

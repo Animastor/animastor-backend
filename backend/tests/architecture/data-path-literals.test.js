@@ -109,15 +109,18 @@ describe('Stage 96 — grep-гейт литералов data-путей', () => 
         expect(srcHits).to.deep.equal(['backend/src/config/runtime-config.js']);
     });
 
-    it('composition root вяжет artifactRoot без локального fallback', () => {
+    it('composition root вяжет корень артефактов без локального fallback', () => {
+        // 2026-11-28 (этап 4): host bindings of the legacy package (artifactRoot) are
+        // gone; the artifact root reaches orchestration v2 / player as config.OUTPUT_DIR.
         const src = fs.readFileSync(path.join(REPO_ROOT, 'backend/src/backend.cjs'), 'utf8');
-        expect(src).to.include('artifactRoot: () => config.OUTPUT_DIR,');
+        expect(src).to.include('outputDir: config.OUTPUT_DIR,');
+        expect(src).to.include('outputRoot: config.OUTPUT_DIR,');
         expect(src).to.not.match(/\|\| '\/data\/output'/);
     });
 
     it('snapshot-фолбэки backend-сервисов устранены', () => {
         for (const rel of [
-            'backend/src/services/task-handler.cjs',
+            'backend/src/services/book-snapshot.cjs',   // was task-handler.cjs (2026-11-28)
             'backend/src/services/book-deletion.cjs',
         ]) {
             const src = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');

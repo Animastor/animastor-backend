@@ -96,7 +96,7 @@ describe('PATCH unit text → image_units.text (player storyboard)', () => {
     });
 
     async function cleanup() {
-        for (const table of ['image_units', 'scene_assets', 'generation_tasks', 'scenes']) {
+        for (const table of ['image_units', 'scene_assets', 'scenes']) {
             await query(`DELETE FROM ${table} WHERE book_id = $1`, [BOOK_ID]);
         }
         book.resetBook(BOOK_ID);

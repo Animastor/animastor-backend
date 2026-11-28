@@ -32,9 +32,16 @@ const REMOVED = [
     ['POST', '/api/v1/book/b1/regenerate'],
     ['POST', '/api/v1/book/b1/cancel-generation'],
     ['GET', '/api/v1/book/b1/progress-panel'],
+    // 2026-11-28, этап 4 шаг 7: the protocol-2 hub callbacks and the legacy
+    // debug runtime surface
+    ['POST', '/gpu/task/result'],
+    ['POST', '/gpu/task/error'],
+    ['POST', '/api/v1/debug/audio/recover'],
+    ['GET', '/api/v1/debug/runtime/status'],
+    ['GET', '/api/v1/book/b1/source-chapters'],
 ];
 
-// Kept until task H (VBook as a generate layer) / step 6 (hub protocol 2).
+// Kept until task H (VBook as a generate layer).
 const KEPT = [
     ['get', '/api/v1/book/:bookId/progress-stream'],
     ['post', '/api/v1/book/:bookId/cancel-worker'],
@@ -43,8 +50,6 @@ const KEPT = [
     ['post', '/api/v1/book/:bookId/resume-bootstrap'],
     ['post', '/api/v1/book/:bookId/trigger-next-window'],
     ['get', '/api/v1/worker/counts'],
-    ['post', '/gpu/task/result'],
-    ['post', '/gpu/task/error'],
     // and the replacements / neighbours that must not be collateral damage
     ['post', '/api/v1/book/import'],
     ['get', '/api/v1/book/:bookId/layer-config'],
@@ -79,6 +84,7 @@ function buildApp() {
     require('../src/routes/book/import-routes.cjs')(app, redis, deps);
     require('../src/routes/book/status-routes.cjs')(app, deps);
     require('../src/routes/book/parse-routes.cjs')(app, deps);
+    require('../src/routes/debug-routes.cjs')(app, redis, deps);
     const { createV2Routes } = require('../src/orchestration-v2/routes');
     const v2 = createV2Routes({
         host: { isEnabled: () => false, disabledReason: () => 'test' },
@@ -119,7 +125,7 @@ describe('removed legacy endpoints (ORCHESTRATION_V2 §11.3, 2026-11-28)', () =>
         });
     }
 
-    it('the endpoints kept until task H / step 6 are still mounted', () => {
+    it('the endpoints kept until task H are still mounted', () => {
         const have = mounted(app);
         const missing = KEPT.map(([m, p]) => `${m} ${p}`).filter((k) => !have.has(k));
         expect(missing).to.deep.equal([]);

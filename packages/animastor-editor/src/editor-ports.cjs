@@ -28,8 +28,8 @@
 //                       (POST /book/blank ownership attach)
 //   rollbackOwnership — drop the registry row resolveOwnership created when
 //                       the blank-book commit fails (POST /book/blank)
-//   recoverChunks     — read-time Redis chunk repair (read-recovery ctx)
-//   placeholderAudio — recoverMissingPlaceholders (read-repair leg)
+//   (0.6.0: the read-repair legs placeholderAudio / recoveryCtx are gone with
+//    the read-time repair of GET /book; a host may still pass them — ignored)
 //   outputRoot        — artifact root (string), read-only: state of the
 //                       reference files of a hero in GET /book (VBook 4)
 //
@@ -56,9 +56,9 @@ module.exports = function createEditorPorts({ deps }) {
         // editor-ports.cjs itself holds ZERO host require() calls so that
         // the @animastor/editor package carries only this file
         // and the contour registrars — the host services stay host-side.
-        sceneAssetsRepo, placeholderAudio,
+        sceneAssetsRepo,
         auditCoverage, promptLimit,
-        purge, resolveOwnership, rollbackOwnership, recoveryCtx,
+        purge, resolveOwnership, rollbackOwnership,
         outputRoot,
     } = deps;
 
@@ -70,22 +70,13 @@ module.exports = function createEditorPorts({ deps }) {
         throw new Error('createEditorPorts: sceneAssetsRepo is required (PG scene-assets port)');
     }
 
-    // ── Read-time repair ports (GET /book/:id) ─────────
-    // Same references the old core-routes.cjs destructured from routeDeps
-    // or required directly; the contour invokes them via the port object.
-    if (!placeholderAudio) {
-        throw new Error('createEditorPorts: placeholderAudio is required (read-repair port)');
-    }
-
     return {
         sceneAssetsRepo,
-        placeholderAudio,
         auditCoverage,
         promptLimit,
         purge,
         resolveOwnership,
         rollbackOwnership,
-        recoveryCtx,
         // VBook 4 (§8.2): the artifact root, to compute the state of a hero's
         // reference files (voice.reference_state, image_refs[].state) for the
         // API — <outputRoot>/<build_id>/voices|refs/… Read only.

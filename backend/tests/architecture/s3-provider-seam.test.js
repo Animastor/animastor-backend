@@ -43,11 +43,11 @@ const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
 const MEDIA_EXECUTORS = [
     'backend/src/audio/generation.js',
     'backend/src/audio/audio-service.js',
-    'backend/src/image/iu-processor.js',
+    'backend/src/image/iu-workflow.js',        // was image/iu-processor.js (2026-11-28)
     'backend/src/image/image-service.js',
     'backend/src/video/video-service.js',
     'backend/src/workflows/video/video-workflows.js',
-    'packages/animastor-orchestration/src/legacy/orchestration/scene-orchestrator.js',
+    // (packages/animastor-orchestration/src/legacy/** — deleted, ORCHESTRATION_V2 этап 4)
 ];
 
 // S-7: the provider seam is package-owned (packages/animastor-generation).
@@ -98,8 +98,7 @@ describe('architecture: S-3 provider seam (executor bans)', () => {
         // the provider module (the seam is the dependency, not a hidden one).
         for (const file of [
             'backend/src/audio/generation.js',
-            'backend/src/image/iu-processor.js',
-            'packages/animastor-orchestration/src/legacy/orchestration/scene-orchestrator.js',
+            'backend/src/image/iu-workflow.js',
         ]) {
             // S-7: executors consume the provider through the package root
             expect(readSrc(file), `${file} must require the provider seam`)
@@ -114,11 +113,10 @@ describe('architecture: S-3 provider seam (executor bans)', () => {
         // bare literal usage in workflow patching context.
         const scanTargets = [
             ...MEDIA_EXECUTORS,
-            'packages/animastor-orchestration/src/legacy/orchestration/orchestrator.js',
-            'packages/animastor-orchestration/src/legacy/orchestration/scene-callbacks.js',
-            'packages/animastor-orchestration/src/legacy/runtime/runtime-scheduler.js',
-            'packages/animastor-orchestration/src/legacy/runtime/dispatch-engine.js',
-            'backend/src/runtime/gpu-dispatcher.js',
+            'backend/src/runtime/worker-lanes.js',
+            'backend/src/orchestration-v2/image-ports.js',
+            'backend/src/orchestration-v2/audio-ports.js',
+            'backend/src/orchestration-v2/video-ports.js',
         ];
         const NODE_ID_RE = /\[\s*['"](108|71|73|74|80|81|82|83|202|203)['"]\s*\]/;
         for (const file of scanTargets) {
@@ -189,46 +187,27 @@ describe('architecture: S-3 provider seam (knowledge centralization)', () => {
 // S3-F — single transport seam
 // ======================================================
 describe('architecture: S-3 provider seam (single dispatch path)', () => {
-    // The frozen set of files allowed to require runtime/gpu-dispatcher.
-    // S-6 UPDATE: comfyui-provider left the set — the provider consumes the
-    // Generation-owned DispatchTransport port (generation/ports/
-    // dispatch-transport.js) and the composition root wires the adapter
-    // (backend.cjs). Remaining entries are NON-dispatch consumers:
-    //   - backend.cjs — composition root (wires the transport adapter)
-    //   - services/provider-gateway.js — Phase 3 facade delegation
-    //   - runtime/scene-window.js + helpers/redis-helpers.cjs — routing/
-    //     availability reads (resolveWorkspaceForBook), not job dispatch —
-    //     documented residual (routing policy stays host-side, §24.6)
-    const DISPATCH_SEAM_BASELINE = [
-        'backend/src/backend.cjs',
-        'backend/src/services/provider-gateway.js',
-        'packages/animastor-orchestration/src/legacy/runtime/scene-window.js',
-        'backend/src/helpers/redis-helpers.cjs',
-    ];
-
-    it('S3-F: gpu-dispatcher requires match the frozen single-seam baseline', () => {
+    // 2026-11-28 (ORCHESTRATION_V2 этап 4): runtime/gpu-dispatcher — the
+    // protocol-2 hub transport (POST /task) — is deleted. Orchestration v2
+    // hands work to the worker through gen_jobs + POST /internal/gen/claim;
+    // nothing in the host dispatches a job to the hub any more.
+    it('S3-F: no module requires the deleted gpu-dispatcher; no host code dispatches to hub /task', () => {
+        const fs = require('fs');
+        expect(fs.existsSync(path.join(BACKEND_SRC, 'runtime', 'gpu-dispatcher.js'))).to.equal(false);
         const offenders = [];
         for (const file of listSourceFiles(BACKEND_SRC)) {
-            const r = rel(file);
-            if (DISPATCH_SEAM_BASELINE.includes(r)) continue;
             for (const spec of requireSpecifiers(readSource(file))) {
-                const target = resolveSpecifier(file, spec);
-                if (target && rel(target) === 'backend/src/runtime/gpu-dispatcher.js') {
-                    offenders.push(`${r}: ${spec}`);
-                }
+                if (/gpu-dispatcher/.test(spec)) offenders.push(`${rel(file)}: ${spec}`);
             }
+            if (/sendUnified\(/.test(readSource(file).replace(/\/\/.*$/gm, ''))) offenders.push(`${rel(file)}: sendUnified(`);
         }
-        expect(offenders, 'a module bypasses the provider dispatch seam').to.deep.equal([]);
+        expect(offenders).to.deep.equal([]);
     });
 
-    it('S3-F: the routing/availability consumers never dispatch jobs', () => {
-        for (const file of ['packages/animastor-orchestration/src/legacy/runtime/scene-window.js', 'backend/src/helpers/redis-helpers.cjs']) {
-            const src = readSrc(file);
-            expect(src, `${file}: availability reads only, no send/sendUnified calls`)
-                .to.not.match(/\.send\(|sendUnified\(/);
-            expect(src, `${file}: uses workspace resolution only`)
-                .to.match(/resolveWorkspaceForBook/);
-        }
+    it('S3-F: the lane lookups (worker-lanes) never dispatch jobs', () => {
+        const src = readSrc('backend/src/runtime/worker-lanes.js');
+        expect(src).to.not.match(/\.send\(|sendUnified\(|fetch\(/);
+        expect(src).to.match(/resolveWorkspaceForBook/);
     });
 });
 

@@ -31,7 +31,7 @@ const { listSourceFiles, readSource, rel, BACKEND_SRC } = require('./helpers');
 // SELECT and the workspace self-heal UPDATE moved into user-repo/workspace-repo.
 // The auth domain now reaches PG only through repositories/ports.)
 const DIRECT_SQL_WHITELIST = [
-    'backend/src/image/iu-processor.js',
+    'backend/src/image/iu-workflow.js',   // was image/iu-processor.js (getSceneDuration moved, 2026-11-28)
     'backend/src/routes/ai-endpoint-routes.cjs',
     'backend/src/services/agent-session.js',
     'backend/src/services/agent-session-control.js',

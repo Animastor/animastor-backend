@@ -49,20 +49,20 @@ const EDITOR_REGISTRARS = [
 const EDITOR_PORTS = path.join(EDITOR_DIR, 'editor-ports.cjs');
 const EDITOR_HELPERS = [
     path.join(EDITOR_DIR, 'scene-patch-utils.cjs'),
-    path.join(EDITOR_DIR, 'read-recovery.cjs'),
+    // (read-recovery.cjs — the GET /book read-repair — removed in editor 0.6.0,
+    //  2026-11-28, ORCHESTRATION_V2 этап 4)
 ];
 const BACKEND_ROOT = path.join(BACKEND_SRC, 'backend.cjs');
 
 // ── The frozen editorPorts shape (Phase 1 seam, frozen in Phase 2) ────────
 const FROZEN_PORTS = [
     'sceneAssetsRepo',   // PG scene-assets: bumpSceneVersions / setDirtyUnitIds
-    'placeholderAudio',   // read-repair: recoverMissingPlaceholders
     'auditCoverage',     // services/source-coverage-audit
     'promptLimit',       // IMAGE_PROMPT_MAX_CHARS (agent-domain constant)
     'purge',             // entity-cleanup purgeScene / purgeUnit
     'resolveOwnership',  // workspace-ownership.resolveWorkspaceForBook
     'rollbackOwnership', // book-repo registry-row rollback (failed blank commit)
-    'recoveryCtx',       // read-recovery ctx (redis chunk repair)
+    // (0.6.0: placeholderAudio and recoveryCtx — the read-repair legs — are gone)
     'outputRoot',        // VBook 4 step 4: artifact root, read only (state of hero reference files)
 ];
 
@@ -87,9 +87,7 @@ describe('E4: dependency matrix — contour deps legs stay frozen', () => {
             'editorModel.read',             // canonical reader (facade)
             'editorPorts.auditCoverage',    // GET source-coverage
             'editorPorts.outputRoot',       // VBook 4: computed state of hero reference files (GET book)
-            'editorPorts.placeholderAudio', // GET book read-repair
             'editorPorts.promptLimit',      // prompt length ceiling
-            'editorPorts.recoveryCtx',      // GET book chunk recovery
             'editorPorts.sceneAssetsRepo',  // post-commit fan-out
             'storage.bookSync',             // post-commit PG reconcile
             'utils.log',                     // destructured: const { log } = utils
@@ -131,34 +129,19 @@ describe('E4: dependency matrix — contour deps legs stay frozen', () => {
         expect(used, 'entity-crud dep matrix changed — see Phase 2 audit §E4').to.deep.equal(BASELINE['entity-crud-routes.cjs']);
     });
 
-    it('read-recovery ctx consumes exactly the frozen ctx fields', () => {
-        const code = codeOf(EDITOR_HELPERS[1]);
-        // destructured ctx fields — the ctx contract
-        const m = code.match(/const\s*\{([^}]*)\}\s*=\s*ctx\s*;/);
-        expect(m, 'read-recovery must destructure its ctx explicitly').to.not.equal(null);
-        const fields = m[1].split(',').map((s) => s.trim()).filter(Boolean).sort();
-        expect(fields).to.deep.equal([
-            'activeScenes', 'book', 'config', 'getAllChunks', 'isBookRegistered', 'log', 'redis', 'saveChunk', 'state',
-        ]);
-        // the ctx contract is fully documented in its header; the handler
-        // consumes the chunk legs + redis counters + book projections
-        for (const f of ['redis', 'book', 'config']) {
-            expect(code, `ctx.${f} must be consumed as a member`).to.match(new RegExp('(?<![\\w.$])' + f + '\\.'));
-        }
-        for (const f of ['getAllChunks', 'saveChunk', 'log']) {
-            expect(code, `ctx.${f} must be invoked`).to.match(new RegExp('(?<![\\w.$])' + f + '\\s*\\('));
-        }
-    });
+    // (read-recovery ctx — removed with read-recovery.cjs in editor 0.6.0)
 });
 
 // ── E5 — editorPorts contract freeze (functional) ─────────────────────────
 describe('E5: createEditorPorts — the frozen port object contract', () => {
-    it('exports exactly the eight frozen port names', () => {
+    it('exports exactly the seven frozen port names', () => {
         const createEditorPorts = require(EDITOR_PORTS);
         const ports = createEditorPorts({
             deps: {
-                sceneAssetsRepo: {}, placeholderAudio: {}, auditCoverage: {},
-                promptLimit: 2000, purge: {}, resolveOwnership: {}, rollbackOwnership: {}, recoveryCtx: {},
+                sceneAssetsRepo: {}, auditCoverage: {},
+                promptLimit: 2000, purge: {}, resolveOwnership: {}, rollbackOwnership: {},
+                // a host that still passes the 0.5.x read-repair legs is not rejected; they are dropped
+                placeholderAudio: {}, recoveryCtx: {},
             },
         });
         expect(Object.keys(ports).sort()).to.deep.equal([...FROZEN_PORTS].sort());
@@ -168,13 +151,12 @@ describe('E5: createEditorPorts — the frozen port object contract', () => {
         const createEditorPorts = require(EDITOR_PORTS);
         const legs = {
             sceneAssetsRepo: { leg: 1 },
-            placeholderAudio: { leg: 2 },
             auditCoverage: { leg: 3 },
             promptLimit: 2000,
             purge: { leg: 4 },
             resolveOwnership: { leg: 5 },
             rollbackOwnership: { leg: 7 },
-            recoveryCtx: { leg: 6 },
+            outputRoot: '/out',
         };
         const ports = createEditorPorts({ deps: legs });
         // Same references — the port object NEVER wraps/re-implements host
@@ -185,10 +167,11 @@ describe('E5: createEditorPorts — the frozen port object contract', () => {
     it('throws fail-closed when a mandatory port is missing', () => {
         const createEditorPorts = require(EDITOR_PORTS);
         expect(() => createEditorPorts({ deps: {} })).to.throw(/sceneAssetsRepo/);
-        expect(() => createEditorPorts({ deps: { sceneAssetsRepo: {} } })).to.throw(/placeholderAudio/);
+        // 0.6.0: placeholderAudio is no longer mandatory
+        expect(() => createEditorPorts({ deps: { sceneAssetsRepo: {} } })).to.not.throw();
     });
 
-    it('backend.cjs wires all eight ports at the composition root', () => {
+    it('backend.cjs wires all seven ports at the composition root', () => {
         const src = readSource(BACKEND_ROOT);
         // Phase 4.1: the port factory comes through the package ROOT
         // (createEditorPorts from require('@animastor/editor')) — no deep
@@ -310,7 +293,6 @@ describe('E7: the editor package is carried by exactly its src files', () => {
             'packages/animastor-editor/src/hero-api.cjs',
             'packages/animastor-editor/src/hero-routes.cjs',
             'packages/animastor-editor/src/index.cjs',
-            'packages/animastor-editor/src/read-recovery.cjs',
             'packages/animastor-editor/src/scene-patch-utils.cjs',
             // (VBook 4 step 4 deleted vbook4-pending.cjs with the 3.1 routes)
         ]);

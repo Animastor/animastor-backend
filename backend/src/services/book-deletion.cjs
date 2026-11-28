@@ -17,14 +17,14 @@
 //   3. Build artifacts     — output-dir removal (build_ids come from Redis
 //      chunk keys, so this runs before the Redis purge below, plus the
 //      manifest's build_id read before step 2 — the v2 build dir).
-//   4. Runtime (Redis)     — scene-window cancel flag, active audio/image/
-//      video keys, all book-keyed key families (cleanBookRedisKeys).
-//      + the per-unit IU registry keys animastor:iu:<unit_id> (keyed by
-//        unit, not by book — found through PG/bundle, see purgeIuRegistry).
+//   4. Runtime (Redis)     — the book-keyed live families (cleanBookRedisKeys:
+//      chunk records, chunk index, window counters), then the VBook cancel
+//      signal is re-armed.
 //   5. Derived/PG cleanup  — per-table deletes (… books LAST for FK order),
-//      child rows first: agent_messages/conversations/steps, gen_command_skips.
-//   6. GPU-hub queue clear (best-effort, external runtime).
-//   7. Final result.
+//      child rows first: agent_messages/conversations/steps, gen_command_skips;
+//      orchestration v2 rows (gen_*) through purgeGenV2.
+//   6. Final result. (2026-11-28, этап 4: no GPU hub call, no legacy runtime
+//      keys / tables, no IU registry keys — the legacy orchestration is gone.)
 //
 // This file owns the ORDER (cancellation → cleanup) so future decomposition
 // only changes internals, not the contract.
@@ -42,8 +42,7 @@ const DEFAULT_BUILD_ID = 'default';
 // Every PG table that records a build_id next to a book_id (schema.js): a build
 // id named there by another book is shared — its directory is never removed whole.
 const BUILD_ID_TABLES = Object.freeze([
-    'scenes', 'output_manifests', 'image_units', 'scene_assets',
-    'iu_image_pointers', 'iu_image_fence_reservations',
+    'scenes', 'image_units', 'scene_assets',
 ]);
 
 /**
@@ -91,71 +90,6 @@ function createBookDeletion(deps) {
     const v2 = { purgeGenV2: deps.purgeGenV2 || null };
     function configureOrchV2(hooks = {}) {
         if (typeof hooks.purgeGenV2 === 'function') v2.purgeGenV2 = hooks.purgeGenV2;
-    }
-
-    // ── IU registry keys (animastor:iu:<unit_id>) ──
-    // The registry is keyed by UNIT id only (helpers/redis-helpers
-    // saveIURegistry — no TTL; image/registry — 24 h), so no book-keyed
-    // pattern of cleanBookRedisKeys can reach it; until 2026-11-22 every
-    // deleted book left them (reports/2026-11-22/books-cleanup.md: 15 keys).
-    // The unit ids of the book come from the bundle (read BEFORE resetBook)
-    // and from PG (image_units / iu_image_pointers /
-    // iu_image_fence_reservations, read BEFORE the PG purge). A key is
-    // removed only when its build_id is one of THIS book's builds and no
-    // other book's image_units row names the same unit (two imports of one
-    // .vbook share unit ids).
-    function unitIdsOfBundle(bundle) {
-        const ids = new Set();
-        for (const ch of (bundle && Array.isArray(bundle.chapters) ? bundle.chapters : [])) {
-            for (const sc of (ch && Array.isArray(ch.scenes) ? ch.scenes : [])) {
-                const units = [...(Array.isArray(sc && sc.units) ? sc.units : [])];
-                for (const db of (Array.isArray(sc && sc.dialogue_blocks) ? sc.dialogue_blocks : [])) {
-                    if (db && Array.isArray(db.units)) units.push(...db.units);
-                }
-                for (const u of units) if (u && typeof u.id === 'string' && u.id) ids.add(u.id);
-            }
-        }
-        return ids;
-    }
-
-    async function pgRows(sql, params) {
-        try {
-            const r = await storage.postgres.query(sql, params);
-            return (r && Array.isArray(r.rows)) ? r.rows : [];
-        } catch (err) {
-            console.warn(`[DELETE-BOOK] DB read: ${err.message}`);
-            return [];
-        }
-    }
-
-    async function purgeIuRegistry(bookId, unitIds, buildIds) {
-        const out = { checked: 0, removed: 0, kept_foreign: 0 };
-        const rows = [
-            ...await pgRows('SELECT unit_id AS iu, build_id FROM image_units WHERE book_id = $1', [bookId]),
-            ...await pgRows('SELECT iu_id AS iu, build_id FROM iu_image_pointers WHERE book_id = $1', [bookId]),
-            ...await pgRows('SELECT iu_id AS iu, build_id FROM iu_image_fence_reservations WHERE book_id = $1', [bookId]),
-        ];
-        const ids = new Set(unitIds);
-        for (const r of rows) {
-            if (r && typeof r.iu === 'string' && r.iu) ids.add(r.iu);
-            if (r && typeof r.build_id === 'string' && r.build_id) buildIds.add(r.build_id);
-        }
-        for (const iu of ids) {
-            out.checked++;
-            const key = `animastor:iu:${iu}`;
-            let raw = null;
-            try { raw = await redis.get(key); } catch (_) { raw = null; }
-            if (raw == null) continue;
-            let buildId = null;
-            try { buildId = JSON.parse(raw).build_id || null; } catch (_) { buildId = null; }
-            if (!buildId || !buildIds.has(buildId)) { out.kept_foreign++; continue; }
-            const shared = await pgRows('SELECT 1 FROM image_units WHERE unit_id = $1 AND book_id <> $2 LIMIT 1', [iu, bookId]);
-            if (shared.length > 0) { out.kept_foreign++; continue; }
-            try { out.removed += Number(await redis.del(key)) || 0; } catch (err) {
-                console.warn(`[DELETE-BOOK] IU registry key ${key}: ${err.message}`);
-            }
-        }
-        return out;
     }
 
     /**
@@ -227,15 +161,12 @@ function createBookDeletion(deps) {
             console.warn(`[DELETE-BOOK] Failed to cancel agent sessions: ${pgErr.message}`);
         }
 
-        // Unit ids + build id of the bundle — read BEFORE the bundle goes
-        // (the IU registry purge in step 4 needs them; the build id also names
-        // the VBook 4 / orchestration v2 build dir of step 3).
-        let bundleUnitIds = new Set();
+        // Build id of the bundle — read BEFORE the bundle goes (it names the
+        // VBook 4 / orchestration v2 build dir of step 3).
         let bundleBuildId = null;
         if (typeof book.loadBook === 'function') {
             try {
                 const bundle = book.loadBook(bookId);
-                bundleUnitIds = unitIdsOfBundle(bundle);
                 bundleBuildId = (bundle && bundle.manifest && bundle.manifest.build_id) || null;
                 // No build id in the manifest: every consumer worked in the
                 // shared OUTPUT_DIR/default/ (post171) — this book's files are there.
@@ -290,21 +221,7 @@ function createBookDeletion(deps) {
         // ── 4. Runtime / ephemeral state (Redis) ──
         // 2026-11-28 (этап 4): the legacy scene-window cancel flag and the
         // legacy runtime:active-* counters are gone with the legacy runtime.
-        // releaseClaims: the book is being destroyed, so its idempotency
-        // ownership refs go with it — ref + claim + completion marker together
-        // through the owner module (a raw ref DEL would orphan every done
-        // marker; see helpers/redis-helpers.cjs). The cache-clear route keeps
-        // the default and releases after the hub lane clear instead.
-        const cleanResult = await cleanBookRedisKeys(redis, bookId, { releaseClaims: true });
-        try {
-            const bookBuildIds = new Set([...buildIds, `build_${bookId}`, ...(bundleBuildId ? [bundleBuildId] : [])]);
-            const iu = await purgeIuRegistry(bookId, bundleUnitIds, bookBuildIds);
-            if (iu.removed || iu.kept_foreign) {
-                log(`[DELETE-BOOK] ${bookId}: IU registry keys removed=${iu.removed} kept(other build/book)=${iu.kept_foreign} of ${iu.checked} unit(s)`);
-            }
-        } catch (iuErr) {
-            console.warn(`[DELETE-BOOK] IU registry cleanup failed for ${bookId}: ${iuErr.message}`);
-        }
+        await cleanBookRedisKeys(redis, bookId);
         // Re-arm the cancellation signal the purge has just removed: a running
         // VBook agent must still observe it on its next checkCancelled() (the
         // cascade can take seconds), and the key then expires on its own.
@@ -314,9 +231,6 @@ function createBookDeletion(deps) {
             log(`[DELETE-BOOK] Re-armed cancelled-workers for ${bookId} (TTL ${CANCELLED_WORKERS_TTL_SEC}s)`);
         } catch (redisErr) {
             console.warn(`[DELETE-BOOK] Failed to re-arm cancelled-workers: ${redisErr.message}`);
-        }
-        if (cleanResult && cleanResult.claims_released) {
-            log(`[DELETE-BOOK] ${bookId}: released ${cleanResult.claims_released} idempotency claim(s), ${cleanResult.markers_released} completion marker(s)`);
         }
 
         // ── 5. Derived PostgreSQL state — clean ALL PG tables, each with an
@@ -329,12 +243,6 @@ function createBookDeletion(deps) {
             // Per-layer & asset tables (book_id as plain TEXT, no FK)
             'image_units',
             'scenes',
-            'asset_states',
-            'asset_dependencies',
-            'generation_tasks',
-            'reconciliation_events',
-            'output_manifests',
-            'cache_entries',
             'book_source',
             // agent_sessions children first (FK ON DELETE CASCADE on the
             // current schema — explicit so an older schema without the
@@ -345,11 +253,7 @@ function createBookDeletion(deps) {
             { table: 'agent_conversations', sql: 'DELETE FROM agent_conversations WHERE session_id IN (SELECT session_id FROM agent_sessions WHERE book_id = $1)' },
             { table: 'agent_steps', sql: 'DELETE FROM agent_steps WHERE session_id IN (SELECT session_id FROM agent_sessions WHERE book_id = $1)' },
             'agent_sessions',
-            // IU image publication state (fenced pointers + reservations)
-            'iu_image_pointers',
-            'iu_image_fence_reservations',
             'book_generation_sessions',
-            'generation_cancellations',
             'book_events',
             'scene_assets',
             // Coreference resolution tables

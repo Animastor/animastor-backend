@@ -67,12 +67,12 @@ function findLazyBooksByHash(fileHash, booksDir, fileSize) {
 
 module.exports = function(app, redis, deps) {
     const {
-        config, state, audio, image, video, book, orchestrator, storage,
+        config, audio, image, video, book, storage,
         txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
-        placeholderAudio, layerConfig, genScope, activeScenes,
+        placeholderAudio, layerConfig, genScope,
         utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
-        detectAvailableMode, recoverChunksFromDisk, recoverAllBooksFromDisk,
-        cleanupService, bookDiff, taskHandler, windowGenerator,
+        recoverChunksFromDisk,
+        cleanupService, bookDiff, windowGenerator,
         iuRepo, cleanBookRedisKeys,
     } = deps;
     const { log } = utils;

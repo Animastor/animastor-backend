@@ -558,9 +558,12 @@ function workerProcessStartMs(io, { workerDir, pid, platformAdapter = null }) {
     }
 }
 
-/** Files whose change requires a worker restart: .env and the bundle (installer 0.2.8). */
+/**
+ * Files whose change requires a worker restart: .env and the bundle (installer 0.2.8).
+ * 0.2.12: job-protocol-v2.cjs is not part of the worker 3.0.0 bundle (protocol 2 removed).
+ */
 const WORKER_CONFIG_FILES = Object.freeze(['.env', 'package.json', 'worker.cjs', 'worker-env.cjs',
-    'job-protocol-v2.cjs', 'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'worker-logs.cjs']);
+    'worker-cleanup.cjs', 'worker-cleanup-journal.cjs', 'worker-logs.cjs']);
 
 /**
  * Configuration files (.env, bundle files) modified AFTER the worker `pid`

@@ -122,13 +122,12 @@ async function startHeroServer() {
         editorModel,
         editorPorts: {
             sceneAssetsRepo: { bumpSceneVersions: async (id, dirty) => { calls.bump.push(dirty); return dirty.length; }, setDirtyUnitIds: async () => 0 },
-            placeholderAudio: { recoverMissingPlaceholders: async () => ({ created: 0, errors: [] }) },
+
             auditCoverage: { auditBookCoverage: () => ({}) },
             promptLimit: 4000,
             purge: { purgeScene: async () => ({ complete: true, steps: [] }), purgeUnit: async () => ({ complete: true, steps: [] }) },
             resolveOwnership: async () => 'ws',
             rollbackOwnership: async () => {},
-            recoveryCtx: { isBookRegistered: async () => false, log: () => {} },
             outputRoot: outputDir,
         },
         utils: { log: () => {} },

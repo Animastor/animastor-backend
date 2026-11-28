@@ -88,7 +88,6 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
     this.timeout(60000);
     let server; let base; let app; let host; let routes; let redis;
     let userId; let workspaceId; let workerId; let audioWorkerId; let bookId; let buildId;
-    let imageVersioned = false;
     const books = new Map();
     const fetchCalls = [];
     const origFetch = global.fetch;
@@ -105,9 +104,8 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
             env: { ORCH_V2_ENABLED: '1', ORCH_V2_UPLOAD_SECRET: SECRET, ORCH_V2_PUBLIC_URL: base },
             hasFfmpeg: () => true,
             getPool, redis, layerConfig, book: vbook, outputDir: config.OUTPUT_DIR,
-            gpuDispatcher: require('../src/runtime/gpu-dispatcher'),
+            gpuDispatcher: require('../src/runtime/worker-lanes'),
             publishProgress: async () => {},
-            imageVersioned: () => imageVersioned,
             timers: false, log: () => {},
         });
     }
@@ -115,14 +113,14 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
     function mountRoutes(a, r) {
         const deps = {
             utils: { log: () => {} }, orchV2: r, layerConfig, book: vbook, config,
-            runtime: {}, state: {}, activeScenes: {}, iuRepo: {},
+            iuRepo: {},
         };
         require('../src/routes/book/generation-routes.cjs')(a, redis, deps);
         require('../src/routes/book/export-routes.cjs')(a, redis, { config, book: vbook, audio: {}, utils: { log: () => {} } });
         require('@animastor/player').createPlayerRoutes(a, redis, {
-            state: require('../src/state'), image: require('../src/image'), utils: { log: () => {} },
+            image: require('../src/image'), utils: { log: () => {} },
             getChunk: async () => null, getAllChunks: async () => [], getBookWindowStatus: async () => ({}),
-            activeScenes: {}, placeholderAudio: {}, layerConfig,
+            placeholderAudio: {}, layerConfig,
             iuRepo: require('../src/storage/postgres/repositories/iu-repo'),
             sceneAssetsRepo: require('../src/storage/postgres/repositories/scene-assets-repo'),
             playerModel: { loadBook: vbook.loadBook },
@@ -217,7 +215,6 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = ANY($1)`, [[workerId, audioWorkerId]]);
-        imageVersioned = false;
         Object.assign(layerCfg, { audio_enabled: true, image_enabled: true, video_enabled: true });
         host = makeHost();
         await host.start();
@@ -311,23 +308,20 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         expect(fetchCalls.filter((u) => !u.startsWith(base))).to.deep.equal([], 'no hub / legacy calls');
     });
 
-    it('payload IU = workflow старого пути (тот же buildIUWorkflow), байт-в-байт, детерминированный seed', async () => {
-        const provider = require('@animastor/generation').comfyuiProvider;
-        const sent = [];
-        const origGenerate = provider.generate;
-        provider.generate = async (req) => { sent.push(req); return { sent: true }; };
-        try {
-            const iu = require('../src/image/iu-processor');
-            const s = require('../src/book').collectScenes(books.get(bookId)).find((x) => x.scene_id === 'sc-1');
-            await iu.generateSceneIUImages(createMockRedis(), s, books.get(bookId), buildId, bookId, new Set(), 'disp-1');
-        } finally { provider.generate = origGenerate; }
-        expect(sent.map((x) => x.jobType)).to.deep.equal(['image', 'image']);
+    it('payload IU = buildIUWorkflow (the workflow the legacy dispatch sent), byte-for-byte, deterministic seed', async () => {
+        // 2026-11-28: the legacy dispatch (iu-processor.generateSceneIUImages) is
+        // gone; its workflow builder lives on in image/iu-workflow — the v2 payload
+        // must stay byte-for-byte that workflow.
+        const iu = require('../src/image/iu-workflow');
+        const { collectSceneUnits } = require('../src/image/registry');
+        const s = require('../src/book').collectScenes(books.get(bookId)).find((x) => x.scene_id === 'sc-1');
+        const expected = collectSceneUnits(s.payload).map((u) => iu.buildIUWorkflow(u, s, books.get(bookId)).workflow);
+        expect(expected).to.have.length(2);
         await runScene('ch-1', 'sc-1');
         const tasks = [(await worker.claim()).body.task, (await worker.claim()).body.task];
-        for (let i = 0; i < 2; i += 1) expect(JSON.stringify(tasks[i].params)).to.equal(JSON.stringify(sent[i].workflow));
+        for (let i = 0; i < 2; i += 1) expect(JSON.stringify(tasks[i].params)).to.equal(JSON.stringify(expected[i]));
         const seedNode = Object.values(tasks[0].params).find((n) => n && n.inputs && n.inputs.seed !== undefined);
         expect(seedNode.inputs.seed).to.equal(458007174637134, 'the static seed of img-qwen-image');
-        expect(sent[0].jobId).to.equal(`${bookId}_ch-1_sc-1_${IU.a}:iu_image`);
     });
 
     it('глава; двойной клик → та же команда; пересекающаяся → joined; без force готовое пропускается по part_hash; mode all → всё заново', async () => {
@@ -465,19 +459,8 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         expect(byCmd.body.cancelled).to.deep.equal(['image']);
     });
 
-    it('IU_IMAGE_VERSIONED включён → image на v2-книге fail-closed (409 v2_image_unavailable), аудио работает', async () => {
-        imageVersioned = true;
-        const r = await command({ scope: 'book', layers: ['image'] });
-        expect(r.status).to.equal(409);
-        expect(r.body.code).to.equal('v2_image_unavailable');
-        expect(r.body.error).to.match(/IU_IMAGE_VERSIONED/);
-        expect((await command({ scope: 'book', layers: ['audio', 'image'] })).status).to.equal(409);
-        expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId])).to.equal(0);
-        expect((await command({ scope: 'book', layers: ['audio'] })).status).to.equal(200, 'audio is not affected');
-        imageVersioned = false;
-        expect((await command({ scope: 'book', layers: ['image'] })).status).to.equal(200, 'flag off → image works again');
-    });
-
+    // (2026-11-28: «IU_IMAGE_VERSIONED включён → image fail-closed» went with the
+    // versioned pointer layer — the flag no longer exists.)
     it('old core (< 1.1.0, no PNG check) → image fail-closed at the command', async () => {
         await host.stop();
         const fakeGen = { ...gen, media: { ...gen.media, inspectPng: undefined } };
@@ -485,7 +468,7 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
             env: { ORCH_V2_ENABLED: '1', ORCH_V2_UPLOAD_SECRET: SECRET, ORCH_V2_PUBLIC_URL: base },
             hasFfmpeg: () => true, gen: fakeGen,
             getPool, redis, layerConfig, book: vbook, outputDir: config.OUTPUT_DIR,
-            gpuDispatcher: require('../src/runtime/gpu-dispatcher'), imageVersioned: () => false, timers: false, log: () => {},
+            gpuDispatcher: require('../src/runtime/worker-lanes'), timers: false, log: () => {},
         });
         await host.start();
         await wireApp();

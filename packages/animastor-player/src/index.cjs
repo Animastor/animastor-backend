@@ -32,7 +32,7 @@
 //   bookProjections   { findSceneRuntimeData(loadedBook, ch, sc),
 //                       collectSceneUnits(scenePayload) } (pure VBook reads)
 //   redis/getChunk/getAllChunks/getBookWindowStatus             (runtime state)
-//   iuRepo/sceneAssetsRepo/layerConfig/image/state/activeScenes/
+//   iuRepo/sceneAssetsRepo/layerConfig/image/
 //   placeholderAudio/utils ({ log })                            (host seams)
 //
 // Public API:

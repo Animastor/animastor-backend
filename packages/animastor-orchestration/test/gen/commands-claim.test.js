@@ -85,15 +85,18 @@ describe('gen v2 — createCommand / cancel / beacon (ADR §6)', function () {
         assert.deepEqual(f.summary, { jobs_created: 7, joined: 0, skipped_ready: 0 });
     });
 
-    it('layers = requested ∩ enabled; empty → 409 layer_disabled; legacy book → 409; foreign workspace → 403', async () => {
+    it('layers = requested ∩ enabled; empty → 409 layer_disabled; a book with the old column value is accepted (2.0.0); foreign workspace → 403', async () => {
         await assert.rejects(cmd({ enabledLayers: ['image'] }), (e) => e.status === 409 && e.code === 'layer_disabled');
         const r = await cmd({ layers: ['audio', 'image'], enabledLayers: ['audio'] });
         assert.deepEqual((await ctx.q(`SELECT layers FROM gen_commands WHERE command_id = $1`, [r.command_id])).rows[0].layers, ['audio']);
         const legacy = await makeBook(ctx, { v2: false });
-        await assert.rejects(o.createCommand({ ...legacy, scope: { level: 'book' }, layers: ['audio'] }), (e) => e.status === 409 && e.code === 'book_not_v2');
+        // 2.0.0: books.orchestration is a migration trace — not read by the core
+        const accepted = await o.createCommand({ ...legacy, kind: 'regenerate', clientActionId: `${legacy.bookId}-old-column`, scope: { level: 'book' }, layers: ['audio'], enabledLayers: ['audio'] });
+        assert.equal(accepted.status, 'active');
+        await o.cancel({ bookId: legacy.bookId });
         await assert.rejects(o.createCommand({ ...book, workspaceId: uuid(), scope: { level: 'book' }, layers: ['audio'] }), (e) => e.status === 403);
         await assert.rejects(cmd({ scope: { level: 'scene' } }), (e) => e.status === 400);
-        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_commands`), 1, 'rejected commands leave no row');
+        assert.equal(await count(ctx, `SELECT count(*) AS n FROM gen_commands`), 2, 'rejected commands leave no row (the two rows are the accepted ones)');
     });
 
     it('cancel by book: all active commands + their live jobs; other books untouched (I7)', async () => {

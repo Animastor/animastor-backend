@@ -9,11 +9,11 @@
 // and clearing dirty_unit_ids mid-regen flipped the formula between branches,
 // causing the frontend progress to jump backwards.
 //
-// The Redis counter (animastor:iu-progress:{book}:{ch}:{sc}:image) is the
-// single source of truth. It is INCR-ed once per confirmed IU in
-// task-handler.cjs and reset (DEL) at the start of a regen cycle in
-// book-routes.cjs, so it is monotonic within one generation. We never touch
-// the disk on the hot polling path.
+// 2026-11-28 (ORCHESTRATION_V2 этап 4): the Redis confirmed counter
+// (animastor:iu-progress:{book}:{ch}:{sc}:image) was INCR-ed only by the
+// legacy task handler — orchestration v2 never wrote it, so it was 0 for every
+// v2 book. The counter is gone; computeIuReady keeps its signature (the
+// player package calls it) and counts the confirmed part as 0.
 
 /**
  * Deterministic IU-ready count from raw counters. No IO — unit-testable.
@@ -42,7 +42,7 @@ function iuReadyFromCounters(total, dirtyCount, confirmedCount) {
  * Read the dirty-unit count and Redis confirmed counter for a scene and return
  * the deterministic ready count. Used for both scene IUs and cover IUs.
  *
- * @param {RedisClient} redis
+ * @param {RedisClient} _redis   unused (kept: the player passes it)
  * @param {Object} sceneAssetsRepo  repo exposing getDirtyUnitIds()
  * @param {string} bookId
  * @param {string} chapterId
@@ -50,19 +50,14 @@ function iuReadyFromCounters(total, dirtyCount, confirmedCount) {
  * @param {number} total            total IUs for the scene
  * @returns {Promise<number>}
  */
-async function computeIuReady(redis, sceneAssetsRepo, bookId, chapterId, sceneId, total) {
+async function computeIuReady(_redis, sceneAssetsRepo, bookId, chapterId, sceneId, total) {
     let dirtyCount = 0;
     try {
         const dirtyIds = await sceneAssetsRepo.getDirtyUnitIds(bookId, chapterId, sceneId);
         dirtyCount = dirtyIds ? dirtyIds.length : 0;
     } catch (_) {}
 
-    let confirmedCount = 0;
-    try {
-        const progKey = `animastor:iu-progress:${bookId}:${chapterId}:${sceneId}:image`;
-        const val = await redis.get(progKey);
-        if (val) confirmedCount = parseInt(val, 10) || 0;
-    } catch (_) {}
+    const confirmedCount = 0;   // legacy Redis counter removed (see the header)
 
     return iuReadyFromCounters(total, dirtyCount, confirmedCount);
 }

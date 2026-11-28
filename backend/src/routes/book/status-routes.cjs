@@ -35,20 +35,8 @@ module.exports = function registerStatusRoutes(app, ctx) {
         }
     });
 
-    // GET /api/v1/book/:bookId/source-chapters
-    app.get('/api/v1/book/:bookId/source-chapters', async (req, res) => {
-        try {
-            const { bookId } = req.params;
-            const draft = lazyBook.loadDraftBook(bookId);
-            if (!draft) return res.status(404).json({ error: 'Book not found' });
-            if (!draft.sourceText) return res.status(400).json({ error: 'Book has no source text' });
-            const chapters = lazyBook.splitIntoChapters(draft.sourceText);
-            return res.json({ chapters, total: chapters.length });
-        } catch (err) {
-            console.error('SOURCE-CHAPTERS ERROR:', err);
-            return res.status(400).json({ error: err.message || 'unknown error' });
-        }
-    });
+    // (GET /api/v1/book/:bookId/source-chapters — removed 2026-11-28,
+    // ORCHESTRATION_V2 этап 4: no caller in web / Android.)
 
     // GET /api/v1/book/:bookId/chapters-summary
     app.get('/api/v1/book/:bookId/chapters-summary', async (req, res) => {

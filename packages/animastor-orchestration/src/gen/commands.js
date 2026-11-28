@@ -144,10 +144,11 @@ function createCommands({ pool, ports, genLog = NOOP_LOG }) {
 
         return withTx(pool, async (client) => {
             const book = (await client.query(
-                'SELECT book_id, workspace_id, orchestration FROM books WHERE book_id = $1 FOR SHARE', [bookId])).rows[0];
+                'SELECT book_id, workspace_id FROM books WHERE book_id = $1 FOR SHARE', [bookId])).rows[0];
             if (!book) throw new GenError('book_not_found', 404, `book ${bookId} not found`);
             if (book.workspace_id !== workspaceId) throw new GenError('forbidden', 403, 'book belongs to another workspace');
-            if (book.orchestration !== 'v2') throw new GenError('book_not_v2', 409, `book ${bookId} is on legacy orchestration`);
+            // 2.0.0: no book_not_v2 — every book is v2 (006-default-v2 flipped the
+            // column; books.orchestration stays only as a migration trace).
 
             const existingOf = async () => (await client.query(
                 'SELECT * FROM gen_commands WHERE book_id = $1 AND client_action_id = $2', [bookId, clientActionId])).rows[0] || null;

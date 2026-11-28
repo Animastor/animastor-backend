@@ -68,7 +68,7 @@ createPlayerRoutes(app, redis, {
     bookProjections: { findSceneRuntimeData, collectSceneUnits }, // pure VBook reads
     redis, getChunk, getAllChunks, getBookWindowStatus,
     iuRepo, sceneAssetsRepo, layerConfig,
-    image, state, activeScenes, placeholderAudio,
+    image, placeholderAudio,
     utils: { log },
 });
 ```

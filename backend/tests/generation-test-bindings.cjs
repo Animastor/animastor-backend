@@ -1,18 +1,15 @@
 // ======================================================
 // GENERATION PORTS — host-side test bindings (S-6)
 // ======================================================
-// Mirrors the production composition root (backend.cjs): binds the four
-// Generation host ports (DispatchTransport, GenerationConfig, ProfileStore,
-// BookData) so that plain requires of generation modules — which is what
+// Mirrors the production composition root (backend.cjs): binds the three
+// Generation host ports (GenerationConfig, ProfileStore, BookData — the
+// DispatchTransport adapter, runtime/gpu-dispatcher, is gone since 2026-11-28) so that plain requires of generation modules — which is what
 // most backend tests do — behave exactly like the wired production process.
 // Loaded for EVERY mocha run via .mocharc.json `require` (runs before any
 // test module), so lazy registry self-bootstrap and call-time port
 // resolution always find a wired port.
 //
 // Behavior compatibility:
-//   - DispatchTransport adapts runtime/gpu-dispatcher.sendUnified through a
-//     call-time property lookup — tests that stub gpuDispatcher.sendUnified
-//     on the module object (generation-provider-seam.test.js) keep working;
 //   - GenerationConfig binds the canonical runtime-config slices verbatim
 //     (config/generation-config-adapter) — the S2-G drift guard still
 //     compares registry values against runtime-config directly;
@@ -32,9 +29,6 @@
 'use strict';
 
 require('../src/config/generation-config-adapter').bindGenerationConfig();
-require('@animastor/generation').ports.dispatchTransport.setDispatchTransport({
-    dispatch: (taskSpec) => require('../src/runtime/gpu-dispatcher').sendUnified(taskSpec),
-});
 require('@animastor/generation').ports.profileStore.setProfileStore({
     getAssemblyProfile: require('../src/services/ai-loader').getAssemblyProfile,
 });
@@ -44,108 +38,11 @@ require('@animastor/generation').ports.bookData.setBookData({
     resolveHeroLook: require('@animastor/vbook-runtime/looks.cjs').resolveHeroLook,
     passportHeroes: require('@animastor/vbook-runtime/heroes.cjs').passportHeroes,
 });
-// O-2: PersistencePort — mirrors the production composition root: binds the
-// host persistence adapter so tier consumers (runtime/orchestration) resolve
-// persistence at call time exactly like the wired production process. Call
-// time resolution (lazy requires inside the adapter) keeps require.cache
-// repo/barrel stubs in individual harnesses fully effective.
-require('@animastor/orchestration').ports.persistence.setPersistencePort(
-    require('../src/storage/runtime-persistence-adapter')
-);
-// O-3: SceneDataPort — same convention: binds the host scene-data adapter so
-// tier consumers resolve loadBook/findSceneRuntimeData/collectScenes at call
-// time through the '../src/book' shim channel (stubbing it keeps working).
-require('@animastor/orchestration').ports.sceneData.setSceneDataPort(
-    require('../src/storage/scene-data-adapter')
-);
-// O-4: PlaceholderAudioPort — same convention: binds the host placeholder-
-// audio adapter so tier consumers resolve hasRealAudio/ensurePlaceholder-
-// Audio/replacePlaceholderWithRealAudio at call time through the
-// '../src/services/placeholder-audio' channel (stubbing it keeps working).
-require('@animastor/orchestration').ports.placeholderAudio.setPlaceholderAudioPort(
-    require('../src/storage/placeholder-audio-adapter')
-);
-// O-5: ProgressEventsPort — same convention: binds the host progress-events
-// adapter so tier consumers resolve publishProgress/getSceneTaskState/
-// hasActiveTasks/reconcileCompletedTasks at call time through the
-// '../src/services/progress-pubsub.cjs' and '../src/services/generation-
-// progress' channels (stubbing them keeps working).
-require('@animastor/orchestration').ports.progressEvents.setProgressEventsPort(
-    require('../src/storage/progress-events-adapter')
-);
-// O-7: AudioFsmPort — same convention: binds the host audio-FSM adapter so
-// tier consumers resolve the audio-FSM operations at call time through the
-// '../src/services/audio-orchestrator' channel (stubbing it keeps working
-// — the reconciliation/worklist harnesses replace exactly that module).
-require('@animastor/orchestration').ports.audioFsm.setAudioFsmPort(
-    require('../src/storage/audio-fsm-adapter')
-);
-// O-8: VideoFsmPort — same convention: binds the host video-FSM adapter so
-// tier consumers resolve the video-FSM operations at call time through the
-// '../src/services/video-orchestrator' channel (stubbing it keeps working
-// — the orchestration-stabilization harness replaces exactly that module).
-require('@animastor/orchestration').ports.videoFsm.setVideoFsmPort(
-    require('../src/storage/video-fsm-adapter')
-);
-// O-9: HubCancelPort — same convention: binds the host hub-cancel adapter
-// so tier consumers resolve clearHubDispatches at call time through the
-// '../src/runtime/dispatch-engine' channel (stubbing it keeps working —
-// the gpu-hub-cleanup and reconciliation harnesses replace exactly that
-// module).
-require('@animastor/orchestration').ports.hubCancel.setHubCancelPort(
-    require('../src/storage/hub-cancel-adapter')
-);
-// O-10: LayerConfigPort — same convention: binds the host layer-config
-// adapter so tier consumers resolve get/restoreFromBooks at call time
-// through the '../src/services/layer-config' channel (stubbing it keeps
-// working — the worklist-rebuild purge list replaces exactly that
-// module; the purge empties require.cache so call-time resolution
-// reloads the real service, identical to the pre-O-10 lazy requires).
-require('@animastor/orchestration').ports.layerConfig.setLayerConfigPort(
-    require('../src/storage/layer-config-adapter')
-);
+// (2026-11-28, ORCHESTRATION_V2 этап 4: the O-2..O-10 orchestration ports and
+// the host bindings of the legacy package are gone with src/legacy — the
+// composition root binds none of them any more.)
 
-// §32.30: HOST BINDINGS for the extracted orchestration package — mirrors the
-// composition-root wiring in backend.cjs. Resolver semantics (zero-arg fns)
-// keep require.cache stubbing working exactly as before the move.
-//
-// PRE-SPLIT DUAL-WIRING: the hoisted binding maps below are applied to BOTH
-// the npm registry copy (requires above) and the monorepo copy under
-// packages/** (try-blocks at the bottom). Before the lock-file decoupling
-// they were ONE module instance through the workspaces symlink; architecture
-// tests still read the monorepo sources, so the monorepo copies must be
-// wired too. The try-blocks become no-ops after the physical split, when
-// packages/** lives in its own repository checkout.
-const HOST_MODULE_BINDINGS = {
-    config: () => require('../src/config/runtime-config'),
-    state: () => require('../src/state'),
-    stateOps: () => require('../src/state/scene-state-ops'),
-    journal: () => require('../src/state/event-journal'),
-    media: () => ({
-        // Mirror of the composition root (backend.cjs, stage 44): the audio
-        // barrel is flat — compose in the two sub-modules the package resolves
-        // as media.audio.chunks / media.audio.segments (startup phase C1
-        // recoverAudioOrchStates + scene-orchestrator stale/no-state legs).
-        audio: {
-            ...require('../src/audio'),
-            chunks: require('../src/audio/chunks'),
-            segments: require('../src/audio/segments'),
-        },
-        image: require('../src/image'),
-        video: require('../src/video'),
-    }),
-    genScope: () => require('../src/services/gen-scope'),
-    seams: () => require('../src/runtime/orchestration-seams'),
-    artifactRoot: () => require('../src/config/runtime-config').OUTPUT_DIR || '/data/output',
-    resolveWorkspaceForBook: () => async (bookId) => {
-        try {
-            return await require('../src/runtime/gpu-dispatcher').resolveWorkspaceForBook(bookId);
-        } catch (_) { return null; } /* system pool availability only */
-    },
-};
-require('@animastor/orchestration').bindHostModules(HOST_MODULE_BINDINGS);
-
-// Same dual-wiring for the GenerationConfig port: the adapter above wired the
+// Dual-wiring for the GenerationConfig port: the adapter above wired the
 // npm copy; wire the monorepo copy so registry self-bootstrap inside the
 // monorepo sources (read directly by the S2 suite) finds a wired port.
 try {
@@ -155,42 +52,4 @@ try {
         quotas: runtimeConfig.QUOTAS,
         stuckThresholds: runtimeConfig.STUCK_THRESHOLDS,
     });
-} catch (_) { /* post-split: monorepo checkout not present */ }
-try {
-    require('../../packages/animastor-orchestration/src/index.js').bindHostModules(HOST_MODULE_BINDINGS);
-} catch (_) { /* post-split: monorepo checkout not present */ }
-
-// Same dual-wiring for the O-2..O-10 PORTS (Stage 143a fix 3): the setters
-// above ran on the npm copy; tests that load the canonical packages/**
-// sources directly (reconciliation-engine, stage143a consumers) resolve
-// their ports from the monorepo copy — an UNWIRED copy would throw
-// "port: not wired" where the wired production process succeeds. Both
-// instances bind the SAME host adapters (call-time lazy requires inside
-// them), so require.cache stubbing keeps working identically in either.
-try {
-    const monorepoOrchestration = require('../../packages/animastor-orchestration/src/index.js');
-    monorepoOrchestration.ports.persistence.setPersistencePort(
-        require('../src/storage/runtime-persistence-adapter')
-    );
-    monorepoOrchestration.ports.sceneData.setSceneDataPort(
-        require('../src/storage/scene-data-adapter')
-    );
-    monorepoOrchestration.ports.placeholderAudio.setPlaceholderAudioPort(
-        require('../src/storage/placeholder-audio-adapter')
-    );
-    monorepoOrchestration.ports.progressEvents.setProgressEventsPort(
-        require('../src/storage/progress-events-adapter')
-    );
-    monorepoOrchestration.ports.audioFsm.setAudioFsmPort(
-        require('../src/storage/audio-fsm-adapter')
-    );
-    monorepoOrchestration.ports.videoFsm.setVideoFsmPort(
-        require('../src/storage/video-fsm-adapter')
-    );
-    monorepoOrchestration.ports.hubCancel.setHubCancelPort(
-        require('../src/storage/hub-cancel-adapter')
-    );
-    monorepoOrchestration.ports.layerConfig.setLayerConfigPort(
-        require('../src/storage/layer-config-adapter')
-    );
 } catch (_) { /* post-split: monorepo checkout not present */ }

@@ -1,19 +1,15 @@
 // ======================================================
 // Prometheus Metrics — O2
 // ======================================================
-// Exposes runtime metrics in Prometheus format for
-// observability and monitoring.
+// GET /metrics serves the in-memory registry (process / Node.js default
+// metrics). No Redis calls.
 //
-// Metrics collected on every scheduler tick:
-//   - Quota utilisation (gauges per stage)
-//   - Active leases by stage (gauges from cached metrics)
-//   - Lease age (sampled from active leases, by stage)
-//   - Tick duration (histogram)
-//   - Active scenes (gauge)
-//   - Dispatch counters (cumulative from scheduler history)
-//
-// GET /metrics serves latest values from in-memory registry.
-// No Redis calls on scrape — only during scheduler tick collection.
+// 2026-11-28 (ORCHESTRATION_V2 §12 этап 4, шаг 7): the legacy runtime gauges
+// and counters — active scenes, active leases, quota usage / max /
+// utilisation, lease age, dispatch counters, intent fence and fenced commit
+// counters — are removed together with the legacy scheduler / dispatch /
+// lease / fence code that fed them (collect() ran on the legacy runtime loop
+// tick). Orchestration v2 state lives in PG (gen_commands / gen_jobs).
 
 const client = require('prom-client');
 
@@ -25,307 +21,21 @@ const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
 // ======================================================
-// GAUGES — current state snapshots
-// ======================================================
-
-const activeScenesGauge = new client.Gauge({
-    name: 'animastor_active_scenes_total',
-    help: 'Number of scenes in the active-scenes set',
-    registers: [register],
-});
-
-const activeLeasesGauge = new client.Gauge({
-    name: 'animastor_active_leases',
-    help: 'Active dispatch leases by stage',
-    labelNames: ['stage'],
-    registers: [register],
-});
-
-const quotaUsageGauge = new client.Gauge({
-    name: 'animastor_quota_usage',
-    help: 'Current active counter by stage (concurrent dispatches)',
-    labelNames: ['stage'],
-    registers: [register],
-});
-
-const quotaMaxGauge = new client.Gauge({
-    name: 'animastor_quota_max',
-    help: 'Max concurrent dispatches by stage',
-    labelNames: ['stage'],
-    registers: [register],
-});
-
-const quotaUtilisationGauge = new client.Gauge({
-    name: 'animastor_quota_utilisation_ratio',
-    help: 'Quota utilisation ratio (usage / max) by stage, 0–1',
-    labelNames: ['stage'],
-    registers: [register],
-});
-
-const leaseAgeGauge = new client.Gauge({
-    name: 'animastor_lease_age_seconds',
-    help: 'Average lease age (TTL consumed) by stage — sampled',
-    labelNames: ['stage'],
-    registers: [register],
-});
-
-// ======================================================
-// COUNTERS — cumulative event counts
-// ======================================================
-
-const dispatchesTotal = new client.Counter({
-    name: 'animastor_dispatches_total',
-    help: 'Cumulative dispatch events by status per scheduler tick',
-    labelNames: ['status'],
-    registers: [register],
-});
-
-// Stage 129 (audit 128 · F7): the intent-fence / dispatch-receipt verdicts.
-// `outcome` is the verdict itself (created, reused, stale_intent,
-// receipt_conflict, intent_not_active, intent_corrupt, intent_missing,
-// unavailable, busy, rollback_failed). A terminal rejection that keeps
-// happening is visible without reading the logs.
-const intentFenceTotal = new client.Counter({
-    name: 'animastor_intent_fence_total',
-    help: 'Intent fence + dispatch receipt verdicts by outcome',
-    labelNames: ['outcome'],
-    registers: [register],
-});
-
-// Stage 129 (audit 128 · B2/F7): every intent-fence operation that could NOT
-// use the atomic Lua path. This must stay at zero in production — a non-zero
-// value means sends are being refused (fail closed) or a double is in use.
-const intentFenceDegradedTotal = new client.Counter({
-    name: 'animastor_intent_fence_degraded_total',
-    help: 'Intent fence operations that could not use the atomic Lua path',
-    labelNames: ['reason'],
-    registers: [register],
-});
-
-/** Count one intent-fence verdict (never throws — metrics are best effort). */
-function observeIntentFence(outcome) {
-    try { intentFenceTotal.inc({ outcome: String(outcome || 'unknown') }); } catch (_) { /* ignore */ }
-}
-
-/** Count one degraded (non-atomic) intent-fence operation. */
-function observeIntentFenceDegraded(reason) {
-    try { intentFenceDegradedTotal.inc({ reason: String(reason || 'unknown') }); } catch (_) { /* ignore */ }
-}
-
-// Stage 131 — fenced RESULT commit verdicts (staged artifacts & fenced
-// commit). Distinct from the SEND-side intent fence above: `outcome` here is
-// the publication verdict (committed, duplicate_same_fence, stale_intent,
-// intent_missing, intent_corrupt, invalid_fence, unavailable).
-// Stage 133 adds the gate rejects that never reach the commit script:
-// `receipt_missing` / `receipt_corrupt` (a callback without an immutable
-// dispatch receipt — the replacement for the unimplemented `legacy_no_receipt`
-// exposure metric of audit 132 §1.2).
-const fenceCommitTotal = new client.Counter({
-    name: 'animastor_fence_commit_total',
-    help: 'Fenced result-commit verdicts by outcome (staged artifact publication)',
-    labelNames: ['outcome'],
-    registers: [register],
-});
-
-/** Count one fenced result-commit verdict (never throws — best effort). */
-function observeFenceCommit(outcome) {
-    try { fenceCommitTotal.inc({ outcome: String(outcome || 'unknown') }); } catch (_) { /* ignore */ }
-}
-
-// ======================================================
-// HISTOGRAMS — duration distributions
-// ======================================================
-
-const tickDurationHistogram = new client.Histogram({
-    name: 'animastor_tick_duration_ms',
-    help: 'Scheduler tick duration in milliseconds',
-    buckets: [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
-    registers: [register],
-});
-
-// ======================================================
-// CONFIGURATION
-// ======================================================
-
-// S-2: media types, quotas and lease TTLs resolved from the media registry
-// (canonical config flows runtime-config → default-registrations → registry).
-// The former local QUOTA_MAX {3,2,1} / LEASE_TTLS {15,20,30} were stale
-// duplicates that drifted from production values (8/4/2) — removed.
-const mediaRegistry = require('@animastor/generation').mediaRegistry;
-
-const QUOTA_KEYS = () => mediaRegistry.listMediaTypes().map(t => `animastor:runtime:active-${t}`);
-
-const STAGES = () => mediaRegistry.listMediaTypes();
-const QUOTA_MAX = (stage) => mediaRegistry.resolveMaxActive(stage);
-
-const LEASE_TTL = (stage) => mediaRegistry.resolveLeaseTtl(stage);
-
-const LEASE_SAMPLE_LIMIT = 20; // sample up to 20 leases per stage for age
-
-// ======================================================
-// COLLECTORS
-// ======================================================
-
-/**
- * Collect quota utilisation from Redis counters.
- * 3 GET calls — very cheap.
- */
-async function collectQuotas(redis) {
-    const stages = STAGES();
-    const values = await Promise.all(
-        QUOTA_KEYS().map(k => redis.get(k).then(v => parseInt(v || '0', 10)))
-    );
-    const usage = Object.fromEntries(stages.map((s, i) => [s, values[i]]));
-
-    for (const stage of stages) {
-        const u = usage[stage];
-        const max = QUOTA_MAX(stage);
-        quotaUsageGauge.set({ stage }, u);
-        quotaMaxGauge.set({ stage }, max);
-        quotaUtilisationGauge.set({ stage }, max > 0 ? u / max : 0);
-    }
-}
-
-/**
- * Collect active leases and lease age from cached runtime metrics
- * (animastor:runtime:metrics:current). Avoids expensive SCAN on every tick.
- * For lease age, samples up to LEASE_SAMPLE_LIMIT leases per stage via TTL.
- */
-async function collectLeases(redis) {
-    // Read cached metrics for lease counts
-    const metricsRaw = await redis.get('animastor:runtime:metrics:current');
-    let metrics = {};
-    if (metricsRaw) {
-        try { metrics = JSON.parse(metricsRaw); } catch (_) {}
-    }
-
-    for (const stage of STAGES()) {
-        const leaseCount = metrics[`active${stage.charAt(0).toUpperCase() + stage.slice(1)}Leases`];
-        if (leaseCount !== undefined) {
-            activeLeasesGauge.set({ stage }, leaseCount);
-        }
-    }
-
-    // Sample lease age from first N leases per stage
-    for (const stage of STAGES()) {
-        let totalAge = 0;
-        let sampled = 0;
-        let cursor = '0';
-        let keys = [];
-
-        // Collect up to LEASE_SAMPLE_LIMIT lease keys
-        while (sampled < LEASE_SAMPLE_LIMIT) {
-            const result = await redis.scan(cursor, 'MATCH', `animastor:dispatch-lease:*:${stage}`, 'COUNT', 50);
-            cursor = result[0];
-            keys = result[1];
-            for (const key of keys) {
-                if (sampled >= LEASE_SAMPLE_LIMIT) break;
-                const ttl = await redis.ttl(key);
-                if (ttl > 0) {
-                    totalAge += LEASE_TTL(stage) - ttl;
-                    sampled++;
-                }
-            }
-            if (cursor === '0') break;
-        }
-
-        const avgAge = sampled > 0 ? Math.round(totalAge / sampled) : 0;
-        leaseAgeGauge.set({ stage }, avgAge);
-    }
-}
-
-/**
- * Collect dispatch counters and tick duration from scheduler history.
- * Reads the latest tick entry and increments cumulative counters.
- */
-async function collectDispatchCounters(redis) {
-    const historyKey = 'animastor:runtime:scheduler:history';
-    const lastEntry = await redis.lindex(historyKey, -1);
-    if (!lastEntry) return;
-
-    try {
-        const tick = JSON.parse(lastEntry);
-        const s = tick.scheduler || {};
-        const processed = s.processed || 0;
-        const dispatched = s.dispatched || 0;
-        const throttled = s.throttled || 0;
-
-        if (processed > 0 || dispatched > 0 || throttled > 0) {
-            dispatchesTotal.inc({ status: 'evaluated' }, processed);
-            dispatchesTotal.inc({ status: 'dispatched' }, dispatched);
-            dispatchesTotal.inc({ status: 'backpressure' }, throttled);
-        }
-
-        const durationMs = tick.duration || 0;
-        if (durationMs > 0) {
-            tickDurationHistogram.observe(durationMs);
-        }
-    } catch (_) {}
-}
-
-/**
- * Collect active scenes count from Redis set cardinality.
- */
-async function collectActiveScenes(redis) {
-    const count = await redis.scard('animastor:active-scenes');
-    activeScenesGauge.set(count);
-}
-
-// ======================================================
-// MAIN COLLECT — call on every scheduler tick
-// ======================================================
-
-/**
- * Collect all metrics from Redis and update Prometheus gauges/counters.
- * Designed to be called from the runtime loop tick every ~5s.
- *
- * Redis calls per tick: 3 (quotas) + 1 (cached metrics) + 1 (active-scenes)
- *   + 1 (scheduler history) + up to 3×LEASE_SAMPLE_LIMIT TTL calls.
- * Total ≈ 10–12 Redis calls — lightweight.
- */
-async function collect(redis) {
-    try {
-        await Promise.all([
-            collectQuotas(redis),
-            collectActiveScenes(redis),
-            collectLeases(redis),
-            collectDispatchCounters(redis),
-        ]);
-    } catch (err) {
-        console.warn('[PROMETHEUS] collect error:', err.message);
-    }
-}
-
-// ======================================================
 // METRICS EXPOSURE
 // ======================================================
 
-/**
- * Get Prometheus-format metrics string.
- */
+/** Prometheus-format metrics string. */
 async function getMetricsContent() {
     return register.metrics();
 }
 
-/**
- * Get content-type header for Prometheus.
- */
+/** Content-type header for Prometheus. */
 function getContentType() {
     return register.contentType;
 }
 
-// ======================================================
-// EXPORTS
-// ======================================================
-
 module.exports = {
     register,
-    collect,
     getMetricsContent,
     getContentType,
-    // Stage 129 — intent fence / dispatch receipt observability
-    observeIntentFence,
-    observeIntentFenceDegraded,
-    // Stage 131 — fenced result commit (staged artifact publication)
-    observeFenceCommit,
 };

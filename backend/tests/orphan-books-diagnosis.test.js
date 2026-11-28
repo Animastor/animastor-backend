@@ -47,7 +47,6 @@ describe('Orphan-books audit (stage 52)', () => {
         for (const id of [TEST_BOOK_ID, TEST_GHOST_ID, TEST_DUP_ID]) {
             await query()('DELETE FROM scenes WHERE book_id = $1', [id]);
             await query()('DELETE FROM scene_assets WHERE book_id = $1', [id]);
-            await query()('DELETE FROM generation_tasks WHERE book_id = $1', [id]);
             await query()('DELETE FROM image_units WHERE book_id = $1', [id]);
             await query()('DELETE FROM books WHERE book_id = $1', [id]);
         }
@@ -71,17 +70,14 @@ describe('Orphan-books audit (stage 52)', () => {
             ON CONFLICT (book_id) DO NOTHING
         `, [TEST_BOOK_ID]);
         await insertAsset(TEST_BOOK_ID);
-        await query()(`
-            INSERT INTO generation_tasks (task_id, book_id, chapter_id, scene_id, task_type, status)
-            VALUES ('task-orphan-audit', $1, 'ch-audit', 'sc-audit', 'audio', 'queued')
-        `, [TEST_BOOK_ID]);
 
         const report = await runAudit();
         const hit = report.booksWithoutScenes.find(b => b.book_id === TEST_BOOK_ID);
 
         expect(hit, 'invisible book must be reported').to.exist;
         expect(hit.assets).to.be.greaterThan(0);
-        expect(hit.tasks).to.equal(1);
+        // tasks = orchestration v2 gen_jobs (generation_tasks dropped 2026-11-28)
+        expect(hit.tasks).to.equal(0);
         expect(hit.in_books).to.equal(true);
 
         const visible = await listBooksLike();

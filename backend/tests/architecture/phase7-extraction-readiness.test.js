@@ -132,7 +132,9 @@ describe('P7-T4: VBook internals are not reached by new direct consumers', () =>
         // (S-6: the composition root binds the BookDataPort adapter — the
         // two operations video-workflows consumes — through the host shims.)
         'backend/src/backend.cjs: ./book/lazy-book/appearance',
-        'backend/src/helpers/redis-helpers.cjs: ../book',
+        // (2026-11-28: helpers/redis-helpers.cjs → helpers/chunk-store.cjs — the
+        // live chunk-record remainder keeps the same book edge.)
+        'backend/src/helpers/chunk-store.cjs: ../book',
         // (O-3: orchestration/scene-callbacks.js and orchestration/
         // scene-orchestrator.js left this baseline — orchestration consumes
         // scene content ONLY through the tier-owned runtime/scene-data-port.js;
@@ -152,7 +154,8 @@ describe('P7-T4: VBook internals are not reached by new direct consumers', () =>
         // (O-3: the five tier edges above collapsed into ONE host edge — the
         // host scene-data adapter is the VBook binding the tiers used to hold,
         // wired by the composition root through runtime/scene-data-port.js.)
-        'backend/src/storage/scene-data-adapter.js: ../book',
+        // (2026-11-28: storage/scene-data-adapter.js — the O-3 adapter — is
+        // deleted with the legacy orchestration.)
         'backend/src/services/agent-prompts.js: ../book/lazy-book/parser',
         'backend/src/services/agent/bootstrap.js: ../../book/lazy-book',
         'backend/src/services/agent/pipeline-runner.js: ../../book/lazy-book',
@@ -231,7 +234,7 @@ describe('P7-T6: Provider Gateway delegate and consumer sets stay explicit', () 
         './agent/ai-caller',
         './workspace-ai-provider',
         './ai-connector/shared-pool',
-        '../runtime/gpu-dispatcher',
+        // (../runtime/gpu-dispatcher — deleted 2026-11-28, этап 4)
         '../storage/postgres/repositories/ai-connector-repo',
     ];
     // (Assistant prep: backend.cjs joined as a composition-root consumer —
@@ -394,11 +397,10 @@ describe('P7-T8: the Provider Gateway generation seam bypass set stays frozen', 
     // injected resolver (the pre-approved §32.29 PW-2 exception) — the
     // package-side edge now only exists behind that injection and is
     // pinned by the post-move PM-G suite.
-    const BYPASS_BASELINE = [
-        'backend/src/backend.cjs: ./runtime/gpu-dispatcher',
-        'backend/src/helpers/redis-helpers.cjs: ../runtime/gpu-dispatcher',
-        'backend/src/services/provider-gateway.js: ../runtime/gpu-dispatcher',
-    ];
+    // 2026-11-28 (ORCHESTRATION_V2 этап 4): gpu-dispatcher is deleted — the
+    // bypass set is EMPTY and must stay so (the lane lookups live in
+    // runtime/worker-lanes.js, which dispatches nothing).
+    const BYPASS_BASELINE = [];
 
     it('direct gpu-dispatcher require set matches the baseline exactly', () => {
         const edges = [];

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.0 (2026-11-28, не опубликован — готов к публикации)
+
+Major: удалена legacy-оркестрация 0.3.x (animastor-docs `ORCHESTRATION_V2.md` §12 этап 4, шаг 7).
+
+- Удалён `src/legacy/` целиком (32 файла): dispatch / reconcile / lease / FSM, порты O-2…O-10, host-bindings,
+  фасад оркестратора, пространство `runtime` (вкл. `workerHealth` — он теперь в хосте backend).
+- Корень пакета экспортирует только `gen` (ленивый геттер). Прежние корневые экспорты (`ports`,
+  `bindHostModules`, `runtime`, фасад, `createRuntimeResultConsumer`) — удалены: это ломающее изменение API.
+- `gen.createCommand` больше не читает `books.orchestration`: `409 book_not_v2` убран. Все книги — v2
+  (миграция `006-default-v2`); колонка остаётся следом миграции.
+- Зависимостей нет (`@animastor/contracts`, `@animastor/generation`, `music-metadata` нужны были только legacy).
+- Тесты пакета — только `test/gen/*` (`npm test`); скрипт `test:gen` убран. Удалены 6 тестов legacy и
+  `test/test-bindings.js`, `test/mocks/`.
+
 ## 1.4.4 (2026-11-27, не опубликован — готов к публикации)
 
 Patch: layer-config книги хранится в PG хоста (`book_layer_config`, animastor-docs `ORCHESTRATION_V2.md` §11.1);

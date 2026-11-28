@@ -109,12 +109,11 @@ describe('architecture: Redis ownership contract (Phase 2 documentation)', () =>
             'animastor:gpu-hub:workers',
             'animastor:queue:*',
             'animastor:queue:*:policy:*',
-            'animastor:job:*',
-            'animastor:result:*',
-            'animastor:error:*',
+            // (2026-11-28, ORCHESTRATION_V2 этап 4: job:* / result:* / error:*
+            // (hub protocol 2) and vbook:* have no writer or reader left — removed
+            // from the registry; scripts/purge-legacy-redis.cjs drops their keys.)
             'animastor:runtime:*',
             'animastor:runtime:active',
-            'animastor:vbook:*',
             'animastor:vbook-scene-idx:*',
             'animastor:ai-connector:hb:*',
         ];

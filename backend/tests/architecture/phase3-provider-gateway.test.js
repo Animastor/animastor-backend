@@ -183,14 +183,16 @@ describe('architecture: Phase 3 transport separation (callAI vs chat)', () => {
 describe('architecture: Phase 3 generation provider separation', () => {
     const GENERATION_FILES = [
         audioGenPath,
-        path.join(REPO_ROOT, 'backend', 'src', 'image', 'iu-processor.js'),
+        path.join(REPO_ROOT, 'backend', 'src', 'image', 'iu-workflow.js'),
         path.join(REPO_ROOT, 'backend', 'src', 'image', 'image-service.js'),
         path.join(REPO_ROOT, 'backend', 'src', 'video', 'video-service.js'),
         path.join(REPO_ROOT, 'backend', 'src', 'workflows', 'video', 'video-workflows.js'),
-        path.join(REPO_ROOT, 'backend', 'src', 'services', 'audio-orchestrator.js'),
-        path.join(REPO_ROOT, 'backend', 'src', 'services', 'video-orchestrator.js'),
-        gpuDispatcherPath,
+        path.join(REPO_ROOT, 'backend', 'src', 'orchestration-v2', 'image-ports.js'),
+        path.join(REPO_ROOT, 'backend', 'src', 'orchestration-v2', 'audio-ports.js'),
+        path.join(REPO_ROOT, 'backend', 'src', 'orchestration-v2', 'video-ports.js'),
         comfyuiSeamPath,
+        // (2026-11-28: iu-processor, audio/video-orchestrator and gpu-dispatcher
+        //  are deleted with the legacy orchestration)
     ];
 
     it('generation modules never import the agent/chat LLM transports', () => {
@@ -204,12 +206,14 @@ describe('architecture: Phase 3 generation provider separation', () => {
         }
     });
 
-    it('generation dispatch goes through the GPU Hub boundary (Job Protocol v2), not HTTP LLM calls', () => {
-        const gw = read(gatewayPath);
-        expect(gw).to.include('gpu-dispatcher');
-        const dispatcher = read(gpuDispatcherPath);
-        expect(dispatcher).to.match(/PROTOCOL_VERSION|protocol_version/);
-        expect(dispatcher).to.match(/HUB_URL/);
+    it('generation dispatch: no protocol-2 hub dispatch left in the gateway (orchestration v2 owns dispatch)', () => {
+        // 2026-11-28 (этап 4): gpu-dispatcher (POST /task, Job Protocol v2) is
+        // gone; orchestration v2 hands work out through gen_jobs and
+        // POST /internal/gen/claim — never an HTTP LLM call.
+        const gw = stripComments(read(gatewayPath));
+        expect(gw).to.not.include('gpu-dispatcher');
+        expect(gw).to.not.include('sendJob');
+        expect(require('fs').existsSync(gpuDispatcherPath)).to.equal(false);
         const seam = read(comfyuiSeamPath);
         expect(seam).to.include('sendUnified');
         expect(seam).to.include('job-schema');
@@ -243,7 +247,6 @@ describe('architecture: Phase 3 gateway surface', () => {
         expect(gw).to.include("require('./ai-service')");
         expect(gw).to.include("require('./agent/ai-caller')");
         expect(gw).to.include("require('./workspace-ai-provider')");
-        expect(gw).to.include("require('../runtime/gpu-dispatcher')");
         expect(gw).to.include("require('@animastor/generation').comfyuiProvider");
     });
 

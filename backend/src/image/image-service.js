@@ -13,7 +13,7 @@
 //   registry.js        - saveIURegistry, getIURegistry, probeIUImage, resolveCanonicalSceneImage, collectSceneUnits
 //   character-utils.js - normalizeCharacterRefs, buildCharacterAliases, buildSafeAliasIndex
 //   prompt-builder.js  - buildImagePrompt, buildIUImageWorkflow, generateIUImageWorkflow, resolveVisualStyle, resolveLocationFromPrompt, buildCharacters
-//   iu-processor.js    - processSingleIU, generateSceneIUImages, saveIUMetadata, getSceneDuration
+//   iu-workflow.js     - buildIUWorkflow, getSceneDuration (iu-processor.js — the legacy IU dispatch — removed 2026-11-28)
 //   preview.js         - getOrCreatePreview, getImageMetadata
 
 const helpers = require('./helpers');
@@ -21,7 +21,7 @@ const provider = require('@animastor/generation').comfyuiProvider;
 const registry = require('./registry');
 const charUtils = require('@animastor/generation').promptProfiles.characterUtils;
 const promptBuilder = require('./prompt-builder');
-const iuProcessor = require('./iu-processor');
+const iuWorkflow = require('./iu-workflow');
 const preview = require('./preview');
 
 module.exports = {
@@ -58,11 +58,8 @@ module.exports = {
     resolveVisualStyle: promptBuilder.resolveVisualStyle,
     buildCharacters: promptBuilder.buildCharacters,
 
-    // iu-processor
-    generateSceneIUImages: iuProcessor.generateSceneIUImages,
-    processSingleIU: iuProcessor.processSingleIU,
-    saveIUMetadata: iuProcessor.saveIUMetadata,
-    getSceneDuration: iuProcessor.getSceneDuration,
+    // iu-workflow
+    getSceneDuration: iuWorkflow.getSceneDuration,
 
     // preview
     getOrCreatePreview: preview.getOrCreatePreview,

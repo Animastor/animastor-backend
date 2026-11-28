@@ -62,8 +62,13 @@ async function collectOrphanReport(opts) {
     // ── 2. derived-state row counts per book ────────────────────────────
     const assetRows = await query(
         'SELECT book_id, COUNT(*)::int AS n FROM scene_assets GROUP BY book_id');
+    // tasks = orchestration v2 jobs (gen_jobs); the legacy generation_tasks
+    // table is dropped (2026-11-28, этап 4). No gen schema yet → none.
     const taskRows = await query(
-        'SELECT book_id, COUNT(*)::int AS n FROM generation_tasks GROUP BY book_id');
+        'SELECT book_id, COUNT(*)::int AS n FROM gen_jobs GROUP BY book_id').catch((err) => {
+        if (err && err.code === '42P01') return { rows: [] };
+        throw err;
+    });
     const iuRows = await query(
         'SELECT book_id, COUNT(*)::int AS n FROM image_units GROUP BY book_id');
 

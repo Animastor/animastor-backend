@@ -9,9 +9,9 @@
 // for the planner, input files, merge_parts); an older core → the video layer is
 // refused (409 v2_video_unavailable), audio / image unaffected.
 //
-// Image layer (2a) is fail-closed: it is refused (409 at the command) while
-// IU_IMAGE_VERSIONED is on (v2 publishes the canonical file, not the versioned
-// pointer — ADR §13 п.9) or when the gen core lacks the 1.1.0 PNG check.
+// Image layer (2a) is fail-closed: it is refused (409 at the command) when the
+// gen core lacks the 1.1.0 PNG check. (The IU_IMAGE_VERSIONED refusal is gone
+// with the versioned pointer layer — 2026-11-28, этап 4.)
 //
 // Master flag ORCH_V2_ENABLED (unset / not 1|true = OFF): nothing of v2 runs —
 // no migration, no sweeper, no local runner, the /internal/gen/* routes answer
@@ -193,9 +193,6 @@ function createOrchV2Host(o) {
     function imageUnsupportedReason() {
         if (!state.enabled && state.reason) return state.reason;
         if (state.coreHasPngCheck === false) return '@animastor/orchestration < 1.1.0 (no PNG check)';
-        let versioned;
-        try { versioned = (o.imageVersioned || (() => require('../storage/postgres/repositories/iu-image-pointer-repo').versionedEnabled()))(); } catch (_) { versioned = true; }
-        if (versioned) return 'IU_IMAGE_VERSIONED is on (v2 publishes the canonical IU file only)';
         return null;
     }
 

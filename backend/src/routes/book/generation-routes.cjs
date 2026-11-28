@@ -11,7 +11,6 @@
 // legacy leases, the Redis task registry) are removed; what is not
 // orchestration work (VBook) keeps its own branch.
 
-const generationCancelRepo = require('../../storage/postgres/repositories/generation-cancel-repo');
 // S-1 (Generation extraction seam): the ONLY VBook leg allowed in this
 // generation route layer is the narrow AgentSessionControl port
 // (VBook-owned — see services/agent-session-control.js). Raw
@@ -74,10 +73,9 @@ module.exports = function(app, redis, deps) {
             });
             log(`[LAYER-CONFIG] book=${bookId} → a=${cfg.audio_enabled} i=${cfg.image_enabled} v=${cfg.video_enabled} cs=${cfg.chunk_size} ato=${cfg.audio_timeout_minutes} ito=${cfg.image_timeout_minutes} vto=${cfg.video_timeout_minutes} am=${cfg.analysis_mode} ap=${cfg.analysis_parallelism}`);
 
-            // Command-only generation: switching a layer OFF stops that stage
-            // for the whole book — tasks, leases, hub copies, active index and
-            // PG pending rows (a disabled layer must not keep running, incident
-            // 2026-10-30 BA). Idempotent: repeating it is harmless.
+            // Command-only generation: switching a layer OFF stops that layer's
+            // orchestration v2 jobs of the whole book (a disabled layer must not
+            // keep running, incident 2026-10-30 BA). Idempotent.
             const off = ['audio', 'image', 'video'].filter((stage) =>
                 (req.body || {})[`${stage}_enabled`] === false && cfg[`${stage}_enabled`] === false);
             const cancelledStages = await requireOrchV2().onLayersDisabled(bookId, off);
@@ -129,11 +127,6 @@ module.exports = function(app, redis, deps) {
                 log(`[CANCEL-WORKER] ${bookId}: VBook agent sessions cancelled`);
             } catch (pgErr) {
                 console.warn(`[CANCEL-WORKER] Failed to cancel VBook session: ${pgErr.message}`);
-            }
-            try {
-                await generationCancelRepo.setCancelled(bookId, { reason: 'user_cancelled', createdBy: 'cancel-worker:vbook' });
-            } catch (tombErr) {
-                console.warn(`[CANCEL-WORKER] Failed to persist cancellation tombstone for ${bookId}: ${tombErr.message}`);
             }
             res.json({ ok: true, book_id: bookId, cancelled: ['vbook'], task_ids: [] });
         } catch (err) {

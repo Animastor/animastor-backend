@@ -461,32 +461,6 @@ async function replacePlaceholderWithRealAudio(bookId, chapterId, sceneId, build
     }
 }
 
-/**
- * Mark placeholder audio as stale for scenes that changed.
- * T5: через фасад orchestrator.markDirtyScene (Redis + PG синхронно).
- *
- * @param {object} redis
- * @param {string} bookId
- * @param {string} chapterId
- * @param {string} sceneId
- * @param {string} buildId
- * @returns {Promise<boolean>}
- */
-async function markPlaceholderStale(redis, bookId, chapterId, sceneId, buildId) {
-    try {
-        // S-5: the FSM writer's canonical owner is the state layer — calling
-        // the orchestrator facade from here would keep a services→orchestration
-        // edge inside the runtime↔orchestration SCC.
-        const stateOps = require('../state/scene-state-ops');
-        await stateOps.markDirtyScene(redis, bookId, chapterId, sceneId, ['audio'], buildId);
-        log(`Placeholder marked stale via facade: ${bookId}/${chapterId}/${sceneId}`);
-        return true;
-    } catch (err) {
-        warn(`Failed to mark placeholder stale: ${err.message}`);
-        return false;
-    }
-}
-
 // ======================================================
 // RECOVERY — check + create missing placeholders
 // ======================================================
@@ -521,6 +495,5 @@ module.exports = {
     ensureAllPlaceholderAudio,
     getScenesNeedingPlaceholder,
     replacePlaceholderWithRealAudio,
-    markPlaceholderStale,
     recoverMissingPlaceholders,
 };

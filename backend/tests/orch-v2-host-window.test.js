@@ -64,7 +64,7 @@ describe('orchestration v2 host — master flag and the VBook window', function 
     });
 
     after(async () => {
-        for (const t of ['scene_assets', 'scenes', 'generation_tasks', 'books']) await query(`DELETE FROM ${t} WHERE book_id = ANY($1)`, [[V2, LEG]]);
+        for (const t of ['scene_assets', 'scenes', 'books']) await query(`DELETE FROM ${t} WHERE book_id = ANY($1)`, [[V2, LEG]]);
         await query(`DELETE FROM workspaces WHERE id = $1`, [wsId]);
         fs.rmSync(path.join(config.OUTPUT_DIR, BUILD), { recursive: true, force: true });
     });

@@ -156,7 +156,9 @@ describe('G7: @animastor/generation package boundary', () => {
                 if (requireSpecifiers(readSource(file)).includes('@animastor/generation')) consumers.push(rel(file));
             }
         }
-        expect(consumers.length, 'backend + orchestration package must actually consume @animastor/generation').to.be.greaterThan(40);
+        // 2026-11-28 (этап 4): the legacy orchestration (≈20 package + host
+        // consumers) is gone — the live-integration floor follows (was > 40).
+        expect(consumers.length, 'backend must actually consume @animastor/generation').to.be.greaterThan(25);
     });
 
     // ── G7-E — no second implementation in backend ──────────────────
@@ -189,10 +191,9 @@ describe('G7: @animastor/generation package boundary', () => {
         for (const shim of ['image/assembly-profile.js', 'image/character-utils.js']) {
             expect(fs.existsSync(path.join(BACKEND_SRC, shim)), `${shim} was deleted in S-7`).to.equal(false);
         }
-        // the remaining host state-layer shim is a one-line re-export (no logic)
-        const stateShim = readSource(path.join(BACKEND_SRC, 'state', 'scene-state.js'));
-        expect(stateShim).to.match(/module\.exports\s*=\s*require\(/);
-        expect(stateShim.trim().split('\n').filter(l => l && !l.startsWith('//')).length).to.be.at.most(1);
+        // the last host state-layer shim (state/scene-state.js) went with the
+        // legacy state layer (2026-11-28, этап 4)
+        expect(fs.existsSync(path.join(BACKEND_SRC, 'state')), 'backend/src/state must stay deleted').to.equal(false);
     });
 
     // ── G7-G — public API surface frozen ────────────────────────────
@@ -276,7 +277,9 @@ describe('G7: @animastor/generation package boundary', () => {
         // S-6 suite re-pointed to the package stays the semantic owner of the
         // port-wiring pins (S6-A…S6-G) — here we re-pin the composition root.
         const backend = readSource(path.join(BACKEND_SRC, 'backend.cjs'));
-        expect(backend).to.include("require('@animastor/generation').ports.dispatchTransport.setDispatchTransport(");
+        // DispatchTransport: still package-owned, no longer wired by the host (its
+        // adapter — the protocol-2 gpu-dispatcher — is gone, 2026-11-28)
+        expect(backend).to.not.include("ports.dispatchTransport.setDispatchTransport(");
         expect(backend).to.include("require('@animastor/generation').ports.profileStore.setProfileStore(");
         expect(backend).to.include("require('@animastor/generation').ports.bookData.setBookData(");
         expect(backend).to.include("require('@animastor/generation').bootstrap()");
@@ -293,9 +296,8 @@ describe('G7: @animastor/generation package boundary', () => {
             }
         }
         expect(offenders, 'the S-5 cycle must stay dead after the physical move').to.deep.equal([]);
-        // the seams registry is still hollow and fail-fast
-        const seamsSrc = readSource(path.join(runtimeDir, 'orchestration-seams.js'));
-        expect(requireSpecifiers(seamsSrc), 'orchestration-seams must stay zero-require').to.deep.equal([]);
+        // the S-5 seams registry went with the legacy orchestration (2026-11-28)
+        expect(fs.existsSync(path.join(runtimeDir, 'orchestration-seams.js'))).to.equal(false);
     });
 
     // ── G7-K — no dependency cycle package ↔ backend ────────────────

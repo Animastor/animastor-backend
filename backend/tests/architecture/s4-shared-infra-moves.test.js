@@ -80,17 +80,19 @@ const DELETED_SHIM_FILES = [
     'image/assembly-profile.js',
     'image/character-utils.js',
 ];
-const REMAINING_HOST_SHIM_FILES = [
-    'state/scene-state.js',
-];
+// 2026-11-28 (ORCHESTRATION_V2 этап 4): state/scene-state.js (the last host
+// shim) is deleted with the legacy state layer.
+const REMAINING_HOST_SHIM_FILES = [];
 
 // Host adapters that own the Redis persistence split out of the S-4 core in
 // the correction pass (audit 8e77d950): pure logic stays in the package,
 // Redis keys + client calls live here. Their public API is unchanged.
-const S4_HOST_REDIS_ADAPTERS = [
-    'services/generation-progress.js',
-    'state/asset-state-store.js',
-];
+// 2026-11-28 (этап 4): both adapters (services/generation-progress.js, the
+// legacy task registry, and state/asset-state-store.js, the per-asset Redis
+// FSM) are deleted with the legacy orchestration — the pure cores stay in
+// @animastor/generation, no host persistence of them remains.
+const S4_HOST_REDIS_ADAPTERS = [];
+const S4_DELETED_HOST_REDIS_ADAPTERS = ['services/generation-progress.js', 'state/asset-state-store.js'];
 
 describe('S-4: shared infrastructure moves', () => {
     // ─────────────────────────────────────────────────────────────
@@ -242,8 +244,12 @@ describe('S-4: shared infrastructure moves', () => {
             const owners = all.filter(([file, src]) => pattern.test(src)).map(([file]) => file);
             expect(owners, `${canonical} must be the only owner of this Redis key namespace`).to.deep.equal([canonical]);
         };
-        singleDef(/const KEY_PREFIX = 'animastor:generation-progress'/, 'services/generation-progress.js');
-        singleDef(/const ASSET_STATE_KEY_PREFIX = 'animastor:asset-state'/, 'state/asset-state-store.js');
+        // (2026-11-28: the two Redis key namespaces — generation-progress and
+        // asset-state — have NO owner any more: the legacy adapters are deleted.)
+        const owners = (pattern) => all.filter(([, src]) => pattern.test(src)).map(([file]) => file);
+        expect(owners(/'animastor:generation-progress'/)).to.deep.equal([]);
+        expect(owners(/'animastor:asset-state'/)).to.deep.equal([]);
+        for (const gone of S4_DELETED_HOST_REDIS_ADAPTERS) expect(fs.existsSync(path.join(SRC, gone)), gone).to.equal(false);
     });
 
     // ─────────────────────────────────────────────────────────────
@@ -285,55 +291,8 @@ describe('S-4: shared infrastructure moves', () => {
     // the domain logic. The adapter must delegate to the core (dependency
     // direction core ← adapter, never the reverse) and expose the frozen
     // registry API.
-    it('S4-D3: generation-progress Redis adapter delegates to the pure core (API frozen)', () => {
-        const coreSrc = readPkg('core/generation-progress.js');
-        const adapterSrc = read('services/generation-progress.js');
-        // dependency direction: adapter → package core (S-7: via public API)
-        expect(adapterSrc).to.match(/require\(\s*['"]@animastor\/generation['"]\s*\)\.generationProgress/);
-        expect(coreSrc).to.not.match(/require\(\s*['"][^'"]*services\//);
-        // frozen registry API (generation-progress.test.js, happy-path, progress-panel)
-        const progress = require(path.join(SRC, 'services', 'generation-progress.js'));
-        for (const fn of ['createTasks', 'listTasks', 'getTask', 'updateTask', 'markCompleted',
-            'markCancelled', 'getSceneTaskState', 'hasActiveTasks', 'getActiveTasksByType',
-            'reconcileCompletedTasks', 'removeTask', 'clear']) {
-            expect(progress[fn], `services/generation-progress.${fn}`).to.be.a('function');
-        }
-        expect(progress.KEY_PREFIX).to.equal('animastor:generation-progress');
-        expect(progress.TTL_SECONDS).to.equal(4 * 60 * 60);
-        // pure core exposes NO persistence surface
-        const coreExports = require(path.join(PKG_SRC, 'core', 'generation-progress.js'));
-        for (const fn of Object.keys(coreExports)) {
-            expect(['createTaskRecords', 'filterTaskMap', 'sceneTaskState', 'hasActiveTasks',
-                'activeTasksByType', 'taskId', 'normalizeScope', 'targetsForType', 'buildTask',
-                'WORKER_TYPES', 'TERMINAL_RETENTION_MS'].includes(fn),
-            `package generation-progress must not export persistence API: ${fn}`).to.equal(true);
-        }
-    });
-
-    it('S4-D3: asset-state Redis adapter delegates to the pure FSM core (API frozen)', () => {
-        const coreSrc = readPkg('core/scene-state.js');
-        const adapterSrc = read('state/asset-state-store.js');
-        // dependency direction: adapter → package core (S-7: via public API)
-        expect(adapterSrc).to.match(/require\(\s*['"]@animastor\/generation['"]\s*\)\.sceneState/);
-        expect(coreSrc).to.not.match(/require\(\s*['"][^'"]*state\//);
-        // frozen FSM surface (asset-state.test.js, scene-state.test.js, redis-ownership)
-        const store = require(path.join(SRC, 'state', 'asset-state-store.js'));
-        expect(store.ASSETS.join(',')).to.equal('audio,image,video');
-        expect(store.AssetState.READY).to.equal('ready');
-        expect(store.validateAssetTransition('new', 'dirty').valid).to.equal(true);
-        expect(store.validateAssetTransition('ready', 'pending').valid).to.equal(false);
-        expect(store.ASSET_STATE_KEY_PREFIX).to.equal('animastor:asset-state');
-        for (const fn of ['getAssetStates', 'unsafeRestoreAssetState', 'unsafeRestoreAssetStates', 'setAssetState', 'setAssetStates']) {
-            expect(store[fn], `state/asset-state-store.${fn}`).to.be.a('function');
-        }
-        // pure core exposes NO persistence surface
-        const coreExports = require(path.join(PKG_SRC, 'core', 'scene-state.js'));
-        for (const fn of Object.keys(coreExports)) {
-            expect(['AssetState', 'ASSETS', 'validateAssetTransition', 'normalizeAssetStates',
-                'validateAssetUpdate', 'validateAssetUpdates'].includes(fn),
-            `package scene-state must not export persistence API: ${fn}`).to.equal(true);
-        }
-    });
+    // (S4-D3 — the core/adapter parity of generation-progress and asset-state —
+    // went with the deleted host adapters, 2026-11-28.)
 
     // ─────────────────────────────────────────────────────────────
     // S4-F — artifact/job-id grammar has a single canonical owner
@@ -393,13 +352,7 @@ describe('S-4: shared infrastructure moves', () => {
     // S4-H — Player/Editor/VBook boundary surfaces stay intact
     // ─────────────────────────────────────────────────────────────
     it('S4-H: boundary suites\u2019 pinned surfaces stay alive through the package public API', () => {
-        // scene-state FSM surface (asset-state.test.js, scene-state.test.js, redis-ownership)
-        const sceneState = require(path.join(SRC, 'state', 'scene-state.js'));
-        expect(sceneState.ASSETS.join(',')).to.equal('audio,image,video');
-        // task registry surface (generation-progress.test.js, happy-path, progress-panel)
-        const progress = require(path.join(SRC, 'services', 'generation-progress.js'));
-        expect(progress.createTasks).to.be.a('function');
-        expect(progress.KEY_PREFIX).to.equal('animastor:generation-progress');
+        // (scene-state FSM and task-registry host surfaces are gone — 2026-11-28)
         // image public surface — S-7: consumed through the package root
         // (coreference-image.test.js consumes image-service, which delegates
         // to the package character-utils)

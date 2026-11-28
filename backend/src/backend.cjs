@@ -21,9 +21,9 @@ const path = require('path');
 // Ownership: ports belong to the package, adapters to the host.
 // Docs: docs/architecture/generation-module-extraction-reconnaissance.md §28–29
 require('./config/generation-config-adapter').bindGenerationConfig();
-require('@animastor/generation').ports.dispatchTransport.setDispatchTransport({
-    dispatch: (taskSpec) => require('./runtime/gpu-dispatcher').sendUnified(taskSpec),
-});
+// (2026-11-28, этап 4: the DispatchTransport port is no longer bound — its
+// only adapter, runtime/gpu-dispatcher → hub POST /task (protocol 2), is gone;
+// orchestration v2 hands work to the worker through /internal/gen/*.)
 require('@animastor/generation').ports.profileStore.setProfileStore({
     getAssemblyProfile: require('./services/ai-loader').getAssemblyProfile,
 });
@@ -33,99 +33,9 @@ require('@animastor/generation').ports.bookData.setBookData({
     resolveHeroLook: require('@animastor/vbook-runtime/looks.cjs').resolveHeroLook,
     passportHeroes: require('@animastor/vbook-runtime/heroes.cjs').passportHeroes,
 });
-// O-2: PERSISTENCE PORT — runtime/orchestration persistence composition.
-// The two tiers consume PG/Redis-registry/filesystem persistence ONLY
-// through runtime/persistence-port; the host adapter (storage/runtime-
-// persistence-adapter) owns every repository, SQL string and table and is
-// bound here, before any runtime module loads.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.9
-require('@animastor/orchestration').ports.persistence.setPersistencePort(
-    require('./storage/runtime-persistence-adapter')
-);
-// O-3: SCENE DATA PORT — runtime/orchestration scene-content composition.
-// The two tiers consume book/scene reads ONLY through runtime/scene-data-port;
-// the host adapter (storage/scene-data-adapter) owns the Book Model facade
-// (backend/src/book → @animastor/vbook-runtime) and is bound here, before any
-// runtime module loads.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.11
-require('@animastor/orchestration').ports.sceneData.setSceneDataPort(
-    require('./storage/scene-data-adapter')
-);
-// O-4: PLACEHOLDER AUDIO PORT — runtime/orchestration placeholder-audio
-// composition. The two tiers consume the three placeholder-audio operations
-// they use ONLY through runtime/placeholder-audio-port; the host adapter
-// (storage/placeholder-audio-adapter) owns the ffmpeg/fs/scene_assets
-// service (services/placeholder-audio) and is bound here, before any
-// runtime/orchestration module loads.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.7 (O-P7)
-require('@animastor/orchestration').ports.placeholderAudio.setPlaceholderAudioPort(
-    require('./storage/placeholder-audio-adapter')
-);
-// O-5: PROGRESS EVENTS PORT — runtime/orchestration progress-observer
-// composition. The two tiers consume progress events (SSE layer-advance
-// pub/sub) and selective-task reads ONLY through runtime/progress-events-
-// port; the host adapter (storage/progress-events-adapter) owns the Redis
-// progress host services (services/progress-pubsub, services/generation-
-// progress) and is bound here, before any runtime/orchestration module
-// loads.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.7 (O-P4)
-require('@animastor/orchestration').ports.progressEvents.setProgressEventsPort(
-    require('./storage/progress-events-adapter')
-);
-// O-7: AUDIO FSM PORT — runtime/orchestration audio-FSM composition. The
-// two tiers drive the audio scene FSM (phase transitions, chunk-completeness
-// merge drive, stall watchdog, startup recovery) ONLY through
-// runtime/audio-fsm-port; the host adapter (storage/audio-fsm-adapter)
-// owns the audio-orchestrator host service (Redis key grammar, state
-// envelope, transition map, merge/hub-dedup logic) and is bound here,
-// before any runtime/orchestration module loads. The video FSM stays a
-// separate seam (O-8 below — never merged into this port).
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.24
-require('@animastor/orchestration').ports.audioFsm.setAudioFsmPort(
-    require('./storage/audio-fsm-adapter')
-);
-// O-8: VIDEO FSM PORT — runtime/orchestration video-FSM composition. The
-// two tiers drive the video scene FSM (group dispatch init, cache-hit
-// group marking, stall watchdog, invariant checks, startup recovery) ONLY
-// through runtime/video-fsm-port; the host adapter (storage/video-fsm-
-// adapter) owns the video-orchestrator host service (Redis key grammar,
-// state envelope, transition map, group-file validation, merge/source-cap
-// pipeline, hub-dedup cleanup) and is bound here, before any
-// runtime/orchestration module loads. Never merged with the audio FSM.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.25
-require('@animastor/orchestration').ports.videoFsm.setVideoFsmPort(
-    require('./storage/video-fsm-adapter')
-);
-// O-9: HUB CANCEL PORT — runtime/orchestration hub-queue-cleanup
-// composition. The two tiers purge cancelled dispatches from the GPU Hub
-// queue ONLY through runtime/hub-cancel-port; the host adapter
-// (storage/hub-cancel-adapter) owns the hub-HTTP cleanup channel
-// (dispatch-engine clearHubDispatches — hub URL/API-key resolution, the
-// DELETE /queue/clear endpoint shape, per-id best-effort accounting) and
-// is bound here, before any runtime/orchestration module loads. Lease
-// cancellation itself stays a direct dispatch-engine call (Redis domain,
-// not hub HTTP).
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.26
-require('@animastor/orchestration').ports.hubCancel.setHubCancelPort(
-    require('./storage/hub-cancel-adapter')
-);
-// O-10: LAYER CONFIG PORT — runtime/orchestration per-book layer-config
-// composition. The two tiers read per-book layer config ONLY through
-// runtime/layer-config-port; the host adapter (storage/layer-config-
-// adapter) owns the layer-config host service (PG book_layer_config,
-// normalize/clamp pipeline — services/layer-config) and is bound here,
-// before any runtime/orchestration module loads. Since 2026-11-27 the
-// former tier-local raw Redis reads go through this port as well (core
-// 1.4.4); routes/agent host consumers call the service directly.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §32.27
-require('@animastor/orchestration').ports.layerConfig.setLayerConfigPort(
-    require('./storage/layer-config-adapter')
-);
-
 // ======================================================
 // MODULE IMPORTS
 // ======================================================
-const state = require('./state');
 const audio = require('./audio');
 const image = require('./image');
 const video = require('./video');
@@ -135,87 +45,12 @@ const video = require('./video');
 // S-7: the default registrations live in the package (bootstrap() is the
 // eager startup entry; the registry also self-bootstraps lazily on first access).
 require('@animastor/generation').bootstrap();
-const { interruptIncompleteSessions, interruptActiveGenerationTasks } = require('./startup-resume');
-// §32.30: orchestration contour physically extracted to @animastor/orchestration
-// (packages/animastor-orchestration). The host consumes ONLY the package root.
-const orchestrationPkg = require('@animastor/orchestration');
-// GPU retry policy (owner decision 2026-11-02): every host caller of
-// failStage (hub /gpu/task/error, stall watchdogs, reconcile replay of
-// undelivered hub errors) goes through the host policy — the stage is failed
-// WITHOUT the package's immediate re-dispatch; a retry (transient/OOM only)
-// happens after a pause and only under a live command. The wrapper inherits
-// every other facade member (prototype chain). Docs: animastor-docs
-// architecture/COMMAND_ONLY_GENERATION.md §«Повтор после ошибки воркера».
-const gpuRetryPolicy = require('./services/gpu-retry-policy.cjs');
-const orchestrator = gpuRetryPolicy.wrapOrchestrator(orchestrationPkg);
-// §32.30: HOST BINDINGS — the package reaches the host-owned modules it is
-// allowed to touch (§32.29 host-stays: config/state/media/gen-scope/seams
-// registry/artifact root/PW-2 resolver) ONLY through this composition-root
-// seam. Bound here, before any orchestration function runs.
-orchestrationPkg.bindHostModules({
-    // RESOLVER semantics (§32.30): every binding is a zero-arg function
-    // resolved at CALL time — the same deferral the former lazy requires had,
-    // so require.cache stubs stay visible to the package.
-    config: () => require('./config/runtime-config'),
-    state: () => require('./state'),
-    stateOps: () => require('./state/scene-state-ops'),
-    journal: () => require('./state/event-journal'),
-    media: () => ({
-        // §32.30 MEDIA SUB-PATHS (stage 44): the extracted orchestration
-        // package resolves media.audio.chunks / media.audio.segments through
-        // this binding exactly as the pre-move files required
-        // '../audio/chunks' and '../audio/segments' (startup phase C1
-        // recoverAudioOrchStates + the scene-orchestrator stale/no-state
-        // recovery legs). The audio barrel is flat, so the two sub-modules are
-        // composed in here — no host module is mutated, every other media.audio
-        // consumer keeps the flat barrel surface.
-        audio: {
-            ...require('./audio'),
-            chunks: require('./audio/chunks'),
-            segments: require('./audio/segments'),
-        },
-        image: require('./image'),
-        video: require('./video'),
-    }),
-    genScope: () => require('./services/gen-scope'),
-    seams: () => require('./runtime/orchestration-seams'),
-    // §32.29 step 4a — OUTPUT_DIR injection: the package no longer reads
-    // process.env; the host passes the artifact root. The default lives in
-    // ONE place — config/runtime-config (Stage 96: no local fallback).
-    artifactRoot: () => config.OUTPUT_DIR,
-    // §32.29 step 4b — PW-2 workspace routing: scene-window's former lazy
-    // gpu-dispatcher call, injected as an optional-load resolver — the host
-    // wrapper preserves the exact optional-load/system-pool-fallback semantics.
-    resolveWorkspaceForBook: () => async (bookId) => {
-        try {
-            return await require('./runtime/gpu-dispatcher').resolveWorkspaceForBook(bookId);
-        } catch (_) { return null; } /* system pool availability only */
-    },
-});
-// S-5: runtime receives orchestration behavior (stage executor + FSM facade
-// writers) ONLY through the seam registry — dependency direction is outward
-// through the composition root, never a runtime→orchestration import.
-// Docs: docs/architecture/generation-module-extraction-reconnaissance.md §26
-require('./runtime/orchestration-seams').registerOrchestrationSeams({
-    dispatchStage: orchestrator.dispatchStage,
-    rollbackStageToPending: orchestrator.rollbackStageToPending,
-    markDirtyScene: orchestrator.markDirtyScene,
-    setScenePending: orchestrator.setScenePending,
-    setSceneAllReady: orchestrator.setSceneAllReady,
-    setScenePlaceholder: orchestrator.setScenePlaceholder,
-});
+// 2026-11-28 (ORCHESTRATION_V2 §12 этап 4, шаг 7): the legacy orchestration is
+// gone — no O-2..O-10 port adapters, no host bindings, no S-5 seams, no runtime
+// loop / reconcile cycle, no GPU retry policy, no protocol-2 result handling.
+// The host consumes @animastor/orchestration only as `.gen` (orchestration-v2/).
 const wfManager = require('./services/workflow-manager');
-const journal = require('./state/event-journal');
 const storage = require('./storage');
-// §32.30: the runtime barrel re-points into the package (host-stay members
-// loop/gpuDispatcher stay on ./runtime/* paths and are exposed below).
-const orchestrationRuntime = orchestrationPkg.runtime;
-const runtime = {
-    ...orchestrationRuntime,
-    loop: require('./runtime/runtime-loop'),
-    gpuDispatcher: require('./runtime/gpu-dispatcher'),
-};
-const activeScenes = orchestrationRuntime.activeScenes;
 const book = require('./book');
 const config = require('./config/runtime-config');
 
@@ -286,16 +121,6 @@ const filesystem = storage.filesystem;
 const layerConfig = storage.layerConfig;
 const genScope = storage.genScope;
 
-// Phase 5: Runtime Result Contract — composition-root wiring. Runtime reports
-// dispatch finalizations (completed/failed/cancelled) through the contracts
-// seam; orchestration consumes them via this injected callback. Runtime never
-// imports orchestration for result reporting.
-// Docs: docs/architecture/PHASE_5_ORCHESTRATION_RUNTIME.md
-const runtimeResultEmitter = orchestrationRuntime.runtimeResultEmitter;
-const { createRuntimeResultConsumer } = orchestrationPkg;
-runtimeResultEmitter.setConsumer(createRuntimeResultConsumer());
-
-
 // ======================================================
 // [02] CORE INIT
 // ======================================================
@@ -322,11 +147,6 @@ try {
     process.exit(1);
 }
 const redis = new Redis(infraEnv.redisOptions());
-// Stage 114 — the GPU dispatcher needs the Redis client for the queue
-// idempotency claim and the executor-availability gate (both must run BEFORE
-// a job reaches the hub queue). Registering it here keeps a single
-// connection instead of opening a second one inside the dispatcher.
-require('./runtime/gpu-dispatcher').setRedis(redis);
 const app = express();
 
 // Trust the single reverse proxy (nginx in docker-compose) so express-rate-limit
@@ -480,13 +300,11 @@ const isBookRegistered = async (bookId) => {
     }
 };
 
-// Redis helpers (factory, initialized with redis instance)
+// Redis chunk store (text chunk records + window counters — import / player)
 const {
     saveChunk, getChunk, getAllChunks, getBookWindowStatus,
-    detectAvailableMode, saveIURegistry,
-    recoverChunksFromDisk, recoverAllBooksFromDisk,
-    cleanBookRedisKeys,
-} = require('./helpers/redis-helpers.cjs')(redis, { isBookRegistered });
+    recoverChunksFromDisk, cleanBookRedisKeys,
+} = require('./helpers/chunk-store.cjs')(redis);
 
 // ======================================================
 // SERVICES (factory pattern)
@@ -509,33 +327,26 @@ const chatEngine = createChatEngine(config, {
     withReasoning: require('./services/ai-reasoning').withReasoning,
 });
 const windowGenerator = require('./services/window-generator.cjs')({
-    redis, txtImporter, genSessionRepo, state, activeScenes,
-    placeholderAudio, saveChunk, config,
+    redis, txtImporter, genSessionRepo, placeholderAudio, config,
 });
 
 const iuRepo = require('./storage/postgres/repositories/iu-repo');
 const sceneAssetsRepo = require('./storage/postgres/repositories/scene-assets-repo');
 
-const taskHandlerDeps = {
-    audio, image, video, state, book, orchestrator, activeScenes, placeholderAudio,
-    cleanupService, utils, iuRepo, saveIURegistry,
-    saveChunk, getChunk,
-};
-const taskHandler = require('./services/task-handler.cjs')(redis, config, taskHandlerDeps);
+const bookSnapshot = require('./services/book-snapshot.cjs').createBookSnapshot({ book, config, log });
 
-const bookDiffDeps = { state, book, layerConfig, genScope, activeScenes, getChunk, saveChunk, utils };
+const bookDiffDeps = { book, utils };
 const bookDiff = require('./services/book-diff.cjs')(redis, config, bookDiffDeps);
 
 const entityCleanup = require('./services/entity-cleanup.cjs')(redis, config, {
-    utils, storage, runtime, bookDiff, book,
+    utils, storage, bookDiff, book,
 });
 
 // ======================================================
-// SERVICES — start periodic tasks
+// SERVICES — periodic tasks
 // ======================================================
-// T6: Periodic lock cleanup moved into reconcileCycle (reconciliation-engine).
-// cleanupService is still used for build/file operations.
-// audio-recovery.cjs logic merged into reconcileCycle Phase A.
+// The pending-purge retry of entity-cleanup ran inside the legacy reconcile
+// cycle; since 2026-11-28 it has its own timer (startServer below).
 
 // ======================================================
 // COMPOSITION ROOT — Assistant contour ports
@@ -562,16 +373,16 @@ const entityCleanup = require('./services/entity-cleanup.cjs')(redis, config, {
 //   log            — host logger
 // Guarded by tests/architecture/assistant-contour.test.js (A1–A7) and
 // assistant-package-boundary.test.js (PB1–PB4).
-// ── Orchestration v2 (ADR animastor-docs ORCHESTRATION_V2.md, этап 1: аудио,
-// книги books.orchestration='v2'). Master flag ORCH_V2_ENABLED; OFF → nothing
-// of v2 runs (no migration / sweeper / local runner / internal routes). The
-// v2/legacy split for a book is the single predicate orchestration-v2/book-flag.
+// ── Orchestration v2 (ADR animastor-docs ORCHESTRATION_V2.md; every book since
+// этап 4). Master flag ORCH_V2_ENABLED; OFF → nothing of v2 runs (no migration /
+// sweeper / local runner / internal routes).
 const { createOrchV2Host } = require('./orchestration-v2');
 const { createV2Routes } = require('./orchestration-v2/routes');
 const orchV2Host = createOrchV2Host({
     env: process.env,
     getPool: () => storage.postgres.getPool(),
-    gpuDispatcher: require('./runtime/gpu-dispatcher'),
+    // lane lookups of gen.defaults.makeLaneFor (private worker / users-policy)
+    gpuDispatcher: require('./runtime/worker-lanes'),
     redis,
     layerConfig,
     book,
@@ -606,39 +417,23 @@ const assistantPorts = createAssistantPorts({
 // ======================================================
 // ROUTES (each registers endpoints on app)
 // ======================================================
-// Stage 116 (D4): the queue-idempotency port (GPU-lane claim ownership).
-// Bound inside the composition slice — the architecture guard stubs every
-// require the slice contains (the stub map is the registry of the
-// composition root's module graph).
-const queueIdempotency = require('./helpers/queue-idempotency.cjs');
-
-// Stage 118 (B4/M2): the capacity backoff of the orchestration package must
-// not survive an explicit intent (a cancel, a cache teardown, a deletion, a
-// regeneration). The deferral key is owned by the package, so the package
-// clears it — the host only injects the port.
-const dispatchEngineForLifecycle = require('@animastor/orchestration').runtime.dispatch;
-const clearDeferrals = {
-    book: async (bookId) => (dispatchEngineForLifecycle && dispatchEngineForLifecycle.clearDeferralsForBook)
-        ? dispatchEngineForLifecycle.clearDeferralsForBook(redis, bookId)
-        : 0,
-    scene: async (bookId, chapterId, sceneId) => (dispatchEngineForLifecycle && dispatchEngineForLifecycle.clearDeferralsForScene)
-        ? dispatchEngineForLifecycle.clearDeferralsForScene(redis, bookId, chapterId, sceneId)
-        : 0,
-};
+// Compatibility with the PUBLISHED @animastor/player 0.1.5 only (the package of
+// this repo, 0.1.6, no longer reads them): its GET /chunk/:id still calls
+// state.getAssetStates and activeScenes.addActiveScene. The legacy runtime is
+// gone — both answer "nothing". Remove together with the backend lock bump to
+// @animastor/player 0.1.6.
+const publishedPlayerCompat = Object.freeze({
+    state: Object.freeze({
+        AssetState: Object.freeze({ READY: 'ready', PLACEHOLDER: 'placeholder' }),
+        getAssetStates: async () => ({}),
+    }),
+    activeScenes: Object.freeze({ addActiveScene: async () => 0 }),
+});
 
 const routeDeps = {
-    config, state, audio, image, video, book, orchestrator, storage,
-    // Stage 116 (D4): queue-idempotency port — injected into the routes that
-    // release the claims of a cleared GPU lane (cancel / regenerate / cache
-    // teardown). The route layers must not require backend/src/helpers.
-    queueIdempotency,
-    // Stage 118 (B4/M2): capacity-deferral port (same injection discipline).
-    clearDeferrals,
-    // Command-only generation: the shared "stop this stage" routine
-    // (cancel-worker, PUT layer-config) — injected, the contour-route
-    // require sets are frozen.
-    stageCancellation: require('./services/stage-cancellation.cjs'),
-    runtime, activeScenes, layerConfig, genScope, placeholderAudio,
+    config, audio, image, video, book, storage,
+    layerConfig, genScope, placeholderAudio,
+    ...publishedPlayerCompat,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     // Book Model manifest read (cache teardown: the v2 build dir = manifest.build_id)
     getBookManifest: (id) => require('./book/book-model.cjs').getBookManifest(id),
@@ -649,10 +444,9 @@ const routeDeps = {
         booksDir: config.BOOKS_DIR,
     }, bookId, candidates),
     utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
-    detectAvailableMode, recoverChunksFromDisk, recoverAllBooksFromDisk,
-    cleanBookRedisKeys,
-    cleanupService, taskHandler, bookDiff, windowGenerator, chatEngine,
-    iuRepo, computeWaveform, journal,
+    recoverChunksFromDisk, cleanBookRedisKeys,
+    cleanupService, bookDiff, windowGenerator, bookSnapshot, chatEngine,
+    iuRepo, computeWaveform,
     wfManager, sceneAssetsRepo,
     // Book-registry gate for read-time self-heal (scene storyboard must not
     // upsert image_units for a deleted/unregistered book).
@@ -667,12 +461,6 @@ const routeDeps = {
             ...opts, buildScoped: require('./utils/build-dir').PRESERVED_ENTRIES,
         }),
         getAllChunks, getChunk, cleanBookRedisKeys,
-        // Stage 116 (D4): queue-idempotency port (injected — the Book Model
-        // layer must not depend on backend/src/helpers).
-        queueIdempotency,
-        // Stage 118 (B4/M2): capacity-deferral port (injected — the Book
-        // Model layer must not depend on the orchestration package either).
-        clearDeferrals,
         log: utils.log,
         // Agent-session cancel port: the cascade delivers the cancellation
         // signal through the same frozen VBook session port as cancel-worker
@@ -762,7 +550,9 @@ const routeDeps = {
             // in the API (voice.reference_state, image_refs[].state), read only.
             outputRoot: config.OUTPUT_DIR,
             recoveryCtx: {
-                redis, book, state, activeScenes, config, getAllChunks, saveChunk,
+                // published @animastor/editor <= 0.5.1 only (its GET /book read-repair);
+                // the editor of this repo (0.6.0) no longer reads recoveryCtx.
+                redis, book, config, getAllChunks, saveChunk,
                 isBookRegistered,
                 log: (utils && utils.log) || ((...a) => console.log(new Date().toISOString(), ...a)),
             },
@@ -777,7 +567,7 @@ routeDeps.bookDeletion.configureOrchV2({
     purgeGenV2: (bookId) => orchV2.purgeBook(bookId, { getPool: () => storage.postgres.getPool(), outputDir: config.OUTPUT_DIR }),
 });
 
-require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, bookDiff, windowGenerator });
+require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, bookDiff, windowGenerator });
 // Generate API v2 (ADR ORCHESTRATION_V2 §11.1): /generate, /generate/stop,
 // /generate/progress, /generate/stream; the book guard of /api/v1/book/:bookId
 // applies (registered above).
@@ -796,16 +586,10 @@ require('./orchestration-v2/voice-routes').mountVoiceRoutes(app, {
 // packages/animastor-player; the host must not require package internals —
 // docs/architecture/PLAYER_ROUTE_SPLIT_CHECKLIST.md).
 createPlayerRoutes(app, redis, routeDeps);
-// Generation routes — import/generation leg, worker status/counts, progress
-// SSE, GPU Hub callbacks. No playback handlers remain here.
-require('./routes/generation-routes.cjs')(app, redis, {
-    ...routeDeps, taskHandler,
-    // Stage 114 — queue idempotency port (injected, not required by the
-    // route layer: the contour-route require sets are frozen).
-    queueIdempotency,
-    // GPU retry policy (2026-11-02) — /gpu/task/error classification + retry.
-    gpuRetryPolicy,
-});
+// Generation routes — GET /worker/counts, GET /book/:id/progress-stream (until
+// task H). The protocol-2 hub callbacks /gpu/task/result|error are removed
+// (2026-11-28, этап 4). No playback handlers remain here.
+require('./routes/generation-routes.cjs')(app, redis, routeDeps);
 // AI Assistant routes — registered through the @animastor/assistant
 // package API (the Assistant HTTP contour lives in
 // packages/animastor-assistant; the host must not require package
@@ -818,9 +602,7 @@ createAssistantRoutes(app, redis, {
     assistantPorts: routeDeps.assistantPorts,
     utils,
 });
-require('./routes/debug-routes.cjs')(app, redis, {
-    ...routeDeps, taskHandler, bookDiff, iuRepo, computeWaveform, journal,
-});
+require('./routes/debug-routes.cjs')(app, redis, routeDeps);
 
 // Workflow Manager routes
 require('./routes/connector-routes.cjs')(app, redis, routeDeps);
@@ -893,8 +675,10 @@ app.get('/metrics', async (req, res) => {
 // HEALTH ENDPOINT (S3.2, 2026-07-19)
 // ======================================================
 // Lightweight liveness probe. No auth — public endpoint.
-// Returns 200 if runtime loop is running AND Redis responds to PING,
-// 503 otherwise. Used by container orchestrators (docker healthcheck,
+// Returns 200 if Redis responds to PING, 503 otherwise. Since 2026-11-28
+// (этап 4) there is no legacy runtime loop: `loop` is gone from the body,
+// `orch_v2` reports whether orchestration v2 runs (informational — a
+// disabled v2 is a configuration state, not a liveness failure). Used by container orchestrators (docker healthcheck,
 // k8s liveness probe) to decide whether to restart the container.
 
 let _isShuttingDown = false;
@@ -904,31 +688,26 @@ app.get('/health', async (req, res) => {
     if (_isShuttingDown) {
         return res.status(503).json({
             status: 'shutting_down',
-            loop: false,
             redis: 'unknown',
             ts
         });
     }
 
     let redisStatus = 'PONG';
-    let loopRunning = false;
     try {
         const pong = await redis.ping();
         redisStatus = pong === 'PONG' ? 'PONG' : 'DOWN';
     } catch (err) {
         redisStatus = 'DOWN';
     }
-    try {
-        loopRunning = runtime.loop.isRunning();
-    } catch (_) {
-        loopRunning = false;
-    }
+    let orchV2Enabled = false;
+    try { orchV2Enabled = orchV2Host.isEnabled(); } catch (_) { orchV2Enabled = false; }
 
-    const ok = redisStatus === 'PONG' && loopRunning;
+    const ok = redisStatus === 'PONG';
     res.status(ok ? 200 : 503).json({
         status: ok ? 'ok' : 'degraded',
-        loop: loopRunning,
         redis: redisStatus,
+        orch_v2: orchV2Enabled,
         ts
     });
 });
@@ -936,6 +715,8 @@ app.get('/health', async (req, res) => {
 // ======================================================
 // [14] SERVER STARTUP
 // ======================================================
+
+let housekeepingTimer = null;
 
 async function startServer() {
     // Load workflow templates (connectors are required — failure is fatal)
@@ -1037,111 +818,45 @@ async function startServer() {
         log(`[STARTUP] GPU HUB URL: ${HUB_URL}`);
         log(`[STARTUP] Output directory: ${OUTPUT_DIR}`);
 
-        // Post-listen initialization.
-        // Command-only generation: interrupt every command that was in flight
-        // BEFORE the scheduler loop starts — a backend start creates no work;
-        // interrupted tasks are resumed only by a button.
-        (async () => {
+        // Post-listen initialization (command-only generation: a backend
+        // start creates no work). VBook window sessions that were running at
+        // shutdown are marked interrupted — never resumed (until task H).
+        setImmediate(async () => {
             try {
-                await interruptActiveGenerationTasks(redis, { log });
+                const { interruptIncompleteSessions } = require('./services/window-sessions-startup');
+                await interruptIncompleteSessions(log);
             } catch (intErr) {
-                console.warn('[STARTUP] Interrupting in-flight generation failed:', intErr.message);
-            }
-            // A retry pause of the previous process is dropped (journaled as
-            // interrupted) — a restart never performs a pending retry.
-            try {
-                const dropped = await gpuRetryPolicy.interruptPendingRetries(redis);
-                if (dropped > 0) log(`[STARTUP] ${dropped} pending GPU retr${dropped === 1 ? 'y' : 'ies'} dropped (interrupted)`);
-            } catch (retryErr) {
-                console.warn('[STARTUP] Dropping pending GPU retries failed:', retryErr.message);
-            }
-            try {
-                runtime.loop.start(redis);
-                log('[STARTUP] Runtime loop started');
-            } catch (loopErr) {
-                console.warn('[STARTUP] Runtime loop start failed:', loopErr.message);
-            }
-        })();
-
-        // T6: Единый reconciliation-цикл (заменяет startup-recovery, audio-recovery, cleanup-service)
-        setImmediate(async () => {
-            try {
-                const reconcileEngine = require('@animastor/orchestration').runtime.reconciliation;
-                // O-2: the raw postgres handle left reconcileDeps — C2/C4 read
-                // PG through the PersistencePort (wired above).
-                const reconcileDeps = {
-                    orchestrator,
-                    taskHandler,
-                    state,
-                    recoverAllBooksFromDisk,
-                    // Command-only generation: C5 marks window sessions
-                    // interrupted — nothing is resumed in the background.
-                    interruptIncompleteSessions,
-                    entityCleanup,
-                };
-
-                // T7: Передаём deps в runtime loop для периодического reconcileCycle
-                runtime.loop.setReconcileDeps(reconcileDeps);
-
-                const recResult = await reconcileEngine.reconcileCycle(redis, reconcileDeps, {
-                    startup: true,
-                });
-                log(`[STARTUP] Reconcile cycle: ${recResult.phases.join(', ')}`);
-                if (recResult.summary.errors.length > 0) {
-                    console.warn('[STARTUP] Reconcile errors:', recResult.summary.errors.join('; '));
-                }
-            } catch (recErr) {
-                console.warn('[STARTUP] Reconcile cycle failed:', recErr.message);
+                console.warn('[STARTUP] Interrupting VBook window sessions failed:', intErr.message);
             }
         });
 
-        // Reset stale active counters and reconcile
-        setImmediate(async () => {
+        // Periodic host housekeeping — formerly run inside the legacy runtime
+        // loop / reconcile cycle (every 60 s), the same cadence on one timer:
+        //   • entity-cleanup retry of incomplete scene / unit purges
+        //     (animastor:pending-purge);
+        //   • worker liveness → PG mirror (hub heartbeats → workers.status /
+        //     last_seen / version; GPU E2E 2026-11-02 §8 п.6).
+        let lastWorkerLivenessError = null;
+        housekeepingTimer = setInterval(async () => {
             try {
-                const scopeMigration = await genScope.migrateLegacyScopes(redis);
-                if (scopeMigration.expiry_added > 0 || scopeMigration.invalid_removed > 0) {
-                    log(
-                        `[STARTUP] Generation scope migration: ` +
-                        `${scopeMigration.expiry_added} expiry added, ` +
-                        `${scopeMigration.invalid_removed} invalid removed`
-                    );
-                }
-
-                // Force-reset active counters to 0 on startup. These are runtime
-                // optimizations (backpressure), not source of truth — leases are.
-                // Prevents stale counters from previous sessions keeping pulse alive.
-                await redis.del('animastor:runtime:active-audio');
-                await redis.del('animastor:runtime:active-image');
-                await redis.del('animastor:runtime:active-video');
-                log('[STARTUP] Stale active counters reset to 0');
-
-                // Clean up stale dispatch leases to prevent DISPATCH_SKIPPED_DUPLICATE loops
-                // Leases that survive a restart are orphans (no worker will complete them).
-                try {
-                    let cursor = '0';
-                    let cleaned = 0;
-                    do {
-                        const scan = await redis.scan(cursor, 'MATCH', 'animastor:dispatch-lease:*', 'COUNT', 200);
-                        cursor = scan[0];
-                        if (scan[1].length > 0) {
-                            await redis.del(scan[1]);
-                            cleaned += scan[1].length;
-                        }
-                    } while (cursor !== '0');
-                    if (cleaned > 0) log(`[STARTUP] Cleared ${cleaned} stale dispatch leases`);
-                } catch (leaseErr) {
-                    warn(`[STARTUP] Failed to clear stale leases: ${leaseErr.message}`);
-                }
-
-                const reconcileCounters = require('@animastor/orchestration').runtime.counterReconciliation;
-                await reconcileCounters.reconcileCounters(redis);
-                log('[STARTUP] Counter reconciliation complete');
-
-
-            } catch (cErr) {
-                console.warn('[STARTUP] Counter reconciliation failed:', cErr.message);
+                await entityCleanup.retryPendingPurges();
+            } catch (err) {
+                console.warn('[PENDING-PURGE] retry failed:', err.message);
             }
-        });
+            try {
+                const wl = await require('./services/worker-liveness-sync.cjs').syncWorkerLiveness(redis);
+                if (!wl.ok) {
+                    if (wl.error !== lastWorkerLivenessError) console.warn(`[WORKER-LIVENESS] sync failed: ${wl.error}`);
+                    lastWorkerLivenessError = wl.error;
+                } else {
+                    lastWorkerLivenessError = null;
+                    if (wl.offline > 0) log(`[WORKER-LIVENESS] live=${wl.live} online=${wl.online} → offline=${wl.offline}`);
+                }
+            } catch (err) {
+                console.warn('[WORKER-LIVENESS] sync failed:', err.message);
+            }
+        }, 60_000);
+        housekeepingTimer.unref();
     });
 
     // LAC-2: Attach the WebSocket upgrade handler to the HTTP server.
@@ -1154,8 +869,8 @@ async function startServer() {
     }
 
     // Graceful shutdown (S3.1, 2026-07-19)
-    // SIGTERM  — Kubernetes/docker stop.  Cancel dispatches, stop loop,
-    //            close HTTP server, close Redis & PG. Hard timeout 10s.
+    // SIGTERM  — Kubernetes/docker stop.  Stop timers, close the HTTP server,
+    //            stop orchestration v2, close Redis & PG. Hard timeout 10s.
     // SIGINT   — Ctrl+C in dev.  Same path.
     // S2UP:    — uncaught exception.  Try to log + exit non-zero.
     async function gracefulShutdown(signal) {
@@ -1171,38 +886,10 @@ async function startServer() {
         hardExit.unref();
 
         try {
-            // 1. Stop runtime loop (scheduler + reconcile timers)
-            try {
-                runtime.loop.stop();
-                log('[SHUTDOWN] Runtime loop stopped');
-            } catch (loopErr) {
-                console.warn(`[SHUTDOWN] Runtime loop stop failed: ${loopErr.message}`);
-            }
+            // 1. Stop the periodic host housekeeping timer.
+            if (housekeepingTimer) { clearInterval(housekeepingTimer); housekeepingTimer = null; }
 
-            // 2. Cancel active dispatches so leases/quota are released cleanly
-            // (instead of waiting for TTL). Stale callbacks after this will be
-            // rejected by verifyDispatchIdentity.
-            try {
-                const dispatchEngine = require('@animastor/orchestration').runtime.dispatch;
-                const leases = await dispatchEngine.getActiveLeases(redis);
-                for (const l of leases) {
-                    if (!l.scene) continue;
-                    try {
-                        await dispatchEngine.cancelActiveDispatch(
-                            redis, l.scene.bookId, l.scene.chapterId,
-                            l.scene.sceneId, l.scene.stage, 'graceful_shutdown'
-                        );
-                        log(`[SHUTDOWN] Cancelled: ${l.scene.bookId}/${l.scene.chapterId}/${l.scene.sceneId}:${l.scene.stage}`);
-                    } catch (cancelErr) {
-                        console.warn(`[SHUTDOWN] Cancel failed: ${cancelErr.message}`);
-                    }
-                }
-                log(`[SHUTDOWN] Cancelled ${leases.length} active dispatches`);
-            } catch (leaseErr) {
-                console.warn(`[SHUTDOWN] Lease inspection failed: ${leaseErr.message}`);
-            }
-
-            // 2.5 Close all live Local AI Connector WS sessions (marks each
+            // 2. Close all live Local AI Connector WS sessions (marks each
             // connector offline; sockets get a server_shutdown close).
             try {
                 if (aiConnectorWs) {
@@ -1250,4 +937,4 @@ startServer().catch(err => {
 // ======================================================
 // EXPORTS (for testing)
 // ======================================================
-module.exports = { app, redis, config, state, book, audio, image, video, storage, runtime };
+module.exports = { app, redis, config, book, audio, image, video, storage };

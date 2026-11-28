@@ -15,21 +15,29 @@ function buildBook({ bookId, chapters }) {
 
 describe('Book Sync (Phase B.3)', () => {
     let bookSync;
-    let sceneAssetRegistry;
-    const taskRepo = () => require('../src/storage/postgres/repositories/task-repo');
+    // a ready audio asset (formerly services/scene-asset-registry, removed
+    // 2026-11-28 with the legacy orchestration) — the same PG row shape
+    const sceneAssetRegistry = {
+        registerSceneAudio: (bookId, chapterId, sceneId, { canonicalPath, duration, buildId }) =>
+            require('../src/storage/postgres/repositories/scene-assets-repo').upsertAsset({
+                book_id: bookId, chapter_id: chapterId, scene_id: sceneId, asset_type: 'audio',
+                path: canonicalPath, duration_sec: duration, format: 'mp3', sample_rate: 24000, channel_count: 1,
+                chunks: null, status: 'ready', build_id: buildId,
+            }),
+        getAudioAsset: (bookId, chapterId, sceneId) =>
+            require('../src/storage/postgres/repositories/scene-assets-repo').getAsset(bookId, chapterId, sceneId, 'audio'),
+    };
     const query = () => require('../src/storage/postgres/database').query;
 
     before(async () => {
         const postgres = require('../src/storage/postgres');
         await postgres.initialize();
         bookSync = require('../src/services/book-sync');
-        sceneAssetRegistry = require('../src/services/scene-asset-registry');
         book.resetBook(TEST_BOOK_ID);
     });
 
     afterEach(async () => {
         await query()(`DELETE FROM scene_assets WHERE book_id = $1`, [TEST_BOOK_ID]);
-        await query()(`DELETE FROM generation_tasks WHERE book_id = $1`, [TEST_BOOK_ID]);
         await query()(`DELETE FROM image_units WHERE book_id = $1`, [TEST_BOOK_ID]);
         await query()(`DELETE FROM scenes WHERE book_id = $1`, [TEST_BOOK_ID]);
         book.resetBook(TEST_BOOK_ID);
@@ -101,41 +109,20 @@ describe('Book Sync (Phase B.3)', () => {
         expect(after.status).to.equal('stale');
     });
 
-    it('syncBook cancels running generation_tasks for changed scenes', async () => {
+    // (2026-11-28: «syncBook cancels running generation_tasks» and
+    // «reconcileFromDiff cancels only task types invalidated by the diff» went
+    // with the legacy generation_tasks registry; the field stays 0.)
+    it('syncBook / reconcileFromDiff report generation_tasks_cancelled = 0 (contract field kept)', async () => {
         saveFixture([{ chapter_id: 'ch-1', scenes: [{ scene_id: 'sc-1', text: 'a' }] }]);
         await bookSync.syncBook(TEST_BOOK_ID);
-        await taskRepo().createTask('t1', TEST_BOOK_ID, 'ch-1', 'sc-1', 'audio');
-        await taskRepo().updateTaskStatus('t1', 'running');
-
         saveFixture([{ chapter_id: 'ch-1', scenes: [{ scene_id: 'sc-1', text: 'b' }] }]);
         const r = await bookSync.syncBook(TEST_BOOK_ID);
-        expect(r.generation_tasks_cancelled).to.equal(1);
-
-        const after = await taskRepo().getSceneTasks(TEST_BOOK_ID, 'ch-1', 'sc-1');
-        expect(after[0].status).to.equal('cancelled');
-    });
-
-    it('reconcileFromDiff cancels only task types invalidated by the diff', async () => {
-        const chapters = [{ chapter_id: 'ch-1', scenes: [{ scene_id: 'sc-1', text: 'a' }] }];
-        saveFixture(chapters);
-        await bookSync.syncBook(TEST_BOOK_ID);
-        await taskRepo().createTask('audio-task', TEST_BOOK_ID, 'ch-1', 'sc-1', 'audio');
-        await taskRepo().createTask('image-task', TEST_BOOK_ID, 'ch-1', 'sc-1', 'image');
-        await taskRepo().updateTaskStatus('audio-task', 'running');
-        await taskRepo().updateTaskStatus('image-task', 'running');
-
-        const loadedBook = book.loadBook(TEST_BOOK_ID);
+        expect(r.changed).to.equal(1);
+        expect(r.generation_tasks_cancelled).to.equal(0);
         const result = await bookSync.reconcileFromDiff(TEST_BOOK_ID, [{
-            chapter_id: 'ch-1',
-            scene_id: 'sc-1',
-            reason: 'changed',
-            dirty_layers: ['image'],
-        }], loadedBook);
-
-        expect(result.generation_tasks_cancelled).to.equal(1);
-        const after = await taskRepo().getSceneTasks(TEST_BOOK_ID, 'ch-1', 'sc-1');
-        expect(after.find(task => task.task_id === 'audio-task').status).to.equal('running');
-        expect(after.find(task => task.task_id === 'image-task').status).to.equal('cancelled');
+            chapter_id: 'ch-1', scene_id: 'sc-1', reason: 'changed', dirty_layers: ['image'],
+        }], book.loadBook(TEST_BOOK_ID));
+        expect(result.generation_tasks_cancelled).to.equal(0);
     });
 
     it('syncBook purges DB rows for scenes removed from JSON', async () => {
@@ -144,13 +131,12 @@ describe('Book Sync (Phase B.3)', () => {
         await sceneAssetRegistry.registerSceneAudio(TEST_BOOK_ID, 'ch-1', 'sc-2', {
             canonicalPath: '/tmp/y.mp3', duration: 1, buildId: 'b1',
         });
-        await taskRepo().createTask('t2', TEST_BOOK_ID, 'ch-1', 'sc-2', 'audio');
 
         saveFixture([{ chapter_id: 'ch-1', scenes: [{ scene_id: 'sc-1' }] }]);
         const r = await bookSync.syncBook(TEST_BOOK_ID);
         expect(r.removed).to.equal(1);
         expect(r.purged.scene_assets).to.be.gte(1);
-        expect(r.purged.generation_tasks).to.be.gte(1);
+        expect(r.purged).to.not.have.property('generation_tasks');
 
         const after = await query()(
             `SELECT count(*)::int as c FROM scenes WHERE book_id = $1 AND scene_id = 'sc-2'`,

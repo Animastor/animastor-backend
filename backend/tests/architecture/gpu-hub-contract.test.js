@@ -138,10 +138,14 @@ describe('architecture: GPU Hub contract', () => {
         expect(worker).to.include('task.protocol_version !== PROTOCOL_VERSION');
     });
 
-    it('backend dispatcher still sends /task via sendUnified and checks protocol_version', () => {
-        const dispatcher = read(dispatcherPath);
-        expect(dispatcher).to.include('`${config.HUB_URL}/task`');
-        expect(dispatcher).to.match(/protocol_version/);
+    it('backend no longer dispatches protocol 2 (gpu-dispatcher removed); v2 claim route is the hand-out', () => {
+        // 2026-11-28 (ORCHESTRATION_V2 этап 4): the protocol-2 dispatcher
+        // (runtime/gpu-dispatcher.js → hub POST /task) is DELETED — the backend
+        // sends nothing to /task; orchestration v2 hands work out through
+        // POST /internal/gen/claim (orchestration-v2/routes.js).
+        expect(require('fs').existsSync(dispatcherPath)).to.equal(false);
+        const v2 = read(path.join(REPO_ROOT, 'backend', 'src', 'orchestration-v2', 'routes.js'));
+        expect(v2).to.include("'/internal/gen/claim'");
     });
 
     it('hub auth: worker identity comes ONLY from the credential, never query/body', () => {

@@ -159,9 +159,8 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
             env: { ORCH_V2_ENABLED: '1', ORCH_V2_UPLOAD_SECRET: SECRET, ORCH_V2_PUBLIC_URL: base },
             hasFfmpeg: () => true,
             getPool, redis, layerConfig, book: vbook, outputDir: config.OUTPUT_DIR,
-            gpuDispatcher: require('../src/runtime/gpu-dispatcher'),
+            gpuDispatcher: require('../src/runtime/worker-lanes'),
             publishProgress: async () => {},
-            imageVersioned: () => false,
             timers: false, log: () => {},
             ...(coreOverride ? { gen: coreOverride } : {}),
             portOverrides: {
@@ -184,12 +183,12 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         });
         routes.mountInternal(app);
         routes.mountGenerateRoutes(app);
-        const deps = { utils: { log: () => {} }, orchV2: routes, layerConfig, book: vbook, config, runtime: {}, state: {}, activeScenes: {}, iuRepo: {} };
+        const deps = { utils: { log: () => {} }, orchV2: routes, layerConfig, book: vbook, config, iuRepo: {} };
         require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
         require('@animastor/player').createPlayerRoutes(app, redis, {
-            state: require('../src/state'), image: require('../src/image'), utils: { log: () => {} },
+            image: require('../src/image'), utils: { log: () => {} },
             getChunk: async () => null, getAllChunks: async () => [], getBookWindowStatus: async () => ({}),
-            activeScenes: {}, placeholderAudio: {}, layerConfig,
+            placeholderAudio: {}, layerConfig,
             iuRepo: require('../src/storage/postgres/repositories/iu-repo'),
             sceneAssetsRepo: require('../src/storage/postgres/repositories/scene-assets-repo'),
             playerModel: { loadBook: vbook.loadBook }, isBookRegistered: async () => false,
@@ -508,17 +507,7 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         expect(Number(row.end_ms) - Number(row.start_ms)).to.equal(0);
     });
 
-    it('legacy-видео не трогает v2-книгу: поздний scene_video отклонён до записи файла, completeGroup → orchestration_v2', async () => {
-        const handler = require('../src/services/task-handler.cjs')(redis, config, { utils: { log: () => {} }, cleanupService: { resolveAssetPath: () => null }, getChunk: async () => null, saveChunk: async () => {} });
-        const jobId = `${bookId}_ch-1_sc-1_g1:video`;
-        let err = null;
-        try { await handler.handleTaskResult(jobId, clip(9).toString('base64'), buildId, 'dispatch-x', { fence: 'f' }); } catch (e) { err = e; }
-        expect(err && err.code).to.equal('orchestration_v2');
-        expect(fs.existsSync(path.join(config.OUTPUT_DIR, buildId, `${bookId}_ch-1_sc-1_g1.mp4`))).to.equal(false);
-        const videoOrch = require('../src/services/video-orchestrator');
-        expect(await videoOrch.completeGroup(redis, bookId, 'ch-1', 'sc-1', '_g1', buildId, {})).to.deep.equal({ completed: false, reason: 'orchestration_v2' });
-    });
-
+    // (2026-11-28: «legacy-видео не трогает v2-книгу» went with the legacy video FSM.)
     it('ядро < 1.3.0 → слой video отклонён (409 v2_video_unavailable), audio/image работают', async () => {
         await host.stop();
         coreOverride = { ...gen, MIGRATIONS: gen.MIGRATIONS.filter((m) => m.id !== '004-command-skips') };

@@ -296,8 +296,7 @@ describe('architecture: Generation media registry (S-2)', () => {
             // runtime-metrics quotas {3,2,1}. Guard against reintroduction.
             const files = [
                 path.join(BACKEND_SRC, 'metrics', 'prometheus.js'),
-                // §32.30: runtime-metrics moved into the orchestration package
-                path.join(ORCH_PKG_RUNTIME_DIR, 'runtime-metrics.js'),
+                // (runtime-metrics — the legacy package — is deleted, 2026-11-28)
             ];
             for (const file of files) {
                 const code = codeOf(readSource(file));
@@ -402,39 +401,13 @@ describe('architecture: Generation media registry (S-2)', () => {
     // After registry-ization, unknown media/task types must produce the SAME
     // errors as before (no behavior change in HTTP/runtime semantics).
     describe('S2-I: Unknown media/task type error semantics preserved', () => {
-        it('gpu-dispatcher.sendUnified rejects unknown job_type with "Invalid job type"', async () => {
-            const gpuDispatcher = require(path.join(BACKEND_SRC, 'runtime', 'gpu-dispatcher'));
-            let err;
-            try {
-                await gpuDispatcher.sendUnified({
-                    job_id: 'bk1_ch1_sc1_audio_0001', params: {}, job_type: 'hologram',
-                    dispatch_id: 'd-1',
-                });
-            } catch (e) { err = e; }
-            // Exact message the route/dispatch layer relied on pre-registry
-            expect(err).to.be.an('error');
-            expect(err.message).to.equal('Invalid job type');
-        });
-
-        it('scene-state rejects unknown asset with existing validation error', async () => {
-            const sceneState = require(path.join(BACKEND_SRC, 'state', 'scene-state'));
-            const { createMockRedis } = require(path.join('..', 'mocks', 'redis-mock'));
-            const redis = createMockRedis();
-            const result = await sceneState.unsafeRestoreAssetState(
-                redis, 'b1', 'c1', 's1', 'hologram', 'ready'
-            );
-            // Pre-existing semantics: null + error log, NOT a throw
-            expect(result).to.be.null;
-        });
-
-        it('scene-orchestrator refuses to dispatch an unregistered stage', async () => {
-            // §32.30: scene-orchestrator moved into the orchestration package
-            const sceneOrch = require(path.join(ORCH_PKG_ORCH_DIR, 'scene-orchestrator'));
-            let err;
-            try {
-                await sceneOrch.dispatchSceneStage({}, 'b1', 'c1', 's1', 'hologram', {});
-            } catch (e) { err = e; }
-            expect(err).to.be.an('error');
+        // (2026-11-28, ORCHESTRATION_V2 этап 4: the three legacy error paths —
+        // gpu-dispatcher.sendUnified, state/scene-state, scene-orchestrator — are
+        // deleted with the legacy orchestration. Orchestration v2 refuses an
+        // unknown layer at the command: 400 bad_request, orchestration-v2/index.js.)
+        it('orchestration v2 refuses an unknown layer (400 bad_request)', () => {
+            const src = readSource(path.join(BACKEND_SRC, 'orchestration-v2', 'index.js'));
+            expect(src).to.match(/unknown layer[\s\S]{0,120}status: 400, code: 'bad_request'/);
         });
 
         it('media-registry bootstrap cannot register a type that resolves unknown worker type', () => {

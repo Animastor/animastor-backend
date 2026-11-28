@@ -84,37 +84,12 @@ function buildComposition({ sessionRepo, order }) {
                         cancelSessions: async () => { order.push('cancel-agent-sessions'); return { cancelled: true }; },
                     }),
                 };
-            case '@animastor/orchestration':
-                return {
-                    runtime: {
-                        sceneWindow: { setCancelFlag: async () => { order.push('set-cancel-flag'); } },
-                        // Stage 118 (B4/M2): the capacity-deferral port.
-                        dispatch: {
-                            clearDeferralsForBook: async () => 0,
-                            clearDeferralsForScene: async () => 0,
-                        },
-                    },
-                };
             case './services/source-coverage-audit':
                 return async () => ({});
             case './services/agent-prompts':
                 return { IMAGE_PROMPT_MAX_CHARS: 4000 };
             case './middleware/workspace-ownership':
                 return { resolveWorkspaceForBook: async () => null };
-            // Stage 116 (D4): the queue-idempotency port (GPU-lane claims).
-            case './helpers/queue-idempotency.cjs':
-                return {
-                    releaseClaimsForBook: async () => ({ released: 0, done: 0, scanned: 0 }),
-                    releaseClaimsForScene: async () => ({ released: 0, done: 0, scanned: 0 }),
-                };
-            // Command-only generation: the shared stage-cancellation routine
-            // (cancel-worker / PUT layer-config) injected into routeDeps.
-            case './services/stage-cancellation.cjs':
-                return { cancelStage: async () => ({}) };
-            // 2026-11-04: the /regenerate post-release hub sweep plan
-            // (scene-scoped, fail-closed) injected into routeDeps.
-            case './services/regenerate-hub-sweep.cjs':
-                return require('../../src/services/regenerate-hub-sweep.cjs');
             // 2026-11-22: the /regenerate "nothing to generate" guard
             // (422 book_has_no_text) injected into routeDeps.
             case './helpers/book-text.cjs':
@@ -141,20 +116,19 @@ function buildComposition({ sessionRepo, order }) {
             BOOKS_DIR: path.join(tmpDir, 'books'),
             OUTPUT_DIR: path.join(tmpDir, 'output'),
         },
-        state: {}, audio: {}, image: {}, video: {},
+        audio: {}, image: {}, video: {},
         book: {
             resetBook: async (id) => { order.push(`resetBook:${id}`); },
             saveBookBundle: () => {},
             findSceneRuntimeData: () => null,
             collectSceneUnits: () => [],
         },
-        orchestrator: {},
         storage: {
             postgres: {
                 query: async (sql) => { order.push(`pg:${sql}`); return { rows: [] }; },
             },
         },
-        runtime: {}, activeScenes: {}, layerConfig: {}, genScope: {},
+        layerConfig: {}, genScope: {},
         placeholderAudio: {}, txtImporter: {},
         lazyBook: { getBookDir: () => tmpDir },
         genSessionRepo: {}, bookSourceRepo: {},
@@ -163,19 +137,17 @@ function buildComposition({ sessionRepo, order }) {
         getChunk: async () => null,
         getAllChunks: async () => [],
         getBookWindowStatus: async () => null,
-        detectAvailableMode: () => null,
         recoverChunksFromDisk: async () => {},
-        recoverAllBooksFromDisk: async () => {},
         cleanBookRedisKeys: async () => { order.push('cleanBookRedisKeys'); },
         // Module-scope book-registry gate (stage 59) — defined above the
         // extracted slice window, stubbed here like the other module legs.
         isBookRegistered: async () => true,
-        cleanupService: {}, taskHandler: {}, bookDiff: {}, windowGenerator: {},
+        cleanupService: {}, bookDiff: {}, windowGenerator: {}, bookSnapshot: {},
         chatEngine: { AI_API_BASE_URL: 'http://stub.local' },
         iuRepo: {},
         computeWaveform: async () => {},
         computeIuReady: () => ({}),
-        journal: {}, wfManager: {}, sceneAssetsRepo: {},
+        wfManager: {}, sceneAssetsRepo: {},
         bookModel: { loadBook: async () => ({}) },
         // The seam under test — REAL host factories from the composition root.
         createBookDeletion,

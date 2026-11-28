@@ -175,14 +175,14 @@ describe('Stage 96 — DATA_ROOT (runtime-config)', () => {
     describe('5. backend: локальные fallback-литералы устранены', () => {
         const read = (rel) => fs.readFileSync(path.join(CWD, rel), 'utf8');
 
-        it('backend.cjs: artifactRoot без локального дефолта', () => {
+        it('backend.cjs: корень артефактов без локального дефолта', () => {
             const src = read('src/backend.cjs');
-            expect(src).to.include('artifactRoot: () => config.OUTPUT_DIR,');
-            expect(src).to.not.match(/artifactRoot: \(\) => config\.OUTPUT_DIR \|\|/);
+            expect(src).to.include('outputDir: config.OUTPUT_DIR,');
+            expect(src).to.not.match(/config\.OUTPUT_DIR \|\|/);
         });
 
-        it('task-handler.cjs: snapshot-путь только из config.BOOKS_DIR', () => {
-            const src = read('src/services/task-handler.cjs');
+        it('book-snapshot.cjs (was task-handler.cjs): snapshot-путь только из config.BOOKS_DIR', () => {
+            const src = read('src/services/book-snapshot.cjs');
             expect(src).to.not.include("config.BOOKS_DIR || '/data/books'");
             // one place builds the snapshot path, from config.BOOKS_DIR, through joinInside
             expect((src.match(/joinInside\(config\.BOOKS_DIR,/g) || []).length).to.equal(1);

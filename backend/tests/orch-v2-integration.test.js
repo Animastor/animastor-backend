@@ -93,7 +93,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
             env: { ORCH_V2_ENABLED: '1', ORCH_V2_UPLOAD_SECRET: SECRET, ORCH_V2_PUBLIC_URL: base },
             hasFfmpeg: () => true,
             getPool, redis, layerConfig, book: vbook, outputDir: config.OUTPUT_DIR,
-            gpuDispatcher: require('../src/runtime/gpu-dispatcher'),
+            gpuDispatcher: require('../src/runtime/worker-lanes'),
             publishProgress: async (_r, b, payload) => { published.push({ book: b, ...payload }); },
             timers: false, log: () => {},
             portOverrides: {
