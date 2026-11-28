@@ -36,17 +36,6 @@ function get(redis, bookId) {
     return layerConfigService().get(bookId);
 }
 
-// COMPAT (2026-11-27, layer-config → PG): services/layer-config.restoreFromBooks
-// is gone (no Redis copy to heal). @animastor/orchestration <= 1.4.3 still
-// lists 'restoreFromBooks' in the port OPS (setLayerConfigPort rejects an
-// adapter without it) and calls it from reconcile PHASE C6, so the adapter
-// answers "nothing restored". 1.4.4 drops both the op and the C6 call —
-// delete this stub with the bump of backend/package.json to ^1.4.4.
-function restoreFromBooks() {
-    return Promise.resolve(0);
-}
-
 module.exports = {
     get,
-    restoreFromBooks,
 };

@@ -23,7 +23,7 @@
         "@animastor/editor": "^0.5.1",
         "@animastor/generation": "^0.3.0",
         "@animastor/installer": "^0.2.11",
-        "@animastor/orchestration": "^1.4.3",
+        "@animastor/orchestration": "^1.4.4",
         "@animastor/parser": "^0.1.1",
         "@animastor/player": "^0.1.5",
         "@animastor/url-safety": "^0.1.0",

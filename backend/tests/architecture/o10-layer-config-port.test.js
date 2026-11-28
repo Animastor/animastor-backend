@@ -13,8 +13,7 @@
 // reads of the layer-config key (reconciliation-engine video-stall threshold,
 // scene-window ×3, command-gate getLayerConfig) go through the port `get`;
 // O10-G6 pins that NO tier file knows the key any more. `restoreFromBooks`
-// (reconcile PHASE C6) is gone from the port; the adapter keeps a no-op stub
-// only for the published core <= 1.4.3 (O10-G4).
+// (reconcile PHASE C6) is gone from the port and the adapter (core ^1.4.4).
 //
 // This suite TIGHTENS the reconnaissance baseline:
 //   O10-G1 zero tier requires of services/layer-config (static scan);
@@ -23,8 +22,7 @@
 //   O10-G3 the port op set stays minimal: exactly ONE op — get (1.4.4);
 //          every declared op has a live tier consumer;
 //   O10-G4 no layer-config implementation leakage through the port or
-//          adapter surface (adapter exports: get + the restoreFromBooks
-//          compat stub for core <= 1.4.3; it delegates to
+//          adapter surface (adapter exports: get only; it delegates to
 //          services/layer-config only);
 //   O10-G5 the composition root wires the adapter BEFORE the first
 //          top-level tier require (backend.cjs + test bindings mirror,
@@ -160,9 +158,8 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
         for (const banned of ['animastor:layer-config', 'BOOKS_DIR', 'getChunkSize', 'persistToBook', 'SCOPES', 'ANALYSIS_MODES', 'DEFAULTS', 'layerConfigService']) {
             expect(portSrc, `the port must not know host internals (${banned})`).to.not.include(banned);
         }
-        // The adapter must NOT grow exports silently: get + the no-op
-        // restoreFromBooks compat stub (published core <= 1.4.3 still demands
-        // it in setLayerConfigPort; drop with the bump to ^1.4.4).
+        // The adapter must NOT grow exports silently: only get (core ^1.4.4
+        // dropped restoreFromBooks from the port).
         const adapterSrc = readSource(ADAPTER_FILE);
         const exportBlock = adapterSrc.match(/module\.exports = \{([\s\S]*?)\};/);
         expect(exportBlock, 'adapter exports must stay declarative').to.not.be.null;
@@ -173,7 +170,7 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
                 line.match(/^([a-zA-Z_]\w*)[,\s]*$/);
             if (m) exportedOps.push(m[1]);
         }
-        expect(exportedOps.sort(), 'the frozen O-10 adapter surface').to.deep.equal(['get', 'restoreFromBooks']);
+        expect(exportedOps.sort(), 'the frozen O-10 adapter surface').to.deep.equal(['get']);
         // The adapter delegates to services/layer-config ONLY.
         const adapterCode = codeOnly(adapterSrc);
         expect(adapterCode, 'the adapter must reach the host channel through services/layer-config').to.include("require('../services/layer-config')");
@@ -188,7 +185,7 @@ describe('§32.27 O-10 guards: per-book layer config reaches the tiers only via 
             expect(serviceSrc, `services/layer-config must keep exporting ${op}`).to.include(op);
         }
         expect(codeOnly(serviceSrc), 'restoreFromBooks is gone from the service (no Redis copy to heal)').to.not.include('restoreFromBooks');
-        expect(codeOnly(adapterSrc), 'the compat stub must not reach the service').to.not.include('layerConfigService().restoreFromBooks');
+        expect(codeOnly(adapterSrc), 'restoreFromBooks is gone from the adapter').to.not.include('restoreFromBooks');
     });
 
     it('O10-G5: the composition root wires the adapter before the first top-level tier require', () => {

@@ -6,9 +6,7 @@
 // the cycle (startup and periodic) writes no layer-config key, reports no
 // C6 phase, and the PG row / book.json copy stay as they were. The rest of
 // the cycle runs on the real modules with mock redis and must stay ok:true.
-// The C6 removal ships in @animastor/orchestration 1.4.4 (legacy runtime);
-// against the published 1.4.3 the adapter's restoreFromBooks stub returns 0,
-// so the same assertions hold.
+// The C6 removal ships in @animastor/orchestration 1.4.4 (legacy runtime).
 
 const { expect } = require('chai');
 const fs = require('fs');

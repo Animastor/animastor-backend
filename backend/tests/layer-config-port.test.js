@@ -16,9 +16,8 @@
 //      stored value — real PG of the test stack);
 //   4. the scene-orchestrator timeout leg keeps its try/catch
 //      tolerance (a throwing read leaves videoTimeoutMs undefined).
-//   5. restoreFromBooks / reconcile PHASE C6 are gone from the port;
-//      the adapter keeps a no-op stub only for the published core
-//      <= 1.4.3 (its setLayerConfigPort still demands the op).
+//   5. restoreFromBooks / reconcile PHASE C6 are gone from the port and
+//      the adapter (core ^1.4.4).
 // The composition-root wiring is exercised through the mocharc test
 // bindings (generation-test-bindings.cjs mirrors backend.cjs).
 // ======================================================
@@ -98,10 +97,8 @@ describe('O-10 LayerConfigPort — contract, delegation and consumer-leg semanti
             }
         });
 
-        it('restoreFromBooks survives only as a no-op compat stub for core <= 1.4.3 (resolves 0, touches nothing)', async () => {
-            const redis = new FakeRedis();
-            expect(await adapter.restoreFromBooks(redis)).to.equal(0);
-            expect(redis.store.size).to.equal(0);
+        it('the adapter exposes get only (restoreFromBooks is gone with core 1.4.4)', () => {
+            expect(Object.keys(adapter)).to.deep.equal(['get']);
         });
 
         it('a require.cache stub of the service is honored through the adapter (stubbing parity)', async () => {
