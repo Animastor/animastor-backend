@@ -163,7 +163,6 @@ describe('P7-T4: VBook internals are not reached by new direct consumers', () =>
         // receives the bundle validator through composition-root injection —
         // no backend/src/book path at all.)
         'backend/src/services/placeholder-audio.js: ../book',
-        'backend/src/services/placeholder-audio.js: ../book/lazy-book',
         'backend/src/services/source-coverage-audit.js: ../book/lazy-book',
         'backend/src/services/txt-importer.js: ../book/lazy-book',
         // (S-6: video-workflows.js left this baseline — its two raw-book edges

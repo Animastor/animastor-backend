@@ -9,8 +9,8 @@
 //           video group, ADR §8.1 — by link, not base64; public through nginx like result)
 //      POST /internal/gen/jobs/:id/error?attempt=N    Bearer upload_token, JSON
 //    No key / token → 401. Master flag off → 503 {code:'orch_v2_disabled'}.
-// 2. Book handlers for books.orchestration='v2' — the existing routes call
-//    them first (deps.orchV2); legacy books never reach this file.
+// 2. Book handlers — the book routes call them (deps.orchV2). Every book is
+//    on orchestration v2 since 2026-11-28 (этап 4).
 
 'use strict';
 
@@ -214,7 +214,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         return { scope: { level: 'scenes', scene_ids: all.slice(startIndex, endIndex).map((s) => s.scene_id) } };
     }
 
-    /** @returns {Promise<boolean>} true when handled (otherwise the legacy route continues: vbook / cover) */
+    /** @returns {Promise<boolean>} true when handled (otherwise the route continues: vbook) */
     async function cancelWorker(req, res) {
         const { bookId } = req.params;
         const { type, task_id: taskId } = req.body || {};
@@ -224,7 +224,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
                 const r = await host.orch().cancel({ commandId: String(taskId) }, { cancelledBy: userIdOf(req) || 'cancel-worker' });
                 return res.json({ ok: true, book_id: bookId, cancelled: r.layers || [], task_ids: [String(taskId)], jobs_cancelled: r.jobs_cancelled, kept_shared: r.kept_shared });
             }
-            if (type === 'cover') return res.json({ ok: true, book_id: bookId, cancelled: ['cover'], task_ids: [] }); // no legacy leases for a v2 book
+            if (type === 'cover') return res.json({ ok: true, book_id: bookId, cancelled: ['cover'], task_ids: [] }); // nothing to stop: cover has no v2 jobs
             if (['audio', 'image', 'video'].includes(type)) {
                 let n = 0;
                 if (host.isEnabled()) n = (await host.orch().cancel({ bookId, layer: type })).jobs_cancelled;
@@ -286,10 +286,10 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     // The former names /regenerate, /cancel-generation and /progress-panel were
     // removed 2026-11-28 (ADR §11.3); cancel-worker and progress-stream stay until task H.
     // Access: the /api/v1/book/:bookId access guard of the composition root.
-    // Errors: {code, error} (sendGenError). A legacy book → 409 book_not_v2 (as voice-routes).
+    // Errors: {code, error} (sendGenError). Every book is on orchestration v2
+    // (2026-11-28, этап 4): the former 409 book_not_v2 is gone.
 
     let material = null;   // helpers/book-text.cjs, set by mountGenerateRoutes
-    const notV2 = (res, bookId) => res.status(409).json({ code: 'book_not_v2', error: `book ${bookId} is not on orchestration v2 (books.orchestration = v2)` });
     const bad = (res, error, code = 'bad_request') => res.status(400).json({ code, error });
     const GENERATE_MODES = Object.freeze(['missing', 'all']);
     const SCOPE_KEYS = Object.freeze(['level', 'chapter_id', 'scene_id', 'scene_ids', 'unit_id', 'unit_key']);
@@ -325,7 +325,6 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     async function generate(req, res) {
         const { bookId } = req.params;
         try {
-            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
             if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
             const body = req.body || {};
             const mode = body.mode === undefined || body.mode === null ? 'missing' : body.mode;
@@ -403,7 +402,6 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     async function generateStop(req, res) {
         const { bookId } = req.params;
         try {
-            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
             const body = req.body && typeof req.body === 'object' ? req.body : {};
             const hasCommand = body.command_id !== undefined && body.command_id !== null;
             const hasLayer = body.layer !== undefined && body.layer !== null;
@@ -450,7 +448,6 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     async function generateProgress(req, res) {
         const { bookId } = req.params;
         try {
-            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
             if (!host.isEnabled() || !host.progress()) return res.json(emptyAggregate(bookId));
             return res.json(await host.progress().aggregate(bookId));
         } catch (err) { return sendGenError(res, err, 'generate-progress'); }
@@ -459,9 +456,6 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     const SSE_HEARTBEAT_MS = 15_000;
     async function generateStream(req, res) {
         const { bookId } = req.params;
-        try {
-            if (!(await host.isV2Book(bookId))) return notV2(res, bookId);
-        } catch (err) { return sendGenError(res, err, 'generate-stream'); }
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('Connection', 'keep-alive');
@@ -517,7 +511,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
 
     return {
         mountInternal, mountGenerateRoutes, cancelWorker, onLayersDisabled, purgeBook, cancelBook,
-        generate, generateStop, generateProgress, generateStream, subscribeLegacyProgress, isV2Book: host.isV2Book,
+        generate, generateStop, generateProgress, generateStream, subscribeLegacyProgress,
     };
 }
 

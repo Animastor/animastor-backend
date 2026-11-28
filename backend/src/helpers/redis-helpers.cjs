@@ -144,7 +144,7 @@ module.exports = function(redis, deps = {}) {
     }
 
     async function detectAvailableMode(redis, bookId) {
-        const workerHealth = require('@animastor/orchestration').runtime.workerHealth;
+        const workerHealth = require('../runtime/worker-health');
         // VISIBILITY: availability is workspace-aware. The book's own workspace
         // private workers count for it; a FOREIGN workspace's private worker
         // must NOT make this book look servicable (ONLINE ≠ available to all).
@@ -572,26 +572,6 @@ module.exports = function(redis, deps = {}) {
                 } catch (err) {
                     console.warn('[CLEAN] Idempotency claim release failed for', bookId, ':', err.message);
                 }
-            }
-
-            // ── Active scenes set (T8: через active-scenes-index API) ──
-            try {
-                const runtimeScheduler = require('@animastor/orchestration').runtime.scheduler;
-                const activeScenesIndex = require('@animastor/orchestration').runtime.activeScenes;
-                let removedActive = 0;
-                const allActive = await redis.smembers('animastor:active-scenes');
-                for (const sceneKey of allActive) {
-                    if (sceneKey.startsWith(`${bookId}:`)) {
-                        const parsed = activeScenesIndex.parseSceneKey(sceneKey);
-                        if (parsed) {
-                            await runtimeScheduler.removeSceneFromActiveIndex(redis, parsed.bookId, parsed.chapterId, parsed.sceneId);
-                            removedActive++;
-                        }
-                    }
-                }
-                log(`[CLEAN] ${bookId}: removed ${removedActive} scenes from active-scenes set`);
-            } catch (err) {
-                console.warn('[CLEAN] Failed to clean active-scenes:', err.message);
             }
 
             // ── Concurrency counters (decrement by removing from set) ──

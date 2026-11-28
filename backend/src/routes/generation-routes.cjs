@@ -112,7 +112,8 @@ module.exports = function(app, redis, deps) {
     // classifies heartbeats by the hub-authored scope fields).
     app.get('/api/v1/worker/counts', async (req, res) => {
         try {
-            const workerHealth = require('@animastor/orchestration').runtime.workerHealth;
+            // 2026-11-28 (этап 4, шаг 4): host module — no orchestration package.
+            const workerHealth = require('../runtime/worker-health');
 
             // VISIBILITY: availability = liveness ∧ scope. The global fields
             // carry the SYSTEM/shared pool ONLY; the caller's OWN private
@@ -124,7 +125,10 @@ module.exports = function(app, redis, deps) {
                 : null;
             const avail = await workerHealth.getAvailability(redis, workspaceId);
 
-            const activeCount = await redis.scard('animastor:active-scenes').catch(() => 0);
+            // active_scenes: the legacy scheduler index (animastor:active-scenes)
+            // is gone with the legacy orchestration (2026-11-28); the field stays
+            // in the contract (web models.ts, Android WorkerCounts.kt) as 0.
+            const activeCount = 0;
 
             // Only pulse when worker reports actual busy status via heartbeat (current_job_id).
             // Dispatch-lease keys are NOT a proxy for active work — they exist from dispatch
@@ -229,13 +233,12 @@ module.exports = function(app, redis, deps) {
         // Tell the client we're connected (also primes proxies).
         res.write(`event: open\ndata: ${JSON.stringify({ book_id: bookId })}\n\n`);
 
-        // Orchestration v2 book (ADR §9, 2026-11-27): generation progress comes
-        // from the in-process hub fed by PG LISTEN gen_progress — the old event
-        // shapes, no Redis. Until step 5 of the legacy removal this route keeps
-        // working for the fronts that still read it.
+        // Orchestration v2 (ADR §9, 2026-11-27; every book since 2026-11-28):
+        // generation progress comes from the in-process hub fed by PG LISTEN
+        // gen_progress — the old event shapes, no Redis. Stays until task H.
         let offV2 = null;
         try {
-            if (deps.orchV2 && typeof deps.orchV2.subscribeLegacyProgress === 'function' && await deps.orchV2.isV2Book(bookId)) {
+            if (deps.orchV2 && typeof deps.orchV2.subscribeLegacyProgress === 'function') {
                 offV2 = deps.orchV2.subscribeLegacyProgress(bookId, (payload) => {
                     try { res.write(`data: ${JSON.stringify({ type: 'progress', ...payload })}\n\n`); } catch (_) {}
                 });
@@ -252,9 +255,9 @@ module.exports = function(app, redis, deps) {
         }, 15_000);
 
         // Redis pub/sub stays for what is NOT orchestration v2: VBook / import
-        // events (pipeline-runner, bootstrap) and legacy books. Best effort: for a
-        // v2 book a Redis outage never closes the stream (subscribe is not awaited
-        // before the heartbeat, a failure only drops the Redis leg).
+        // events (pipeline-runner, bootstrap; until task H). Best effort: a Redis
+        // outage never closes the stream while the v2 leg is subscribed
+        // (subscribe is not awaited, a failure only drops the Redis leg).
         let sub = null;
         const ch = progressChannel(bookId);
         const onMessage = (chan, message) => {

@@ -7,18 +7,15 @@
 //
 // Command-only generation (2026-10-31, animastor-docs
 // architecture/COMMAND_ONLY_GENERATION.md):
-//   • scenes of a new window are NEVER registered for the GPU scheduler
-//     (no active-index write) — GPU work starts only by an explicit
-//     audio/image/video command that creates task-registry tasks;
+//   • scenes of a new window are NEVER registered for GPU work — it starts
+//     only by an explicit POST /book/:id/generate command (orchestration v2);
 //   • processing the next QUEUED window after this one finishes is an
 //     automatic start — behind WINDOW_AUTO_NEXT_ENABLED, default OFF.
 
 const { log } = require('../helpers/utils.cjs');
 const { isBookCancelled } = require('./agent-session');
-// S-4: filename grammar composed from the canonical owner (bytes unchanged)
-const artifactNaming = require('@animastor/generation').artifactNaming;
 
-module.exports = function({ redis, txtImporter, genSessionRepo, state, activeScenes, placeholderAudio, saveChunk, config }) {
+module.exports = function({ redis, txtImporter, genSessionRepo, placeholderAudio, config }) {
     /**
      * Run background generation for the next text window.
      * Creates chunks + placeholder audio + registers scenes for GPU scheduler.
@@ -66,51 +63,18 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                 const sceneCount = result.added_scenes || 0;
                 await progress(`⟳ Creating ${sceneCount} scenes...`);
 
-                // — 3. Create chunks for each new scene in Redis —
-                let chunkCount = 0;
+                // — 3. Scenes of the new window (no Redis chunk records) —
+                const chunkCount = 0;
                 if (result.chapter && result.chapter.scenes && !result.chapter.chapter_id) {
                     console.warn(`[BG-GEN] window result for ${bookId} has no chapter.chapter_id — chunks skipped`);
                 } else if (result.chapter && result.chapter.scenes) {
-                    const phScenes = [];
-                    // Orchestration v2 (1b/E): a v2 book gets no legacy Redis chunk
-                    // records / scene counters — only the placeholder (ADR §4.3).
-                    const isV2 = await require('../orchestration-v2/book-flag').isV2BookFailClosed(bookId);
-                    if (isV2) bgLog(`orchestration v2: legacy chunk records and scene counters skipped`);
+                    // Orchestration v2 (1b/E; since 2026-11-28 every book): no legacy
+                    // Redis chunk records / scene counters — only the placeholder (ADR §4.3).
                     // The chapter object of lazy-book carries chapter_id (there is no
                     // `chapter` field — `.chapter.chapter` gave "undefined" in chunk
                     // and audio names, ba_1795695606197).
                     const chapterId = result.chapter.chapter_id;
-                    bgLog(`📦 Creating ${result.chapter.scenes.length} chunks for chapter ${chapterId}...`);
-                    for (const scene of result.chapter.scenes) {
-                        const chunkId = artifactNaming.sceneChunkAudioName(bookId, chapterId, scene.scene_id, 1).replace(/\.mp3$/, '');
-                        if (isV2) {
-                            phScenes.push({ chapter_id: chapterId, scene_id: scene.scene_id });
-                            continue;
-                        }
-                        try {
-                            await saveChunk(chunkId, {
-                                build_id: buildId,
-                                book_id: bookId,
-                                scene_order: 0,
-                                chapter_id: chapterId,
-                                scene_id: scene.scene_id,
-                                chunk_index: '0001',
-                                expected_chunk_count: 1,
-                                scene_type: scene.type || 'narration',
-                                audio: true,
-                                audio_status: 'placeholder',
-                                image: false,
-                                video: false,
-                                video_status: 'pending',
-                                padded_text: false,
-                            });
-                            chunkCount++;
-                            phScenes.push({ chapter_id: chapterId, scene_id: scene.scene_id });
-                            bgLog(`  ✅ Chunk created: ${chunkId}`);
-                        } catch (chunkErr) {
-                            console.warn(`[BG-GEN] Failed to create chunk ${chunkId}: ${chunkErr.message}`);
-                        }
-                    }
+                    const phScenes = result.chapter.scenes.map((scene) => ({ chapter_id: chapterId, scene_id: scene.scene_id }));
 
                     // — 4. Generate placeholder audio —
                     if (phScenes.length > 0) {
@@ -125,17 +89,6 @@ module.exports = function({ redis, txtImporter, genSessionRepo, state, activeSce
                     // — 5. No GPU registration (command-only generation): the
                     //   new scenes wait for an explicit audio/image/video command.
                     bgLog(`⏭️ ${phScenes.length} scene(s) NOT registered for GPU — generation starts only by an explicit command`);
-
-                        // Update scene indices
-                        if (!isV2) try {
-                            const totalScenes = parseInt(await redis.get(config.BOOK_SCENE_TOTAL(bookId)) || '0', 10);
-                            const nextIdx = parseInt(await redis.get(config.BOOK_SCENE_NEXT(bookId)) || '0', 10);
-                            await redis.set(config.BOOK_SCENE_TOTAL(bookId), totalScenes + phScenes.length);
-                            await redis.set(config.BOOK_SCENE_NEXT(bookId), nextIdx + phScenes.length);
-                            bgLog(`📊 Scene indices updated: total=${totalScenes + phScenes.length} next=${nextIdx + phScenes.length}`);
-                        } catch (idxErr) {
-                            console.warn(`[BG-GEN] Failed to update scene indices: ${idxErr.message}`);
-                        }
                     }
                 }
 

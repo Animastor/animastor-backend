@@ -31,7 +31,6 @@ const config = require('../src/config/runtime-config');
 const gen = require('@animastor/orchestration').gen;
 const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
-const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
 const { lockReference } = require('./helpers/voice-reference-fixture');
 
@@ -207,7 +206,6 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
         books.set(id, bookJson(id, bld));
         lockReference(books.get(id), config.OUTPUT_DIR);
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, $4)`, [id, workspaceId, userId, orchestration]);
-        bookFlag.invalidate();
         return bld;
     }
     async function dropBook(id) {
@@ -478,26 +476,6 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
             expect(await count(`SELECT count(*)::int AS n FROM gen_commands WHERE book_id = $1 AND status = 'active'`, [bookId])).to.equal(0);
             expect(cancelledSessions).to.deep.equal([bookId]);
         });
-    });
-
-    // ── 409 book_not_v2 ─────────────────────────────────────────────────
-    it('legacy-книга → 409 book_not_v2 на всех четырёх эндпоинтах; работа не создаётся', async () => {
-        const legacy = `${stamp}-l${crypto.randomBytes(2).toString('hex')}`;
-        legacyBooks.push(legacy);
-        await addBook(legacy, 'legacy');
-        const calls = [
-            api('POST', `/api/v1/book/${legacy}/generate`, { scope: { level: 'book' }, layers: ['audio'], mode: 'missing', client_action_id: 'x' }),
-            api('POST', `/api/v1/book/${legacy}/generate/stop`, {}),
-            api('GET', `/api/v1/book/${legacy}/generate/progress`),
-            api('GET', `/api/v1/book/${legacy}/generate/stream`),
-        ];
-        for (const r of await Promise.all(calls)) {
-            expect(r.status).to.equal(409);
-            expect(r.body).to.include({ code: 'book_not_v2' });
-            expect(r.body.error).to.be.a('string');
-        }
-        expect(await commandsOf(legacy)).to.equal(0);
-        expect(cancelledSessions).to.deep.equal([]);
     });
 
     // ── GET /generate/progress ──────────────────────────────────────────

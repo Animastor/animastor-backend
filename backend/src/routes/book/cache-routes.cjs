@@ -7,10 +7,10 @@
 //     cleanBookRedisKeys, purgeAssistantForBook, orchV2, log,
 //     getBookManifest (injected: book-model.getBookManifest, backend.cjs) }
 //
-// Orchestration v2 (ADR §13 п.8, stage 1c): for a books.orchestration='v2'
-// book the teardown never calls the hub (no /queue/clear, no legacy claim
-// release) — the book's gen commands / jobs are cancelled in the gen core.
-// The predicate is the fail-closed one (unknown → v2 → hub untouched).
+// Orchestration v2 (ADR §13 п.8, stage 1c): the teardown never calls the hub
+// (no /queue/clear, no legacy claim release) — the book's gen commands / jobs
+// are cancelled in the gen core. Since 2026-11-28 (этап 4) every book is v2:
+// the legacy branch (hub /queue/clear + idempotency claim release) is removed.
 //
 // Assistant boundary: Assistant data (chat sessions) is purged through the
 // purgeAssistantForBook port — this route must not know the Assistant's
@@ -51,12 +51,10 @@ module.exports = function registerCacheRoutes(app, ctx) {
         try {
             const { bookId } = req.params;
             const orchV2 = ctx.orchV2 || null;
-            // decided BEFORE anything is wiped (fail-closed predicate)
-            const isV2 = !!(orchV2 && await orchV2.isV2Book(bookId));
-            // v2: stop the book's work FIRST (the hub holds no state of it), so no
+            // Stop the book's work FIRST (the hub holds no state of it), so no
             // acceptance can re-create an asset row after the wipe below.
             let v2Stopped = null;
-            if (isV2) {
+            if (orchV2) {
                 try {
                     v2Stopped = await orchV2.cancelBook(bookId, 'cache-clear');
                 } catch (cancelErr) {
@@ -157,94 +155,12 @@ module.exports = function registerCacheRoutes(app, ctx) {
                 console.warn(`[CACHE] Assistant data cleanup failed: ${assistantErr.message}`);
             }
 
-            if (isV2) {
-                log('[CACHE] Cache cleared for', bookId, '(orchestration v2, hub not called;',
-                    v2Stopped ? `${v2Stopped.commands_cancelled} command(s), ${v2Stopped.jobs_cancelled} job(s) cancelled)` : 'v2 disabled — nothing running)');
-                return res.json({
-                    cleared: true, orchestration: 'v2', hub_cleared: false, hub_skipped: true, book_id: bookId, builds_removed: buildIds.size,
-                    commands_cancelled: v2Stopped ? v2Stopped.commands_cancelled : 0, jobs_cancelled: v2Stopped ? v2Stopped.jobs_cancelled : 0,
-                });
-            }
-
-            // ── Clear gpu-hub queue ──
-            // Stage 118 (B4): the hub lane is cleared FIRST; the backend-side
-            // claims are released ONLY after the hub confirmed. The Stage 116
-            // order (release → clear) opened a duplicate window: when the hub
-            // call failed, the claims were already free while the lane
-            // entries survived ⇒ the next dispatch enqueued a SECOND copy of
-            // a task that was still queued. On a hub failure the claims are
-            // kept — the safe direction (no duplicates).
-            let hubCleared = false;
-            try {
-                const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
-                const hubHeaders = { method: 'DELETE' };
-                const apiKey = config.GPU_HUB_API_KEY || process.env.GPU_HUB_API_KEY;
-                if (apiKey) {
-                    hubHeaders.headers = { 'x-api-key': apiKey };
-                }
-                const hubRes = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
-                hubCleared = !!(hubRes && hubRes.ok);
-            } catch (_) {}
-
-            if (hubCleared) {
-                // Stage 116 (D4) / Stage 118 (B1): the hub lane entries of
-                // this book are cleared; the backend-side pending claims must
-                // go with them, otherwise the next run of the same book would
-                // be suppressed as a duplicate until the claim TTL expires.
-                // The release also frees the COMPLETION MARKERS (B1): the
-                // cache was wiped on purpose, so the previous "already
-                // completed" no longer applies.
-                try {
-                    const qidem = ctx.queueIdempotency;
-                    if (qidem) {
-                        const released = await qidem.releaseClaimsForBook(redis, bookId);
-                        log('[CACHE] Released', released.released, 'idempotency claim(s) and', released.done, 'completion marker(s) for', bookId);
-                    }
-                    // The capacity backoff must not survive an explicit cache
-                    // teardown — the user asked for the work to run again.
-                    if (ctx.clearDeferrals) {
-                        await ctx.clearDeferrals.book(bookId);
-                    }
-                } catch (claimErr) {
-                    console.warn(`[CACHE] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
-                }
-                // Stage 120 (M-b): a dispatch that lands BETWEEN the lane
-                // clear above and the release just above re-creates a claim
-                // and appends a lane entry; the release then deleted that
-                // claim, leaving an ORPHAN lane entry with no claim — the next
-                // dispatch would enqueue a SECOND copy (the mirror of the
-                // Stage 116 lost-task race). A SECOND lane-clear pass removes
-                // any such orphan entry so the state stays consistent.
-                try {
-                    const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
-                    const hubHeaders = { method: 'DELETE' };
-                    const apiKey = config.GPU_HUB_API_KEY || process.env.GPU_HUB_API_KEY;
-                    if (apiKey) hubHeaders.headers = { 'x-api-key': apiKey };
-                    const sweep = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
-                    if (!(sweep && sweep.ok)) {
-                        console.warn(`[CACHE] Post-release lane sweep failed for ${bookId} — an orphan entry may survive (bounded by claim TTL)`);
-                    }
-                } catch (_) {}
-            } else {
-                console.warn(`[CACHE] GPU hub queue clear failed for ${bookId} — the idempotency claims are KEPT (no duplicate window)`);
-            }
-
-            log('[CACHE] Cache cleared for', bookId);
-            // Stage 120 (M-a): the response must not claim success it cannot
-            // confirm. When the hub lane clear FAILED the claims/markers were
-            // KEPT (the safe direction) and the book will NOT auto-regenerate
-            // until they expire — report that honestly instead of {cleared:true}.
-            if (!hubCleared) {
-                return res.json({
-                    cleared: false,
-                    hub_cleared: false,
-                    claims_kept: true,
-                    book_id: bookId,
-                    builds_removed: buildIds.size,
-                    error: 'hub_queue_clear_failed',
-                });
-            }
-            res.json({ cleared: true, hub_cleared: true, claims_released: true, book_id: bookId, builds_removed: buildIds.size });
+            log('[CACHE] Cache cleared for', bookId, '(orchestration v2, hub not called;',
+                v2Stopped ? `${v2Stopped.commands_cancelled} command(s), ${v2Stopped.jobs_cancelled} job(s) cancelled)` : 'v2 disabled — nothing running)');
+            return res.json({
+                cleared: true, orchestration: 'v2', hub_cleared: false, hub_skipped: true, book_id: bookId, builds_removed: buildIds.size,
+                commands_cancelled: v2Stopped ? v2Stopped.commands_cancelled : 0, jobs_cancelled: v2Stopped ? v2Stopped.jobs_cancelled : 0,
+            });
         } catch (err) {
             console.error('[CACHE] Delete error:', err.message);
             res.status(500).json({ error: err.message });

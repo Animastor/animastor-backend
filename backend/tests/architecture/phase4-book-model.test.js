@@ -223,9 +223,11 @@ describe('T4: Book Model excludes Redis/runtime state', () => {
 
     it('book-deletion owns runtime cleanup; the model layer stays canonical-only', () => {
         // Deletion boundary is where runtime-state cleanup belongs.
+        // (2026-11-28: the legacy runtime:active-* counters are gone with the
+        // legacy runtime — the book-keyed Redis purge remains here.)
         const del = readSource(bookDeletionPath);
-        expect(del).to.match(/animastor:runtime:active-audio/);
         expect(del).to.match(/cleanBookRedisKeys/);
+        expect(del).to.match(/Runtime \/ ephemeral state \(Redis\)/);
     });
 });
 

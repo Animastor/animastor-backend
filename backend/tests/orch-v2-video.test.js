@@ -36,7 +36,6 @@ const config = require('../src/config/runtime-config');
 const gen = require('@animastor/orchestration').gen;
 const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
-const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
 const { commandBody, progressRows } = require('./helpers/v2-generate');
 const { lockReference } = require('./helpers/voice-reference-fixture');
@@ -293,7 +292,6 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         books.set(bookId, bookJson(bookId, buildId));
         lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
-        bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = ANY($1)`, [Object.values(workers)]);
         Object.assign(layerCfg, { audio_enabled: true, image_enabled: true, video_enabled: true });
         mergeCalls.length = 0;

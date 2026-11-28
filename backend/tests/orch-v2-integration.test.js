@@ -26,7 +26,6 @@ const config = require('../src/config/runtime-config');
 const gen = require('@animastor/orchestration').gen;
 const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
-const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
 const { commandBody, progressRows } = require('./helpers/v2-generate');
 const { lockReference, toneWav } = require('./helpers/voice-reference-fixture');
@@ -202,7 +201,6 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         books.set(bookId, bookJson(bookId, buildId));
         lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
-        bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = $1`, [workerId]);
         host = makeHost();
         await host.start();
@@ -415,8 +413,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         const deletion = createBookDeletion({
             book: { resetBook: async () => {} }, redis, config, storage: { postgres: { query } },
             getAllChunks: async () => [], getChunk: async () => null, cleanBookRedisKeys: async () => {},
-            log: () => {}, setCancelFlag: async () => {}, agentSessionControl: { cancelSessions: async () => {} }, purgeAssistantForBook: async () => {},
-            isV2Book: (id) => routes.isV2Book(id),
+            log: () => {}, agentSessionControl: { cancelSessions: async () => {} }, purgeAssistantForBook: async () => {},
             purgeGenV2: (id) => routes.purgeBook(id, { getPool, outputDir: config.OUTPUT_DIR }),
         });
         fetchCalls.length = 0;
@@ -453,7 +450,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect((await command({ scope: 'from_current_scene' })).status).to.equal(400);
     });
 
-    it('DELETE /book/:id/cache для v2-книги: хаб не вызывается, работа книги отменена (до стирания); legacy-книга — хаб вызывается', async () => {
+    it('DELETE /book/:id/cache для v2-книги: хаб не вызывается, работа книги отменена (до стирания)', async () => {
         await command({ scope: 'book' });
         const t = (await worker.claim()).body.task;
         fetchCalls.length = 0;
@@ -465,20 +462,6 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect((await worker.beacon(t.job_id)).body.cancel).to.include(t.job_id);
         expect((await worker.put(t)).status).to.equal(409, 'a late result cannot re-create the wiped asset');
         expect(await count(`SELECT count(*) AS n FROM scene_assets WHERE book_id = $1`, [bookId])).to.equal(0);
-
-        // control: a legacy book still goes through the hub
-        const legacyId = `${bookId}-legacy`;
-        await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'legacy')`, [legacyId, workspaceId, userId]);
-        try {
-            bookFlag.invalidate();
-            fetchCalls.length = 0;
-            const l = await api('DELETE', `/api/v1/book/${legacyId}/cache`);
-            expect(l.status).to.equal(200);
-            expect(l.body.orchestration).to.equal(undefined);
-            expect(fetchCalls.filter((u) => u.includes(`/queue/clear?book_id=${legacyId}`))).to.have.length.greaterThan(0);
-        } finally {
-            await query(`DELETE FROM books WHERE book_id = $1`, [legacyId]);
-        }
     });
 
     // VOICE_REFERENCES.md: a chunk is cloned from the narrator's LOCKED reference —

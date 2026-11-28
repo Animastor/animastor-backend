@@ -492,122 +492,19 @@ async function markPlaceholderStale(redis, bookId, chapterId, sceneId, buildId) 
 // ======================================================
 
 /**
- * Recover missing placeholder MP3 files for a book.
- * Scans all scenes in the book JSON and creates placeholder
- * audio for any scene that is missing its MP3 file on disk.
+ * Former read-repair of missing placeholder MP3 files (GET /book of the
+ * editor, POST recover-placeholders). It was a LEGACY leg: it wrote placeholder
+ * mp3 + scene_assets(audio) outside the v2 acceptance (ADR ORCHESTRATION_V2 I2 —
+ * on a v2 book scene_assets is written only by the acceptance), so it was
+ * skipped for every v2 book. Since 2026-11-28 (этап 4) every book is v2: the
+ * function is a no-op that answers the former v2 result. It stays only while
+ * the published @animastor/editor (<= 0.5.x) still calls it from GET /book;
+ * the editor of this repo no longer does (read-repair removed).
  *
- * This handles the case where scenes were created by window
- * generation but placeholder audio was never generated (e.g.,
- * due to a transient error or an old bug that has since been fixed).
- *
- * @param {string} buildId - Build directory (usually 'default')
- * @param {string} bookId  - Book ID
- * @returns {Promise<{checked: number, created: number, skipped: number, errors: string[], skipped_v2?: true}>}
+ * @returns {Promise<{checked: 0, created: 0, skipped: 0, errors: [], skipped_v2: true}>}
  */
-async function recoverMissingPlaceholders(buildId, bookId) {
-    const result = { checked: 0, created: 0, skipped: 0, errors: [] };
-
-    // О2 (reports/2026-11-07/orch-v2-image-scene-run.md): this read-repair is
-    // a LEGACY leg (it writes placeholder mp3 + scene_assets(audio) outside
-    // the v2 acceptance — ADR ORCHESTRATION_V2 I2: on a v2 book scene_assets
-    // is written only by the acceptance). It runs on every GET /book
-    // (@animastor/editor editor-routes) and POST recover, so the gate lives
-    // HERE, in the one legacy isolation predicate the scheduler, reconcile and
-    // scene window ask (PersistencePort orchestration.isV2Book, fail-closed:
-    // an unknown answer = v2 = hands off).
-    if (await require('@animastor/orchestration').ports.persistence.isV2Book(bookId)) {
-        result.skipped_v2 = true;
-        log(`[RECOVER] ${bookId}: orchestration v2 book — legacy placeholder read-repair skipped`);
-        return result;
-    }
-
-    try {
-        const lazyBook = require('../book/lazy-book');
-        const draft = lazyBook.loadDraftBook(bookId);
-        if (!draft) {
-            log(`[RECOVER] Book ${bookId} not found on disk, skipping`);
-            return result;
-        }
-
-        // If book is in RAW_IMPORTED state, no scenes exist yet
-        if (draft.manifest.state === lazyBook.BookState.RAW_IMPORTED) {
-            log(`[RECOVER] Book ${bookId} is RAW_IMPORTED, no scenes to check`);
-            return result;
-        }
-
-        const scenes = [];
-        for (const ch of draft.chapters) {
-            for (const sc of (ch.scenes || [])) {
-                scenes.push({ chapter_id: ch.chapter_id, scene_id: sc.scene_id });
-            }
-        }
-
-        if (scenes.length === 0) {
-            log(`[RECOVER] Book ${bookId} has no scenes in chapters, skipping`);
-            return result;
-        }
-
-        result.checked = scenes.length;
-        log(`[RECOVER] Checking ${scenes.length} scenes for ${bookId}...`);
-
-        if (!isValidBuildId(buildId) || !isValidBookId(bookId)) {
-            log(`[RECOVER] Book ${bookId}: invalid id, skipping`);
-            return result;
-        }
-        const outputDir = joinInside(config.OUTPUT_DIR, buildId);
-        const needsRecovery = [];
-
-        for (const s of scenes) {
-            const audioPath = path.join(outputDir, artifactNaming.sceneAudioName(bookId, s.chapter_id, s.scene_id));
-
-            // Check if file already exists
-            if (fs.existsSync(audioPath)) {
-                result.skipped++;
-                continue;
-            }
-
-            // Check if scene has real audio (skip if real audio exists in DB)
-            try {
-                const asset = await sceneAssetsRepo.getAsset(bookId, s.chapter_id, s.scene_id, 'audio', buildId);
-                if (asset && asset.status === 'ready' && fs.existsSync(asset.path)) {
-                    result.skipped++;
-                    continue;
-                }
-            } catch (_) {
-                // DB error — proceed with recovery attempt
-            }
-
-            needsRecovery.push(s);
-        }
-
-        if (needsRecovery.length === 0) {
-            log(`[RECOVER] ${bookId}: all ${scenes.length} scenes have valid audio, nothing to do`);
-            return result;
-        }
-
-        log(`[RECOVER] ${bookId}: recovering placeholder audio for ${needsRecovery.length} scenes`);
-
-        for (const s of needsRecovery) {
-            try {
-                const phResult = await ensurePlaceholderAudio(buildId, bookId, s.chapter_id, s.scene_id);
-                if (phResult.created) {
-                    result.created++;
-                } else {
-                    result.skipped++;
-                }
-            } catch (err) {
-                warn(`[RECOVER] Failed for ${bookId}/${s.chapter_id}/${s.scene_id}: ${err.message}`);
-                result.errors.push(`${s.chapter_id}/${s.scene_id}: ${err.message}`);
-            }
-        }
-
-        log(`[RECOVER] ${bookId}: ${result.created} placeholders created, ${result.skipped} skipped, ${result.errors.length} errors`);
-    } catch (err) {
-        warn(`[RECOVER] Error recovering placeholders for ${bookId}: ${err.message}`);
-        result.errors.push(`global: ${err.message}`);
-    }
-
-    return result;
+async function recoverMissingPlaceholders(_buildId, _bookId) {
+    return { checked: 0, created: 0, skipped: 0, errors: [], skipped_v2: true };
 }
 
 // ======================================================

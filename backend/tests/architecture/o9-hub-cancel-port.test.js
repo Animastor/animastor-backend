@@ -345,11 +345,11 @@ describe('§32.26 O-9 guards: hub-queue cleanup happens only via the HubCancelPo
         // port, checked in O9-G1) + the O-9 adapter bridge. §32.30: the
         // package-side consumers (orchestrator, scene-callbacks,
         // reconciliation-engine, runtime-scheduler) are now intra-package
-        // and excluded from the host scan — the host set stays frozen at 8.
+        // and excluded from the host scan — the host set stays frozen (8 → 7
+        // on 2026-11-28: book/generation-routes lost its legacy cancel half).
         expect([...new Set(consumers)].sort(), 'the frozen host dispatch-engine consumer set (all via the package root)').to.deep.equal([
             'backend/src/backend.cjs',
             'backend/src/image/iu-processor.js',
-            'backend/src/routes/book/generation-routes.cjs',
             'backend/src/routes/generation-routes.cjs',
             'backend/src/runtime/runtime-loop.js',
             'backend/src/services/task-handler.cjs',

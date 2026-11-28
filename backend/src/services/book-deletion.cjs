@@ -56,9 +56,6 @@ const BUILD_ID_TABLES = Object.freeze([
  *   getChunk        - redis helper
  *   cleanBookRedisKeys - redis purge helper (book-keyed key families)
  *   log             - logger (optional)
- *   setCancelFlag   - runtime scene-window cancel flag adapter (required;
- *                     injected from backend.cjs, keeps the book layer free
- *                     of direct runtime-module requires)
  *   agentSessionControl - VBook agent-session cancel port (required; the
  *                     cascade must not own the agent_sessions SQL — the
  *                     same frozen port implementation serves cancel-worker
@@ -75,7 +72,6 @@ function createBookDeletion(deps) {
         book, redis, storage, config,
         getAllChunks, getChunk, cleanBookRedisKeys,
         log = console.log,
-        setCancelFlag = null,
         agentSessionControl = null,
         purgeAssistantForBook = null,
         removeBookArtifacts = null,
@@ -90,10 +86,10 @@ function createBookDeletion(deps) {
      *   cascade step is best-effort (warn + continue), matching the
      *   historical route behavior.
      */
-    // Orchestration v2 hooks (composition root, after routeDeps): {isV2Book, purgeGenV2}
-    const v2 = { isV2Book: deps.isV2Book || null, purgeGenV2: deps.purgeGenV2 || null };
+    // Orchestration v2 hook (composition root, after routeDeps): {purgeGenV2}.
+    // Since 2026-11-28 (этап 4) every book is v2: no isV2Book split.
+    const v2 = { purgeGenV2: deps.purgeGenV2 || null };
     function configureOrchV2(hooks = {}) {
-        if (typeof hooks.isV2Book === 'function') v2.isV2Book = hooks.isV2Book;
         if (typeof hooks.purgeGenV2 === 'function') v2.purgeGenV2 = hooks.purgeGenV2;
     }
 
@@ -199,12 +195,6 @@ function createBookDeletion(deps) {
 
     async function deleteBook(bookId, options = {}) {
         const onEvent = typeof options.onEvent === 'function' ? options.onEvent : null;
-        // Orchestration v2: decided BEFORE the books row goes (the flag lives there).
-        let isV2 = false;
-        if (typeof v2.isV2Book === 'function') {
-            try { isV2 = await v2.isV2Book(bookId); } catch (_) { isV2 = true; }
-        }
-
         // ── 1. Cancellation signal FIRST — before ANY canonical/runtime
         //    state is deleted. КРИТИЧЕСКИ важно: сначала ОТМЕНИТЬ активные
         //    agent-сессии, потом чистить. Если сначала почистить Redis, PG
@@ -298,16 +288,8 @@ function createBookDeletion(deps) {
         }
 
         // ── 4. Runtime / ephemeral state (Redis) ──
-        // setCancelFlag is injected (runtime scene-window adapter) — the book
-        // layer itself does not require runtime modules (see
-        // tests/architecture/dependency-guardrails.test.js BOOK_ALLOWLIST).
-        if (typeof setCancelFlag !== 'function') {
-            throw new Error('bookDeletion: setCancelFlag adapter is required');
-        }
-        await setCancelFlag(redis, bookId);
-        await redis.del('animastor:runtime:active-audio');
-        await redis.del('animastor:runtime:active-image');
-        await redis.del('animastor:runtime:active-video');
+        // 2026-11-28 (этап 4): the legacy scene-window cancel flag and the
+        // legacy runtime:active-* counters are gone with the legacy runtime.
         // releaseClaims: the book is being destroyed, so its idempotency
         // ownership refs go with it — ref + claim + completion marker together
         // through the owner module (a raw ref DEL would orphan every done
@@ -423,69 +405,8 @@ function createBookDeletion(deps) {
             console.warn(`[DELETE-BOOK] Assistant data cleanup failed: ${assistantErr.message}`);
         }
 
-        // ── 6. GPU-hub queue clear (best-effort, external runtime) ──
-        // Stage 118 (B4): the hub lane is cleared FIRST; the backend-side
-        // claims are released ONLY after the hub confirmed. The Stage 116
-        // order (release → clear) opened a duplicate window: when the hub
-        // call failed, the claims were already free while the lane entries
-        // survived ⇒ a later run of the same book could enqueue a SECOND
-        // copy of a task that was still queued. On a hub failure the claims
-        // are kept — the safe direction (no duplicates).
-        let hubCleared = false;
-        if (isV2) {
-            // a v2 book has no hub queues (ADR §8.4) — the hub is not touched
-            log(`[DELETE-BOOK] Book completely deleted: ${bookId} (orchestration v2)`);
-            if (onEvent) onEvent(`Book completely deleted: ${bookId}`);
-            return { deleted: true, book_id: bookId };
-        }
-        try {
-            const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
-            const hubHeaders = { method: 'DELETE' };
-            const apiKey = process.env.GPU_HUB_API_KEY;
-            if (apiKey) {
-                hubHeaders.headers = { 'x-api-key': apiKey };
-            }
-            const hubRes = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
-            hubCleared = !!(hubRes && hubRes.ok);
-        } catch (_) {}
-
-        if (hubCleared) {
-            // Stage 116 (D4) / Stage 118 (B1): the hub lane entries of this
-            // book are removed; the backend-side pending claims must go with
-            // them, otherwise a later run of the same book would be
-            // suppressed as a duplicate. The release also frees the COMPLETION
-            // MARKERS (B1) — the book is gone, its "already completed"
-            // markers must not survive it.
-            try {
-                const qidem = deps.queueIdempotency;
-                if (qidem) {
-                    const released = await qidem.releaseClaimsForBook(redis, bookId);
-                    console.log(`[DELETE-BOOK] ${bookId}: released ${released.released} idempotency claim(s), ${released.done} completion marker(s)`);
-                }
-                if (deps.clearDeferrals && deps.clearDeferrals.book) {
-                    await deps.clearDeferrals.book(bookId);
-                }
-            } catch (claimErr) {
-                console.warn(`[DELETE-BOOK] Failed to release idempotency claims for ${bookId}: ${claimErr.message}`);
-            }
-            // Stage 120 (M-b): sweep the lane AGAIN after the release — a
-            // dispatch landing between the clear above and the release would
-            // leave an ORPHAN lane entry whose claim was just deleted (the
-            // next run would enqueue a second copy). The sweep removes it.
-            try {
-                const HUB_URL = process.env.HUB_URL || 'https://animastor.org/gpu';
-                const hubHeaders = { method: 'DELETE' };
-                const apiKey = process.env.GPU_HUB_API_KEY;
-                if (apiKey) hubHeaders.headers = { 'x-api-key': apiKey };
-                const sweep = await fetch(`${HUB_URL}/queue/clear?book_id=${bookId}`, hubHeaders).catch(() => null);
-                if (!(sweep && sweep.ok)) {
-                    console.warn(`[DELETE-BOOK] Post-release lane sweep failed for ${bookId} — an orphan entry may survive (bounded by claim TTL)`);
-                }
-            } catch (_) {}
-        } else {
-            console.warn(`[DELETE-BOOK] GPU hub queue clear failed for ${bookId} — the idempotency claims are KEPT (no duplicate window)`);
-        }
-
+        // ── 6. GPU hub: not touched — orchestration v2 has no hub queues
+        //    (ADR §8.4; hub v0.4.0 has no DELETE /queue/clear).
         log(`[DELETE-BOOK] Book completely deleted: ${bookId}`);
         if (onEvent) onEvent(`Book completely deleted: ${bookId}`);
         return { deleted: true, book_id: bookId };

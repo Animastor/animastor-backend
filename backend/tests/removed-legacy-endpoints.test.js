@@ -81,7 +81,7 @@ function buildApp() {
     require('../src/routes/book/parse-routes.cjs')(app, deps);
     const { createV2Routes } = require('../src/orchestration-v2/routes');
     const v2 = createV2Routes({
-        host: { isV2Book: async () => true, isEnabled: () => false, disabledReason: () => 'test' },
+        host: { isEnabled: () => false, disabledReason: () => 'test' },
         config: {}, workerRepo: {}, bookRepo: {}, layerConfig: {}, redis: null, book: null, log: () => {},
     });
     v2.mountInternal(app);

@@ -202,7 +202,7 @@ describe('«Мои книги»', () => {
                 getChunk: async () => null,
                 cleanBookRedisKeys: async () => ({ deleted: 0 }),
                 purgeAssistantForBook: async () => {},
-                orchV2: { isV2Book: async () => true, cancelBook: async () => ({ commands_cancelled: 0, jobs_cancelled: 0 }) },
+                orchV2: { cancelBook: async () => ({ commands_cancelled: 0, jobs_cancelled: 0 }) },
                 // the v4 build dir is named by manifest.build_id — no Redis chunk names it
                 getBookManifest: (id) => (id === bookId ? { vbook_version: 4, build_id: build } : null),
                 log: () => {},
@@ -259,7 +259,6 @@ describe('«Мои книги»', () => {
                 getChunk: async () => null,
                 cleanBookRedisKeys: async () => {},
                 log: () => {},
-                setCancelFlag: async () => {},
                 agentSessionControl: { cancelSessions: async () => {} },
                 purgeAssistantForBook: async () => {},
                 // production wiring (backend.cjs): build-scoped voices/

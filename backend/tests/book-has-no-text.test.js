@@ -66,7 +66,7 @@ describe('POST /api/v1/book/:bookId/generate — book_has_no_text', () => {
         const handlers = new Map();
         const app = { post(p, ...h) { handlers.set(p, h[h.length - 1]); }, get() {}, put() {}, delete() {}, use() {} };
         const host = {
-            isV2Book: async () => true, isEnabled: () => true, disabledReason: () => null,
+            isEnabled: () => true, disabledReason: () => null,
             videoUnsupportedReason: () => null, imageUnsupportedReason: () => null,
             orch: () => ({ createCommand: async () => { calls.createCommand++; throw new Error('not reached'); } }),
         };

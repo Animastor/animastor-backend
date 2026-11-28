@@ -296,7 +296,7 @@ describe('architecture: assistant purge wiring (composition root)', () => {
         expect(warns.join('\n')).to.match(/\[DELETE-BOOK\] Assistant data cleanup failed: session repo down/);
     });
 
-    it('T4: the surrounding deletion cascade is unchanged (cancel → reset → redis → PG → purge → hub)', async () => {
+    it('T4: the surrounding deletion cascade is unchanged (cancel → reset → redis → PG → purge; the hub is never called)', async () => {
         const { routeDeps } = makeComposition();
 
         const result = await routeDeps.bookDeletion.deleteBook('book-purge-3');
@@ -322,7 +322,8 @@ describe('architecture: assistant purge wiring (composition root)', () => {
         expect(resetIdx, 'canonical reset must run').to.be.gte(0);
         expect(redisIdx, 'book-keyed Redis purge must run').to.be.gte(0);
         expect(pgBooksIdx, 'PG books cleanup must run').to.be.gte(0);
-        expect(hubIdx, 'GPU-hub queue clear must run').to.be.gte(0);
+        // 2026-11-28 (этап 4): orchestration v2 has no hub queues — no clear.
+        expect(hubIdx, 'the GPU hub must not be called').to.equal(-1);
         expect(purgeIdx, 'Assistant purge must be recorded in the shared order journal').to.be.gte(0);
 
         // Order contract of the cascade (book-deletion.cjs §1–6).
@@ -330,10 +331,8 @@ describe('architecture: assistant purge wiring (composition root)', () => {
         expect(agentIdx).to.be.below(resetIdx);
         expect(resetIdx).to.be.below(redisIdx);
         expect(redisIdx, 'Redis purge must precede the PG step').to.be.below(pgBooksIdx);
-        // Strict chain on the shared journal: PG deletes < Assistant purge <
-        // GPU-hub clear (step 5 → 5b → 6).
+        // Strict chain on the shared journal: PG deletes < Assistant purge (step 5 → 5b).
         expect(lastPgIdx, 'the PG table loop must run').to.be.gte(0);
         expect(purgeIdx, 'Assistant purge must run AFTER the PG deletes').to.be.above(lastPgIdx);
-        expect(hubIdx, 'GPU-hub clear must run AFTER the Assistant purge').to.be.above(purgeIdx);
     });
 });

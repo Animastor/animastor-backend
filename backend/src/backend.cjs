@@ -674,7 +674,6 @@ const routeDeps = {
         // Model layer must not depend on the orchestration package either).
         clearDeferrals,
         log: utils.log,
-        setCancelFlag: (redisClient, id) => require('@animastor/orchestration').runtime.sceneWindow.setCancelFlag(redisClient, id),
         // Agent-session cancel port: the cascade delivers the cancellation
         // signal through the same frozen VBook session port as cancel-worker
         // (single owner of the agent_sessions cancel SQL).
@@ -771,19 +770,17 @@ const routeDeps = {
     }),
 };
 
-// Orchestration v2 handlers for books.orchestration='v2' (legacy books never reach them):
-// the book routes read deps.orchV2; the deletion cascade purges gen_* and skips the hub.
+// Orchestration v2 handlers (every book since 2026-11-28, этап 4): the book
+// routes read deps.orchV2; the deletion cascade purges gen_* (the hub is never called).
 routeDeps.orchV2 = orchV2;
 routeDeps.bookDeletion.configureOrchV2({
-    isV2Book: (bookId) => orchV2.isV2Book(bookId),
     purgeGenV2: (bookId) => orchV2.purgeBook(bookId, { getPool: () => storage.postgres.getPool(), outputDir: config.OUTPUT_DIR }),
 });
 
 require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, bookDiff, windowGenerator });
 // Generate API v2 (ADR ORCHESTRATION_V2 §11.1): /generate, /generate/stop,
-// /generate/progress, /generate/stream — v2 books only (legacy → 409
-// book_not_v2); the book guard of /api/v1/book/:bookId applies (registered
-// above).
+// /generate/progress, /generate/stream; the book guard of /api/v1/book/:bookId
+// applies (registered above).
 orchV2.mountGenerateRoutes(app, { generationMaterial: require('./helpers/book-text.cjs') });
 // Voice references (VOICE_REFERENCES.md) — orchestration v2 only; the book
 // guard of /api/v1/book/:bookId applies (registered above).

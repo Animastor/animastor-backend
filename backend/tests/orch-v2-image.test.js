@@ -25,7 +25,6 @@ const config = require('../src/config/runtime-config');
 const gen = require('@animastor/orchestration').gen;
 const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
-const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
 const { commandBody, progressRows } = require('./helpers/v2-generate');
 const { lockReference } = require('./helpers/voice-reference-fixture');
@@ -217,7 +216,6 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         books.set(bookId, bookJson(bookId, buildId));
         lockReference(books.get(bookId), config.OUTPUT_DIR);   // VOICE_REFERENCES: narrator reference locked
         await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'v2')`, [bookId, workspaceId, userId]);
-        bookFlag.invalidate();
         await query(`UPDATE workers SET last_seen = floor(extract(epoch from now()))::bigint, current_job_id = NULL WHERE worker_id = ANY($1)`, [[workerId, audioWorkerId]]);
         imageVersioned = false;
         Object.assign(layerCfg, { audio_enabled: true, image_enabled: true, video_enabled: true });
@@ -467,7 +465,7 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         expect(byCmd.body.cancelled).to.deep.equal(['image']);
     });
 
-    it('IU_IMAGE_VERSIONED включён → image на v2-книге fail-closed (409 v2_image_unavailable), аудио работает; legacy-книга → 409 book_not_v2', async () => {
+    it('IU_IMAGE_VERSIONED включён → image на v2-книге fail-closed (409 v2_image_unavailable), аудио работает', async () => {
         imageVersioned = true;
         const r = await command({ scope: 'book', layers: ['image'] });
         expect(r.status).to.equal(409);
@@ -476,18 +474,6 @@ describe('orchestration v2 — images (2a): fake image worker over HTTP + player
         expect((await command({ scope: 'book', layers: ['audio', 'image'] })).status).to.equal(409);
         expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId])).to.equal(0);
         expect((await command({ scope: 'book', layers: ['audio'] })).status).to.equal(200, 'audio is not affected');
-        // a legacy book: the generate API answers 409 book_not_v2, no work
-        const legacyId = `${bookId}-legacy`;
-        await query(`INSERT INTO books (book_id, title, workspace_id, user_id, orchestration) VALUES ($1, 't', $2, $3, 'legacy')`, [legacyId, workspaceId, userId]);
-        try {
-            bookFlag.invalidate();
-            const lr = await api('POST', `/api/v1/book/${legacyId}/generate`, commandBody({ layers: ['image'], scope: 'book' }));
-            expect(lr.status).to.equal(409);
-            expect(lr.body.code).to.equal('book_not_v2');
-            expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [legacyId])).to.equal(0);
-        } finally {
-            await query(`DELETE FROM books WHERE book_id = $1`, [legacyId]);
-        }
         imageVersioned = false;
         expect((await command({ scope: 'book', layers: ['image'] })).status).to.equal(200, 'flag off → image works again');
     });

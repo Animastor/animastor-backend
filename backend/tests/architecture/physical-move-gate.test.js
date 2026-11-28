@@ -75,7 +75,11 @@ const HOST_STAYS_RUNTIME = {
     'runtime-persistence.js': 'dead — deleted at cleanup (§32.13)',
     'retention-manager.js': 'orphaned — deleted at cleanup (§32.13)',
 };
-const ALIVE_HOST_STAYS = ['gpu-dispatcher.js', 'runtime-loop.js', 'orchestration-seams.js', 'job-schema.js'];
+const ALIVE_HOST_STAYS = ['gpu-dispatcher.js', 'runtime-loop.js', 'orchestration-seams.js', 'job-schema.js', 'worker-health.js'];
+// 2026-11-28 (ORCHESTRATION_V2 этап 4, шаг 4): worker-health moved BACK to the
+// host (backend/src/runtime/worker-health.js) — GET /worker/counts lives
+// without the package. The package copy stays until the legacy tree goes.
+const MOVED_BACK_TO_HOST = new Set(['worker-health.js']);
 
 // ── Frozen package root API (§32.29 §32.30: the measured host surface) ──
 const ROOT_FACADE_EXPORTS = [
@@ -99,6 +103,7 @@ describe('§32.30 post-move boundary guards — packages/animastor-orchestration
 
     it('PM-G2: the moved runtime files are gone from backend/src/runtime; exactly the classified stays remain', () => {
         for (const name of MOVED_RUNTIME) {
+            if (MOVED_BACK_TO_HOST.has(name)) continue;
             expect(fs.existsSync(path.join(RUNTIME_DIR, name)), `${name} must live in the package now`).to.equal(false);
         }
         for (const name of MOVED_RUNTIME) {

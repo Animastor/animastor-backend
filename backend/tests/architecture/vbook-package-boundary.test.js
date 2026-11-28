@@ -340,10 +340,12 @@ describe('VB-T5: ownership boundaries hold (package vs host)', () => {
         expect(offenders, '{booksRoot}/{bookId}.snapshot.json is a host-owned convention (task-handler.cjs / book-deletion.cjs)').to.deep.equal([]);
     });
 
-    it('deletion orchestration + hub env stay host-side (services/book-deletion.cjs)', () => {
+    it('deletion orchestration stays host-side (services/book-deletion.cjs); the hub is never called', () => {
+        // 2026-11-28 (этап 4): orchestration v2 has no hub queues — the former
+        // DELETE /queue/clear leg (and its HUB_URL / GPU_HUB_API_KEY env) is gone.
         const src = readSource(path.join(BACKEND_SRC, 'services', 'book-deletion.cjs'));
-        expect(src).to.match(/process\.env\.HUB_URL/, 'host ownership marker: hub queue clear');
-        expect(src).to.match(/process\.env\.GPU_HUB_API_KEY/, 'host ownership marker: hub api key');
+        expect(src).to.match(/function createBookDeletion/, 'host ownership marker: the cascade lives here');
+        expect(src).to.not.match(/process\.env\.HUB_URL|queue\/clear\?/, 'no hub call from the cascade');
     });
 
     it('book-deletion.cjs is excluded from the package files allowlist', () => {

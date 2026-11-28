@@ -91,11 +91,9 @@ describe('Book deletion — IU registry keys, IU image tables, gen_command_skips
             getChunk: async () => null,
             cleanBookRedisKeys: async () => ({}),
             log: () => {},
-            setCancelFlag: async () => {},
             agentSessionControl: { cancelSessions: async () => {} },
             purgeAssistantForBook: async () => {},
             removeBookArtifacts: () => {},
-            isV2Book: async () => true, // no hub call
         });
         const r = await deletion.deleteBook(BOOK);
         expect(r.deleted).to.equal(true);

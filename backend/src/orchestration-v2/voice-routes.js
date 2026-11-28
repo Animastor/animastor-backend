@@ -21,9 +21,9 @@
 // routes are gone.
 //
 // Generation happens ONLY on an explicit command (COMMAND_ONLY_GENERATION):
-// both POSTs that create GPU work require client_action.action_id. Books on the
-// legacy orchestration get 409 book_not_v2 for the commands and for pinning;
-// reading, listening, deleting a candidate and unpinning work for any book.
+// both POSTs that create GPU work require client_action.action_id. Every book
+// is on orchestration v2 (2026-11-28, этап 4) — the former 409 book_not_v2 is
+// gone; the commands and pinning need the master flag on (503 orch_v2_disabled).
 //
 // Writes of the hero go through the hero store of the editor model (the
 // runtime's character store: read → change → validate → atomic write) — never
@@ -82,7 +82,6 @@ function mountVoiceRoutes(app, { host, editorModel, bookRepo, getPool, log = con
 
     async function requireV2(bookId) {
         if (!host.isEnabled()) throw new VoiceReferenceError('orch_v2_disabled', 503, host.disabledReason() || 'orchestration v2 is disabled');
-        if (!(await host.isV2Book(bookId))) throw new VoiceReferenceError('book_not_v2', 409, 'voice references need orchestration v2 (books.orchestration = v2)');
     }
 
     /** The book and the hero of the request; the hero must exist and have a voice block. */

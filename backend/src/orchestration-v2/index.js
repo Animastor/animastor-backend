@@ -2,8 +2,7 @@
 // orchestration-v2 — composition of the gen core into the backend host
 // ======================================================
 // ADR animastor-docs architecture/ORCHESTRATION_V2.md (этап 1: аудио; этап 2a:
-// изображения IU; этап 3: видео — video_group + video_merge; только книги
-// books.orchestration='v2').
+// изображения IU; этап 3: видео — video_group + video_merge; этап 4 — все книги).
 //
 // Ports are routed by job kind EXPLICITLY (PORT_OF_KIND); an unknown kind is a
 // deterministic error, never the audio port. Video needs core >= 1.3.0 (ctx.db
@@ -20,13 +19,12 @@
 // ON: requires ORCH_V2_UPLOAD_SECRET (>= 32 bytes) and the ffmpeg binary
 // (silence check + merge); missing either → logged, v2 stays OFF.
 //
-// The legacy isolation predicate (book-flag) works regardless of the flag:
-// legacy never touches a v2 book.
+// Since 2026-11-28 (этап 4) every book is on v2: there is no legacy/v2 split
+// predicate any more (book-flag removed).
 
 'use strict';
 
 const { spawnSync } = require('child_process');
-const bookFlag = require('./book-flag');
 const { createAudioPorts } = require('./audio-ports');
 const { createImagePorts } = require('./image-ports');
 const { createVideoPorts } = require('./video-ports');
@@ -236,8 +234,6 @@ function createOrchV2Host(o) {
         errorUrl: (jobId, attempt) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/error?attempt=${attempt}`,
         inputUrl: (jobId, attempt, name) => `${publicBaseUrl}/internal/gen/jobs/${jobId}/input/${encodeURIComponent(name)}?attempt=${attempt}`,
         maxUploadBytes,
-        isV2Book: bookFlag.isV2BookFailClosed,
-        bookFlag,
     };
 }
 
