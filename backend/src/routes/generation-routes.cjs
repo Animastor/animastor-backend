@@ -1,9 +1,12 @@
 // ======================================================
 // ANIMASTOR BACKEND — GENERATION ROUTES
 // ======================================================
-// Generation / import / worker contours ONLY:
-//   /api/v1/generate, /api/v1/worker/*, /api/v1/book/:id/progress-stream,
+// Generation / worker contours ONLY:
+//   /api/v1/worker/counts, /api/v1/book/:id/progress-stream,
 //   /gpu/task/result|error (GPU Hub callbacks).
+// POST /api/v1/generate (legacy multipart import + generation) and
+// GET /api/v1/worker/status were removed 2026-11-28 (ORCHESTRATION_V2 §11.3);
+// import is POST /api/v1/book/import, generation is POST /book/:id/generate.
 //
 // The playback (Player) HTTP contour — scene/chunk media serving, scene
 // data, iu/preview, playback queue — was split out (4d1f6f0e) and then
@@ -15,16 +18,10 @@
 // Usage:
 //   require('./routes/generation-routes.cjs')(app, redis, deps);
 
-const multer = require('multer');
-const authContextMiddleware = require('../middleware/auth-context');
-
 module.exports = function(app, redis, deps) {
     const {
         config, state, audio, image, video, book, orchestrator, storage,
-        runtime, activeScenes, layerConfig, genScope, placeholderAudio,
-        utils, saveChunk, getChunk, getAllChunks, getBookWindowStatus,
-        detectAvailableMode, recoverChunksFromDisk, recoverAllBooksFromDisk,
-        cleanupService, iuRepo, computeWaveform,
+        runtime, utils,
         agentSessionControl,
         // Stage 114 — queue idempotency port. Injected by the composition root
         // (backend.cjs) so this route layer does NOT gain a new relative
@@ -98,143 +95,6 @@ module.exports = function(app, redis, deps) {
     }
 
     // ======================================================
-    // GENERATE (legacy full-book endpoint)
-    // ======================================================
-    const { requireUser, singleUpload } = require('../middleware/input-guard');
-    const vbookImporter = require('../services/vbook-import.cjs').createVbookImporter({
-        book, importBookAllowed: authContextMiddleware.importBookAllowed, log,
-        // post171: an archive's build id another book already names → a fresh one
-        // (backend.cjs routeDeps — contour-route require sets are frozen).
-        buildIdsOfOtherBooks: deps.buildIdsOfOtherBooks,
-    });
-    app.post('/api/v1/generate', requireUser, singleUpload('file'), async (req, res) => {
-        try {
-            if (!req.file) return res.status(400).json({ error: 'file missing' });
-
-            // The one .vbook importer (services/vbook-import.cjs): version gate,
-            // whitelist, cross-workspace guard (the bundle book_id is
-            // client-controlled — never overwrite a foreign book), object-path
-            // save. An existing book is kept as it is.
-            const imported = await vbookImporter.importVbookArchive(req, req.file.buffer, { tag: 'GENERATE' });
-            if (!imported.ok) return res.status(imported.status).json(imported.body);
-            const { bookId, bookData } = imported;
-            try {
-                const workspaceOwnership = require('../middleware/workspace-ownership');
-                await workspaceOwnership.resolveWorkspaceForBook(bookId, { preferredWorkspaceId: req.workspace?.id || null });
-            } catch (wsErr) {
-                console.warn(`[GENERATE] Ownership attach failed for ${bookId} (non-fatal): ${wsErr.message}`);
-            }
-
-            // Cathedral Recon #3 §5.4 option 1: an explicit full-book generate is a
-            // new run — clear any cancellation tombstone so it can't linger and be
-            // skipped by startup-resume on a later restart. Best-effort.
-            try {
-                const generationCancelRepo = require('../storage/postgres/repositories/generation-cancel-repo');
-                await generationCancelRepo.clear(bookId);
-            } catch (tombErr) {
-                console.warn(`[GENERATE] Failed to clear cancellation tombstone for ${bookId}: ${tombErr.message}`);
-            }
-
-            await genScope.setScope(redis, bookId, layerConfig.SCOPES.WHOLE_BOOK, null, null);
-
-            const existingBook = imported.wasExisting ? imported.loadedBook : null;
-            if (existingBook) {
-                const buildId = existingBook.manifest?.build_id || bookData.manifest.build_id || 'default';
-                const layerCfgBody = {
-                    audio_enabled: req.body.audio_enabled !== 'false',
-                    image_enabled: req.body.image_enabled !== 'false',
-                    video_enabled: req.body.video_enabled !== 'false',
-                };
-                await layerConfig.set(bookId, layerCfgBody);
-                const scenes = book.collectScenes(existingBook);
-                const ids = await getAllChunks(bookId);
-                if (ids.length === 0) {
-                    log(`No chunks in Redis for existing book ${bookId} — recovering from disk`);
-                    const recovered = await recoverChunksFromDisk(bookId, buildId, scenes);
-                    if (recovered.length > 0) {
-                        log(`Recovered ${recovered.length}/${scenes.length} chunks from disk`);
-                        ids.push(...recovered);
-                        await redis.set(config.BOOK_SCENE_TOTAL(bookId), scenes.length);
-                        await redis.set(config.BOOK_SCENE_NEXT(bookId), recovered.length);
-                        if (recovered.length < scenes.length) {
-                            log(`Sliding window to process remaining ${scenes.length - recovered.length} scenes`);
-                            const windowModule = require('@animastor/orchestration').runtime.sceneWindow;
-                            await windowModule.slideWindow(redis, bookId, existingBook, buildId);
-                        }
-                    } else {
-                        log(`No files on disk — starting pipeline for ${scenes.length} scenes`);
-                        const windowModule = require('@animastor/orchestration').runtime.sceneWindow;
-                        const started = await windowModule.initSceneWindow(redis, scenes, existingBook, buildId, bookId);
-                        log(`Window init: ${started}/${scenes.length} scenes started`);
-                        const newIds = await getAllChunks(bookId);
-                        ids.push(...newIds);
-                    }
-                }
-                if (ids.length === 0) {
-                    log(`⚠️ Still no chunks after init — waiting 500ms and retrying for ${bookId}`);
-                    await new Promise(r => setTimeout(r, 500));
-                    const retry = await getAllChunks(bookId);
-                    if (retry.length > 0) { log(`✅ Retry found ${retry.length} chunks`); ids.push(...retry); }
-                }
-                const mode = await detectAvailableMode(redis, bookId);
-                return res.json({ book_id: bookId, build_id: buildId, chunk_ids: ids, mode });
-            }
-
-            const buildId = imported.buildId;
-            const loadedBook = imported.loadedBook;
-
-            const layerCfgBody = {
-                audio_enabled: req.body.audio_enabled !== 'false',
-                image_enabled: req.body.image_enabled !== 'false',
-                video_enabled: req.body.video_enabled !== 'false',
-            };
-            await layerConfig.set(bookId, layerCfgBody);
-            console.log(`[LAYER] book=${bookId} audio=${layerCfgBody.audio_enabled} image=${layerCfgBody.image_enabled} video=${layerCfgBody.video_enabled}`);
-
-            const scenes = book.collectScenes(loadedBook);
-            console.log(`[API] Collected ${scenes.length} scenes from book`);
-
-            const ids = await getAllChunks(bookId);
-            if (ids.length === 0) {
-                log(`No chunks in Redis — recovering from disk for book ${bookId}`);
-                const recovered = await recoverChunksFromDisk(bookId, buildId, scenes);
-                if (recovered.length > 0) {
-                    log(`Recovered ${recovered.length}/${scenes.length} chunks from disk`);
-                    ids.push(...recovered);
-                    await redis.set(config.BOOK_SCENE_TOTAL(bookId), scenes.length);
-                    await redis.set(config.BOOK_SCENE_NEXT(bookId), recovered.length);
-                    if (recovered.length < scenes.length) {
-                        log(`Sliding window to process remaining ${scenes.length - recovered.length} scenes`);
-                        const windowModule = require('@animastor/orchestration').runtime.sceneWindow;
-                        await windowModule.slideWindow(redis, bookId, loadedBook, buildId);
-                    }
-                } else {
-                    log(`No files on disk — starting pipeline for ${scenes.length} scenes`);
-                    const windowModule = require('@animastor/orchestration').runtime.sceneWindow;
-                    const started = await windowModule.initSceneWindow(redis, scenes, loadedBook, buildId, bookId);
-                    log(`Window init: ${started}/${scenes.length} scenes started`);
-                    const newIds = await getAllChunks(bookId);
-                    ids.push(...newIds);
-                }
-            } else {
-                log(`Chunks found in Redis: ${ids.length}/${scenes.length}`);
-                await redis.set(config.BOOK_SCENE_TOTAL(bookId), scenes.length);
-                await redis.set(config.BOOK_SCENE_NEXT(bookId), ids.length);
-                if (ids.length < scenes.length) {
-                    log(`Sliding window to process remaining ${scenes.length - ids.length} scenes`);
-                    const windowModule = require('@animastor/orchestration').runtime.sceneWindow;
-                    await windowModule.slideWindow(redis, bookId, loadedBook, buildId);
-                }
-            }
-            const mode = await detectAvailableMode(redis, bookId);
-            return res.json({ book_id: bookId, build_id: buildId, chunk_ids: ids, mode });
-        } catch (err) {
-            console.error('❌ GENERATE ERROR:', err);
-            return res.status(400).json({ error: err.message || 'unknown error' });
-        }
-    });
-
-    // ======================================================
     // WORKER HEARTBEAT
     // ======================================================
     // NOTE: the legacy POST /api/v1/worker/heartbeat endpoint was REMOVED
@@ -243,21 +103,13 @@ module.exports = function(app, redis, deps) {
     // worse — every anonymous POST auto-provisioned a guest + temporary
     // workspace via authContext, making it a DB row-churn vector. Worker
     // liveness now flows through the token-authenticated hub path; the
-    // read-only status/counts endpoints below remain.
+    // read-only counts endpoint below remains.
 
+    // GET /api/v1/worker/status was removed 2026-11-28 (no callers in web /
+    // Android; ORCHESTRATION_V2 §11.3). worker/counts stays.
     // VISIBILITY: global operational view — SYSTEM/shared pool only. Private
     // workers of any workspace never appear in these numbers (worker-health
     // classifies heartbeats by the hub-authored scope fields).
-    app.get('/api/v1/worker/status', async (req, res) => {
-        try {
-            const workerHealth = require('@animastor/orchestration').runtime.workerHealth;
-            const status = await workerHealth.getStatus(redis);
-            res.json({ workers: status, heartbeat_ttl_sec: config.WORKER_HEARTBEAT_TTL });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    });
-
     app.get('/api/v1/worker/counts', async (req, res) => {
         try {
             const workerHealth = require('@animastor/orchestration').runtime.workerHealth;

@@ -9,7 +9,6 @@
 //   command gate (image stage), scheduler tick, reconcile cycle,
 //   scene-window read-repair (reconcileWindowStatuses / restoreChunkStatusForScene),
 //   window slide (slideWindow / trySlideWindowOnComplete / initSceneWindow),
-//   POST /book/:id/generate-next (the «regenerate missing» slide route),
 //   the image dispatch itself (generateSceneIUImages is never called).
 // Expected: not one legacy write for the v2 book; the control book IS processed.
 
@@ -175,27 +174,7 @@ describe('orchestration v2 (2a) — legacy isolation for IMAGES (one predicate, 
         expect(r[LEG].writes.length).to.be.greaterThan(0);
     });
 
-    it('POST /book/:id/generate-next for a v2 book: nothing started, no legacy writes', async () => {
-        const { redis, writes } = trackingRedis();
-        await seed(redis, V2);
-        writes.length = 0;
-        const app = express();
-        app.use(express.json());
-        require('../src/routes/book/generation-routes.cjs')(app, redis, {
-            utils: { log: () => {} }, config, layerConfig: { get: async () => ({}) },
-            book: { loadBook: (id) => books.get(id) || null, collectScenes: (b) => require('../src/book').collectScenes(b) },
-            runtime: { sceneWindow: orchestration.runtime.sceneWindow }, state: {}, activeScenes: {}, iuRepo: {},
-            getAllChunks: async () => [], getChunk: async () => null,
-        });
-        const server = http.createServer(app);
-        await new Promise((res) => server.listen(0, '127.0.0.1', res));
-        try {
-            const r = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/book/${V2}/generate-next`, { method: 'POST' });
-            expect(r.status).to.equal(200);
-            expect((await r.json()).started).to.equal(0);
-        } finally { await new Promise((res) => server.close(res)); }
-        expect(writes.filter((w) => w.args.includes(V2))).to.deep.equal([]);
-    });
+    // POST /book/:id/generate-next was removed 2026-11-28 (ORCHESTRATION_V2 §11.3); the window guard itself is covered above.
 
     it('fail-closed: an unknown answer of the predicate (PG error) keeps legacy out of the image read-repair', async () => {
         const sw = orchestration.runtime.sceneWindow;

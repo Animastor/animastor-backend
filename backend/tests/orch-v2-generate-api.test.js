@@ -164,7 +164,6 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
         routes.mountGenerateRoutes(app, { generationMaterial: require('../src/helpers/book-text.cjs') });
         const deps = { utils: { log: () => {} }, orchV2: routes, layerConfig, book: vbook, config, runtime: {}, state: {}, activeScenes: {}, iuRepo: {} };
         require('../src/routes/book/generation-routes.cjs')(app, redisClient, deps);
-        require('../src/routes/book/progress-panel.cjs')(app, redisClient, deps);
         require('../src/routes/generation-routes.cjs')(app, redisClient, deps);   // old GET /progress-stream
         server.removeAllListeners('request');
         server.on('request', app);
@@ -654,14 +653,13 @@ describe('generate API v2 — /generate, /generate/stop, /generate/progress, /ge
         expect(host.progressHub().stats().legacy_clients).to.equal(0);
     });
 
-    // ── the legacy names keep working (no behaviour change) ─────────────
-    it('старые имена (/regenerate, cancel-worker, progress-panel) работают как прежде', async () => {
-        const r = await api('POST', `/api/v1/book/${bookId}/regenerate`, { worker_types: ['audio'], scope: 'current_scene', chapter_id: 'ch-1', scene_id: 'sc-1', client_action: { kind: 'user_click', action_id: 'legacy-1' } });
+    // ── cancel-worker stays until task H (ADR §11.3) ─────────────────────
+    it('cancel-worker {task_id: command_id} снимает команду generate API (оставлен до задачи H)', async () => {
+        const r = await gen_({ scope: scene('sc-1') });
         expect(r.status).to.equal(200);
-        expect(r.body).to.include({ orchestration: 'v2', build_id: buildId, scope: 'current_scene' });
-        const panel = await api('GET', `/api/v1/book/${bookId}/progress-panel`);
-        expect(panel.body.tasks[0]).to.include({ task_id: r.body.command_id, type: 'audio', scope: 'current_scene' });
         const stop = await api('POST', `/api/v1/book/${bookId}/cancel-worker`, { task_id: r.body.command_id });
         expect(stop.body).to.include({ ok: true, jobs_cancelled: 1 });
+        const p = (await api('GET', `/api/v1/book/${bookId}/generate/progress`)).body;
+        expect(p.commands.find((c) => c.command_id === r.body.command_id).status).to.equal('cancelled');
     });
 });

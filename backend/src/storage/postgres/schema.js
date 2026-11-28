@@ -1194,7 +1194,7 @@ async function runMigrations() {
     // Generation cancellation tombstones (Cathedral Recon #3 §5.4)
     // ======================================================
     // Persistent marker that the user explicitly cancelled generation for a
-    // book. Written by POST /cancel-generation, cleared by POST /regenerate.
+    // book. Written by cancel-worker type=vbook, cleared by an explicit new run (bootstrap).
     // Survives Redis loss so automatic resumption (startup-resume / future
     // work-list rebuild) can never resurrect an explicitly cancelled run.
     try {

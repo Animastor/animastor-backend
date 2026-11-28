@@ -16,7 +16,7 @@
 //     cancelled scenes × stage (services/cancel-scene-state.cjs).
 //
 // Used by POST /cancel-worker (type or task_id), PUT /layer-config
-// (X_enabled=false) and, for the PG leg, POST /cancel-generation.
+// (X_enabled=false).
 // ======================================================
 
 'use strict';
@@ -150,8 +150,8 @@ async function cancelStage(p) {
     return summary;
 }
 
-// Re-exported so cancel-generation reaches it through the same composition-
-// root dependency (deps.stageCancellation) — contour-route requires are frozen.
+// Re-exported through the same composition-root dependency
+// (deps.stageCancellation) — contour-route requires are frozen.
 const { clearCancelledSceneState } = require('./cancel-scene-state.cjs');
 
 module.exports = { cancelStage, clearCancelledSceneState };

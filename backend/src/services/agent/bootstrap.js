@@ -112,7 +112,7 @@ async function bootstrapWithAgentInner(bookId, draft, progress, publishProgress,
     }
     // Cathedral Recon #3 §5.4: the user explicitly starting (or restarting)
     // generation is a NEW run — clear the persistent cancellation tombstone,
-    // same semantics as POST /regenerate. Without this, a cancelled book that
+    // same semantics as an explicit generation command. Without this, a cancelled book that
     // is later explicitly restarted would be skipped by startup-resume after a
     // Redis loss even though the user re-ran it. Best-effort: a PG failure must
     // not block the explicit new run.
@@ -392,7 +392,7 @@ async function _bootstrapNextWindowInner(bookId, progress, publishProgress, redi
         }
     } catch (_) { /* best-effort */ }
     // Cathedral Recon #3 §5.4: "Continue" is an explicit new run — clear the
-    // persistent cancellation tombstone (same semantics as POST /regenerate).
+    // persistent cancellation tombstone (same semantics as an explicit generation command).
     // Without this, a cancelled-then-continued book would be skipped by
     // startup-resume after a Redis loss despite the user's explicit resume.
     // Best-effort: a PG failure must not block the explicit continuation.

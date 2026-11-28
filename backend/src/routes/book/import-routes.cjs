@@ -259,7 +259,7 @@ app.post('/api/v1/book/import', requireUser, singleUpload('file'), async (req, r
             // ── VBOOK path — the one importer (services/vbook-import.cjs) ──
             return await handleVbookUpload(req, res, buf, 'UNIFIED-IMPORT', { format: 'vbook' });
         } else {
-            // ── TXT path — same logic as /import-txt ──
+            // ── TXT path (former /import-txt, removed 2026-11-28) ──
             if (req.guest && req.workspace && req.workspace.status === 'expired') {
                 return res.status(410).json({ error: 'Guest workspace expired', code: 'workspace_expired' });
             }
@@ -348,7 +348,7 @@ function detectFileFormat(buf) {
 
 /**
  * Import an uploaded .vbook and answer the request. Shared by
- * POST /book/import (ZIP upload) and POST /book/load-vbook.
+ * POST /book/import (ZIP upload).
  */
 async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
     const result = await vbookImporter.importVbookArchive(req, buf, { tag });
@@ -428,20 +428,6 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
     });
 }
 
-// ======================================================
-// LOAD VBOOK
-// ======================================================
-    app.post('/api/v1/book/load-vbook', requireUser, singleUpload('file'), async (req, res) => {
-        try {
-            if (!req.file) return res.status(400).json({ error: 'file missing' });
-
-            return await handleVbookUpload(req, res, req.file.buffer, 'LOAD-VBOOK');
-        } catch (err) {
-            if (err && err.status === 400) console.warn(`[LOAD-VBOOK] refused: ${err.code || 'invalid input'}`); else console.error('LOAD-VBOOK ERROR:', err);
-            return res.status(400).json({ error: err.message || 'unknown error' });
-        }
-    });
-
     // ======================================================
     // RESUME BOOTSTRAP
     // ======================================================
@@ -493,77 +479,6 @@ async function handleVbookUpload(req, res, buf, tag, extraBody = {}) {
             }
             console.error('[RESUME-BOOTSTRAP] Error:', err.message);
             return res.status(500).json({ error: err.message });
-        }
-    });
-
-    // ======================================================
-    // IMPORT TXT
-    // ======================================================
-    app.post('/api/v1/book/import-txt', requireUser, singleUpload('file'), async (req, res) => {
-        try {
-            if (!req.file) return res.status(400).json({ error: 'file missing' });
-            if (req.guest && req.workspace && req.workspace.status === 'expired') {
-                return res.status(410).json({ error: 'Guest workspace expired', code: 'workspace_expired' });
-            }
-
-            const decoded = txtImporter.decodeTxtBuffer(req.file.buffer);
-            if (decoded.error) return res.status(400).json({ error: decoded.error });
-
-            const sourceText = decoded.text;
-            const title = path.basename(req.file.originalname, '.txt');
-
-            // ⚠️ Hash MUST be computed from the DECODED text (UTF-8), NOT from the
-            // raw buffer. Source files may be in CP1251/koi8/etc — the raw bytes
-            // differ from the UTF-8 bytes written to source.txt on disk. Using the
-            // raw buffer hash would make the disk-fallback never find a match.
-            const fileHash = crypto.createHash('sha256').update(Buffer.from(sourceText, 'utf8')).digest('hex');
-            const sourceSize = Buffer.byteLength(sourceText, 'utf8');
-
-            let existingBookId = null;
-            let existingBuildId = null;
-            let existingState = null;
-            // ── Identity-scoped dedup: current identity + TXT → OWNED book ──
-            // Never returns a hash match owned by another workspace; the
-            // caller gets a fresh book of their own instead.
-            const dedupHit = await resolveOwnedTxtDedup(req, {
-                fileHash, sourceSize, title,
-                originalFilename: req.file.originalname,
-                tag: 'IMPORT-TXT',
-            });
-            if (dedupHit) {
-                existingBookId = dedupHit.bookId;
-                existingBuildId = dedupHit.buildId;
-                existingState = dedupHit.state;
-            }
-
-            if (existingBookId) {
-                log(`[IMPORT-TXT] DEDUP: returning existing book ${existingBookId} for hash ${fileHash}`);
-                return res.json({
-                    book_id: existingBookId, build_id: existingBuildId, title,
-                    state: existingState || lazyBook.BookState.RAW_IMPORTED, dedup: true,
-                });
-            }
-
-            const draft = lazyBook.createDraftBook(sourceText, lazyBook.SourceType.TXT, title);
-            const bookDir = lazyBook.getBookDir(draft.bookId);
-            const mp = lazyBook.getManifestPath(bookDir);
-            const m = JSON.parse(fs.readFileSync(mp, 'utf8'));
-            m.import_meta.original_filename = req.file.originalname;
-            fs.writeFileSync(mp, JSON.stringify(m, null, 2));
-
-            try {
-                await bookSourceRepo.registerSource(fileHash, req.file.originalname, sourceSize, draft.bookId, 'txt');
-                log(`[IMPORT-TXT] Registered source: ${fileHash} → ${draft.bookId}`);
-            } catch (pgErr) {
-                console.warn(`[IMPORT-TXT] Failed to register source (non-fatal): ${pgErr.message}`);
-            }
-            await attachBookWorkspace(draft.bookId, title, req.workspace?.id);
-
-            log(`[IMPORT-TXT] RAW_IMPORTED: ${draft.bookId} (${sourceSize} bytes)`);
-            return res.json({ book_id: draft.bookId, build_id: m.build_id, title, state: lazyBook.BookState.RAW_IMPORTED });
-        } catch (err) {
-            console.error('IMPORT-TXT ERROR:', err);
-            return res.status(400).json({ error: err.message || 'unknown error' });
         }
     });
 

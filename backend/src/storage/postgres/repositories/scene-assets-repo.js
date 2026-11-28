@@ -581,7 +581,7 @@ async function getBookAssetSummary(bookId) {
 
 /**
  * R13/R14: Bump version counters for dirty scenes.
- * Shared between PUT and /regenerate to eliminate duplicate SQL.
+ * Shared by the editor PUT paths and entity cleanup (one SQL).
  * First ensures the row exists (UPSERT) so the UPDATE has effect.
  *
  * @param {string} bookId
@@ -809,22 +809,6 @@ async function getSceneAssetVersions(bookId) {
     return result.rows;
 }
 
-/**
- * Scenes flagged dirty through the persistent PG markers:
- * is_dirty = TRUE or a non-empty dirty_unit_ids array.
- * Fallback dirty source for /regenerate when the diff path is empty.
- */
-async function getFlaggedDirtyScenes(bookId) {
-    const result = await query(`
-        SELECT chapter_id, scene_id, is_dirty, dirty_unit_ids
-        FROM scenes
-        WHERE book_id = $1
-          AND (is_dirty = TRUE OR (dirty_unit_ids IS NOT NULL AND array_length(dirty_unit_ids, 1) > 0))
-        ORDER BY chapter_id, scene_id
-    `, [bookId]);
-    return result.rows;
-}
-
 // ======================================================
 // Command-only generation (2026-10-31): terminal statuses for work that will
 // NOT run. A `pending` row is "queued work" for every PG reader (worklist,
@@ -900,7 +884,6 @@ module.exports = {
     getDirtyScenesByVersion,
     getSceneVersions,
     getSceneAssetVersions,
-    getFlaggedDirtyScenes,
     isSceneReady,
     deleteSceneAssets,
     deleteBookAssets,

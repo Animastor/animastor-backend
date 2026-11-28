@@ -507,13 +507,14 @@ describe('Private worker identity & authentication (Phase 1)', () => {
             expect(await countRows('workspaces')).to.equal(wsBefore);
         });
 
-        it('legacy status/counts endpoints remain mounted in the real app', async () => {
+        it('the read-only counts endpoint remains mounted in the real app', async () => {
             // The test harness mounts only auth + worker routes (generation
             // routes are not part of this boundary), so assert route removal
             // coverage differently: the heartbeat POST must 404; the read-only
-            // status/counts endpoints are preserved in generation-routes.cjs.
+            // counts endpoint is preserved in generation-routes.cjs
+            // (GET /worker/status was removed 2026-11-28, ORCHESTRATION_V2 §11.3).
             const genRoutes = require('../src/routes/generation-routes.cjs').toString();
-            expect(genRoutes).to.contain("app.get('/api/v1/worker/status'");
+            expect(genRoutes).to.not.contain("app.get('/api/v1/worker/status'");
             expect(genRoutes).to.contain("app.get('/api/v1/worker/counts'");
             expect(genRoutes).to.not.contain("app.post('/api/v1/worker/heartbeat'");
         });

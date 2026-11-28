@@ -514,9 +514,6 @@ describe('Worker visibility — /worker/counts acceptance (A vs B)', () => {
         expect(anon.audio).to.equal(1);
         expect(anon.private_audio).to.equal(0);
 
-        // /worker/status (operational view) is system-only too.
-        const st = await (await fetch(`${base}/api/v1/worker/status`)).json();
-        expect(st.workers.audio).to.equal(1);
     });
 
     it('A sees its worker ONLINE; the worker list stays workspace-scoped', async () => {

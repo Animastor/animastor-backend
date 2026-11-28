@@ -9,7 +9,7 @@
 // Repeat → 200, same answer. completed → untouched.
 //
 // Real modules: generation-routes cancel-worker handler, stage-cancellation,
-// progress-panel route, orchestration runtime, task registry over the Redis
+// orchestration runtime, task registry over the Redis
 // mock, PG repositories against the TEST database (test-db-safety guards it).
 
 const { expect } = require('chai');
@@ -17,8 +17,6 @@ const { createMockRedis } = require('./mocks/redis-mock');
 
 const orchestration = require('@animastor/orchestration');
 const scheduler = orchestration.runtime.scheduler;
-const sceneState = require('../src/state/scene-state');
-const activeScenes = require('../node_modules/@animastor/orchestration/src/legacy/runtime/active-scenes-index');
 const generationProgress = require('../src/services/generation-progress');
 const stageCancellation = require('../src/services/stage-cancellation.cjs');
 const taskRepo = require('../src/storage/postgres/repositories/task-repo');
@@ -57,24 +55,14 @@ function harness(redis) {
         stageCancellation,
         agentSessionControl: { cancelSessions: async () => { sessionCalls.push('vbook-sessions'); } },
     });
-    require('../src/routes/book/progress-panel.cjs')(app, redis, {
-        state: sceneState,
-        activeScenes,
-        getAllChunks: async () => [],
-        getChunk: async () => null,
-        iuRepo: { getImageUnitsForScene: async () => [] },
-        utils: { log: () => {} },
-    });
     const cancelWorker = async (bookId, body) => {
         const res = createResponse();
         await posts.get('/api/v1/book/:bookId/cancel-worker')({ params: { bookId }, body }, res);
         return res;
     };
-    const panel = async (bookId) => {
-        const res = createResponse();
-        await gets.get('/api/v1/book/:bookId/progress-panel')({ params: { bookId }, query: {} }, res);
-        return res.body;
-    };
+    // The task registry as the Generator rows are built from it (the former
+    // GET /progress-panel was removed 2026-11-28, ORCHESTRATION_V2 §11.3).
+    const panel = async (bookId) => ({ tasks: await generationProgress.listTasks(redis, bookId) });
     return { cancelWorker, panel, sessionCalls };
 }
 
@@ -160,11 +148,10 @@ describe('cancel-worker: «Снять» a stopped task (2026-11-05)', function (
         expect(h.sessionCalls).to.deep.equal([]);
         expect(await redis.smembers(`animastor:cancelled-workers:${b}`)).to.deep.equal([]);
 
-        // progress-panel: never a stopped row again — a cancelled one, then gone.
+        // registry: never a stopped task again — a cancelled one, then gone.
         const after = await h.panel(b);
         const row = after.tasks.find(t => t.task_id === mine.task_id);
         expect(row.status).to.equal('cancelled');
-        expect(row.interrupted).to.equal(false);
         await ageTerminal(redis, b, mine.task_id);
         const later = await h.panel(b);
         expect(later.tasks.map(t => t.task_id)).to.have.members([otherAudio.task_id, otherImage.task_id]);

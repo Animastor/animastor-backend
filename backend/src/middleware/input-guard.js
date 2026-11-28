@@ -34,7 +34,7 @@ function isSafeSegment(v) {
 }
 
 // Book-creation sub-paths of /api/v1/book/:bookId (not ids).
-const CREATE_BOOK_SUBPATHS = new Set(['import', 'import-txt', 'import-text', 'load-vbook', 'blank']);
+const CREATE_BOOK_SUBPATHS = new Set(['import', 'blank']);
 
 const REJECT_CODES = { 'book id': 'invalid_book_id', 'build id': 'invalid_build_id', 'hero id': 'invalid_hero_id', 'look id': 'invalid_look_id', id: 'invalid_id' };
 function reject(res, what) {

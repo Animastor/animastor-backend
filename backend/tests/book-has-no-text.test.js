@@ -1,17 +1,17 @@
 // =====================================================
-// /regenerate on a book with nothing to generate → 422 book_has_no_text
+// Generation on a book with nothing to generate → 422 book_has_no_text
 // =====================================================
 // reports/2026-11-22/assistant-edit-bug.md §4: an audio generation on a
 // blank VBook 4 book (one scene, one empty unit) was accepted, the audio
 // dispatch found 0 jobs (no_jobs_generated), retried every tick and was
-// finally cancelled — the user saw only "failed". The route now refuses the
-// command up front, before any task, dirty mark or dispatch, for both
-// orchestrations; the material rule is per layer (helpers/book-text.cjs).
+// finally cancelled — the user saw only "failed". POST /book/:id/generate
+// (generate API v2; the former /regenerate was removed 2026-11-28) refuses the
+// command up front, before any work; the material rule is per layer
+// (helpers/book-text.cjs).
 
 'use strict';
 
 const { expect } = require('chai');
-const { createMockRedis } = require('./mocks/redis-mock');
 const generationMaterial = require('../src/helpers/book-text.cjs');
 const { bookMaterial, nothingToGenerate } = generationMaterial;
 
@@ -58,59 +58,55 @@ describe('book-text: material per layer', () => {
     });
 });
 
-describe('POST /api/v1/book/:bookId/regenerate — book_has_no_text', () => {
-    const route = '../src/routes/book/generation-routes.cjs';
-    let saved;
-    beforeEach(() => { const r = require.resolve(route); saved = require.cache[r]; delete require.cache[r]; });
-    afterEach(() => { const r = require.resolve(route); if (saved) require.cache[r] = saved; else delete require.cache[r]; });
+describe('POST /api/v1/book/:bookId/generate — book_has_no_text', () => {
+    const { createV2Routes } = require('../src/orchestration-v2/routes');
 
     function mount(loadedBook) {
-        const calls = { reset: 0, layerConfig: 0, clearCancel: 0 };
+        const calls = { layerConfig: 0, createCommand: 0 };
         const handlers = new Map();
-        const app = { post(p, h) { handlers.set(p, h); }, get() {}, put() {}, delete() {} };
-        require(route)(app, createMockRedis(), {
-            config: { HUB_URL: 'http://gpu-hub.invalid', OUTPUT_DIR: '/tmp/empty-book-output' },
-            book: { loadBook: () => loadedBook, collectScenes: () => [] },
-            layerConfig: { get: async () => { calls.layerConfig++; return { audio_enabled: true, image_enabled: true, video_enabled: true }; }, set: async () => ({}) },
-            bookDiff: { filterDirtyScenesByScope: (d) => d },
-            storage: {},
-            orchestrator: { resetScenes: async () => { calls.reset++; return { marked: 0 }; } },
-            runtime: {
-                sceneWindow: { clearCancelFlag: async () => { calls.clearCancel++; }, setCancelFlag: async () => {}, slideWindow: async () => ({}) },
-                scheduler: { addSceneToActiveIndex: async () => {}, clearBookFromActiveIndex: async () => {} },
-            },
-            utils: { log: () => {} },
-            generationMaterial, // composition-root injection (backend.cjs routeDeps)
+        const app = { post(p, ...h) { handlers.set(p, h[h.length - 1]); }, get() {}, put() {}, delete() {}, use() {} };
+        const host = {
+            isV2Book: async () => true, isEnabled: () => true, disabledReason: () => null,
+            videoUnsupportedReason: () => null, imageUnsupportedReason: () => null,
+            orch: () => ({ createCommand: async () => { calls.createCommand++; throw new Error('not reached'); } }),
+        };
+        const routes = createV2Routes({
+            host, config: {}, workerRepo: {},
+            bookRepo: { getWorkspaceId: async () => null },          // past the guard → 409 book_without_workspace
+            layerConfig: { get: async () => { calls.layerConfig++; return { audio_enabled: true, image_enabled: true, video_enabled: true }; } },
+            redis: null, book: { loadBook: () => loadedBook, collectScenes: () => [] }, log: () => {},
         });
-        return { handler: handlers.get('/api/v1/book/:bookId/regenerate'), calls };
+        routes.mountGenerateRoutes(app, { generationMaterial });  // composition-root injection (backend.cjs)
+        return { handler: handlers.get('/api/v1/book/:bookId/generate'), calls };
     }
+    const body = (layers) => ({ scope: { level: 'book' }, layers, mode: 'all', client_action_id: 'c-1' });
 
     it('a blank v4 book: audio generation → 422 book_has_no_text, nothing touched', async () => {
         const { handler, calls } = mount(bookWith([blankUnit()]));
         const res = createResponse();
-        await handler({ params: { bookId: 'new_book_1' }, body: { scope: 'whole_book', worker_types: ['audio'], rebuild_all: true }, headers: {} }, res);
+        await handler({ params: { bookId: 'new_book_1' }, body: body(['audio']), headers: {} }, res);
         expect(res.statusCode).to.equal(422);
         expect(res.body).to.include({ error: 'book_has_no_text', code: 'book_has_no_text' });
         expect(res.body.message).to.match(/no text/);
-        expect(calls).to.deep.equal({ reset: 0, layerConfig: 0, clearCancel: 0 });
+        expect(calls).to.deep.equal({ layerConfig: 0, createCommand: 0 });
     });
 
-    it('a book with an image prompt only: audio refused, image accepted', async () => {
+    it('a book with an image prompt only: audio refused, image passes the guard', async () => {
         const b = bookWith([{ id: 'iu-1', text: null, image: { prompt: 'A room.' } }]);
         let m = mount(b);
         let res = createResponse();
-        await m.handler({ params: { bookId: 'new_book_2' }, body: { scope: 'whole_book', worker_types: ['audio'] }, headers: {} }, res);
+        await m.handler({ params: { bookId: 'new_book_2' }, body: body(['audio']), headers: {} }, res);
         expect(res.statusCode).to.equal(422);
 
         m = mount(b);
         res = createResponse();
-        await m.handler({ params: { bookId: 'new_book_2' }, body: { scope: 'whole_book', worker_types: ['image'] }, headers: {} }, res);
-        expect(res.statusCode).to.not.equal(422);
-        expect(m.calls.layerConfig).to.equal(1);
+        await m.handler({ params: { bookId: 'new_book_2' }, body: body(['image']), headers: {} }, res);
+        expect(res.statusCode).to.equal(409);
+        expect(res.body.code).to.equal('book_without_workspace');
     });
 
-    it('the composition root injects the guard into the route deps', () => {
+    it('the composition root injects the guard into the generate API', () => {
         const src = require('fs').readFileSync(require.resolve('../src/backend.cjs'), 'utf8');
-        expect(src).to.match(/generationMaterial: require\('\.\/helpers\/book-text\.cjs'\)/);
+        expect(src).to.match(/mountGenerateRoutes\(app, \{ generationMaterial: require\('\.\/helpers\/book-text\.cjs'\) \}\)/);
     });
 });

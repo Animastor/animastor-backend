@@ -264,7 +264,7 @@ describe('Book input guard (routes)', function () {
     });
 
     describe('anonymous callers', () => {
-        for (const route of ['/api/v1/book/import', '/api/v1/book/load-vbook']) {
+        for (const route of ['/api/v1/book/import']) {
             it(`${route}: 401 and no guest identity minted`, async () => {
                 const before = tree(sandbox);
                 const r = await req('POST', route, { file: bundle() });
@@ -290,7 +290,7 @@ describe('Book input guard (routes)', function () {
 
     describe('signed-in import refusals (disk unchanged)', () => {
         const badIds = ['..', '../sibling', '../../x', 'a/b', '/abs', 'a\\b', 'x.y'];
-        for (const route of ['/api/v1/book/import', '/api/v1/book/load-vbook']) {
+        for (const route of ['/api/v1/book/import']) {
             for (const id of badIds) {
                 it(`${route}: book_id ${JSON.stringify(id)} → 400`, async () => {
                     const before = tree(sandbox);
@@ -362,7 +362,7 @@ describe('Book input guard (routes)', function () {
 
     describe('valid use', () => {
         it('a VBook 4 archive imports for a signed-in user, then downloads; anonymous download → 401', async () => {
-            const r = await req('POST', '/api/v1/book/load-vbook', { cookie: userCookie, file: bundle() });
+            const r = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle() });
             expect(r.status, JSON.stringify(r.body)).to.equal(200);
             expect(r.body).to.include({ book_id: 'guard_book_1', build_id: 'build_guard_book_1', chapter_count: 1, scene_count: 1, was_existing: false });
             expect(tree(path.join(booksDir, 'guard_book_1')).split('\n')).to.deep.equal(V4_BOOK_FILES);
@@ -376,7 +376,7 @@ describe('Book input guard (routes)', function () {
         it('a second import of the same book keeps the copy on disk untouched', async () => {
             const before = contents(path.join(booksDir, 'guard_book_1'));
             const edited = bundle({ replace: { 'characters/yura.json': JSON.stringify({ ...YURA, name: 'Другой' }) } });
-            for (const route of ['/api/v1/book/import', '/api/v1/book/load-vbook']) {
+            for (const route of ['/api/v1/book/import']) {
                 const r = await req('POST', route, { cookie: userCookie, file: edited });
                 expect(r.status, JSON.stringify(r.body)).to.equal(200);
                 expect(r.body.was_existing).to.equal(true);
@@ -395,7 +395,7 @@ describe('Book input guard (routes)', function () {
     // VBook 4 — input refusals (after every refusal the disk is unchanged)
     // ══════════════════════════════════════════════════════════════════
     describe('VBook 4 import refusals (disk unchanged)', () => {
-        const ROUTES = ['/api/v1/book/import', '/api/v1/book/load-vbook'];
+        const ROUTES = ['/api/v1/book/import'];
         const hero = (extra) => JSON.stringify({ ...YURA, ...extra });
         const refFile = (file) => hero({ voice: { timbre: 't', reference: { file, sha256: SHA, ref_text: 'Фраза.', source: 'uploaded', locked: true } } });
 
@@ -567,7 +567,7 @@ describe('Book input guard (routes)', function () {
             }
         });
 
-        for (const route of ['/api/v1/book/import', '/api/v1/book/load-vbook']) {
+        for (const route of ['/api/v1/book/import']) {
             it(`1.3 ${route}: MiM.vbook (VBook 3.1) → 422 unsupported_vbook_version, disk unchanged`, async () => {
                 const mim = fs.readFileSync(path.resolve(__dirname, '../../MiM.vbook'));
                 const before = contents(sandbox);
@@ -625,7 +625,7 @@ describe('Book input guard (routes)', function () {
                 existing_book_id: 'old_book_31', hint: 'delete_existing_book',
                 message: 'На сервере уже есть книга с этим идентификатором (old_book_31) в формате VBook 3.1, который больше не поддерживается. Удалите старую книгу и повторите импорт.',
             });
-            const againEn = await req('POST', '/api/v1/book/load-vbook', { cookie: userCookie, file: bundle({ bookId: 'old_book_31', buildId: 'build_old_book_31' }) });
+            const againEn = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: 'old_book_31', buildId: 'build_old_book_31' }) });
             expect(againEn.status).to.equal(409);
             expect(againEn.body.hint).to.equal('delete_existing_book');
             expect(againEn.body.message).to.match(/Delete the old book and import again\.$/);
@@ -643,7 +643,7 @@ describe('Book input guard (routes)', function () {
             expect(fresh).to.not.have.property('unsupported');
         });
 
-        for (const route of ['/api/v1/book/import', '/api/v1/book/load-vbook']) {
+        for (const route of ['/api/v1/book/import']) {
             it(`1.4 ${route}: an archive with a prefix folder → manifest_not_in_root, nothing on disk`, async () => {
                 const before = contents(sandbox);
                 for (const prefix of ['import_1700000000/', 'guard_book_9/', 'a/b/']) {
@@ -662,7 +662,7 @@ describe('Book input guard (routes)', function () {
                 { name: 'cover.json', data: '{}' }, { name: 'manifest.json.bak', data: '{}' }, { name: 'notebook.json', data: '{}' },
                 ...LEGACY_FILES.map((name) => ({ name, data: '{}' })),
             ];
-            const r = await req('POST', '/api/v1/book/load-vbook', { cookie: userCookie, file: bundle({ bookId: 'v4_whitelist', buildId: 'build_v4_whitelist', extra: stray }) });
+            const r = await req('POST', '/api/v1/book/import', { cookie: userCookie, file: bundle({ bookId: 'v4_whitelist', buildId: 'build_v4_whitelist', extra: stray }) });
             ownedBookIds.push('v4_whitelist');
             expect(r.status, JSON.stringify(r.body)).to.equal(200);
             expect(tree(path.join(booksDir, 'v4_whitelist')).split('\n')).to.deep.equal(V4_BOOK_FILES);

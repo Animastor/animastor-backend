@@ -26,7 +26,7 @@
 //   - POST /api/v1/generate                  (multipart, on book import)
 //   - GET  /api/v1/book/:bookId/layer-config (read)
 //   - PUT  /api/v1/book/:bookId/layer-config (write)
-//   - orchestration-v2 isLayerEnabled / POST /generate, /regenerate
+//   - orchestration-v2 isLayerEnabled / POST /book/:id/generate
 //   - VBook agent (chunk_size, analysis_*), player playback queue
 //   - legacy runtime through the O-10 LayerConfigPort (storage/layer-config-adapter)
 
