@@ -104,108 +104,7 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
         });
     }
 
-    // ── cancel-generation ─────────────────────────────────────────────────
-    describe('POST /api/v1/book/:bookId/cancel-generation', () => {
-        function registerCancel(redis, deps) {
-            const handlers = new Map();
-            const app = { post(p, h) { handlers.set(p, h); }, get() {}, put() {}, delete() {} };
-            require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
-            return handlers.get('/api/v1/book/:bookId/cancel-generation');
-        }
-
-        it('clears the hub lane BEFORE the claims are released', async () => {
-            stubBaseModules();
-            const redis = createMockRedis();
-            const order = [];
-            const savedFetch = globalThis.fetch;
-            globalThis.fetch = async (url) => {
-                order.push(`hub-clear:${String(url).includes('queue/clear')}`);
-                return { ok: true, status: 200 };
-            };
-            try {
-                const deps = {
-                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null },
-                    runtime: {
-                        sceneWindow: { setCancelFlag: async () => {}, clearCancelFlag: async () => {} },
-                        scheduler: { clearBookFromActiveIndex: async () => {}, addSceneToActiveIndex: async () => {} },
-                    },
-                    utils: { log: () => {} },
-                    queueIdempotency: makeQidem(order),
-                };
-                const handler = registerCancel(redis, deps);
-                const response = createResponse();
-                await handler({ params: { bookId: 'order-book' } }, response);
-                expect(response.statusCode).to.equal(200);
-                // the hub clear comes FIRST, the release SECOND
-                expect(order[0]).to.match(/^hub-clear:/);
-                expect(order[1]).to.equal('release:order-book');
-            } finally {
-                globalThis.fetch = savedFetch;
-            }
-        });
-
-        it('keeps the claims when the hub clear FAILS (no duplicate window)', async () => {
-            stubBaseModules();
-            const redis = createMockRedis();
-            const order = [];
-            const savedFetch = globalThis.fetch;
-            globalThis.fetch = async () => ({ ok: false, status: 500 });
-            try {
-                const deps = {
-                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null },
-                    runtime: {
-                        sceneWindow: { setCancelFlag: async () => {}, clearCancelFlag: async () => {} },
-                        scheduler: { clearBookFromActiveIndex: async () => {}, addSceneToActiveIndex: async () => {} },
-                    },
-                    utils: { log: () => {} },
-                    queueIdempotency: makeQidem(order),
-                };
-                const handler = registerCancel(redis, deps);
-                const response = createResponse();
-                await handler({ params: { bookId: 'failed-hub-book' } }, response);
-                // the hub failure is reported (500) and NO claim was released
-                expect(response.statusCode).to.equal(500);
-                expect(order.filter(o => o.startsWith('release:'))).to.have.length(0);
-            } finally {
-                globalThis.fetch = savedFetch;
-            }
-        });
-
-        it('Stage 120 (M-b): the lane is swept a SECOND time after the claims are released', async () => {
-            stubBaseModules();
-            const redis = createMockRedis();
-            const order = [];
-            const savedFetch = globalThis.fetch;
-            globalThis.fetch = async (url) => {
-                order.push(`hub-clear:${String(url).includes('queue/clear')}`);
-                return { ok: true, status: 200 };
-            };
-            try {
-                const deps = {
-                    config: { HUB_URL: 'http://gpu-hub.invalid', GPU_HUB_API_KEY: null },
-                    runtime: {
-                        sceneWindow: { setCancelFlag: async () => {}, clearCancelFlag: async () => {} },
-                        scheduler: { clearBookFromActiveIndex: async () => {}, addSceneToActiveIndex: async () => {} },
-                    },
-                    utils: { log: () => {} },
-                    queueIdempotency: makeQidem(order),
-                };
-                const handler = registerCancel(redis, deps);
-                const response = createResponse();
-                await handler({ params: { bookId: 'cancel-sweep-book' } }, response);
-                expect(response.statusCode).to.equal(200);
-                const releaseIdx = order.indexOf('release:cancel-sweep-book');
-                const hubClears = order.map((o, i) => (o.startsWith('hub-clear:') ? i : -1)).filter(i => i >= 0);
-                // clear → release → CLEAR: a dispatch landing between the two
-                // cannot leave an orphan lane entry behind
-                expect(hubClears).to.have.length(2);
-                expect(hubClears[0]).to.be.lessThan(releaseIdx);
-                expect(hubClears[1]).to.be.greaterThan(releaseIdx);
-            } finally {
-                globalThis.fetch = savedFetch;
-            }
-        });
-    });
+    // POST /cancel-generation (and its lane-ordering cases) was removed 2026-11-28 (ORCHESTRATION_V2 §11.3).
 
     // ── cache teardown ────────────────────────────────────────────────────
     describe('DELETE /api/v1/book/:bookId/cache', () => {
@@ -452,22 +351,7 @@ describe('Stage 118: GPU lane release ordering (audit 117 · B4)', () => {
         });
     });
 
-    // ── Stage 120 — regenerate path sweep (audit 119 · M-b) ───────────────
-    describe('/regenerate post-release sweep (audit 119 · M-b)', () => {
-        it('the regenerate path sweeps the hub lane again through the hubCancel port', () => {
-            const fs = require('fs');
-            const path = require('path');
-            const src = fs.readFileSync(path.join(__dirname, '../src/routes/book/generation-routes.cjs'), 'utf8');
-            const releaseIdx = src.indexOf('releaseClaimsForScene(');
-            const sweepIdx = src.indexOf("hubCancelOp('clearHubDispatches')");
-            expect(releaseIdx).to.be.greaterThan(0);
-            // the sweep must come AFTER the per-scene claim release
-            expect(sweepIdx).to.be.greaterThan(releaseIdx);
-            expect(src).to.include('Stage 120 (M-b)');
-            // the port is consulted (never a blind call on an unwired port)
-            expect(src).to.include('isHubCancelPortWired()');
-        });
-    });
+    // The /regenerate post-release sweep left with the route (2026-11-28).
 
     // ── Stage 122 — behavioural book-scoped sweep (audit 121 · N1) ────────
     // The Stage 120 structural test only checked the call SITE existed. Audit

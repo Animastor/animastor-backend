@@ -66,7 +66,6 @@ const P = {
     scheduler: require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/runtime-scheduler'),
     sceneWindow: require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window'),
     journal: require.resolve('../src/state/event-journal'),
-    cancelRoute: require.resolve('../src/routes/book/generation-routes.cjs'),
 };
 
 // ── Stubs (PG + fs are irrelevant for the lifecycle under test) ──
@@ -148,32 +147,6 @@ async function runCycles(n) {
     }
 }
 
-function mountCancelRoute() {
-    delete require.cache[P.cancelRoute];
-    const handlers = new Map();
-    const app = {
-        post: (p, h) => handlers.set(`POST ${p}`, h),
-        get: () => {}, put: () => {}, delete: () => {},
-    };
-    const deps = {
-        config: { HUB_URL: 'http://gpu-hub.test', GPU_HUB_API_KEY: '' },
-        state,
-        runtime: { sceneWindow, scheduler },
-        utils: { log: () => {} },
-    };
-    require(P.cancelRoute)(app, redis, deps);
-    return handlers.get('POST /api/v1/book/:bookId/cancel-generation');
-}
-
-function makeRes() {
-    return {
-        statusCode: 200,
-        body: null,
-        status(code) { this.statusCode = code; return this; },
-        json(body) { this.body = body; return this; },
-    };
-}
-
 // ======================================================
 // TESTS — hooks are describe-scoped on purpose: root-level
 // hooks would leak the stubs into other test files.
@@ -185,7 +158,7 @@ describe('dispatch metadata/lease lifecycle — getDispatchEvidence premise (172
         for (const p of Object.values(P)) savedCache.set(p, require.cache[p]);
         installStubs();
         for (const p of [P.reconciler, P.dispatchEngine, P.leaseManager, P.orchestrator,
-            P.state, P.scheduler, P.sceneWindow, P.journal, P.cancelRoute]) {
+            P.state, P.scheduler, P.sceneWindow, P.journal]) {
             delete require.cache[p];
         }
         state = require(P.state);
@@ -394,42 +367,5 @@ describe('dispatch metadata/lease lifecycle — getDispatchEvidence premise (172
         });
     });
 
-    // ── TEST G: Stop All leaves no blocking metadata ────
-    describe('G. Stop All: lease+metadata cleanup + orphan sweep + tombstone', () => {
-        it('Stop All removes lease and metadata; state repaired; no resurrection', async function () {
-            this.timeout(10000);
-            // Live dispatch + GENERATING + scene in the active index
-            await createLiveDispatch('image');
-            await seedGenerating('image');
-            await redis.sadd(ACTIVE_SCENES_KEY, `${B}:${C}:${S}`);
-
-            const originalFetch = global.fetch;
-            global.fetch = async () => ({ ok: true, status: 200 });
-            try {
-                const cancelGeneration = mountCancelRoute();
-                const res = makeRes();
-                await cancelGeneration({ params: { bookId: B } }, res);
-                expect(res.statusCode).to.equal(200);
-                expect(res.body.ok).to.equal(true);
-            } finally {
-                global.fetch = originalFetch;
-            }
-
-            // No lease, no metadata — nothing left that could block self-heal
-            expect(await allKeysByPattern(`animastor:dispatch-lease:${B}:*`)).to.have.length(0);
-            expect(await allKeysByPattern(`animastor:dispatch-meta:${B}:*`)).to.have.length(0);
-            // Lease-backed GENERATING was rolled back (cancel → evidence gone → sweep)
-            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('dirty'); // command-only: released, not re-queued
-            // Tombstone + cancel flag recorded
-            expect(pgState.cancelledBooks.has(B)).to.equal(true);
-            expect(await redis.get(`animastor:generation:cancel:${B}`)).to.equal('true');
-
-            // Reconciliation after Stop All: no resurrection, no new dispatch keys
-            await runCycles(2);
-            expect(await redis.smembers(ACTIVE_SCENES_KEY)).to.have.length(0);
-            expect((await state.getAssetStates(redis, B, C, S)).image).to.equal('dirty'); // command-only: released, not re-queued
-            expect(await allKeysByPattern(`animastor:dispatch-lease:${B}:*`)).to.have.length(0);
-            expect(await allKeysByPattern(`animastor:dispatch-meta:${B}:*`)).to.have.length(0);
-        });
-    });
+    // G (Stop All through POST /cancel-generation) was removed 2026-11-28 with the route (ORCHESTRATION_V2 §11.3).
 });

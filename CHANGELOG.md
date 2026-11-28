@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-28 — удалены legacy-эндпоинты генерации и импорта (ветка `chore/remove-legacy-endpoints`)
+
+Нормативно — `animastor-docs` `architecture/ORCHESTRATION_V2.md` §11.3. Решение владельца 27.11: APK ≤ 0.3.4 не
+поддерживаются.
+
+- **Удалены роуты** (отвечают 404 стандартным обработчиком): `POST /api/v1/generate`, `POST /book/:id/generate-next`,
+  `POST /book/load-vbook`, `POST /book/import-txt`, `POST /book/import-text`, `POST /book/:id/recover-placeholders`,
+  `GET /book/:id/generation-state`, `GET /worker/status`, `POST /book/:id/regenerate`,
+  `POST /book/:id/cancel-generation`, `GET /book/:id/progress-panel` — вместе с v2-обработчиками `regenerate`,
+  `cancelGeneration`, `progressPanel` (`orchestration-v2/routes.js`) и `panel()` адаптера прогресса.
+- **Удалены файлы:** `routes/book/progress-panel.cjs`, `routes/book/recovery-routes.cjs`,
+  `services/regenerate-hub-sweep.cjs`. Оставлены живые: `routes/book/status-routes.cjs` (`/status` — web и Android,
+  `/chapters-summary` — Android), `routes/book/iu-progress-utils.cjs` (`computeIuReady` → `@animastor/player`).
+- **Оставлены до задачи H / шага 6:** `progress-stream`, `cancel-worker`, `bootstrap`, `bootstrap-next-window`,
+  `resume-bootstrap`, `trigger-next-window`, `worker/counts`, `/gpu/task/*`. Импорт — единый `POST /book/import`.
+- `no-store`: из регэкспа убраны `progress-panel` и `generation*`; `CREATE_BOOK_SUBPATHS` — только `import`, `blank`.
+- Тесты: v2-интеграционные сьюты (`orch-v2-integration`, `-image`, `-video`) переведены на generate API v2
+  (`tests/helpers/v2-generate.js`); тесты удалённых роутов удалены; страж `tests/removed-legacy-endpoints.test.js`.
+
 ## 2026-11-27 — LISTEN `gen_progress` переживает обрыв PG; no-store для `/book/:id/generate/*` (ветка `fix/gen-listen-nostore`)
 
 - **`@animastor/orchestration` 1.4.3** (`packages/`, **опубликован**; `backend/package.json` → `^1.4.3` + lock,

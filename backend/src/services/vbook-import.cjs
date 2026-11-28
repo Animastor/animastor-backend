@@ -1,9 +1,9 @@
 // ======================================================
 // vbook-import — the ONE way a .vbook archive becomes a book on disk
 // ======================================================
-// POST /api/v1/book/import, POST /api/v1/book/load-vbook and POST
-// /api/v1/generate used to carry three copies of the same ~70 lines
-// (VBOOK_FORMAT_V4 §11.2, Н15). They now call importVbookArchive.
+// POST /api/v1/book/import calls importVbookArchive (VBOOK_FORMAT_V4 §11.2,
+// Н15: the former three copies of the same ~70 lines are gone; the other two
+// upload routes were removed 2026-11-28, ORCHESTRATION_V2 §11.3).
 //
 // Order of work — nothing is written before every check has passed:
 //   1. list and extract the archive (limits, unsafe names, links, whitelist);

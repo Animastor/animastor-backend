@@ -6,7 +6,7 @@
 //   • the legacy package via the optional PersistencePort op
 //     orchestration.isV2Book (command gate, reconcile, scheduler, scene window);
 //   • host legacy services (gpu-retry-policy, startup-resume, window-generator);
-//   • routes (/regenerate, cancel-*, layer-config, progress, delete).
+//   • routes (generate API, cancel-worker, layer-config, progress-stream, delete).
 // Semantics:
 //   • column missing (42703: the v2 migration never ran) → not v2;
 //   • unknown book → not v2;

@@ -184,12 +184,13 @@ describe('T5: Editor/Player contours load through the facades', () => {
         // playerModel.
         const src = readSource(path.join(BACKEND_SRC, 'routes', 'generation-routes.cjs'));
         const direct = [...src.matchAll(/\bbook\.loadBook\s*\(/g)].length;
-        // VBook 4 step 1: the import leg went to services/vbook-import.cjs (the
-        // one importer of three routes); this file no longer loads books itself.
+        // VBook 4 step 1: the import leg went to services/vbook-import.cjs; this
+        // file no longer loads books itself. 2026-11-28: POST /api/v1/generate
+        // (its importer call) was removed — POST /book/import is the one upload.
         expect(direct, 'routes/generation-routes.cjs direct book.loadBook count grew').to.equal(0);
-        expect(src).to.match(/vbookImporter\.importVbookArchive\(req, req\.file\.buffer/);
+        expect(src).to.not.match(/vbookImporter|importVbookArchive/);
         // The pinned import leg — existing copy, cross-workspace guard, reload
-        // after save — is the importer's, in one place for all three routes.
+        // after save — is the importer's, in one place.
         const importer = readSource(path.join(BACKEND_SRC, 'services', 'vbook-import.cjs'));
         expect([...importer.matchAll(/\bbook\.loadBook\s*\(/g)].length, 'services/vbook-import.cjs direct book.loadBook count grew').to.equal(2);
         expect(importer).to.match(/existingBook = book\.loadBook\(bookId\);/);
@@ -223,17 +224,16 @@ describe('T5: Editor/Player contours load through the facades', () => {
         expect(src).to.match(/playerModel\.loadBook\(bookId\)/);
     });
 
-    it('generation-control routes keep their pinned loader calls (regenerate leg)', () => {
+    it('generation-control routes keep their pinned loader calls (layer-config / cancel-worker leg)', () => {
         // routes/book/generation-routes.cjs is the generation-control leg
-        // (POST /book/:id/regenerate, cancel-generation, generate-next) — a
-        // generation-pipeline concern, deliberately NOT migrated to playerModel
-        // (docs/architecture/PHASE_6_EDITOR_PLAYER.md §6.1). Its direct
-        // book.loadBook calls are pinned here (same rule as the import leg in
-        // routes/generation-routes.cjs) so the leg cannot grow new facade
-        // bypasses silently.
+        // (layer-config, cancel-worker) — a generation-pipeline concern,
+        // deliberately NOT migrated to playerModel (docs/architecture/
+        // PHASE_6_EDITOR_PLAYER.md §6.1). 2026-11-28: the three book.loadBook
+        // calls left with /regenerate, /cancel-generation and /generate-next
+        // (ORCHESTRATION_V2 §11.3) — the pin drops to 0 and must not grow.
         const src = readSource(path.join(BACKEND_SRC, 'routes', 'book', 'generation-routes.cjs'));
         const direct = [...src.matchAll(/\bbook\.loadBook\s*\(/g)].length;
-        expect(direct, 'routes/book/generation-routes.cjs direct book.loadBook count grew').to.equal(3);
+        expect(direct, 'routes/book/generation-routes.cjs direct book.loadBook count grew').to.equal(0);
         expect(src).to.not.match(/\bbook\.saveBookBundle\s*\(/);
     });
 });

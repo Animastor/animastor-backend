@@ -27,8 +27,8 @@ const { query } = require('../storage/postgres/database');
 function createAgentSessionControl() {
     /**
      * Cancel every running/paused VBook agent session for a book.
-     * Mirrors the semantics previously inlined in cancel-worker /
-     * cancel-generation routes (best-effort: the caller decides whether a
+     * Mirrors the semantics previously inlined in the cancel routes
+     * (best-effort: the caller decides whether a
      * PG failure is fatal — it never was there).
      * @returns {Promise<{cancelled: boolean}>}
      */

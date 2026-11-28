@@ -150,7 +150,6 @@ describe('editor registration contract (Phase 4.1 regression)', () => {
         const siblings = [
             './book/import-routes.cjs', './book/export-routes.cjs',
             './book/generation-routes.cjs', './book/agent-routes.cjs',
-            './book/progress-panel.cjs', './book/recovery-routes.cjs',
             './book/versions-routes.cjs', './book/recent-books-routes.cjs',
             './book/status-routes.cjs', './book/parse-routes.cjs',
             './book/cache-routes.cjs',

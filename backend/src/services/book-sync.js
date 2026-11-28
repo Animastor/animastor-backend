@@ -16,7 +16,7 @@
 //
 // Data flow:
 //   PUT /book/:bookId → save to disk
-//     → POST /regenerate → book-diff.computeBookDiff() → Redis markDirty
+//     → book-diff.computeBookDiff() → Redis markDirty
 //     → book-sync.reconcileFromDiff() → PG hash/assets/tasks update
 //
 const bookSource = require('./book-source');

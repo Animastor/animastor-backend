@@ -8,13 +8,11 @@ const path = require('path');
 const { isNoStorePath, noStoreForPolling } = require('../src/middleware/no-store');
 
 const POLL_PATHS = [
-    '/book/ba_1/progress-panel',
     '/book/ba_1/progress-stream',
     '/book/ba_1/assets-state',
     '/book/ba_1/status',
     '/book/ba_1/agent-status',
     '/book/ba_1/layer-config',
-    '/book/ba_1/generation-status',
     '/scene/ba_1/ch-1/sc-1/status',
     '/worker/counts',
     '/generate/commands/abc',
@@ -32,12 +30,14 @@ const CACHEABLE_PATHS = [
     '/worker/counts-history',
     '/generated/x',
     '/book/X/generate-next',
+    // removed 2026-11-28 (ORCHESTRATION_V2 §11.3) — no longer polling paths
+    '/book/ba_1/progress-panel',
+    '/book/ba_1/generation-state',
 ];
 
 function buildApp() {
     const app = express();
     app.use('/api/v1', noStoreForPolling);
-    app.get('/api/v1/book/:id/progress-panel', (req, res) => res.json({ tasks: [], any_incomplete: false }));
     app.get('/api/v1/worker/counts', (req, res) => res.json({ audio: 1 }));
     app.get('/api/v1/book/:id/assets-state', (req, res) => res.json({ scenes: {} }));
     app.get('/api/v1/book/:id/progress-stream', (req, res) => {
@@ -47,7 +47,7 @@ function buildApp() {
     });
     app.get('/api/v1/book/:id/generate/progress', (req, res) => res.json({ book_id: req.params.id, active: false, commands: [] }));
     app.get('/api/v1/book/:id', (req, res) => res.json({ book_id: req.params.id }));
-    app.post('/api/v1/book/:id/progress-panel', (req, res) => res.json({ ok: true }));
+    app.post('/api/v1/book/:id/assets-state', (req, res) => res.json({ ok: true }));
     return app;
 }
 
@@ -80,8 +80,8 @@ describe('О1 no-store for polling endpoints', () => {
         for (const p of CACHEABLE_PATHS) it(`cacheable: ${p}`, () => expect(isNoStorePath(p)).to.equal(false));
     });
 
-    it('progress-panel / worker/counts / assets-state: Cache-Control no-store, no ETag', async () => {
-        for (const p of ['/api/v1/book/b1/progress-panel', '/api/v1/worker/counts', '/api/v1/book/b1/assets-state']) {
+    it('worker/counts / assets-state: Cache-Control no-store, no ETag', async () => {
+        for (const p of ['/api/v1/worker/counts', '/api/v1/book/b1/assets-state']) {
             const r = await get(p);
             expect(r.status, p).to.equal(200);
             expect(r.headers['cache-control'], p).to.equal('no-store');
@@ -90,11 +90,11 @@ describe('О1 no-store for polling endpoints', () => {
     });
 
     it('If-None-Match never yields 304 on a polling path', async () => {
-        const r = await get('/api/v1/book/b1/progress-panel', { 'If-None-Match': 'W/"58-E8X2CSrc0ABGG0HeBBPXZeRVFU8"' });
+        const r = await get('/api/v1/book/b1/assets-state', { 'If-None-Match': 'W/"58-E8X2CSrc0ABGG0HeBBPXZeRVFU8"' });
         expect(r.status).to.equal(200);
-        expect(JSON.parse(r.text)).to.deep.equal({ tasks: [], any_incomplete: false });
+        expect(JSON.parse(r.text)).to.deep.equal({ scenes: {} });
         // even with the ETag the server itself would have computed
-        const r2 = await get('/api/v1/book/b1/progress-panel', { 'If-None-Match': '*' });
+        const r2 = await get('/api/v1/book/b1/assets-state', { 'If-None-Match': '*' });
         expect(r2.status).to.equal(200);
     });
 
@@ -115,7 +115,7 @@ describe('О1 no-store for polling endpoints', () => {
         const r = await get('/api/v1/book/b1');
         expect(r.headers.etag).to.be.a('string');
         expect(r.headers['cache-control']).to.equal(undefined);
-        const p = await post('/api/v1/book/b1/progress-panel');
+        const p = await post('/api/v1/book/b1/assets-state');
         expect(p.headers['cache-control']).to.equal(undefined);
     });
 

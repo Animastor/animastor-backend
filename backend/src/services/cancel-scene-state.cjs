@@ -1,7 +1,7 @@
 // ======================================================
 // Cancel → per-scene runtime state cleanup (GPU E2E 2026-11-02 §8 п.4)
 // ======================================================
-// `cancel-generation` (tombstone) and `cancelStage` (cancel-worker,
+// The book-wide stop (tombstone) and `cancelStage` (cancel-worker,
 // layer-config X=false) released leases, dispatch metadata and hub lanes,
 // but left the scene FSM records behind. The audio-orch record of a cancelled
 // attempt (started_at=11:09) survived 75 minutes and the next command's

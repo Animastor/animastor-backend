@@ -21,7 +21,6 @@ const { scopeBounds } = require('../services/gen-scope');
 const workerLogsStore = require('../services/worker-logs-store');
 const workerLogTail = require('../services/worker-log-tail');
 
-const LEGACY_TO_SCOPE = Object.freeze({ whole_book: 'book', current_chapter: 'chapter', current_scene: 'scene' });
 const ALL_LAYERS = Object.freeze(['audio', 'image', 'video']);
 const BASE_V2_LAYERS = Object.freeze(['audio', 'image']);  // + video (stage 3) when the core supports it
 const FROM_CURRENT_SCENE = 'from_current_scene';
@@ -215,111 +214,6 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
         return { scope: { level: 'scenes', scene_ids: all.slice(startIndex, endIndex).map((s) => s.scene_id) } };
     }
 
-    async function regenerate(req, res) {
-        const { bookId } = req.params;
-        if (!host.isEnabled()) return res.status(409).json({ code: 'orch_v2_disabled', error: host.disabledReason() || 'orchestration v2 is disabled' });
-        const body = req.body || {};
-        const types = body.worker_types === undefined ? ['audio'] : body.worker_types;
-        if (!Array.isArray(types) || types.length === 0 || types.some((t) => !ALL_LAYERS.includes(t))) {
-            return res.status(400).json({ error: 'worker_types must be a non-empty array containing audio, image, or video' });
-        }
-        // audio + image (2a) + video (stage 3, core >= 1.3.0) run on v2; a layer the host
-        // cannot run creates no work — the answer says so (summary.skipped_unsupported)
-        const requested = [...new Set(types)];
-        const videoWhy = host.videoUnsupportedReason ? host.videoUnsupportedReason() : 'host without video support';
-        const supported = videoWhy ? BASE_V2_LAYERS : [...BASE_V2_LAYERS, 'video'];
-        const unsupported = requested.filter((t) => !supported.includes(t));
-        const layers = requested.filter((t) => supported.includes(t));
-        if (!layers.length) {
-            return res.status(409).json({
-                code: 'v2_video_unavailable', error: `video layer is unavailable on orchestration v2: ${videoWhy}`,
-                worker_types: unsupported, summary: { jobs_created: 0, joined: 0, skipped_ready: 0, skipped_unsupported: unsupported },
-            });
-        }
-        if (layers.includes('image')) {
-            const why = host.imageUnsupportedReason ? host.imageUnsupportedReason() : 'host without image support';
-            if (why) return res.status(409).json({ code: 'v2_image_unavailable', error: `image layer is unavailable on orchestration v2: ${why}`, worker_types: ['image'] });
-        }
-        const legacyScope = body.scope || 'whole_book';
-        let scope;
-        if (legacyScope === FROM_CURRENT_SCENE) {
-            // ADR §11.1 / §13 п.8 (1c): «from the current scene to the end» is expanded
-            // HERE into an explicit list — book order, [current, last) exactly as the
-            // legacy gen-scope.scopeBounds; the command stores {level:'scenes', scene_ids}.
-            const r = expandFromCurrentScene(bookId, body);
-            if (r.error) return res.status(r.status).json(r.error);
-            scope = r.scope;
-        } else {
-            const level = LEGACY_TO_SCOPE[legacyScope];
-            if (!level) return res.status(409).json({ code: 'v2_scope_not_supported_yet', error: `scope ${legacyScope} is not supported on orchestration v2 yet` });
-            scope = { level };
-            if (body.chapter_id) scope.chapter_id = String(body.chapter_id);
-            if (body.scene_id && level === 'scene') scope.scene_id = String(body.scene_id);
-        }
-        try {
-            const workspaceId = await bookRepo.getWorkspaceId(bookId);
-            if (!workspaceId) return res.status(409).json({ code: 'book_without_workspace', error: 'book has no workspace' });
-            let userId = userIdOf(req);
-            if (!userId) {
-                const ws = await require('../storage/postgres/repositories/workspace-repo').findById(workspaceId).catch(() => null);
-                userId = ws && ws.owner_user_id ? ws.owner_user_id : null;
-            }
-            if (!userId) return res.status(401).json({ code: 'unauthorized', error: 'no user for the command' });
-            const cfg = await layerConfig.get(bookId);
-            const enabledLayers = ['audio', 'image', 'video'].filter((l) => cfg[`${l}_enabled`] !== false);
-            const ca = body.client_action && typeof body.client_action === 'object' ? body.client_action : null;
-            const clientActionId = ca && typeof ca.action_id === 'string' && ca.action_id ? ca.action_id.slice(0, 200) : null;
-            const r = await host.orch().createCommand({
-                workspaceId, userId, bookId, kind: 'regenerate', scope, layers,
-                force: body.rebuild_all === true || body.force === true,
-                clientActionId, enabledLayers,
-            });
-            const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
-            const scopeLog = scope.level === 'scenes' ? `${legacyScope}→scenes[${scope.scene_ids.length}] from ${scope.scene_ids[0]}` : legacyScope;
-            const summary = unsupported.length ? { ...r.summary, skipped_unsupported: unsupported } : r.summary;
-            log(`[REGENERATE] ${bookId}: orchestration v2 command ${r.command_id} ${r.existing ? '(existing, repeated click)' : 'created'} layers=${r.layers.join(',')} scope=${scopeLog} summary=${JSON.stringify(summary)} client_action_id=${clientActionId || '-'}`);
-            // per-layer counts of the command (jobs it created or joined, §4.2a)
-            let byLayer = {};
-            try {
-                const p = await host.orch().progress(bookId);
-                const c = p.commands.find((x) => x.command_id === r.command_id);
-                if (c) byLayer = c.by_layer || {};
-            } catch (_) { /* counts are informational */ }
-            const layerCount = (l) => { const t = byLayer[l] || {}; return (t.queued || 0) + (t.running || 0) + (t.done || 0) + (t.failed || 0) + (t.cancelled || 0); }
-            return res.json({
-                book_id: bookId,
-                orchestration: 'v2',
-                command_id: r.command_id,
-                existing: r.existing,
-                summary,
-                scope: legacyScope,
-                build_id: (loaded && loaded.manifest && loaded.manifest.build_id) || 'default',
-                dirty_scenes: [],
-                // not run by this command: unsupported on v2 (video) + disabled in layer-config
-                skipped_worker_types: requested.filter((t) => !r.layers.includes(t)),
-                tasks: r.layers.map((type) => ({ task_id: r.command_id, type, target_count: layerCount(type) })),
-            });
-        } catch (err) {
-            if (err && err.code === 'layer_disabled') {
-                return res.status(409).json({ error: 'layer_disabled', message: 'All requested layers are disabled in layer-config', disabled_worker_types: layers });
-            }
-            return sendGenError(res, err, 'regenerate');
-        }
-    }
-
-    async function cancelGeneration(req, res) {
-        const { bookId } = req.params;
-        try {
-            if (host.isEnabled()) {
-                const r = await host.orch().cancel({ bookId }, { cancelledBy: userIdOf(req) || 'cancel-generation' });
-                log(`[CANCEL-GENERATION] ${bookId}: orchestration v2 — ${r.commands_cancelled} command(s), ${r.jobs_cancelled} job(s) cancelled`);
-            }
-            // VBook (LLM) is not orchestration work — the button stops it as before.
-            if (sessionControl) { try { await sessionControl.cancelSessions(bookId); } catch (e) { console.warn(`[CANCEL-GENERATION] VBook cancel failed: ${e.message}`); } }
-            return res.json({ ok: true, book_id: bookId, orchestration: 'v2' });
-        } catch (err) { return sendGenError(res, err, 'cancel-generation'); }
-    }
-
     /** @returns {Promise<boolean>} true when handled (otherwise the legacy route continues: vbook / cover) */
     async function cancelWorker(req, res) {
         const { bookId } = req.params;
@@ -350,12 +244,6 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             log(`[LAYER-CONFIG] ${bookId}: orchestration v2 layer ${layer} off — ${r.jobs_cancelled} job(s) cancelled`);
         }
         return out;
-    }
-
-    async function progressPanel(bookId, resolveLabels) {
-        if (!host.isEnabled()) return { book_id: bookId, tasks: [], overall_percent: 0, any_incomplete: false, orchestration: 'v2' };
-        const p = await host.progress().panel(bookId, { resolveLabels });
-        return { ...p, orchestration: 'v2' };
     }
 
     /** Book deletion: gen_* rows + this book's files in {build}/.incoming. Works with the flag off. */
@@ -391,14 +279,14 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     }
 
     // ── generate API v2 (ADR §11.1, этап 2; 2026-11-27) ──────────────────
-    // Thin wrappers over the same core calls as the legacy names above:
-    //   POST /generate          ≈ /regenerate      (createCommand; mode all = force)
-    //   POST /generate/stop     ≈ cancel-worker / cancel-generation (cancel by command / layer / book)
-    //   GET  /generate/progress ≈ progress-panel   (ADR §9 aggregate, new format)
-    //   GET  /generate/stream   ≈ progress-stream  (SSE from LISTEN gen_progress, no Redis)
-    // Access: the /api/v1/book/:bookId guard of the composition root (as /regenerate).
-    // Errors: {code, error} (sendGenError), as the v2 leg of /regenerate.
-    // A legacy book → 409 book_not_v2 (as voice-routes); the legacy names keep working unchanged.
+    //   POST /generate          createCommand (mode all = force)
+    //   POST /generate/stop     cancel by command / layer / book
+    //   GET  /generate/progress ADR §9 aggregate
+    //   GET  /generate/stream   SSE from LISTEN gen_progress, no Redis
+    // The former names /regenerate, /cancel-generation and /progress-panel were
+    // removed 2026-11-28 (ADR §11.3); cancel-worker and progress-stream stay until task H.
+    // Access: the /api/v1/book/:bookId access guard of the composition root.
+    // Errors: {code, error} (sendGenError). A legacy book → 409 book_not_v2 (as voice-routes).
 
     let material = null;   // helpers/book-text.cjs, set by mountGenerateRoutes
     const notV2 = (res, bookId) => res.status(409).json({ code: 'book_not_v2', error: `book ${bookId} is not on orchestration v2 (books.orchestration = v2)` });
@@ -449,7 +337,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             if (!Array.isArray(types) || types.length === 0 || types.some((t) => !ALL_LAYERS.includes(t))) {
                 return bad(res, 'layers must be a non-empty array of audio, image, video');
             }
-            // the /regenerate «nothing to generate» guard (helpers/book-text.cjs)
+            // the «nothing to generate» guard (helpers/book-text.cjs)
             if (material) {
                 const loaded = book && typeof book.loadBook === 'function' ? book.loadBook(bookId) : null;
                 if (loaded && material.nothingToGenerate(loaded, types)) {
@@ -461,7 +349,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             if (sc.error) return res.status(sc.status).json(sc.error);
             const scope = sc.scope;
 
-            // layer availability — the same rules as the v2 leg of /regenerate
+            // layer availability (image / video support of the host)
             const requested = [...new Set(types)];
             const videoWhy = host.videoUnsupportedReason ? host.videoUnsupportedReason() : 'host without video support';
             const supported = videoWhy ? BASE_V2_LAYERS : [...BASE_V2_LAYERS, 'video'];
@@ -543,7 +431,7 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
             }
             let r = { commands_cancelled: 0, jobs_cancelled: 0 };
             if (host.isEnabled()) r = await host.orch().cancel({ bookId }, { cancelledBy: by });
-            // VBook (LLM) is not orchestration work — the book stop stops it as cancel-generation does
+            // VBook (LLM) is not orchestration work — the book stop stops its sessions too
             let vbookCancelled = false;
             if (sessionControl) {
                 try { await sessionControl.cancelSessions(bookId); vbookCancelled = true; } catch (e) { console.warn(`[GENERATE-STOP] VBook cancel failed: ${e.message}`); }
@@ -609,8 +497,8 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
 
     /**
      * Mount the four /generate endpoints (composition root, AFTER the
-     * /api/v1/book/:bookId access guard — the same guard as /regenerate).
-     * generationMaterial: the /regenerate «nothing to generate» guard (helpers/book-text.cjs).
+     * /api/v1/book/:bookId access guard of the composition root).
+     * generationMaterial: the «nothing to generate» guard (helpers/book-text.cjs).
      */
     function mountGenerateRoutes(app, { generationMaterial = null } = {}) {
         material = generationMaterial;
@@ -628,9 +516,9 @@ function createV2Routes({ host, config, workerRepo, bookRepo, layerConfig, redis
     }
 
     return {
-        mountInternal, mountGenerateRoutes, regenerate, cancelGeneration, cancelWorker, onLayersDisabled, progressPanel, purgeBook, cancelBook,
+        mountInternal, mountGenerateRoutes, cancelWorker, onLayersDisabled, purgeBook, cancelBook,
         generate, generateStop, generateProgress, generateStream, subscribeLegacyProgress, isV2Book: host.isV2Book,
     };
 }
 
-module.exports = { createV2Routes, LEGACY_TO_SCOPE, sendGenError };
+module.exports = { createV2Routes, sendGenError };

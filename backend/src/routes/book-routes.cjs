@@ -5,10 +5,11 @@
 // Split into sub-route modules for maintainability.
 //
 // Sub-modules (routes/book/):
-//   import-routes.cjs    - load-vbook, import-txt, bootstrap, resume-bootstrap, bootstrap-next-window, trigger-next-window
-//   generation-routes.cjs - regenerate, cancel-generation, generate-next
+//   import-routes.cjs    - import, bootstrap, resume-bootstrap, bootstrap-next-window, trigger-next-window
+//   generation-routes.cjs - layer-config, cancel-worker
 //   agent-routes.cjs     - GET agent-status
-//   recovery-routes.cjs  - recover-placeholders
+// Removed 2026-11-28 (ORCHESTRATION_V2 §11.3): progress-panel.cjs, recovery-routes.cjs,
+// load-vbook, import-txt, import-text, generation-state, regenerate, cancel-generation, generate-next.
 //
 // Editor contour (routes/editor/ — Phase 1 of the Editor extraction,
 // docs/architecture/editor-module-extraction-audit.md §13): core book
@@ -62,12 +63,6 @@ module.exports = function(app, redis, deps) {
 
     // Agent status route
     require('./book/agent-routes.cjs')(app, redis, deps);
-
-    // Progress panel route (pre-computed worker list)
-    require('./book/progress-panel.cjs')(app, redis, deps);
-
-    // Recovery routes
-    require('./book/recovery-routes.cjs')(app, redis, deps);
 
     // Version introspection routes
     require('./book/versions-routes.cjs')(app, {

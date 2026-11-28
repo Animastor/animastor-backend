@@ -2,8 +2,8 @@
 // Generation Cancellation Tombstone Repository
 // ======================================================
 // Persistent marker that the user explicitly cancelled generation for a book
-// (Cathedral Recon #3 §5.4 option 1). Written on POST /cancel-generation,
-// cleared on POST /regenerate (explicit new run). Survives Redis loss so that
+// (Cathedral Recon #3 §5.4 option 1). Written by cancel-worker type=vbook,
+// cleared by an explicit new run (bootstrap). Survives Redis loss so that
 // automatic resumption paths (startup-resume, future work-list rebuild) can
 // never resurrect an explicitly cancelled generation.
 //

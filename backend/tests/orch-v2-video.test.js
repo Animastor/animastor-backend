@@ -3,8 +3,8 @@
 // ======================================================
 // Real: PG (animastor-test), the gen core (>= 1.3.0), orchestration-v2 host +
 // audio/image/video ports + routes, the LTX video workflows + connectors of
-// ai/, the book routes (regenerate, cancel-generation, progress-panel) and the
-// player scene video route.
+// ai/, the generate API v2 (/generate, /generate/stop, /generate/progress), the
+// book routes (layer-config, cancel-worker) and the player scene video route.
 // Faked: the book on disk (vbook loadBook), layer-config, the GPU workers (HTTP
 // clients: GET input frames by link, PUT PNG / MP3 / MP4). Without the ffmpeg
 // binary (host test runs) the audio merge copies the first chunk, durations come
@@ -38,6 +38,7 @@ const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
 const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { commandBody, progressRows } = require('./helpers/v2-generate');
 const { lockReference } = require('./helpers/voice-reference-fixture');
 
 const FIX = path.resolve(__dirname, '../../packages/animastor-orchestration/test/gen/fixtures');
@@ -183,9 +184,9 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
             layerConfig, redis, book: vbook, sessionControl: { cancelSessions: async () => {} }, log: () => {},
         });
         routes.mountInternal(app);
+        routes.mountGenerateRoutes(app);
         const deps = { utils: { log: () => {} }, orchV2: routes, layerConfig, book: vbook, config, runtime: {}, state: {}, activeScenes: {}, iuRepo: {} };
         require('../src/routes/book/generation-routes.cjs')(app, redis, deps);
-        require('../src/routes/book/progress-panel.cjs')(app, redis, deps);
         require('@animastor/player').createPlayerRoutes(app, redis, {
             state: require('../src/state'), image: require('../src/image'), utils: { log: () => {} },
             getChunk: async () => null, getAllChunks: async () => [], getBookWindowStatus: async () => ({}),
@@ -217,8 +218,9 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         return { status: r.status, body: await r.json() };
     };
     const fetchInput = (task, f, token = task.upload_token) => api('GET', f.url, undefined, token ? { authorization: `Bearer ${token}` } : {});
-    const regenerate = (body) => api('POST', `/api/v1/book/${bookId}/regenerate`, body);
-    const scene = (ch, sc, types, extra = {}) => regenerate({ worker_types: types, scope: 'current_scene', chapter_id: ch, scene_id: sc, ...extra });
+    const command = (body) => api('POST', `/api/v1/book/${bookId}/generate`, commandBody(body));
+    const scene = (ch, sc, types, extra = {}) => command({ layers: types, scope: 'scene', chapter_id: ch, scene_id: sc, ...extra });
+    const progress = async () => progressRows((await api('GET', `/api/v1/book/${bookId}/generate/progress`)).body);
     const orch = () => host.orch();
     const count = async (sql, params) => Number((await query(sql, params)).rows[0].n);
     const asset = async (sc, type) => (await query(`SELECT * FROM scene_assets WHERE book_id = $1 AND scene_id = $2 AND asset_type = $3 AND build_id = $4`, [bookId, sc, type, buildId])).rows[0];
@@ -323,7 +325,7 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         expect(r.status).to.equal(200);
         expect(r.body.summary).to.include({ joined: 0, skipped_ready: 0 });
         expect(r.body.summary.jobs_created).to.equal((await jobs('audio_chunk')).length + 2);
-        expect(r.body.tasks.map((t) => t.type)).to.deep.equal(['audio', 'image', 'video']);
+        expect(r.body.layers).to.deep.equal(['audio', 'image', 'video']);
         expect(await drainImages()).to.equal(2);
         expect((await jobs('video_group')).length).to.equal(0, 'audio still in work → video waits');
         await drainAudio();
@@ -375,13 +377,12 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         const play = await api('GET', `/api/v1/scene/${bookId}/ch-1/sc-1/video`);
         expect(play.status).to.equal(200); expect(play.type).to.match(/video\/mp4/);
         await orch().sweepOnce();
-        const panel = await api('GET', `/api/v1/book/${bookId}/progress-panel`);
-        const row = panel.body.tasks.find((x) => x.type === 'video');
-        expect(row).to.include({ done: true, status: 'completed' });
+        const row = (await progress()).find((x) => x.layer === 'video');
+        expect(row).to.include({ status: 'done', percent: 100 });
         expect(row.skipped).to.deep.equal({});
     });
 
-    it('{video} при заглушке аудио → skipped_needs_audio (summary + progress-panel), аудио не ставится', async () => {
+    it('{video} при заглушке аудио → skipped_needs_audio (summary + /generate/progress), аудио не ставится', async () => {
         const audioFile = path.join(config.OUTPUT_DIR, buildId, `${bookId}_ch-1_sc-2.mp3`);
         fs.mkdirSync(path.dirname(audioFile), { recursive: true });
         fs.writeFileSync(audioFile, fixture('silence.mp3'));
@@ -391,8 +392,7 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         expect(r.status).to.equal(200);
         expect(r.body.summary).to.deep.equal({ jobs_created: 0, joined: 0, skipped_ready: 0, skipped_needs_audio: ['sc-2'] });
         expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId])).to.equal(0);
-        const panel = await api('GET', `/api/v1/book/${bookId}/progress-panel`);
-        expect(panel.body.tasks.find((x) => x.type === 'video').skipped).to.deep.equal({ skipped_needs_audio: ['sc-2'] });
+        expect((await progress()).find((x) => x.layer === 'video').skipped).to.deep.equal({ skipped_needs_audio: ['sc-2'] });
     });
 
     it('{video} при готовом аудио: группы по реальным длительностям; новая длина аудио → тайминги пересчитаны, группа грязная (missing делает новую); правка промпта → skipped_image_dirty; IU без gen_parts → skipped_needs_image', async () => {
@@ -432,7 +432,7 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
         const g2 = (await jobs('video_group')).slice(1);
         expect(g2[0].input.part_hash).to.not.equal(g1.input.part_hash);
         expect(g2[0].input.scene_hash).to.not.equal(g1.input.scene_hash);
-        await api('POST', `/api/v1/book/${bookId}/cancel-generation`, {});
+        await api('POST', `/api/v1/book/${bookId}/generate/stop`, {});
 
         // prompt of one IU edited after its picture → dirty; a picture without gen_parts → needs_image
         books.set(bookId, bookJson(bookId, buildId, { [IU.d]: 'a village at night, lanterns' }));
@@ -480,7 +480,7 @@ describe('orchestration v2 — video (stage 3): fake workers over HTTP', functio
 
         await scene('ch-2', 'sc-3', ['video']);
         const t1 = await claim('video');
-        expect((await api('POST', `/api/v1/book/${bookId}/cancel-generation`, {})).status).to.equal(200);
+        expect((await api('POST', `/api/v1/book/${bookId}/generate/stop`, {})).status).to.equal(200);
         expect((await beacon('video', t1.job_id)).body.cancel).to.include(t1.job_id);
         expect((await put(t1, clip(73, 1))).status).to.equal(409);
         expect((await fetchInput(t1, t1.input_files[0])).status).to.equal(409);

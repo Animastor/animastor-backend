@@ -3,7 +3,7 @@
 // no-store for polling / restore endpoints (О1)
 // ============================================================
 // reports/2026-11-07/orch-v2-image-scene-run.md О1: a mobile browser kept
-// answering GET /book/:id/progress-panel from its HTTP cache (a 3-minute-old
+// answering a progress poll from its HTTP cache (a 3-minute-old
 // `status: active` 0/1 snapshot) although the command had finished; the
 // responses carried only a weak ETag and no Cache-Control. Live state must
 // never be cached or revalidated:
@@ -14,15 +14,16 @@
 // animastor-web frontends/app/src/api/client.ts, and Android PollRequests.kt).
 
 const NO_STORE_PATHS = [
-    // /book/:id/{progress-panel,progress-stream,assets-state,status,agent-status,layer-config,generation*}
-    /^\/book\/[^/]+\/(?:progress-panel|progress-stream|assets-state|status|agent-status|layer-config|generation[^/]*)(?:\/|$)/,
+    // /book/:id/{progress-stream,assets-state,status,agent-status,layer-config}
+    // (progress-panel and generation-state were removed 2026-11-28, ORCHESTRATION_V2 §11.3)
+    /^\/book\/[^/]+\/(?:progress-stream|assets-state|status|agent-status|layer-config)(?:\/|$)/,
     // /scene/:book/:chapter/:scene/status
     /^\/scene\/[^/]+\/[^/]+\/[^/]+\/status(?:\/|$)/,
     /^\/worker\/counts(?:\/|$)/,
     // v2 generation API (/generate/*), present and future
     /^\/generate(?:\/|$)/,
     // book-scoped generate API v2 (ADR ORCHESTRATION_V2 §11.1): /book/:id/generate,
-    // /generate/progress, /generate/stream, … (not /generate-next)
+    // /generate/progress, /generate/stream, …
     /^\/book\/[^/]+\/generate(?:\/|$)/,
 ];
 

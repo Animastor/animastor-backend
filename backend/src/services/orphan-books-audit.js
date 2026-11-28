@@ -4,9 +4,9 @@
 // `scenes` is a LAZILY materialized derived table:
 //   - `runtime-persistence-adapter.listBooks` = SELECT DISTINCT book_id FROM scenes
 //     (worklist rebuild / reconciliation-engine discovery entry point);
-//   - import and /regenerate never INSERT into scenes;
+//   - import and generation never INSERT into scenes;
 //   - rows only appear via editor-save reconcile (book-sync.updateSceneHashes)
-//     and scene-assets-repo.ensureSceneRow (unit-dirty / now also /regenerate);
+//     and scene-assets-repo.ensureSceneRow (unit-dirty);
 //   - a derived-state cleanup (DELETE /book/:id/cache, book-sync purge,
 //     guest-workspace purge) can delete scenes/scene_assets WITHOUT deleting
 //     the canonical bundle on disk — and nothing re-creates the rows.

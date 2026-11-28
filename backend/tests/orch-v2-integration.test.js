@@ -2,8 +2,8 @@
 // Orchestration v2 (stage 1b) — backend integration with a fake worker over HTTP
 // ======================================================
 // Real: PG (animastor-test, books / workers / scene_assets / gen_*), the gen
-// core, orchestration-v2 host + ports + routes, the existing book routes
-// (generation-routes, progress-panel) and the book-deletion service.
+// core, orchestration-v2 host + ports + routes (generate API v2), the book
+// routes (layer-config, cancel-worker, cache) and the book-deletion service.
 // Faked: the book on disk (vbook loadBook), layer-config, the worker (HTTP
 // client). Without the ffmpeg binary the silence decoder uses the recorded
 // decode of the fixtures and the merge stub copies the first part; with
@@ -28,6 +28,7 @@ const { createOrchV2Host } = require('../src/orchestration-v2');
 const { createV2Routes } = require('../src/orchestration-v2/routes');
 const bookFlag = require('../src/orchestration-v2/book-flag');
 const { createMockRedis } = require('./mocks/redis-mock');
+const { commandBody, progressRows } = require('./helpers/v2-generate');
 const { lockReference, toneWav } = require('./helpers/voice-reference-fixture');
 
 const FIX = path.resolve(__dirname, '../../packages/animastor-orchestration/test/gen/fixtures');
@@ -110,7 +111,6 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
             runtime: {}, state: {}, activeScenes: {}, iuRepo: {},
         };
         require('../src/routes/book/generation-routes.cjs')(a, redis, deps);
-        require('../src/routes/book/progress-panel.cjs')(a, redis, deps);
         require('../src/routes/book/cache-routes.cjs')(a, {
             redis, config, storage: { postgres: { query } }, path, fs,
             getAllChunks: async () => [], getChunk: async () => null, cleanBookRedisKeys: async () => {},
@@ -129,6 +129,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
             layerConfig, redis, book: vbook, sessionControl: { cancelSessions: async () => {} }, log: () => {},
         });
         routes.mountInternal(app);
+        routes.mountGenerateRoutes(app);
         mountBookRoutes(app, routes);
         require('../src/orchestration-v2/voice-routes').mountVoiceRoutes(app, {
             host,
@@ -172,7 +173,8 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         error: (task, body) => origFetch(task.error_url, { method: 'POST', headers: { authorization: `Bearer ${task.upload_token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })
             .then(async (r) => ({ status: r.status, body: await r.json() })),
     };
-    const regenerate = (body) => api('POST', `/api/v1/book/${bookId}/regenerate`, { worker_types: ['audio'], rebuild_all: true, ...body });
+    const command = (body) => api('POST', `/api/v1/book/${bookId}/generate`, commandBody({ layers: ['audio'], all: true, ...body }));
+    const progress = async () => progressRows((await api('GET', `/api/v1/book/${bookId}/generate/progress`)).body);
     const orch = () => host.orch();
     const count = async (sql, params) => Number((await query(sql, params)).rows[0].n);
 
@@ -226,10 +228,10 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     });
 
     async function runScene(chapterId, sceneId, extra = {}) {
-        return regenerate({ scope: 'current_scene', chapter_id: chapterId, scene_id: sceneId, ...extra });
+        return command({ scope: 'scene', chapter_id: chapterId, scene_id: sceneId, ...extra });
     }
 
-    it('«аудио» сцены: claim → PUT → audio_merge → scene ready (sha256, job_id), sidecar снят, progress-panel done', async () => {
+    it('«аудио» сцены: claim → PUT → audio_merge → scene ready (sha256, job_id), sidecar снят, /generate/progress done', async () => {
         // a placeholder with its sidecar marker is on disk (import), as in production
         const { getOutputPath } = require('../src/audio/helpers');
         const sceneFile = getOutputPath(buildId, `${bookId}_ch-1_sc-1.mp3`);
@@ -239,19 +241,17 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         marker.writePlaceholderMarker(sceneFile, { reason: 'test' });
         expect(marker.isPlaceholderAudioFile(sceneFile)).to.equal(true);
 
-        const r = await runScene('ch-1', 'sc-1', { client_action: { kind: 'user_click', action_id: 'a-1' } });
+        const r = await runScene('ch-1', 'sc-1', { client_action_id: 'a-1' });
         expect(r.status).to.equal(200);
         expect(r.body.orchestration).to.equal('v2');
         expect(r.body.summary).to.deep.equal({ jobs_created: 1, joined: 0, skipped_ready: 0 });
-        expect(r.body.build_id).to.equal(buildId);
         const t = (await worker.claim()).body.task;
         expect(t).to.include({ kind: 'audio_chunk', book_id: bookId, scene_id: 'sc-1', unit_key: '0001', attempt: 1 });
         expect(t.params).to.be.an('object');
         expect(t.upload_url).to.equal(`${base}/internal/gen/jobs/${t.job_id}/result?attempt=1`);
-        let panel = await api('GET', `/api/v1/book/${bookId}/progress-panel`);
-        expect(panel.body.tasks).to.have.length(1);
-        expect(panel.body.tasks[0]).to.include({ task_id: r.body.command_id, type: 'audio', scope: 'current_scene', done: false, total: 2, ready: 0 });
-        expect(panel.body.any_incomplete).to.equal(true);
+        let rows = await progress();
+        expect(rows).to.have.length(1);
+        expect(rows[0]).to.include({ command_id: r.body.command_id, layer: 'audio', status: 'active', total: 2, ready: 0 });
 
         const up = await worker.put(t);
         expect(up.status).to.equal(200);
@@ -265,30 +265,29 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect(asset.job_id).to.equal(merge.job_id);
         expect(marker.isPlaceholderAudioFile(sceneFile)).to.equal(false, 'sidecar marker removed');
         await orch().sweepOnce();
-        panel = await api('GET', `/api/v1/book/${bookId}/progress-panel`);
-        expect(panel.body.tasks[0]).to.include({ done: true, percent: 100, status: 'completed' });
-        expect(panel.body.any_incomplete).to.equal(false);
+        rows = await progress();
+        expect(rows[0]).to.include({ status: 'done', percent: 100 });
     });
 
     it('глава; двойной клик (тот же client_action) → одна команда и тот же summary; пересекающиеся → joined без дублей', async () => {
-        const a = await regenerate({ scope: 'current_chapter', chapter_id: 'ch-1', client_action: { kind: 'user_click', action_id: 'dbl' } });
-        const b = await regenerate({ scope: 'current_chapter', chapter_id: 'ch-1', client_action: { kind: 'user_click', action_id: 'dbl' } });
+        const a = await command({ scope: 'chapter', chapter_id: 'ch-1', client_action_id: 'dbl' });
+        const b = await command({ scope: 'chapter', chapter_id: 'ch-1', client_action_id: 'dbl' });
         expect(a.body.summary).to.deep.equal({ jobs_created: 2, joined: 0, skipped_ready: 0 });
         expect(b.body.command_id).to.equal(a.body.command_id);
         expect(b.body.existing).to.equal(true);
         expect(b.body.summary).to.deep.equal(a.body.summary);
-        const whole = await regenerate({ scope: 'whole_book' });
+        const whole = await command({ scope: 'book' });
         expect(whole.body.summary).to.deep.equal({ jobs_created: 1, joined: 2, skipped_ready: 0 });
         expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId])).to.equal(3);
         expect(await count(`SELECT count(*) AS n FROM gen_commands WHERE book_id = $1`, [bookId])).to.equal(2);
     });
 
     it('стоп книги посередине: оставшиеся cancelled, beacon отдаёт cancel, поздний PUT → 409, сцена не ready', async () => {
-        await regenerate({ scope: 'whole_book' });
+        await command({ scope: 'book' });
         const t1 = (await worker.claim()).body.task;
         const t2 = (await worker.claim()).body.task;
         expect((await worker.put(t1)).status).to.equal(200);
-        const stop = await api('POST', `/api/v1/book/${bookId}/cancel-generation`, {});
+        const stop = await api('POST', `/api/v1/book/${bookId}/generate/stop`, {});
         expect(stop.status).to.equal(200);
         expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND status IN ('queued','running')`, [bookId])).to.equal(0);
         const beacon = await worker.beacon(t2.job_id);
@@ -301,7 +300,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     });
 
     it('стоп одной из двух команд с общим юнитом: юнит выполняется, B → done, A → cancelled', async () => {
-        const a = await regenerate({ scope: 'current_chapter', chapter_id: 'ch-1' });
+        const a = await command({ scope: 'chapter', chapter_id: 'ch-1' });
         const b = await runScene('ch-1', 'sc-2');
         expect(b.body.summary).to.deep.equal({ jobs_created: 0, joined: 1, skipped_ready: 0 });
         const stop = await api('POST', `/api/v1/book/${bookId}/cancel-worker`, { task_id: a.body.command_id });
@@ -318,7 +317,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     });
 
     it('рестарт backend посередине (новый экземпляр): дочитывает без потерь, новых job не создано', async () => {
-        await regenerate({ scope: 'whole_book' });
+        await command({ scope: 'book' });
         const t1 = (await worker.claim()).body.task;
         const before = await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1`, [bookId]);
         await host.stop();
@@ -362,8 +361,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect(j).to.deep.equal({ status: 'failed', error_class: 'invalid_result' });
         expect(await count(`SELECT count(*) AS n FROM scene_assets WHERE book_id = $1 AND status = 'ready'`, [bookId])).to.equal(0);
         await orch().sweepOnce();
-        const panel = await api('GET', `/api/v1/book/${bookId}/progress-panel`);
-        expect(panel.body.tasks[0]).to.include({ failed: true, done: false });
+        expect((await progress())[0].status).to.equal('failed');
     });
 
     it('internal routes: без ключа / токена → 401; video без готового аудио → 200, работ нет, skipped_needs_audio (этап 3)', async () => {
@@ -377,7 +375,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         expect((await worker.put(t, fixture('tone.mp3'), `${t.upload_token}x`)).status).to.equal(401);
         expect((await api('POST', `/internal/gen/jobs/${t.job_id}/error?attempt=1`, { error_class: 'transient' })).status).to.equal(401);
         for (const types of [['video'], ['video', 'video']]) {
-            const r = await regenerate({ worker_types: types, scope: 'whole_book' });
+            const r = await command({ layers: types, scope: 'book' });
             expect(r.status).to.equal(200);
             expect(r.body.summary.jobs_created).to.equal(0);
             // the scenes of this book have no IU pictures and (but sc-1, in work) no audio
@@ -385,18 +383,18 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
             expect(skippedScenes.length, JSON.stringify(r.body.summary)).to.be.greaterThan(0);
             expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND layer = 'video'`, [bookId])).to.equal(0);
         }
-        expect((await regenerate({ worker_types: ['bogus'], scope: 'whole_book' })).status).to.equal(400);
+        expect((await command({ layers: ['bogus'], scope: 'book' })).status).to.equal(400);
         const e = await worker.error(t, { error_class: 'deterministic', reason: 'node_errors' });
         expect(e.body).to.include({ status: 200, job_status: 'failed' });
     });
 
     it('cancel-worker type=audio и PUT layer-config audio_enabled=false снимают слой (и audio_merge)', async () => {
-        await regenerate({ scope: 'whole_book' });
+        await command({ scope: 'book' });
         const t = (await worker.claim()).body.task;
         const r = await api('POST', `/api/v1/book/${bookId}/cancel-worker`, { type: 'audio' });
         expect(r.body).to.include({ ok: true, jobs_cancelled: 3 });
         expect((await worker.put(t)).status).to.equal(409);
-        await regenerate({ scope: 'current_scene', chapter_id: 'ch-2', scene_id: 'sc-3' });
+        await command({ scope: 'scene', chapter_id: 'ch-2', scene_id: 'sc-3' });
         const t3 = (await worker.claim()).body.task;
         await worker.put(t3);                                           // → audio_merge queued
         expect(await count(`SELECT count(*) AS n FROM gen_jobs WHERE book_id = $1 AND kind = 'audio_merge' AND status = 'queued'`, [bookId])).to.equal(1);
@@ -407,7 +405,7 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     });
 
     it('удаление v2-книги: gen_* этой книги пусто, .incoming её работ удалён, хаб не вызывается', async () => {
-        await regenerate({ scope: 'whole_book' });
+        await command({ scope: 'book' });
         const t = (await worker.claim()).body.task;
         const incoming = path.join(config.OUTPUT_DIR, buildId, '.incoming');
         fs.mkdirSync(incoming, { recursive: true });
@@ -433,10 +431,10 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
     });
 
     it('from_current_scene → scope {level:scenes, scene_ids: current…end} в порядке книги; выдача в этом порядке; ошибки 400/404', async () => {
-        const r = await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-2' });
+        const r = await command({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-2' });
         expect(r.status).to.equal(200);
         expect(r.body.summary).to.deep.equal({ jobs_created: 2, joined: 0, skipped_ready: 0 });
-        expect(r.body.scope).to.equal('from_current_scene');
+        expect(r.body.scope).to.deep.equal({ level: 'scenes', scene_ids: ['sc-2', 'sc-3'] });
         const stored = (await query(`SELECT scope FROM gen_commands WHERE command_id = $1`, [r.body.command_id])).rows[0].scope;
         expect(stored).to.deep.equal({ level: 'scenes', scene_ids: ['sc-2', 'sc-3'] });
         const order = [];
@@ -448,15 +446,15 @@ describe('orchestration v2 — backend integration (fake worker over HTTP)', fun
         const { startIndex, endIndex } = require('../src/services/gen-scope').scopeBounds({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-2' }, all);
         expect(all.slice(startIndex, endIndex).map((x) => x.scene_id)).to.deep.equal(stored.scene_ids);
         // the first scene of the book → the whole book
-        const first = await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-1', rebuild_all: false });
+        const first = await command({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'sc-1', all: false });
         expect(first.body.summary).to.deep.equal({ jobs_created: 1, joined: 2, skipped_ready: 0 });
-        expect((await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'nope' })).body.code).to.equal('scene_not_found');
-        expect((await regenerate({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'nope' })).status).to.equal(404);
-        expect((await regenerate({ scope: 'from_current_scene' })).status).to.equal(400);
+        expect((await command({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'nope' })).body.code).to.equal('scene_not_found');
+        expect((await command({ scope: 'from_current_scene', chapter_id: 'ch-1', scene_id: 'nope' })).status).to.equal(404);
+        expect((await command({ scope: 'from_current_scene' })).status).to.equal(400);
     });
 
     it('DELETE /book/:id/cache для v2-книги: хаб не вызывается, работа книги отменена (до стирания); legacy-книга — хаб вызывается', async () => {
-        await regenerate({ scope: 'whole_book' });
+        await command({ scope: 'book' });
         const t = (await worker.claim()).body.task;
         fetchCalls.length = 0;
         const r = await api('DELETE', `/api/v1/book/${bookId}/cache`);

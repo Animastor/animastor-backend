@@ -40,8 +40,8 @@ const PORT_PATH = path.join(BACKEND_SRC, 'services', 'agent-session-control.js')
 const GENERATION_ROUTE_FILES = [
     path.join(BACKEND_SRC, 'routes', 'generation-routes.cjs'),
     path.join(BACKEND_SRC, 'routes', 'book', 'generation-routes.cjs'),
-    path.join(BACKEND_SRC, 'routes', 'book', 'progress-panel.cjs'),
-];
+]
+// (routes/book/progress-panel.cjs was removed 2026-11-28 with GET /progress-panel.);
 
 /** Strip comments so doc mentions are not treated as code edges. */
 function codeOf(src) {

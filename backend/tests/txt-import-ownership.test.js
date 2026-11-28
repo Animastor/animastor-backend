@@ -76,7 +76,8 @@ async function importTxt(cookie, filename = 'test.txt') {
     fd.append('file', new Blob([SAMPLE_TXT], { type: 'text/plain' }), filename);
     const headers = {};
     if (cookie) headers.Cookie = cookie;
-    const res = await fetch(`http://127.0.0.1:${_port}/api/v1/book/import-txt`, {
+    // the TXT leg of the one upload route (the former /import-txt was removed 2026-11-28)
+    const res = await fetch(`http://127.0.0.1:${_port}/api/v1/book/import`, {
         method: 'POST',
         headers,
         body: fd,

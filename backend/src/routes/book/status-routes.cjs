@@ -7,25 +7,7 @@
 module.exports = function registerStatusRoutes(app, ctx) {
     const { genSessionRepo, lazyBook, txtImporter, log } = ctx;
 
-    // GET /api/v1/book/:bookId/generation-state
-    app.get('/api/v1/book/:bookId/generation-state', async (req, res) => {
-        try {
-            const { bookId } = req.params;
-            const state_data = await genSessionRepo.getGenerationState(bookId);
-            const bookStatus = lazyBook.getBookStatus(bookId);
-            const totalChapters = bookStatus?.totalChapters || 0;
-            const parsedChapters = bookStatus?.parsedChapters || 0;
-
-            return res.json({
-                ...state_data, book_id: bookId,
-                total_chapters: totalChapters, parsed_chapters: parsedChapters,
-                remaining: totalChapters - parsedChapters,
-            });
-        } catch (err) {
-            console.error('[GENERATION-STATE] Error:', err.message);
-            return res.status(500).json({ error: err.message });
-        }
-    });
+    // GET /api/v1/book/:bookId/generation-state was removed 2026-11-28 (ORCHESTRATION_V2 §11.3).
 
     // GET /api/v1/book/:bookId/status
     app.get('/api/v1/book/:bookId/status', async (req, res) => {

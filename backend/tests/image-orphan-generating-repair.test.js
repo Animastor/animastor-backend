@@ -75,8 +75,6 @@ const P = {
     sceneWindow: require.resolve('../node_modules/@animastor/orchestration/src/legacy/runtime/scene-window'),
     journal: require.resolve('../src/state/event-journal'),
     genProgress: require.resolve('../src/services/generation-progress'),
-    cancelRoute: require.resolve('../src/routes/book/generation-routes.cjs'),
-    progressPanel: require.resolve('../src/routes/book/progress-panel.cjs'),
 };
 
 // ── Shared stub state (reset per test) ──────────────────
@@ -223,63 +221,6 @@ async function runCycles(n) {
     }
 }
 
-function mountCancelRoute() {
-    delete require.cache[P.cancelRoute];
-    const handlers = new Map();
-    const app = {
-        post: (p, h) => handlers.set(`POST ${p}`, h),
-        get: (p, h) => handlers.set(`GET ${p}`, h),
-        put: (p, h) => handlers.set(`PUT ${p}`, h),
-        delete: (p, h) => handlers.set(`DELETE ${p}`, h),
-    };
-    const deps = {
-        config: { HUB_URL: 'http://gpu-hub.test', GPU_HUB_API_KEY: '' },
-        state,
-        runtime: { sceneWindow, scheduler },
-        utils: { log: () => {} },
-    };
-    require(P.cancelRoute)(app, redis, deps);
-    return handlers.get('POST /api/v1/book/:bookId/cancel-generation');
-}
-
-function mountProgressPanel() {
-    delete require.cache[P.progressPanel];
-    const handlers = new Map();
-    const app = {
-        get: (p, h) => handlers.set(`GET ${p}`, h),
-        post: () => {}, put: () => {}, delete: () => {},
-    };
-    const deps = {
-        state,
-        activeScenes: require('../node_modules/@animastor/orchestration/src/legacy/runtime/active-scenes-index'),
-        iuRepo: {
-            getImageUnitsForScene: async () =>
-                Array.from({ length: IU_COUNT }, (_, i) => ({ unit_id: `iu-${i + 1}` })),
-        },
-        book: bookStub,
-        utils: { log: () => {} },
-        // The mock redis has no mget → loadChunks falls back to getChunk.
-        // A real chunk carries the build identity, so countImage resolves
-        // the 9 image units exactly like production.
-        getChunk: async () => ({
-            chapter_id: C, scene_id: S, build_id: BUILD,
-            image_status: 'pending', audio_status: 'ready',
-        }),
-        getAllChunks: async () => [`${B}_${C}_${S}_0001`],
-    };
-    require(P.progressPanel)(app, redis, deps);
-    return handlers.get('GET /api/v1/book/:bookId/progress-panel');
-}
-
-function makeRes() {
-    return {
-        statusCode: 200,
-        body: null,
-        status(code) { this.statusCode = code; return this; },
-        json(body) { this.body = body; return this; },
-    };
-}
-
 // ======================================================
 // TEST A — getDispatchEvidence liveness semantics
 // ======================================================
@@ -290,8 +231,7 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
         for (const p of Object.values(P)) savedCache.set(p, require.cache[p]);
         installStubs();
         for (const p of [P.reconciler, P.dispatchEngine, P.orchestrator, P.state,
-            P.scheduler, P.sceneWindow, P.journal, P.genProgress,
-            P.cancelRoute, P.progressPanel]) {
+            P.scheduler, P.sceneWindow, P.journal, P.genProgress]) {
             delete require.cache[p];
         }
         state = require(P.state);
@@ -406,84 +346,9 @@ describe('orphan GENERATING repair (audit d9d67a3)', () => {
         });
     });
 
-    // ======================================================
-    // TEST C — full incident E2E: ghost 0/9 → Stop All → cycles
-    // ======================================================
-    describe('C. incident E2E: ghost 0/9 → Stop All → 3 reconcile cycles', () => {
-        it('UI no longer synthesizes a ghost row (command-only: only real registry tasks)', async () => {
-            await seedGhost(S);
-            const panel = mountProgressPanel();
-            const res = makeRes();
-            await panel({ params: { bookId: B } }, res);
-            expect(res.statusCode).to.equal(200);
-            // Formerly a task_id=null "0/9" row was synthesized from the
-            // active index (incident 2026-10-30 BA: a "task" no command made).
-            expect(res.body.tasks.filter(t => t.type === 'image')).to.have.length(0);
-            expect(res.body.any_incomplete).to.equal(false);
-        });
-
-        it('Stop All clears the orphan GENERATING, tombstone + cancel flag set', async () => {
-            await seedGhost(S);
-            createAudioFile();
-            const originalFetch = global.fetch;
-            global.fetch = async () => ({ ok: true, status: 200 });
-            try {
-                const cancelGeneration = mountCancelRoute();
-                const res = makeRes();
-                await cancelGeneration({ params: { bookId: B } }, res);
-                expect(res.statusCode).to.equal(200);
-                expect(res.body.ok).to.equal(true);
-            } finally {
-                global.fetch = originalFetch;
-            }
-
-            // orphan state released: GENERATING → DIRTY (command-only: a
-            // cancelled book keeps no PENDING work)
-            expect(await imageState()).to.equal('dirty');
-            const states = await state.getAssetStates(redis, B, C, S);
-            expect(states.audio).to.equal('ready');
-            // scene removed from active index
-            expect(await activeScenes()).to.have.length(0);
-            // cancellation recorded: Redis flag + PG tombstone
-            expect(await redis.get(CANCEL_FLAG_KEY)).to.equal('true');
-            expect(pgState.cancelledBooks.has(B)).to.equal(true);
-            // no dispatch artifacts left or created
-            expect(await allKeysByPattern('animastor:dispatch-lease:*')).to.have.length(0);
-            expect(await allKeysByPattern('animastor:dispatch-meta:*')).to.have.length(0);
-            expect(await allKeysByPattern('animastor:iu-in-flight:*')).to.have.length(0);
-        });
-
-        it('3 reconcile cycles after Stop All: ghost does not resurrect', async function () {
-            this.timeout(10000);
-            await seedGhost(S);
-            createAudioFile();
-            const originalFetch = global.fetch;
-            global.fetch = async () => ({ ok: true, status: 200 });
-            try {
-                const cancelGeneration = mountCancelRoute();
-                await cancelGeneration({ params: { bookId: B } }, makeRes());
-            } finally {
-                global.fetch = originalFetch;
-            }
-
-            await runCycles(3);
-
-            // tombstone honored: scene NOT re-added to active-scenes
-            expect(await activeScenes()).to.have.length(0);
-            // state stays out of GENERATING (no resurrection, no new ghost)
-            expect(await imageState()).to.equal('dirty');
-            // no new dispatch was created
-            expect(await allKeysByPattern('animastor:dispatch-lease:*')).to.have.length(0);
-            const events = await journalEvents();
-            expect(events.find(e => e.type === 'IMAGE_DISPATCHED'), 'no re-dispatch').to.not.exist;
-            // progress panel no longer synthesizes the ghost row
-            const panel = mountProgressPanel();
-            const res = makeRes();
-            await panel({ params: { bookId: B } }, res);
-            expect(res.body.tasks.filter(t => t.type === 'image')).to.have.length(0);
-            expect(res.body.any_incomplete).to.equal(false);
-        });
-    });
+    // TEST C (Stop All via POST /cancel-generation + the GET /progress-panel
+    // ghost row) was removed 2026-11-28 with both routes (ORCHESTRATION_V2
+    // §11.3); the repair core stays covered by B, D, E, F, G.
 
     // ======================================================
     // TEST D — autonomous recovery without Stop All

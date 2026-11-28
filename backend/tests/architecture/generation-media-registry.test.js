@@ -222,7 +222,6 @@ describe('architecture: Generation media registry (S-2)', () => {
             const genRouteFiles = [
                 path.join(BACKEND_SRC, 'routes', 'generation-routes.cjs'),
                 path.join(BACKEND_SRC, 'routes', 'book', 'generation-routes.cjs'),
-                path.join(BACKEND_SRC, 'routes', 'book', 'progress-panel.cjs'),
             ];
             const offenders = [];
             for (const file of genRouteFiles) {

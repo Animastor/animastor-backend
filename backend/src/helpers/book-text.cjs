@@ -1,11 +1,11 @@
 'use strict';
 
 // ======================================================
-// "Nothing to generate" guard for /regenerate
+// "Nothing to generate" guard for POST /book/:id/generate
 // ======================================================
 // A book whose scenes carry no material for the requested layers (a blank
 // book right after POST /book/blank, or one whose units were emptied) has
-// nothing to voice, draw or animate. Before 2026-11-22 /regenerate accepted
+// nothing to voice, draw or animate. Before 2026-11-22 the generation route accepted
 // such a command: the audio dispatch found 0 jobs (no_jobs_generated),
 // retried every tick and was finally cancelled — the user only saw "failed"
 // (reports/2026-11-22/assistant-edit-bug.md §4). The route now refuses the
@@ -54,7 +54,7 @@ function bookMaterial(book) {
 }
 
 /**
- * Should a /regenerate for `workerTypes` be refused as "nothing to generate"?
+ * Should a generation for `workerTypes` be refused as "nothing to generate"?
  * Only when the book HAS scenes (a scene-less book keeps the historic empty
  * 200) and none of the requested layers has material anywhere.
  * @param {object|null} book

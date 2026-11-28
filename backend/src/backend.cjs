@@ -394,7 +394,7 @@ require('./routes/auth-routes.cjs')(app, redis, { utils: { log: (m) => console.l
 // Book ownership guards (Authentication MVP): every /api/v1/book/:bookId/*
 // endpoint plus book-keyed media serving requires an identity (user or
 // guest) that may access the book; requests without identity get 401.
-// Book-CREATION paths (import/blank/load-vbook) are exempt — they must run
+// Book-CREATION paths (import/blank) are exempt — they must run
 // so ownership can attach to the caller's workspace inside the handler.
 const { CREATE_BOOK_SUBPATHS } = inputGuard;
 const bookAccessGuard = requireBookAccess('bookId');
@@ -638,12 +638,6 @@ const routeDeps = {
     // (cancel-worker, PUT layer-config) — injected, the contour-route
     // require sets are frozen.
     stageCancellation: require('./services/stage-cancellation.cjs'),
-    // 2026-11-04: /regenerate post-release hub sweep plan (scene-scoped,
-    // book-wide only for a full restart of the whole book — fail-closed).
-    regenerateHubSweep: require('./services/regenerate-hub-sweep.cjs'),
-    // 2026-11-22: /regenerate refuses a book with nothing to generate
-    // (422 book_has_no_text) — injected, same discipline.
-    generationMaterial: require('./helpers/book-text.cjs'),
     runtime, activeScenes, layerConfig, genScope, placeholderAudio,
     txtImporter, lazyBook, genSessionRepo, bookSourceRepo,
     // Book Model manifest read (cache teardown: the v2 build dir = manifest.build_id)
@@ -789,7 +783,7 @@ require('./routes/book-routes.cjs')(app, redis, { ...routeDeps, taskHandler, boo
 // Generate API v2 (ADR ORCHESTRATION_V2 §11.1): /generate, /generate/stop,
 // /generate/progress, /generate/stream — v2 books only (legacy → 409
 // book_not_v2); the book guard of /api/v1/book/:bookId applies (registered
-// above), the same as for /regenerate.
+// above).
 orchV2.mountGenerateRoutes(app, { generationMaterial: require('./helpers/book-text.cjs') });
 // Voice references (VOICE_REFERENCES.md) — orchestration v2 only; the book
 // guard of /api/v1/book/:bookId applies (registered above).
